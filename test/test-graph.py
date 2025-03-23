@@ -1,0 +1,3 @@
+from test_pydantic_graph import InsertCoin, vending_machine_graph
+
+vending_machine_graph.mermaid_code(start_node=InsertCoin)
