@@ -37,6 +37,10 @@ def verify_correctness_func(func_triton, func_torch, input_generator, dimensions
         torch_output = func_torch(*inputs) if isinstance(inputs, tuple) else func_torch(inputs)
         _check_outputs_match(config, correctness, triton_output, torch_output, dtype, atol=atol, rtol=rtol, label="func")
 
+    # write correctness results to file
+    with open("code.correctness.func.json", "w") as f:
+        f.write(json.dumps(correctness, indent=4))
+
     return correctness
 
 def verify_correctness_forward(module_generator, input_generator, dimensions, device='cuda', dtype=torch.float16, atol=1e-2, rtol=1e-2, seed=42):
@@ -64,7 +68,7 @@ def verify_correctness_forward(module_generator, input_generator, dimensions, de
         _check_outputs_match(config, correctness, triton_output, torch_output, dtype, atol=atol, rtol=rtol, label="forward")
 
     # write correctness results to file
-    with open("code.correctness.json", "w") as f:
+    with open("code.correctness.forward.json", "w") as f:
         f.write(json.dumps(correctness, indent=4))
 
     return correctness
