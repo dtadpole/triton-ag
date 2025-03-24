@@ -129,8 +129,8 @@ async def main(args, model_settings):
                 })
 
         code_file = await agent_coder.run(json.dumps(prompt, indent=2), usage=ctx.usage, model_settings=model_settings)
-        with open(os.path.join(ctx.deps.wd, code_file.filename), 'w') as f:
-            f.write(code_file.code)
+        with open(os.path.join(ctx.deps.wd, code_file.data.filename), 'w') as f:
+            f.write(code_file.data.code)
 
         return code_file
 
