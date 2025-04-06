@@ -1,11 +1,15 @@
 import os
+import json
 import yaml
 from string import Template
 import argparse
 import asyncio
 
 from pydantic_ai.agent import Agent
+from pydantic_ai.messages import UserPromptPart, ModelRequest, SystemPromptPart
 from pydantic_ai.models import Model, ModelRequestParameters
+from pydantic_core import to_jsonable_python
+
 
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -114,24 +118,31 @@ async def main():
     model = create_model(args.model, args.provider)
     print(model)
 
-    # response = await model.request(
-    #     messages=[
-    #         {"role": "user", "content": "Hello, world!"},
-    #     ],
-    #     model_settings=settings,
-    #     model_request_parameters=ModelRequestParameters(
-    #         function_tools=[],
-    #         allow_text_result=True,
-    #         result_tools=[],
-    #     ),
-    # )
-    # print(response)
+    messages = [
+        ModelRequest(
+            parts=[
+                SystemPromptPart(content="You are a helpful assistant."),
+                UserPromptPart(content="Hello!"),
+            ],
+        ),
+    ]
 
-    agent = Agent(
-        model=model,
+    response = await model.request(
+        messages=messages,
+        model_settings=settings,
+        model_request_parameters=ModelRequestParameters(
+            function_tools=[],
+            allow_text_result=True,
+            result_tools=[],
+        ),
     )
-    response = await agent.run("Hello")
-    print(response)
+    print(json.dumps(to_jsonable_python(response), indent=4))
+
+    # agent = Agent(
+    #     model=model,
+    # )
+    # response = await agent.run("Hello")
+    # print(response)
 
 
 if __name__ == "__main__":
