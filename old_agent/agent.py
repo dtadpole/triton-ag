@@ -2,9 +2,9 @@ from pydantic import BaseModel, Field, model_validator
 from typing import Optional, List
 from enum import Enum
 from pydantic_ai import Model
-from agent.message import Memory, Message, ROLE_TYPE
+from old_agent.message import Memory, Message, ROLE_TYPE
 from abc import ABC, abstractmethod
-from agent.logger import logger
+from old_agent.logger import logger
 
 
 class AgentState(str, Enum):
