@@ -104,6 +104,7 @@ class BaseAgent(BaseModel, ABC):
     )
 
     finished: bool = False
+    finish_reason: str | None = None
 
     current_step: int = 0
     max_steps: int = 50
@@ -225,6 +226,8 @@ class BaseAgent(BaseModel, ABC):
 
         results: list[str] = []
         self.finished = False
+        self.finish_reason = None
+        self.current_step = 0
         while not self.finished:
             self.current_step += 1
             step_result = await self.step()
@@ -238,9 +241,10 @@ class BaseAgent(BaseModel, ABC):
 
         return "\n".join(results) if results else "No steps executed"
 
-    def finish(self, finished: bool = True) -> None:
+    def finish(self, finished: bool = True, reason: str = "") -> None:
         """Finish the agent"""
         self.finished = finished
+        self.finish_reason = reason
 
     async def step(self) -> str:
         """Execute a single step: think and act."""
@@ -376,7 +380,9 @@ class FinishTool(BaseTool):
             "required": ["finished"],
         }
 
-    async def execute(self, agent: BaseAgent, name: str) -> None:
+    async def execute(
+        self, agent: BaseAgent, name: str, params: dict[str, Any]
+    ) -> None:
         if name != self.name:
             raise ValueError(f"Tool name {name} does not match {self.name}")
-        agent.finish()
+        agent.finish(params["finished"], params["reason"])
