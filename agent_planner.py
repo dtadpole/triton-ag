@@ -19,7 +19,7 @@ from pydantic import GetCoreSchemaHandler, GetJsonSchemaHandler, TypeAdapter
 from pydantic.json_schema import JsonSchemaValue
 
 from pydantic_ai.messages import TextPart
-from agent import BaseAgent, BaseTool
+from agent import BaseAgent, BaseTool, FinishTool
 from logger import logger
 
 PLANNER_SYSTEM_PROMPT = """
@@ -123,7 +123,6 @@ class PlanStep(BaseModel):
     depends_on: List[str] = Field(
         ...,
         description="List of step IDs that must be completed before this step",
-        pattern=r"^[0-9]{2}_[a-z_]+$",
     )
     verification: str = Field(
         ...,
@@ -153,6 +152,79 @@ class Plan(BaseModel):
     #     return json_schema
 
 
+class CreatePlanTool(BaseTool):
+    name: str = "create_plan"
+    description: str = "Create a plan for the task"
+
+    def parameters_json_schema(self) -> dict[str, Any]:
+        return to_jsonable_python(Plan.model_json_schema(by_alias=False))
+
+    @logger.catch
+    async def execute(
+        self, agent: BaseAgent, name: str, params: dict[str, Any]
+    ) -> Plan:
+        if name != self.name:
+            raise ValueError(f"Tool name {name} does not match {self.name}")
+        agent.plan = Plan.model_validate(params)
+        return agent.plan
+
+
+class UpdateStepStatusTool(BaseTool):
+    name: str = "update_step_status"
+    description: str = "Update the status of a step in the plan"
+
+    def parameters_json_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "id": {
+                "description": "Unique identifier for the step, typically using a numeric prefix",
+                "pattern": "^[0-9]{2}_[a-z_]+$",
+                "title": "Id",
+                "type": "string",
+            },
+            "status": {
+                "description": "The status of the step",
+                "enum": ["pending", "in_progress", "error", "completed"],
+                "title": "Status",
+                "type": "string",
+            },
+            "required": ["id", "status"],
+        }
+
+    async def execute(
+        self, agent: BaseAgent, name: str, params: dict[str, Any]
+    ) -> PlanStep:
+        if name != self.name:
+            raise ValueError(f"Tool name {name} does not match {self.name}")
+        for step in agent.plan.steps:
+            if step.id == params["id"]:
+                step.status = params["status"]
+                return step
+        raise ValueError(f"Step {params['id']} not found in plan")
+
+
+class GetPlanTool(BaseTool):
+    name: str = "get_plan"
+    description: str = "Get the plan"
+
+    def parameters_json_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "The ID of the step to get",
+                },
+            },
+            "required": ["id"],
+        }
+
+    async def execute(self, agent: BaseAgent, name: str) -> Plan:
+        if name != self.name:
+            raise ValueError(f"Tool name {name} does not match {self.name}")
+        return agent.plan
+
+
 class AgentPlanner(BaseAgent):
     name: str = "agent_planner"
     description: str = "An agent that plans and executes tasks"
@@ -161,63 +233,13 @@ class AgentPlanner(BaseAgent):
 
     plan: Plan = Field(None, description="The plan")
 
-    class CreatePlanTool(BaseTool):
-        name: str = "create_plan"
-        description: str = "Create a plan for the task"
-
-        def parameters_json_schema(self) -> dict[str, Any]:
-            return to_jsonable_python(Plan.model_json_schema(by_alias=False))
-
-        async def execute(self, name: str, params: dict[str, Any]) -> Plan:
-            if name != self.name:
-                raise ValueError(f"Tool name {name} does not match {self.name}")
-            self.AgentPlanner.plan = Plan(**params)
-            return self.AgentPlanner.plan
-
-    class UpdateStepStatusTool(BaseTool):
-        name: str = "update_step_status"
-        description: str = "Update the status of a step in the plan"
-
-        def parameters_json_schema(self) -> dict[str, Any]:
-            return {
-                "id": {
-                    "description": "Unique identifier for the step, typically using a numeric prefix",
-                    "pattern": "^[0-9]{2}_[a-z_]+$",
-                    "title": "Id",
-                    "type": "string",
-                },
-                "status": {
-                    "description": "The status of the step",
-                    "enum": ["pending", "in_progress", "error", "completed"],
-                    "title": "Status",
-                    "type": "string",
-                },
-                "required": ["id", "status"],
-            }
-
-        async def execute(self, step_id: str, new_status: str) -> PlanStep:
-            for step in self.AgentPlanner.plan.steps:
-                if step.id == step_id:
-                    step.status = new_status
-                    return step
-            raise ValueError(f"Step {step_id} not found in plan")
-
-    class GetPlanTool(BaseTool):
-        name: str = "get_plan"
-        description: str = "Get the plan"
-
-        def parameters_json_schema(self) -> dict[str, Any]:
-            return {}
-
-        async def execute(self) -> Plan:
-            return self.AgentPlanner.plan
-
     def __init__(self):
         super().__init__()
         self.tools = [
-            self.CreatePlanTool(),
-            # self.UpdateStepStatusTool(),
-            # self.GetPlanTool(),
+            CreatePlanTool(),
+            UpdateStepStatusTool(),
+            GetPlanTool(),
+            FinishTool(),
         ]
 
     def callback(self) -> None:
@@ -252,3 +274,59 @@ if __name__ == "__main__":
     )
     # derefed = jsonref.loads(json.dumps(to_jsonable_python(create_plan_tool)))
     print(json.dumps(to_jsonable_python(tool_def), indent=4))
+
+    params = {
+        "goal": "Implement Triton kernel for nn.Linear (without bias) with forward and backward passes, validate against PyTorch implementation, and benchmark performance",
+        "steps": [
+            {
+                "id": "01_setup_environment",
+                "description": "Set up the necessary environment by importing required libraries (PyTorch, Triton, etc.) and defining test cases",
+                "depends_on": [],
+                "verification": "All necessary libraries are imported without errors and test data is properly initialized",
+            },
+            {
+                "id": "02_implement_forward",
+                "description": "Implement the forward pass of nn.Linear using Triton. This will involve matrix multiplication between input and weight tensors.",
+                "depends_on": ["01_setup_environment"],
+                "verification": "Forward function is implemented and can be called without errors",
+            },
+            {
+                "id": "03_test_forward",
+                "description": "Test the forward pass implementation by comparing results with PyTorch's nn.Linear. Verify numerical correctness within acceptable tolerance.",
+                "depends_on": ["02_implement_forward"],
+                "verification": "Triton forward pass produces results that match PyTorch's implementation (within numerical tolerance)",
+            },
+            {
+                "id": "04_implement_backward",
+                "description": "Implement the backward pass of nn.Linear using Triton. This involves computing gradients with respect to inputs and weights.",
+                "depends_on": ["02_implement_forward"],
+                "verification": "Backward function is implemented and can be called without errors",
+            },
+            {
+                "id": "05_test_backward",
+                "description": "Test the backward pass implementation by comparing gradients with PyTorch's autograd. Verify numerical correctness within acceptable tolerance.",
+                "depends_on": ["04_implement_backward"],
+                "verification": "Triton backward pass produces gradients that match PyTorch's implementation (within numerical tolerance)",
+            },
+            {
+                "id": "06_benchmark_performance",
+                "description": "Benchmark the performance of Triton kernels against PyTorch's implementation for both forward and backward passes. Test with various input sizes.",
+                "depends_on": ["03_test_forward", "05_test_backward"],
+                "verification": "Performance benchmarks are completed and compared",
+            },
+            {
+                "id": "07_refine_implementation",
+                "description": "Optimize the Triton kernels based on benchmark results, potentially adding tuning parameters or adjusting block sizes.",
+                "depends_on": ["06_benchmark_performance"],
+                "verification": "Optimized implementation shows improved performance over initial version",
+            },
+            {
+                "id": "08_final_validation",
+                "description": "Conduct final validation with comprehensive test cases and document the implementation's correctness and performance characteristics.",
+                "depends_on": ["07_refine_implementation"],
+                "verification": "Final implementation passes all tests and performance benchmarks are documented",
+            },
+        ],
+    }
+    plan = Plan.model_validate(params)
+    print(plan)
