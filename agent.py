@@ -1,6 +1,6 @@
 import os
 import json
-from typing import Optional, AsyncIterator
+from typing import Optional, AsyncIterator, Any
 from typing import Union
 from pydantic import BaseModel, Field, model_validator
 from pydantic.json_schema import to_jsonable_python
@@ -102,6 +102,8 @@ class BaseAgent(BaseModel, ABC):
     memory: list[ModelMessage] = Field(
         default=[], description="The memory of the agent"
     )
+
+    finished: bool = False
 
     current_step: int = 0
     max_steps: int = 50
@@ -222,7 +224,8 @@ class BaseAgent(BaseModel, ABC):
             self.memory.append(user_msg)
 
         results: list[str] = []
-        while True:
+        self.finished = False
+        while not self.finished:
             self.current_step += 1
             step_result = await self.step()
             # logger.info(f"Step {self.current_step}: {step_result}")
@@ -234,6 +237,10 @@ class BaseAgent(BaseModel, ABC):
                 break
 
         return "\n".join(results) if results else "No steps executed"
+
+    def finish(self, finished: bool = True) -> None:
+        """Finish the agent"""
+        self.finished = finished
 
     async def step(self) -> str:
         """Execute a single step: think and act."""
@@ -320,8 +327,8 @@ class BaseAgent(BaseModel, ABC):
             # Execute the tool
             for tool in self.tools:
                 if tool.name == name:
-                    logger.info(f"🔧 Activating tool: '{name}'...")
-                    result = await tool.execute(name=name, params=args)
+                    logger.info(f"🔧 Activating tool: '{name}'... {args}")
+                    result = await tool.execute(agent=self, name=name, params=args)
                     break
             else:
                 raise ValueError(f"Tool '{name}' not found")
@@ -347,3 +354,29 @@ class BaseAgent(BaseModel, ABC):
     @abstractmethod
     async def callback(self) -> None:
         """Callback for the agent"""
+
+
+class FinishTool(BaseTool):
+    name: str = "finish"
+    description: str = "Finish the task"
+
+    def parameters_json_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "finished": {
+                    "type": "boolean",
+                    "description": "Whether the work has been finished",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "The reason for finishing the task",
+                },
+            },
+            "required": ["finished"],
+        }
+
+    async def execute(self, agent: BaseAgent, name: str) -> None:
+        if name != self.name:
+            raise ValueError(f"Tool name {name} does not match {self.name}")
+        agent.finish()
