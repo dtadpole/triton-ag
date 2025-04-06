@@ -265,7 +265,8 @@ if __name__ == "__main__":
     agent_planner = AgentPlanner()
     asyncio.run(main(args))
 
-    create_plan_tool = agent_planner.CreatePlanTool()
+    """
+    create_plan_tool = CreatePlanTool()
     tool_def = ToolDefinition(
         name=create_plan_tool.name,
         description=create_plan_tool.description,
@@ -330,3 +331,4 @@ if __name__ == "__main__":
     }
     plan = Plan.model_validate(params)
     print(plan)
+    """
