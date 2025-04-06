@@ -22,7 +22,7 @@ from pydantic_ai.providers.google_gla import GoogleGLAProvider
 
 from pydantic_ai.providers.deepseek import DeepSeekProvider
 
-from agent.logger import logger
+from logger import logger
 
 
 def load_model_settings(provider: str, model: str) -> dict:
@@ -60,47 +60,68 @@ def load_model_settings(provider: str, model: str) -> dict:
 
 
 @logger.catch
-def create_model(model_name: str, provider: str) -> Model:
+def create_model(
+    provider: str,
+    model_name: str,
+) -> tuple[Model, dict]:
     model_settings = load_model_settings(provider, model_name)
     # if "name" in model_settings, use the name as the model name
     if "name" in model_settings:
         model_name = model_settings["name"]
 
     if provider == "openai":
-        return OpenAIModel(
-            model_name=model_name,
-            provider=OpenAIProvider(api_key=os.environ["OPENAI_API_KEY"]),
+        return (
+            OpenAIModel(
+                model_name=model_name,
+                provider=OpenAIProvider(api_key=os.environ["OPENAI_API_KEY"]),
+            ),
+            model_settings["settings"],
         )
     elif provider == "anthropic":
-        return AnthropicModel(
-            model_name=model_name,
-            provider=AnthropicProvider(api_key=os.environ["ANTHROPIC_API_KEY"]),
+        return (
+            AnthropicModel(
+                model_name=model_name,
+                provider=AnthropicProvider(api_key=os.environ["ANTHROPIC_API_KEY"]),
+            ),
+            model_settings["settings"],
         )
     elif provider == "gemini":
-        return GeminiModel(
-            model_name=model_name,
-            provider=GoogleGLAProvider(api_key=os.environ["GEMINI_API_KEY"]),
+        return (
+            GeminiModel(
+                model_name=model_name,
+                provider=GoogleGLAProvider(api_key=os.environ["GEMINI_API_KEY"]),
+            ),
+            model_settings["settings"],
         )
     elif provider == "deepseek":
-        return OpenAIModel(
-            model_name=model_name,
-            provider=DeepSeekProvider(api_key=os.environ["DEEPSEEK_API_KEY"]),
+        return (
+            OpenAIModel(
+                model_name=model_name,
+                provider=DeepSeekProvider(api_key=os.environ["DEEPSEEK_API_KEY"]),
+            ),
+            model_settings["settings"],
         )
     elif provider == "fireworks":
-        return OpenAIModel(
-            model_name=model_name,
-            provider=OpenAIProvider(
-                base_url="https://api.fireworks.ai/inference/v1",
-                api_key=os.environ["FIREWORKS_API_KEY"],
+        return (
+            OpenAIModel(
+                model_name=model_name,
+                provider=OpenAIProvider(
+                    base_url="https://api.fireworks.ai/inference/v1",
+                    api_key=os.environ["FIREWORKS_API_KEY"],
+                ),
             ),
+            model_settings["settings"],
         )
     elif provider == "together":
-        return OpenAIModel(
-            model_name=model_name,
-            provider=OpenAIProvider(
-                base_url="https://api.together.xyz/v1",
-                api_key=os.environ["TOGETHER_API_KEY"],
+        return (
+            OpenAIModel(
+                model_name=model_name,
+                provider=OpenAIProvider(
+                    base_url="https://api.together.xyz/v1",
+                    api_key=os.environ["TOGETHER_API_KEY"],
+                ),
             ),
+            model_settings["settings"],
         )
     else:
         raise ValueError(f"Unknown provider: {provider}")
@@ -113,15 +134,17 @@ async def main():
     parser.add_argument("--model", type=str, default="gpt-4o")
     args = parser.parse_args()
 
-    model_settings = load_model_settings(args.provider, args.model)
-    settings = model_settings["settings"]
-    model = create_model(args.model, args.provider)
+    model, settings = create_model(args.provider, args.model)
     print(model)
 
     messages = [
         ModelRequest(
             parts=[
                 SystemPromptPart(content="You are a helpful assistant."),
+            ],
+        ),
+        ModelRequest(
+            parts=[
                 UserPromptPart(content="Hello!"),
             ],
         ),
