@@ -270,7 +270,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--task",
         type=str,
-        default="implement Triton kernel for nn.Linear, no bias, both forward and backward pass, compare to PyTorch implementation, verify correctness, and benchmark performance",
+        default="implement Triton kernel for nn.Linear, no bias, both forward and backward pass, compare to PyTorch implementation for each kernel implementation, verify correctness, and benchmark performance",
     )
     args = parser.parse_args()
     agent_planner = AgentPlanner()
