@@ -26,7 +26,7 @@ PLANNER_SYSTEM_PROMPT = """
 You are an expert Planning Agent tasked with solving problems efficiently through structured plans.
 
 1. Analyze requests to understand the task scope
-2. Create a clear, actionable plan that makes meaningful progress with the `planning` tool
+2. Create a clear, detailed, andactionable plan that makes meaningful progress with the `planning` tool
 3. After each step of changing code, test and verify correctness using available tools, fix code until it is correct
 4. Track progress and adapt plans when necessary
 5. Use `finish` to conclude immediately when the task is complete
@@ -104,9 +104,10 @@ Be concise in your reasoning, then select the appropriate tool or action.
             },
         },
         "required": [
-        "goal",
-        "steps"
-    ]
+            "goal",
+            "steps"
+        ]
+    }
 }
 """
 
@@ -165,6 +166,8 @@ class CreatePlanTool(BaseTool):
     ) -> Plan:
         if name != self.name:
             raise ValueError(f"Tool name {name} does not match {self.name}")
+        if isinstance(params, str):
+            params = json.loads(params)
         agent.plan = Plan.model_validate(params)
         return agent.plan
 
@@ -176,17 +179,18 @@ class UpdateStepStatusTool(BaseTool):
     def parameters_json_schema(self) -> dict[str, Any]:
         return {
             "type": "object",
-            "id": {
-                "description": "Unique identifier for the step, typically using a numeric prefix",
-                "pattern": "^[0-9]{2}_[a-z_]+$",
-                "title": "Id",
-                "type": "string",
-            },
-            "status": {
-                "description": "The status of the step",
-                "enum": ["pending", "in_progress", "error", "completed"],
-                "title": "Status",
-                "type": "string",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "Unique identifier for the step, typically using a numeric prefix",
+                    "pattern": "^[0-9]{2}_[a-z_]+$",
+                },
+                "status": {
+                    "type": "string",
+                    "description": "The status of the step",
+                    "enum": ["pending", "in_progress", "error", "completed"],
+                    "default": "pending",
+                },
             },
             "required": ["id", "status"],
         }
@@ -196,6 +200,8 @@ class UpdateStepStatusTool(BaseTool):
     ) -> PlanStep:
         if name != self.name:
             raise ValueError(f"Tool name {name} does not match {self.name}")
+        if isinstance(params, str):
+            params = json.loads(params)
         for step in agent.plan.steps:
             if step.id == params["id"]:
                 step.status = params["status"]
@@ -214,14 +220,19 @@ class GetPlanTool(BaseTool):
                 "id": {
                     "type": "string",
                     "description": "The ID of the step to get",
+                    "pattern": "^[0-9]{2}_[a-z_]+$",
                 },
             },
             "required": ["id"],
         }
 
-    async def execute(self, agent: BaseAgent, name: str) -> Plan:
+    async def execute(
+        self, agent: BaseAgent, name: str, params: dict[str, Any]
+    ) -> Plan:
         if name != self.name:
             raise ValueError(f"Tool name {name} does not match {self.name}")
+        if isinstance(params, str):
+            params = json.loads(params)
         return agent.plan
 
 
@@ -254,8 +265,8 @@ async def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--provider", type=str, default="openai")
-    parser.add_argument("--model", type=str, default="gpt-4o")
+    # parser.add_argument("--provider", type=str, default="openai")
+    # parser.add_argument("--model", type=str, default="gpt-4o")
     parser.add_argument(
         "--task",
         type=str,
