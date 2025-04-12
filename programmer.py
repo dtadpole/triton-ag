@@ -1,40 +1,266 @@
 import os
+import json
 import asyncio
 import argparse
-from agents import Agent, Runner, AsyncOpenAI, OpenAIChatCompletionsModel
-import yaml
-from string import Template
+from agents import (
+    Agent,
+    Runner,
+    RunContextWrapper,
+    RunHooks,
+    FunctionTool,
+    RunConfig,
+    trace,
+    enable_verbose_stdout_logging,
+    set_trace_processors,
+)
+from agents.mcp import MCPServer, MCPServerStdio
+import mlflow
 from util import load_model
-claude_key = os.environ["ANTHROPIC_API_KEY"]
-openai_key = os.environ["OPENAI_API_KEY"]
 
-model = OpenAIChatCompletionsModel(
-    model="claude-3-7-sonnet-latest",
-    openai_client=AsyncOpenAI(
-        api_key=claude_key,
-        base_url="https://api.anthropic.com/v1",
-    ),
+
+import logging
+from logger import logger
+from pydantic import BaseModel, Field
+from typing import List, Any
+from dataclasses import dataclass
+from pydantic.json_schema import to_jsonable_python
+
+PLANNER_SYSTEM_PROMPT = """
+You are an expert Planning Agent tasked with solving problems efficiently through structured plans.
+
+1. Analyze requests to understand the task scope
+2. Create a clear, detailed, andactionable plan that makes meaningful progress with the `planning` tool
+3. After each step of changing code, test and verify correctness using available tools, fix code until it is correct
+4. Track progress and adapt plans when necessary
+5. Use `finish` to conclude immediately when the task is complete
+
+Available tools will vary by task but may include:
+- `planning`: Create, update, and track plans (commands: create, update, mark_step, etc.)
+- `finish`: End the task when complete
+Break tasks into logical steps with clear outcomes. Avoid excessive detail or sub-steps.
+Think about dependencies and verification methods.
+Know when to conclude - don't continue thinking once objectives are met.
+"""
+
+PLANNING_NEXT_PROMPT = """
+Goal: {goal}
+
+Based on the current state, what's your next action?
+Choose the most efficient path forward:
+1. Is the plan sufficient, or does it need refinement?
+2. Can you execute the next step immediately?
+3. Is the task complete? If so, use `finish` right away.
+
+Be concise in your reasoning, then select the appropriate tool or action.
+"""
+
+
+class PlanStep(BaseModel):
+    id: str = Field(
+        ...,
+        description="Unique identifier for the step, typically using a numeric prefix",
+        pattern=r"^[0-9]{2}_[a-z_]+$",
+    )
+    description: str = Field(
+        ..., description="Detailed explanation of the step's activities"
+    )
+    depends_on: List[str] = Field(
+        ...,
+        description="List of step IDs that must be completed before this step",
+    )
+    verification: str = Field(
+        ...,
+        description="Criteria to determine if the step has been successfully completed",
+    )
+    status: str = Field(
+        default="pending",
+        description="The status of the step",
+        enum=["pending", "in_progress", "error", "completed"],
+    )
+
+
+@dataclass
+class Plan(BaseModel):
+    goal: str = Field(..., description="The overall objective of the project")
+    steps: list[PlanStep] = Field(
+        ...,
+        description="Ordered list of steps required to complete the project",
+        min_items=1,
+    )
+
+
+async def create_plan(ctx: RunContextWrapper[Any], params: dict[str, Any]) -> Plan:
+    if isinstance(params, str):
+        params = json.loads(params)
+    plan = Plan.model_validate(params)
+    if not ctx.context:
+        ctx.context = {}
+    ctx.context["plan"] = plan
+    return ctx.context["plan"]
+
+
+create_plan_tool = FunctionTool(
+    name="create_plan",
+    description="Create a plan for the goal",
+    params_json_schema=to_jsonable_python(Plan.model_json_schema()),
+    on_invoke_tool=create_plan,
 )
 
-programmer = Agent(
-    model=model,
-    name="programmer",
-    instructions="You are a programmer. You are given a task and you need to complete it.",
-    tools=[],
+
+async def update_plan_step(
+    ctx: RunContextWrapper[Any], params: dict[str, Any]
+) -> PlanStep:
+    if isinstance(params, str):
+        params = json.loads(params)
+    if not ctx.context:
+        raise ValueError("No plan found")
+    for step in ctx.context["plan"].steps:
+        if step.id == params["id"]:
+            step.status = params["status"]
+            return step
+    raise ValueError(f"Step {params['id']} not found in plan")
+
+
+update_plan_step_tool = FunctionTool(
+    name="update_plan_step",
+    description="Update the status of a step in the plan",
+    params_json_schema={
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "description": "Unique identifier for the step, typically using a numeric prefix",
+                "pattern": "^[0-9]{2}_[a-z_]+$",
+            },
+            "status": {
+                "type": "string",
+                "description": "The status of the step",
+                "enum": ["pending", "in_progress", "error", "completed"],
+                "default": "pending",
+            },
+        },
+        "required": ["id", "status"],
+    },
+    on_invoke_tool=update_plan_step,
 )
 
+
+async def get_plan(ctx: RunContextWrapper[Any], params: dict[str, Any]) -> Plan:
+    if not ctx.context:
+        raise ValueError("No plan found")
+    return ctx.context["plan"]
+
+
+get_plan_tool = FunctionTool(
+    name="get_plan",
+    description="Get the plan info",
+    params_json_schema={
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "description": "The ID of the step to get",
+                "pattern": "^[0-9]{2}_[a-z_]+$",
+            },
+        },
+        "required": ["id"],
+    },
+    on_invoke_tool=get_plan,
+)
+
+
+# function to find next available folder starting with _run_<number>
+def find_next_run_folder():
+    i = 0
+    while os.path.exists(os.path.join(os.getcwd(), f"_run_{i:03d}")):
+        i += 1
+    os.makedirs(os.path.join(os.getcwd(), f"_run_{i:03d}"), exist_ok=True)
+    return os.path.join(os.getcwd(), f"_run_{i:03d}")
 
 
 async def main(args):
     model, model_settings = load_model(args.provider, args.model)
-    result = await Runner.run(programmer, input="write a Triton kernel for matrix multiplication")
-    print(result.final_output)
+    run_folder = find_next_run_folder()
+    file_server = MCPServerStdio(
+        params={
+            "command": "npx",
+            "args": [
+                "-y",
+                "@modelcontextprotocol/server-filesystem",
+                run_folder,
+            ],
+        }
+    )
+    code_run_server = MCPServerStdio(
+        params={
+            "command": "uv",
+            "args": ["run", "--with", "mcp", "mcp", "run", "codeRunServer.py"],
+        }
+    )
+    await file_server.__aenter__()
+    await code_run_server.__aenter__()
+    try:
+        programmer = Agent(
+            model=model,
+            name="programmer",
+            instructions=PLANNER_SYSTEM_PROMPT,
+            tools=[create_plan_tool, update_plan_step_tool, get_plan_tool],
+            mcp_servers=[file_server, code_run_server],
+        )
+        prompt = PLANNING_NEXT_PROMPT.format(goal=args.input)
+
+        run_hooks = RunHooks()
+
+        async def on_tool_start(context, agent, tool):
+            logger.info(
+                f"Agent [{agent.name}] Tool [{tool.name}] Context: {context} started"
+            )
+
+        async def on_tool_end(context, agent, tool, result):
+            logger.info(
+                f"Agent [{agent.name}] Tool [{tool.name}] Context: {context} ended with result:\n{result}\n"
+            )
+
+        run_hooks.on_tool_start = on_tool_start
+        run_hooks.on_tool_end = on_tool_end
+
+        result = await Runner.run(
+            programmer,
+            input=prompt,
+            max_turns=50,
+            hooks=run_hooks,
+            run_config=RunConfig(
+                model_settings=model_settings,
+            ),
+        )
+        print(result.final_output)
+    finally:
+        await file_server.__aexit__()
+        await code_run_server.__aexit__()
 
 
 if __name__ == "__main__":
+    enable_verbose_stdout_logging()
+    stdout_logger = logging.getLogger("openai.agents")
+    stdout_logger.setLevel(logging.INFO)
+    stdout_logger.addHandler(logging.StreamHandler())
+
+    # mlflow.openai.autolog()
+    # mlflow.set_tracking_uri("http://localhost:5050")
+    # mlflow.set_experiment("OpenAI Agent")
+
+    # weave.init("openai-agents")
+    # set_trace_processors([WeaveTracingProcessor()])
+
     # argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("-p", "--provider", type=str, default="anthropic")
     parser.add_argument("-m", "--model", type=str, default="claude-3.7")
+    parser.add_argument(
+        "-i",
+        "--input",
+        type=str,
+        default="Generate triton kernel for nn.linear, no bias, both forward and backward, compare to PyTorch implementation, verify correctness, benchmark performance",
+    )
     args = parser.parse_args()
     asyncio.run(main(args))
