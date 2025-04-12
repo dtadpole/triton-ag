@@ -1,7 +1,8 @@
 import yaml
 from string import Template
 import os
-from agents import AsyncOpenAI, OpenAIChatCompletionsModel
+from agents import AsyncOpenAI, OpenAIChatCompletionsModel, ModelSettings
+
 
 def load_model(provider: str, model: str):
     # read model.yaml
@@ -9,8 +10,14 @@ def load_model(provider: str, model: str):
         model_yaml = yaml.safe_load(f)
     if provider not in model_yaml:
         raise ValueError(f"Provider {provider} not found in model.yaml")
-    if "common" not in model_yaml[provider] or "base_url" not in model_yaml[provider]["common"] or "api_key" not in model_yaml[provider]["common"]:
-        raise ValueError(f"Common settings not found in model.yaml for provider {provider}")
+    if (
+        "common" not in model_yaml[provider]
+        or "base_url" not in model_yaml[provider]["common"]
+        or "api_key" not in model_yaml[provider]["common"]
+    ):
+        raise ValueError(
+            f"Common settings not found in model.yaml for provider {provider}"
+        )
     base_url = model_yaml[provider]["common"]["base_url"]
 
     template = Template(model_yaml[provider]["common"]["api_key"])
@@ -31,9 +38,9 @@ def load_model(provider: str, model: str):
         model_name = model
 
     if "settings" in model_config:
-        model_settings = model_config["settings"]
+        model_settings = ModelSettings(**model_config["settings"])
     else:
-        model_settings = {}
+        model_settings = ModelSettings()
 
     model = OpenAIChatCompletionsModel(
         model=model_name,
@@ -44,4 +51,3 @@ def load_model(provider: str, model: str):
     )
 
     return model, model_settings
-
