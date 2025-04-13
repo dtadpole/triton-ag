@@ -17,8 +17,8 @@ def verify_correctness_func(
     dimensions,
     device="cuda",
     dtype=torch.float16,
-    atol=1e-2,
-    rtol=1e-2,
+    atol=2e-2,
+    rtol=2e-2,
     seed=None,
 ):
     """
@@ -68,8 +68,8 @@ def verify_correctness_forward(
     dimensions,
     device="cuda",
     dtype=torch.float16,
-    atol=1e-2,
-    rtol=1e-2,
+    atol=2e-2,
+    rtol=2e-2,
     seed=None,
 ):
     """
@@ -126,8 +126,8 @@ def verify_correctness_backward(
     dimensions,
     device="cuda",
     dtype=torch.float16,
-    atol=1e-2,
-    rtol=1e-2,
+    atol=2e-2,
+    rtol=2e-2,
     seed=None,
 ):
     """

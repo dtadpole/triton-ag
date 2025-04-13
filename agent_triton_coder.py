@@ -23,8 +23,10 @@ Working directory: {working_dir}
 1. Analyze the request to understand the task scope
 2. All the relevant environments has already been setup
 3. Check the working directory and subfolders for Python files (ending with `.py`) to understand the current code structure
-4. Implement specific code for the given task in a single file (in the working directory, not subfolder)
+4. Implement specific code for the given task in a single file directly in the working directory
 5. Use the provided function in `verifier/correctness.py` to verify correctness, verify the Triton implementation in the working directory against reference PyTorch implementation
+6. If the final and official verification fails, fix the code and verify again, repeat the process until it passes
+7. If the final and official verification passes, finish the task
 
 
 When generating code, always follow these instructions:
@@ -33,14 +35,12 @@ When generating code, always follow these instructions:
 - Do not change any existing code in the `verifier` subfolder, do not add any new code in the `verifier` subfolder
 - You may create your own test cases to verify intermediate results, but the final and official verification will need to be done using the provided function.
 - When creating test cases, write them in subfolder under `tests`, with filename ends with `_test.py` (not in the main working directory)
-- If the final and official verification fails, fix the code and verify again, repeat the process until it passes
-- If the final and official verification passes, finish the task
 
 Be concise in your reasoning, then select the appropriate tool or action.
 """
 
 
-"""
+DUMMY_SYSTEM_PROMPT = """
 You are an expert GPU programmer specializing in Triton kernels with deep understanding of
 GPU architecture, parallel computing patterns, memory access optimization, tilings,
 parallelism strategies, and numerical precision considerations.
@@ -113,7 +113,7 @@ Based on the error information, what's your next action?
 
 Choose the most efficient path forward:
 1. Do you understand the error? Can you fix the error immediately?
-2. If not sure why the error happened, can you create test cases to verify intermediate results?
+2. If not sure why the error happened, what are the hypothesis?  Create test cases based on each hypothesis to verify intermediate results, and fix the code, step by step.
 3. If you have fixed the error and verified intermediate results, verify again using the final and official verification.
 4. If the final and official verification passes, finish the task.
 
@@ -140,47 +140,50 @@ async def main(args):
             "args": ["run", "--with", "mcp", "mcp", "run", "codeRunServer.py"],
         }
     )
-    await file_server.__aenter__()
-    await code_run_server.__aenter__()
-    try:
-        triton_coder = Agent(
-            model=model,
-            name="triton_coder",
-            instructions=TRITON_CODER_SYSTEM_PROMPT.format(working_dir=run_folder),
-            mcp_servers=[file_server, code_run_server],
-        )
-        prompt = TRITON_CODER_NEXT_PROMPT.format(task=args.input)
-
-        run_hooks = RunHooks()
-
-        async def on_tool_start(context, agent, tool):
-            logger.info(f"Agent [{agent.name}] Tool [{tool.name}] started")
-
-        async def on_tool_end(context, agent, tool, result):
-            logger.info(
-                f"Agent [{agent.name}] Tool [{tool.name}] ended with result:\n{result}\n"
-            )
-
-        run_hooks.on_tool_start = on_tool_start
-        run_hooks.on_tool_end = on_tool_end
-
-        with trace("Triton Coder"):
-            result = await Runner.run(
-                triton_coder,
-                input=prompt,
-                max_turns=50,
-                hooks=run_hooks,
-                run_config=RunConfig(
-                    model_settings=model_settings,
-                ),
-            )
-            print(result.final_output)
-    finally:
+    async with file_server as fs, code_run_server as crs:
         try:
-            await file_server.__aexit__()
-            await code_run_server.__aexit__()
-        except Exception as e:
-            logger.error(f"Error exiting servers: {e}")
+            triton_coder = Agent(
+                model=model,
+                name="triton_coder",
+                instructions=TRITON_CODER_SYSTEM_PROMPT.format(working_dir=run_folder),
+                mcp_servers=[fs, crs],
+            )
+            prompt = TRITON_CODER_NEXT_PROMPT.format(task=args.input)
+
+            run_hooks = RunHooks()
+
+            async def on_tool_start(context, agent, tool):
+                logger.info(f"Agent [{agent.name}] Tool [{tool.name}] started")
+
+            async def on_tool_end(context, agent, tool, result):
+                logger.info(
+                    f"Agent [{agent.name}] Tool [{tool.name}] ended with result:\n{result}\n"
+                )
+
+            run_hooks.on_tool_start = on_tool_start
+            run_hooks.on_tool_end = on_tool_end
+
+            with trace("Triton Coder"):
+                result = await Runner.run(
+                    triton_coder,
+                    input=prompt,
+                    max_turns=50,
+                    hooks=run_hooks,
+                    run_config=RunConfig(
+                        model_settings=model_settings,
+                    ),
+                )
+                print(result.final_output)
+        finally:
+            logger.info("Agent completed!")
+            # try:
+            #   await file_server.__aexit__(None, None, None)
+            # except Exception as e:
+            #     logger.error(f"Error exiting servers: {e}")
+            # try:
+            #   await code_run_server.__aexit__(None, None, None)
+            # except Exception as e:
+            #     logger.error(f"Error exiting servers: {e}")
 
 
 if __name__ == "__main__":
@@ -193,7 +196,7 @@ if __name__ == "__main__":
         "-i",
         "--input",
         type=str,
-        default="Implement triton kernel for the backward pass of nn.Linear, use autotune for the tiling parameters",
+        default="Implement triton kernel for the forward pass of nn.Linear, use autotune for the tiling parameters",
     )
     args = parser.parse_args()
 
