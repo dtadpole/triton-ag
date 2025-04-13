@@ -1,29 +1,17 @@
 import os
-import json
 import asyncio
 import argparse
-import time
 from agents import (
     Agent,
     Runner,
     RunHooks,
     RunConfig,
     trace,
-    enable_verbose_stdout_logging,
-    set_trace_processors,
 )
-from agents.mcp import MCPServer, MCPServerStdio
-import mlflow
-from util import load_model
-
-
-import logging
-
+from agents.mcp import MCPServerStdio
+from util import load_model, init_logging, prepare_next_run_folder
 from logger import logger
-from pydantic import BaseModel, Field
-from typing import List, Any
-from dataclasses import dataclass
-from pydantic.json_schema import to_jsonable_python
+
 
 DESIGNER_SYSTEM_PROMPT = """
 You are an expert Design Agent tasked with designing a system to solve a problem.
@@ -55,32 +43,9 @@ Be concise in your reasoning, then select the appropriate tool or action.
 """
 
 
-# function to find next available folder starting with _run_<number>
-def find_next_run_folder():
-    i = 0
-    while os.path.exists(os.path.join(os.getcwd(), f"_run_{i:03d}")):
-        i += 1
-    os.makedirs(os.path.join(os.getcwd(), f"_run_{i:03d}"), exist_ok=True)
-    return os.path.join(os.getcwd(), f"_run_{i:03d}")
-
-
-def init_logging(args):
-    # enable_verbose_stdout_logging()
-    # stdout_logger = logging.getLogger("agents")
-    # stdout_logger.setLevel(logging.INFO)
-    # stdout_logger.addHandler(logging.StreamHandler())
-
-    mlflow.openai.autolog()
-    mlflow.set_tracking_uri("http://localhost:5050")
-    mlflow.set_experiment(f"Agent [{args.provider}] [{args.model}]")
-
-    # weave.init("openai-agents")
-    # set_trace_processors([WeaveTracingProcessor()])
-
-
 async def main(args):
     model, model_settings = load_model(args.provider, args.model)
-    run_folder = find_next_run_folder()
+    run_folder = prepare_next_run_folder()
     print(f"Run folder: {run_folder}")
     file_server = MCPServerStdio(
         params={
