@@ -70,7 +70,7 @@ async def main(args):
     file_server = MCPServerStdio(
         params={
             "command": "npx",
-            "args": [ "-y", "@modelcontextprotocol/server-filesystem", run_folder ],
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", run_folder],
         }
     )
     plan_server = MCPServerStdio(
@@ -128,7 +128,7 @@ async def main(args):
 
 if __name__ == "__main__":
     enable_verbose_stdout_logging()
-    stdout_logger = logging.getLogger("openai.agents")
+    stdout_logger = logging.getLogger("agents")
     stdout_logger.setLevel(logging.INFO)
     stdout_logger.addHandler(logging.StreamHandler())
 
