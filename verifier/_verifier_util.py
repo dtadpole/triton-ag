@@ -1,8 +1,10 @@
+# filename: _verifier_util.py
+
 import torch
 import triton
 import numpy as np
-import json
 import matplotlib.pyplot as plt
+
 
 def _generate_configs(dims):
     """
@@ -44,7 +46,17 @@ def _generate_configs(dims):
 
     return configs
 
-def _check_outputs_match(config, correctness, triton_output, torch_output, dtype, atol=1e-2, rtol=1e-2, label=""):
+
+def _check_outputs_match(
+    config,
+    correctness,
+    triton_output,
+    torch_output,
+    dtype,
+    atol=1e-2,
+    rtol=1e-2,
+    label="",
+):
     """
     Check if outputs from Triton and PyTorch implementations match within tolerance.
 
@@ -83,22 +95,19 @@ def _check_outputs_match(config, correctness, triton_output, torch_output, dtype
         print(f"✅ Correctness test passed for shape ({config}, {dtype}) [{label}]")
         correctness["passed"] += 1
         correctness["total"] += 1
-        correctness["results"].append({
-            "shape": config,
-            "dtype": str(dtype),
-            "correctness": True
-        })
+        correctness["results"].append(
+            {"shape": config, "dtype": str(dtype), "correctness": True}
+        )
     else:
         print(f"❌ Correctness test failed for shape ({config}, {dtype}) [{label}]")
         correctness["failed"] += 1
         correctness["total"] += 1
-        correctness["results"].append({
-            "shape": config,
-            "dtype": str(dtype),
-            "correctness": False
-        })
+        correctness["results"].append(
+            {"shape": config, "dtype": str(dtype), "correctness": False}
+        )
 
     return not mismatch
+
 
 def _copy_parameters(source_module, target_module):
     """
@@ -119,6 +128,7 @@ def _copy_parameters(source_module, target_module):
         # Copy the data from source to target (in-place)
         target_param.data.copy_(source_param.data)
 
+
 def _backward_pass(module, inputs, dy):
     """
     Perform backward pass through a module with given inputs and gradients.
@@ -133,7 +143,11 @@ def _backward_pass(module, inputs, dy):
             1. Gradients with respect to inputs (dx)
             2. Gradients with respect to module parameters (dw)
     """
-    detached_inputs = tuple(x.clone().detach().requires_grad_() for x in inputs) if isinstance(inputs, tuple) else (inputs.clone().detach().requires_grad_(),)
+    detached_inputs = (
+        tuple(x.clone().detach().requires_grad_() for x in inputs)
+        if isinstance(inputs, tuple)
+        else (inputs.clone().detach().requires_grad_(),)
+    )
     outputs = module(*detached_inputs)
 
     if isinstance(outputs, tuple):
@@ -142,10 +156,26 @@ def _backward_pass(module, inputs, dy):
     else:
         outputs.backward(dy)
 
-    dx, dw = tuple([x.grad for x in detached_inputs]), tuple([p.grad for p in module.parameters()])
+    dx, dw = tuple([x.grad for x in detached_inputs]), tuple(
+        [p.grad for p in module.parameters()]
+    )
     return dx, dw
 
-def _benchmark_implementations(config, triton_fn, torch_fn, inputs, timings_triton, timings_pytorch, speedups, performance, num_warmup=25, num_repeats=100, device='cuda', dtype=torch.float16):
+
+def _benchmark_implementations(
+    config,
+    triton_fn,
+    torch_fn,
+    inputs,
+    timings_triton,
+    timings_pytorch,
+    speedups,
+    performance,
+    num_warmup=25,
+    num_repeats=100,
+    device="cuda",
+    dtype=torch.float16,
+):
     """
     Benchmark Triton and PyTorch implementations and measure execution times.
 
@@ -176,20 +206,26 @@ def _benchmark_implementations(config, triton_fn, torch_fn, inputs, timings_trit
         inputs = (inputs,)
 
     # Time Triton implementation
-    time_triton = triton.testing.do_bench(
-        lambda: triton_fn(inputs),
-        warmup=num_warmup,
-        rep=num_repeats,
-        quantiles=quantiles
-    ) * 1e3
+    time_triton = (
+        triton.testing.do_bench(
+            lambda: triton_fn(inputs),
+            warmup=num_warmup,
+            rep=num_repeats,
+            quantiles=quantiles,
+        )
+        * 1e3
+    )
 
     # Time PyTorch implementation
-    time_pytorch = triton.testing.do_bench(
-        lambda: torch_fn(inputs),
-        warmup=num_warmup,
-        rep=num_repeats,
-        quantiles=quantiles
-    ) * 1e3
+    time_pytorch = (
+        triton.testing.do_bench(
+            lambda: torch_fn(inputs),
+            warmup=num_warmup,
+            rep=num_repeats,
+            quantiles=quantiles,
+        )
+        * 1e3
+    )
 
     timings_triton.append(time_triton)
     timings_pytorch.append(time_pytorch)
@@ -197,19 +233,26 @@ def _benchmark_implementations(config, triton_fn, torch_fn, inputs, timings_trit
     speedup = time_pytorch / time_triton
     speedups.append(speedup)
 
-    print(f"Shape: ({config}, {dtype}), Triton: {time_triton:.1f} us, PyTorch: {time_pytorch:.1f} us, Speedup: {speedup:.2f}x")
+    print(
+        f"Shape: ({config}, {dtype}), Triton: {time_triton:.1f} us, PyTorch: {time_pytorch:.1f} us, Speedup: {speedup:.2f}x"
+    )
 
-    performance["results"].append({
-        "shape": config,
-        "dtype": str(dtype),
-        "triton_time": time_triton,
-        "pytorch_time": time_pytorch,
-        "speedup": speedup
-    })
+    performance["results"].append(
+        {
+            "shape": config,
+            "dtype": str(dtype),
+            "triton_time": time_triton,
+            "pytorch_time": time_pytorch,
+            "speedup": speedup,
+        }
+    )
 
     return time_triton, time_pytorch, speedup
 
-def _plot_benchmark_results(configs, timings_triton, timings_pytorch, speedups, label=""):
+
+def _plot_benchmark_results(
+    configs, timings_triton, timings_pytorch, speedups, label=""
+):
     """
     Plot performance comparison between Triton and PyTorch implementations.
 
@@ -233,21 +276,21 @@ def _plot_benchmark_results(configs, timings_triton, timings_pytorch, speedups, 
     width = 0.35
 
     # Plot timing bars
-    ax1.bar(x - width/2, timings_triton, width, label='Triton', color='blue')
-    ax1.bar(x + width/2, timings_pytorch, width, label='PyTorch', color='red')
+    ax1.bar(x - width / 2, timings_triton, width, label="Triton", color="blue")
+    ax1.bar(x + width / 2, timings_pytorch, width, label="PyTorch", color="red")
 
-    ax1.set_ylabel('Time (us)')
-    ax1.set_xlabel('Tensor Shape')
-    ax1.set_title('Performance Comparison')
+    ax1.set_ylabel("Time (us)")
+    ax1.set_xlabel("Tensor Shape")
+    ax1.set_title("Performance Comparison")
     ax1.set_xticks(x)
     ax1.set_xticklabels(x_labels, rotation=45)
-    ax1.legend(loc='upper left')
+    ax1.legend(loc="upper left")
 
     # Plot speedup line
     ax2 = ax1.twinx()
-    ax2.plot(x, speedups, label='Speedup (PyTorch / Triton)', color='green', marker='o')
-    ax2.set_ylabel('Speedup (x)')
-    ax2.legend(loc='upper right')
+    ax2.plot(x, speedups, label="Speedup (PyTorch / Triton)", color="green", marker="o")
+    ax2.set_ylabel("Speedup (x)")
+    ax2.legend(loc="upper right")
 
     filename = f"code.performance.{label}.png"
 

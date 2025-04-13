@@ -10,41 +10,142 @@ Optimized matrix multiplication using Triton with advanced features:
 - Memory coalescing and register optimizations
 """
 
+
 @triton.autotune(
     configs=[
         # Basic configs varying block sizes
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            }
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            }
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            }
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            }
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 64,
+                "GROUP_SIZE_M": 8,
+            }
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 64,
+                "GROUP_SIZE_M": 8,
+            }
+        ),
         # Additional configs with different GROUP_SIZE_M
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 4,
+            }
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 4,
+            }
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 4,
+            }
+        ),
         # Large matrix configs
-        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}),
-        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 256,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 64,
+                "GROUP_SIZE_M": 8,
+            }
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 256,
+                "BLOCK_SIZE_K": 64,
+                "GROUP_SIZE_M": 8,
+            }
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 256,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            }
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 256,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+            }
+        ),
     ],
-    key=['M', 'N', 'K'],
+    key=["M", "N", "K"],
 )
 @triton.jit
 def matmul_kernel(
     # Pointers to matrices
-    a_ptr, b_ptr, c_ptr,
+    a_ptr,
+    b_ptr,
+    c_ptr,
     # Matrix dimensions
-    M, N, K,
+    M,
+    N,
+    K,
     # The stride variables represent how to access the next element along a
     # particular dimension. For example, `stride_am` represents how to access
     # the next element along the M dimension of the A matrix.
-    stride_am, stride_ak,
-    stride_bk, stride_bn,
-    stride_cm, stride_cn,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
     # Meta-parameters
-    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
 ):
     """
@@ -105,10 +206,18 @@ def matmul_kernel(
     # -----------------------------------------------------------
 
     # Pointers for A matrix
-    a_ptrs = a_ptr + rm[:, None] * stride_am + tl.arange(0, BLOCK_SIZE_K)[None, :] * stride_ak
+    a_ptrs = (
+        a_ptr
+        + rm[:, None] * stride_am
+        + tl.arange(0, BLOCK_SIZE_K)[None, :] * stride_ak
+    )
 
     # Pointers for B matrix
-    b_ptrs = b_ptr + tl.arange(0, BLOCK_SIZE_K)[:, None] * stride_bk + rn[None, :] * stride_bn
+    b_ptrs = (
+        b_ptr
+        + tl.arange(0, BLOCK_SIZE_K)[:, None] * stride_bk
+        + rn[None, :] * stride_bn
+    )
 
     # -----------------------------------------------------------
     # Initialize accumulator with zeros
@@ -129,8 +238,8 @@ def matmul_kernel(
 
         # Load A and B blocks from global memory
         # Apply masking to handle edge cases
-        a_mask = (offs_k[None, :] < K - k * BLOCK_SIZE_K)
-        b_mask = (offs_k[:, None] < K - k * BLOCK_SIZE_K)
+        a_mask = offs_k[None, :] < K - k * BLOCK_SIZE_K
+        b_mask = offs_k[:, None] < K - k * BLOCK_SIZE_K
 
         # Load the blocks from DRAM
         a = tl.load(a_ptrs, mask=a_mask, other=0.0)
@@ -159,6 +268,7 @@ def matmul_kernel(
 
     # Write the result back to global memory with the mask
     tl.store(c_ptrs, acc, mask=mask)
+
 
 def matmul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
@@ -192,18 +302,26 @@ def matmul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
     # Launch the CUDA kernel with optimal grid configuration
     grid = lambda META: (
-        triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),
+        triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
     )
 
     matmul_kernel[grid](
-        a, b, c,
-        M, N, K,
-        stride_am, stride_ak,
-        stride_bk, stride_bn,
-        stride_cm, stride_cn,
+        a,
+        b,
+        c,
+        M,
+        N,
+        K,
+        stride_am,
+        stride_ak,
+        stride_bk,
+        stride_bn,
+        stride_cm,
+        stride_cn,
     )
 
     return c
+
 
 def generated_torch_func(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
@@ -218,17 +336,24 @@ def generated_torch_func(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
     return torch.matmul(a, b)
 
+
 if __name__ == "__main__":
     M_sizes = [256, 1024, 4096]
     N_sizes = [256, 1024, 4096]
     K_sizes = [256, 512, 1024, 2048, 4096]
-    def input_generator(M, N, K, device='cuda', dtype=torch.float16):
+
+    def input_generator(M, N, K, device="cuda", dtype=torch.float16):
         A = torch.randn(M, K, device=device, dtype=dtype)
         A = torch.nn.functional.normalize(A, dim=-1)
         B = torch.randn(K, N, device=device, dtype=dtype)
         B = torch.nn.functional.normalize(B, dim=-1)
         return A, B
 
-    from benchmark import verify_correctness_func, benchmark_performance_func
-    verify_correctness_func(matmul, generated_torch_func, input_generator, [M_sizes, N_sizes, K_sizes])
-    benchmark_performance_func(matmul, generated_torch_func, input_generator, [M_sizes, N_sizes, K_sizes])
+    from verifier.benchmark import verify_correctness_func, benchmark_performance_func
+
+    verify_correctness_func(
+        matmul, generated_torch_func, input_generator, [M_sizes, N_sizes, K_sizes]
+    )
+    benchmark_performance_func(
+        matmul, generated_torch_func, input_generator, [M_sizes, N_sizes, K_sizes]
+    )
