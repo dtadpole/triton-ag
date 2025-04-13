@@ -109,7 +109,7 @@ def selective_walk(node):
 async def analyze_python_code(
     wd: str,
     include_patterns: list[str] = [".*\\.py"],
-    exclude_patterns: list[str] = ["_.*\\.py"],
+    exclude_patterns: list[str] = ["_.*\\.py", ".*_test.py"],
 ) -> dict[str, Any]:
     # get all files in the working directory
     files = os.listdir(wd)
@@ -147,8 +147,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--wd", type=str, default=".")
     parser.add_argument("--include", type=str, default=".*\\.py")
-    parser.add_argument("--exclude", type=str, default="_.*\\.py")
+    parser.add_argument("--exclude", type=str, default="_.*\\.py|.*_test\\.py")
     args = parser.parse_args()
 
-    # asyncio.run(analyze_python_code(args.wd, [args.include], [args.exclude]))
+    # asyncio.run(
+    #    analyze_python_code(args.wd, args.include.split("|"), args.exclude.split("|"))
+    # )
     server.run(transport="stdio")
