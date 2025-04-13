@@ -55,120 +55,6 @@ Be concise in your reasoning, then select the appropriate tool or action.
 """
 
 
-class PlanStep(BaseModel):
-    id: str = Field(
-        ...,
-        description="Unique identifier for the step, typically using a numeric prefix",
-        pattern=r"^[0-9]{2}_[a-z_]+$",
-    )
-    description: str = Field(
-        ..., description="Detailed explanation of the step's activities"
-    )
-    depends_on: List[str] = Field(
-        ...,
-        description="List of step IDs that must be completed before this step",
-    )
-    verification: str = Field(
-        ...,
-        description="Criteria to determine if the step has been successfully completed",
-    )
-    status: str = Field(
-        default="pending",
-        description="The status of the step",
-        enum=["pending", "in_progress", "error", "completed"],
-    )
-
-
-@dataclass
-class Plan(BaseModel):
-    goal: str = Field(..., description="The overall objective of the project")
-    steps: list[PlanStep] = Field(
-        ...,
-        description="Ordered list of steps required to complete the project",
-        min_items=1,
-    )
-
-
-async def create_plan(ctx: RunContextWrapper[Any], params: dict[str, Any]) -> Plan:
-    if isinstance(params, str):
-        params = json.loads(params)
-    plan = Plan.model_validate(params)
-    if not ctx.context:
-        ctx.context = {}
-    ctx.context["plan"] = plan
-    return ctx.context["plan"]
-
-
-create_plan_tool = FunctionTool(
-    name="create_plan",
-    description="Create a plan for the goal",
-    params_json_schema=to_jsonable_python(Plan.model_json_schema()),
-    on_invoke_tool=create_plan,
-)
-
-
-async def update_plan_step(
-    ctx: RunContextWrapper[Any], params: dict[str, Any]
-) -> PlanStep:
-    if isinstance(params, str):
-        params = json.loads(params)
-    if not ctx.context:
-        raise ValueError("No plan found")
-    for step in ctx.context["plan"].steps:
-        if step.id == params["id"]:
-            step.status = params["status"]
-            return step
-    raise ValueError(f"Step {params['id']} not found in plan")
-
-
-update_plan_step_tool = FunctionTool(
-    name="update_plan_step",
-    description="Update the status of a step in the plan",
-    params_json_schema={
-        "type": "object",
-        "properties": {
-            "id": {
-                "type": "string",
-                "description": "Unique identifier for the step, typically using a numeric prefix",
-                "pattern": "^[0-9]{2}_[a-z_]+$",
-            },
-            "status": {
-                "type": "string",
-                "description": "The status of the step",
-                "enum": ["pending", "in_progress", "error", "completed"],
-                "default": "pending",
-            },
-        },
-        "required": ["id", "status"],
-    },
-    on_invoke_tool=update_plan_step,
-)
-
-
-async def get_plan(ctx: RunContextWrapper[Any], params: dict[str, Any]) -> Plan:
-    if not ctx.context:
-        raise ValueError("No plan found")
-    return ctx.context["plan"]
-
-
-get_plan_tool = FunctionTool(
-    name="get_plan",
-    description="Get the plan info",
-    params_json_schema={
-        "type": "object",
-        "properties": {
-            "id": {
-                "type": "string",
-                "description": "The ID of the step to get",
-                "pattern": "^[0-9]{2}_[a-z_]+$",
-            },
-        },
-        "required": ["id"],
-    },
-    on_invoke_tool=get_plan,
-)
-
-
 # function to find next available folder starting with _run_<number>
 def find_next_run_folder():
     i = 0
@@ -184,11 +70,13 @@ async def main(args):
     file_server = MCPServerStdio(
         params={
             "command": "npx",
-            "args": [
-                "-y",
-                "@modelcontextprotocol/server-filesystem",
-                run_folder,
-            ],
+            "args": [ "-y", "@modelcontextprotocol/server-filesystem", run_folder ],
+        }
+    )
+    plan_server = MCPServerStdio(
+        params={
+            "command": "uv",
+            "args": ["run", "--with", "mcp", "mcp", "run", "planServer.py"],
         }
     )
     code_run_server = MCPServerStdio(
@@ -198,27 +86,25 @@ async def main(args):
         }
     )
     await file_server.__aenter__()
+    await plan_server.__aenter__()
     await code_run_server.__aenter__()
     try:
         programmer = Agent(
             model=model,
             name="programmer",
             instructions=PLANNER_SYSTEM_PROMPT,
-            tools=[create_plan_tool, update_plan_step_tool, get_plan_tool],
-            mcp_servers=[file_server, code_run_server],
+            mcp_servers=[file_server, code_run_server, plan_server],
         )
         prompt = PLANNING_NEXT_PROMPT.format(goal=args.input)
 
         run_hooks = RunHooks()
 
         async def on_tool_start(context, agent, tool):
-            logger.info(
-                f"Agent [{agent.name}] Tool [{tool.name}] Context: {context} started"
-            )
+            logger.info(f"Agent [{agent.name}] Tool [{tool.name}] started")
 
         async def on_tool_end(context, agent, tool, result):
             logger.info(
-                f"Agent [{agent.name}] Tool [{tool.name}] Context: {context} ended with result:\n{result}\n"
+                f"Agent [{agent.name}] Tool [{tool.name}] ended with result:\n{result}\n"
             )
 
         run_hooks.on_tool_start = on_tool_start
@@ -236,6 +122,7 @@ async def main(args):
         print(result.final_output)
     finally:
         await file_server.__aexit__()
+        await plan_server.__aexit__()
         await code_run_server.__aexit__()
 
 
