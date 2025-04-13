@@ -103,9 +103,15 @@ async def main(args):
             print(result.final_output)
     finally:
         try:
-            await file_server.__aexit__()
-            await plan_server.__aexit__()
-            await code_run_server.__aexit__()
+            await file_server.cleanup()
+        except Exception as e:
+            logger.error(f"Error exiting servers: {e}")
+        try:
+            await plan_server.cleanup()
+        except Exception as e:
+            logger.error(f"Error exiting servers: {e}")
+        try:
+            await code_run_server.cleanup()
         except Exception as e:
             logger.error(f"Error exiting servers: {e}")
 
