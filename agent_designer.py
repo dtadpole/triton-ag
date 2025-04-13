@@ -25,8 +25,8 @@ from typing import List, Any
 from dataclasses import dataclass
 from pydantic.json_schema import to_jsonable_python
 
-PLANNER_SYSTEM_PROMPT = """
-You are an expert Planning Agent tasked with solving problems efficiently through structured plans.
+DESIGNER_SYSTEM_PROMPT = """
+You are an expert Design Agent tasked with designing a system to solve a problem.
 
 1. Analyze requests to understand the task scope
 2. Create a clear, detailed, andactionable plan that makes meaningful progress with the `planning` tool
@@ -42,7 +42,7 @@ Think about dependencies and verification methods.
 Know when to conclude - don't continue thinking once objectives are met.
 """
 
-PLANNING_NEXT_PROMPT = """
+DESIGNER_NEXT_PROMPT = """
 Goal: {goal}
 
 Based on the current state, what's your next action?
@@ -89,13 +89,13 @@ async def main(args):
     await plan_server.__aenter__()
     await code_run_server.__aenter__()
     try:
-        programmer = Agent(
+        designer = Agent(
             model=model,
-            name="programmer",
-            instructions=PLANNER_SYSTEM_PROMPT,
+            name="designer",
+            instructions=DESIGNER_SYSTEM_PROMPT,
             mcp_servers=[file_server, code_run_server, plan_server],
         )
-        prompt = PLANNING_NEXT_PROMPT.format(goal=args.input)
+        prompt = DESIGNER_NEXT_PROMPT.format(goal=args.input)
 
         run_hooks = RunHooks()
 
@@ -111,7 +111,7 @@ async def main(args):
         run_hooks.on_tool_end = on_tool_end
 
         result = await Runner.run(
-            programmer,
+            designer,
             input=prompt,
             max_turns=50,
             hooks=run_hooks,
@@ -128,7 +128,7 @@ async def main(args):
 
 if __name__ == "__main__":
     enable_verbose_stdout_logging()
-    stdout_logger = logging.getLogger("agents")
+    stdout_logger = logging.getLogger("openai.agents")
     stdout_logger.setLevel(logging.INFO)
     stdout_logger.addHandler(logging.StreamHandler())
 

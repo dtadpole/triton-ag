@@ -74,7 +74,7 @@ async def update_plan_step(
     if "plan" not in ctx:
         raise ValueError("No plan found")
     for step in ctx["plan"].steps:
-        if step.id == step_id:
+        if step.step_id == step_id:
             step.status = status
             return step
     raise ValueError(f"Step {step_id} not found in plan")
