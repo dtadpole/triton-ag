@@ -60,7 +60,16 @@ async def create_plan(plan: Plan) -> Plan:
     name="update_plan_step",
     description="Update the status of a step in the plan",
 )
-async def update_plan_step(step_id: str, status: str) -> PlanStep:
+async def update_plan_step(
+    step_id: str = Field(
+        ..., description="The ID of the step to update", pattern=r"^[0-9]{2}_[a-z_]+$"
+    ),
+    status: str = Field(
+        ...,
+        description="The status of the step",
+        enum=["pending", "in_progress", "error", "completed"],
+    ),
+) -> PlanStep:
     global ctx
     if "plan" not in ctx:
         raise ValueError("No plan found")
