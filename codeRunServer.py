@@ -2,23 +2,25 @@ from mcp.server.fastmcp import FastMCP
 import subprocess
 import asyncio
 from dataclasses import dataclass
+from pydantic import Field
 
 server = FastMCP("codeRun")
 
 
 @dataclass
 class RunResult:
-    returncode: int
-    stdout: str
-    stderr: str
-
-
-@server.tool(
-    name="echo",
-    description="Echo a message",
-)
-def echo(msg: str) -> str:
-    return msg
+    returncode: int = Field(
+        ...,
+        description="The return code of the command",
+    )
+    stdout: str = Field(
+        ...,
+        description="The stdout of the command",
+    )
+    stderr: str = Field(
+        ...,
+        description="The stderr of the command",
+    )
 
 
 @server.tool(
