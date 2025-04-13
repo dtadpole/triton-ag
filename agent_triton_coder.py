@@ -9,8 +9,6 @@ from agents import (
     RunHooks,
     RunConfig,
     trace,
-    enable_verbose_stdout_logging,
-    set_trace_processors,
 )
 from agents.mcp import MCPServer, MCPServerStdio
 import mlflow
@@ -25,25 +23,26 @@ from typing import List, Any
 from dataclasses import dataclass
 from pydantic.json_schema import to_jsonable_python
 
-DESIGNER_SYSTEM_PROMPT = """
-You are an expert Design Agent tasked with designing a system to solve a problem.
+TRITON_CODER_SYSTEM_PROMPT = """
+You are an expert coder experienced in Triton kernels.  You understand tilings, parallelism, and other concepts in the context of Triton pragramming.
 
-1. Analyze requests to understand the task scope
-2. Create a clear, detailed, andactionable plan that makes meaningful progress with the `planning` tool
-3. After each step of changing code, test and verify correctness using available tools, fix code until it is correct
-4. Track progress and adapt plans when necessary
-5. Use `finish` to conclude immediately when the task is complete
+1. Analysize the request to understand the task scope
+2. Create specific code to implement the task
+3. Use the provided code in benchmark.py to verify correctness
+4. Use `finish` to conclude immediately when you are done
 
 Available tools will vary by task but may include:
-- `planning`: Create, update, and track plans (commands: create, update, mark_step, etc.)
-- `finish`: End the task when complete
+- `generate_code`: Create, update, and track plans (commands: create, update, mark_step, etc.)
+- `fix_code`: End the task when complete
+- `test_code`: Test the code and verify correctness
+
 Break tasks into logical steps with clear outcomes. Avoid excessive detail or sub-steps.
 Think about dependencies and verification methods.
 Know when to conclude - don't continue thinking once objectives are met.
 """
 
-DESIGNER_NEXT_PROMPT = """
-Goal: {goal}
+TRITON_CODER_NEXT_PROMPT = """
+Task: {task}
 
 Based on the current state, what's your next action?
 Choose the most efficient path forward:
@@ -53,29 +52,6 @@ Choose the most efficient path forward:
 
 Be concise in your reasoning, then select the appropriate tool or action.
 """
-
-
-# function to find next available folder starting with _run_<number>
-def find_next_run_folder():
-    i = 0
-    while os.path.exists(os.path.join(os.getcwd(), f"_run_{i:03d}")):
-        i += 1
-    os.makedirs(os.path.join(os.getcwd(), f"_run_{i:03d}"), exist_ok=True)
-    return os.path.join(os.getcwd(), f"_run_{i:03d}")
-
-
-def init_logging(args):
-    # enable_verbose_stdout_logging()
-    # stdout_logger = logging.getLogger("agents")
-    # stdout_logger.setLevel(logging.INFO)
-    # stdout_logger.addHandler(logging.StreamHandler())
-
-    mlflow.openai.autolog()
-    mlflow.set_tracking_uri("http://localhost:5050")
-    mlflow.set_experiment(f"Agent [{args.provider}] [{args.model}]")
-
-    # weave.init("openai-agents")
-    # set_trace_processors([WeaveTracingProcessor()])
 
 
 async def main(args):
@@ -125,7 +101,7 @@ async def main(args):
         run_hooks.on_tool_start = on_tool_start
         run_hooks.on_tool_end = on_tool_end
 
-        with trace("Agent Designer"):
+        with trace("Triton Coder"):
             result = await Runner.run(
                 designer,
                 input=prompt,
@@ -158,5 +134,4 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    init_logging(args)
     asyncio.run(main(args))
