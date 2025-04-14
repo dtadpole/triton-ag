@@ -61,6 +61,9 @@ async def create_plan(
         raise ValueError(
             f"Working directory {working_dir} is not a subfolder of cwd {os.getcwd()}"
         )
+    # create the working directory if it doesn't exist
+    if not os.path.exists(working_dir):
+        os.makedirs(working_dir, exist_ok=True)
     # write plan to file
     with open(os.path.join(working_dir, PLAN_FILE), "w") as f:
         json.dump(dataclasses.asdict(plan), f, indent=4)

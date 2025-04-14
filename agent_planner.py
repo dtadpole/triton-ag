@@ -10,6 +10,7 @@ from agents import (
 )
 from agents.mcp import MCPServerStdio
 from agent_triton_coder import triton_coder
+from agent_env_setup import env_setup
 from util import load_agent_model, init_logging, get_next_run_folder, get_run_hooks
 from logger import logger
 from pydantic import Field
@@ -23,7 +24,7 @@ Working directory: {working_dir}
 
 1. Analyze requests to understand the task scope
 2. Create a clear, detailed, andactionable plan that makes meaningful progress with the `planning` tool
-3. After each step of changing code, test and verify correctness using available tools, fix code until it is correct
+3. After each step, update plan step status using the `update_plan_step` tool
 4. Track progress and adapt plans when necessary
 5. Use `finish` to conclude immediately when the task is complete
 
@@ -76,7 +77,7 @@ async def run_planner(goal: str, working_dir: str):
                 model=model,
                 name=AGENT_NAME,
                 instructions=PLANNER_SYSTEM_PROMPT.format(working_dir=working_dir),
-                tools=[triton_coder],
+                tools=[triton_coder, env_setup],
                 mcp_servers=[ps],
             )
             prompt = PLANNER_NEXT_PROMPT.format(goal=goal)
