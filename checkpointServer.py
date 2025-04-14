@@ -16,12 +16,47 @@ def is_subfolder(parent_folder: str, child_folder: str) -> bool:
 
 
 @server.tool(
-    name="create_checkpoint",
-    description="Create a checkpoint from the source directory",
+    name="init_workspace_folder",
+    description="Initialize a workspace folder",
 )
-async def create_checkpoint(
+async def init_workspace_folder(
     workspace_folder: str = Field(
-        ..., description="The parent directory for checkpointing"
+        ..., description="The workspace directory for checkpointing"
+    ),
+):
+    try:
+        if not is_subfolder(parent_folder=os.getcwd(), child_folder=workspace_folder):
+            raise ValueError(
+                f"Workspace folder {workspace_folder} is not a subfolder of cwd {os.getcwd()}"
+            )
+        # if the workspace folder does not exist, create it
+        if not os.path.exists(workspace_folder):
+            init_checkpoint_folder = os.path.join(
+                workspace_folder, f"{0:02d}.checkpoint"
+            )
+            os.makedirs(init_checkpoint_folder, exist_ok=True)
+            # create verifier folder in the new run folder
+            shutil.copytree(
+                os.path.join(os.getcwd(), "verifier"),
+                os.path.join(init_checkpoint_folder, "verifier"),
+            )
+        # restore from the latest checkpoint
+        await restore_last_checkpoint(
+            workspace_folder=workspace_folder,
+            target_folder=os.path.join(workspace_folder, "current"),
+        )
+        return f"Workspace folder {workspace_folder} initialized"
+    except Exception as e:
+        return f"Error initializing workspace folder: {e}"
+
+
+@server.tool(
+    name="save_checkpoint",
+    description="Save a checkpoint from the source directory",
+)
+async def save_checkpoint(
+    workspace_folder: str = Field(
+        ..., description="The workspace directory for checkpointing"
     ),
     source_folder: str = Field(
         ..., description="The source folder to be checkpointed (preserved)"
@@ -55,7 +90,7 @@ async def create_checkpoint(
 )
 async def restore_last_checkpoint(
     workspace_folder: str = Field(
-        ..., description="The parent directory for checkpointing"
+        ..., description="The workspace directory for checkpointing"
     ),
     target_folder: str = Field(
         ..., description="The target folder to restore the checkpoint to"
