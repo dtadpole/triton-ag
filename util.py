@@ -21,6 +21,12 @@ def init_logging(agent_name: str):
     # set_trace_processors([WeaveTracingProcessor()])
 
 
+def is_subfolder(parent_folder: str, child_folder: str) -> bool:
+    abs_parent_folder = os.path.abspath(parent_folder)
+    abs_child_folder = os.path.abspath(child_folder)
+    return abs_child_folder.startswith(abs_parent_folder)
+
+
 def get_next_run_folder():
     i = 0
     while os.path.exists(os.path.join(os.getcwd(), f"_run_{i:03d}")):

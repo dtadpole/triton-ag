@@ -7,7 +7,7 @@ from pydantic import Field
 from typing import Any, List
 import json
 import os
-
+from util import is_subfolder
 
 PLAN_FILE = "plan.json"
 
@@ -57,6 +57,10 @@ async def create_plan(
     working_dir: str = Field(..., description="The working directory"),
     plan: Plan = Field(..., description="The plan to create"),
 ) -> Plan:
+    if not is_subfolder(parent_folder=os.getcwd(), child_folder=working_dir):
+        raise ValueError(
+            f"Working directory {working_dir} is not a subfolder of cwd {os.getcwd()}"
+        )
     # write plan to file
     with open(os.path.join(working_dir, PLAN_FILE), "w") as f:
         json.dump(dataclasses.asdict(plan), f, indent=4)
@@ -78,6 +82,10 @@ async def update_plan_step(
         enum=["pending", "in_progress", "error", "completed"],
     ),
 ) -> PlanStep:
+    if not is_subfolder(parent_folder=os.getcwd(), child_folder=working_dir):
+        raise ValueError(
+            f"Working directory {working_dir} is not a subfolder of cwd {os.getcwd()}"
+        )
     if not os.path.exists(os.path.join(working_dir, PLAN_FILE)):
         raise ValueError("No plan found")
     with open(os.path.join(working_dir, PLAN_FILE), "r") as f:
@@ -98,6 +106,10 @@ async def update_plan_step(
 async def get_plan(
     working_dir: str = Field(..., description="The working directory")
 ) -> Plan:
+    if not is_subfolder(parent_folder=os.getcwd(), child_folder=working_dir):
+        raise ValueError(
+            f"Working directory {working_dir} is not a subfolder of cwd {os.getcwd()}"
+        )
     if not os.path.exists(os.path.join(working_dir, PLAN_FILE)):
         raise ValueError("No plan found")
     with open(os.path.join(working_dir, PLAN_FILE), "r") as f:
