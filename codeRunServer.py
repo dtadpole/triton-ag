@@ -4,6 +4,8 @@ import asyncio
 from dataclasses import dataclass
 from pydantic import Field
 from datetime import datetime
+import os
+from util import is_subfolder
 
 server = FastMCP("codeRun")
 
@@ -33,6 +35,10 @@ async def run_code(
     cmd: str = Field(..., description="The command to run"),
     tag: str = Field(..., description="The tag for this run", pattern=r"^[a-z_]+$"),
 ) -> RunResult:
+    if not is_subfolder(parent_folder=os.getcwd(), child_folder=wd):
+        raise ValueError(
+            f"Working directory {wd} is not a subfolder of cwd {os.getcwd()}"
+        )
     command = f"cd {wd} && {cmd}"
     print(command)
 

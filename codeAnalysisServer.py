@@ -7,6 +7,7 @@ from mcp.server.fastmcp import FastMCP
 import asyncio
 from dataclasses import dataclass
 from pydantic import Field
+from util import is_subfolder
 from loguru import logger
 from typing import Any
 from collections import deque
@@ -111,6 +112,10 @@ async def analyze_python_code(
     include_patterns: list[str] = [".*\\.py"],
     exclude_patterns: list[str] = ["_.*\\.py", ".*_test.py"],
 ) -> dict[str, Any]:
+    if not is_subfolder(parent_folder=os.getcwd(), child_folder=wd):
+        raise ValueError(
+            f"Working directory {wd} is not a subfolder of cwd {os.getcwd()}"
+        )
     # get all files in the working directory
     files = os.listdir(wd)
     # filter files by include_patterns and exclude_patterns

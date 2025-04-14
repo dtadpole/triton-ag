@@ -5,14 +5,9 @@ from pydantic import Field
 from datetime import datetime
 import os
 import shutil
+from util import is_subfolder
 
 server = FastMCP("checkpoint")
-
-
-def is_subfolder(parent_folder: str, child_folder: str) -> bool:
-    abs_parent_folder = os.path.abspath(parent_folder)
-    abs_child_folder = os.path.abspath(child_folder)
-    return abs_child_folder.startswith(abs_parent_folder)
 
 
 @server.tool(
