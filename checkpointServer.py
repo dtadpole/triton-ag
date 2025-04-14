@@ -24,11 +24,9 @@ async def init_workspace_folder(
             raise ValueError(
                 f"Workspace folder {workspace_folder} is not a subfolder of cwd {os.getcwd()}"
             )
-        # if the workspace folder does not exist, create it
-        if not os.path.exists(workspace_folder):
-            init_checkpoint_folder = os.path.join(
-                workspace_folder, f"{0:02d}.checkpoint"
-            )
+            # if the workspace folder does not exist, create it
+        init_checkpoint_folder = os.path.join(workspace_folder, f"{0:02d}.checkpoint")
+        if not os.path.exists(init_checkpoint_folder):
             os.makedirs(init_checkpoint_folder, exist_ok=True)
             # create verifier folder in the new run folder
             shutil.copytree(
