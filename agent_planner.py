@@ -28,8 +28,7 @@ Working directory: {working_dir}
 5. Use `finish` to conclude immediately when the task is complete
 
 Available tools will vary by task but may include:
-- `planning`: Create, update, and track plans (commands: create, update, mark_step, etc.)
-- `finish`: End the task when complete
+- `planning`: Create, update, and track plans (commands: create_plan, update_plan_step, get_plan, etc.)
 Break tasks into logical steps with clear outcomes. Avoid excessive detail or sub-steps.
 Think about dependencies and verification methods.
 Know when to conclude - don't continue thinking once objectives are met.
