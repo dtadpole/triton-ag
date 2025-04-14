@@ -28,9 +28,9 @@ Task: {task}
 
 1. Analyze the request to understand the task scope
 2. Check the required environments are properly setup
-3. Use `uv pip install` to install the required packages
+3. If any environment is missing, use `uv pip install` to install the required packages
 4. Verify the installation by running the test cases that import the packages
-5. If verification has passed , save the `{workspace_dir}/current` folder as a checkpoint, and stop the task.
+5. If verification has passed and task is complete, save the `{workspace_dir}/current` folder as a checkpoint, and stop the task.
 
 Be concise in your reasoning, select the appropriate tool or action.
 """
@@ -75,23 +75,13 @@ async def run_env_setup(workspace_dir: str, task: str):
         )
         logger.info(result)
 
-        file_server = MCPServerStdio(
-            params={
-                "command": "npx",
-                "args": [
-                    "-y",
-                    "@modelcontextprotocol/server-filesystem",
-                    os.path.join(workspace_dir, "current"),
-                ],
-            }
-        )
         code_run_server = MCPServerStdio(
             params={
                 "command": "uv",
                 "args": ["run", "--with", "mcp", "mcp", "run", "codeRunServer.py"],
             }
         )
-        async with file_server as fs, code_run_server as crs:
+        async with code_run_server as crs:
             try:
                 env_setup = Agent(
                     model=model,
@@ -99,7 +89,7 @@ async def run_env_setup(workspace_dir: str, task: str):
                     instructions=ENV_SETUP_SYSTEM_PROMPT.format(
                         workspace_dir=workspace_dir
                     ),
-                    mcp_servers=[fs, cs, crs],
+                    mcp_servers=[cs, crs],
                 )
                 prompt = ENV_SETUP_NEXT_PROMPT.format(
                     task=task, workspace_dir=workspace_dir
