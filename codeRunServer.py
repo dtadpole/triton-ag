@@ -1,11 +1,11 @@
 from mcp.server.fastmcp import FastMCP
-import subprocess
 import asyncio
 from dataclasses import dataclass
 from pydantic import Field
 from datetime import datetime
 import os
 from util import is_subfolder
+from logger import logger
 
 server = FastMCP("codeRun")
 
@@ -40,7 +40,7 @@ async def run_code(
             f"Working directory {wd} is not a subfolder of cwd {os.getcwd()}"
         )
     command = f"cd {wd} && {cmd}"
-    print(command)
+    logger.info(command)
 
     time_prefix = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -51,11 +51,11 @@ async def run_code(
     stdout, stderr = await process.communicate()
 
     if process.returncode == 0:
-        print(f"Command '{command}' executed successfully.")
-        print("Output:", stdout.decode())
+        logger.info(f"Command '{command}' executed successfully.")
+        logger.info("Output:", stdout.decode())
     else:
-        print(f"Command '{command}' failed with exit code {process.returncode}.")
-        print("Error:", stderr.decode())
+        logger.info(f"Command '{command}' failed with exit code {process.returncode}.")
+        logger.info("Error:", stderr.decode())
 
     rc_file = f"{wd}/code_{time_prefix}_{tag}.rc"
     stdout_file = f"{wd}/code_{time_prefix}_{tag}.stdout"
