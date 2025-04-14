@@ -50,7 +50,9 @@ def correctness_func():
     # Example input generator
     def input_generator(M_size, N_size, K_size, device="cuda", dtype=torch.float16):
         result = torch.randn(M_size, N_size, K_size, device=device, dtype=dtype)
-        result = F.normalize(result, p=2, dim=-1)
+        result = F.normalize(
+            result, p=2, dim=-1
+        )  # normalize to ensure numerical stability
         return result
 
     from verifier.correctness import verify_correctness_func
@@ -86,14 +88,20 @@ def correctness_module():
 
     def forward_generator(B, I, O, device="cuda", dtype=torch.float16):
         input = torch.randn(B, I, device=device, dtype=dtype)
-        input = torch.nn.functional.normalize(input, dim=-1)
+        input = torch.nn.functional.normalize(
+            input, dim=-1
+        )  # normalize to ensure numerical stability
         return input
 
     def backward_generator(B, I, O, device="cuda", dtype=torch.float16):
         input = torch.randn(B, I, device=device, dtype=dtype)
-        input = torch.nn.functional.normalize(input, dim=-1)
+        input = torch.nn.functional.normalize(
+            input, dim=-1
+        )  # normalize to ensure numerical stability
         d_output = torch.randn(B, O, device=device, dtype=dtype)
-        d_output = torch.nn.functional.normalize(d_output, dim=-1)
+        d_output = torch.nn.functional.normalize(
+            d_output, dim=-1
+        )  # normalize to ensure numerical stability
         return input, d_output
 
     from verifier.correctness import verify_correctness_forward

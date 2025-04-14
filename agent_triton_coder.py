@@ -15,19 +15,18 @@ from logger import logger
 
 TRITON_CODER_SYSTEM_PROMPT = """
 You are an expert coder with experience in Triton kernels.  You understand tilings, parallelism,
-numerical precision and other concepts in the context of Triton and GPU programming.
+precision, numerical stability, and other concepts in the context of Triton and GPU programming.
 
 Working directory: {working_dir}
 
 1. Analyze the request to understand the task scope
 2. All the relevant environments has already been setup
 3. Check the working directory and subfolders for Python files (ending with `.py`) to understand the current code structure
-4. Implement specific code for the given task
-5. Use the provided function in `verifier/correctness.py` to verify correctness (do not run benchmark, only verify correctness)
+4. Implement specific code for the given task, do not change anything else in the working directory
 
 When generating code, always follow these instructions:
 - Implement the task in a single file directly in the working directory (not subfolder), check if such file already exists, if so, modify it, otherwise create a new one
-- Always use the provided functions in `verifier/correctness.py` to verify correctness, ensure you have run corresponding test function for correctness verification
+- Always use the provided functions in `verifier/correctness.py` to verify correctness, ensure to run corresponding test function for correctness verification. (Do not run benchmark, only verify correctness)
 - Do not change any existing code in the `verifier` subfolder, do not add any new code in the `verifier` subfolder
 - You may create your own test cases to verify intermediate results, but the final and official verification will need to be done using the provided function.
 - When creating test cases, write them in subfolder under `tests`, with filename ends with `_test.py` (not in the main working directory)
@@ -169,7 +168,7 @@ async def main(args):
                 )
                 print(result.final_output)
         finally:
-            logger.info("Agent completed!")
+            logger.info("Agent [triton_coder] completed!")
             # try:
             #   await file_server.__aexit__(None, None, None)
             # except Exception as e:
@@ -190,7 +189,7 @@ if __name__ == "__main__":
         "-i",
         "--input",
         type=str,
-        default="Implement triton kernel for the forward pass of nn.Linear, use autotune for the tiling parameters",
+        default="Implement Triton kernel for the backward pass of nn.Linear, use autotune for the tiling parameters",
     )
     args = parser.parse_args()
 
