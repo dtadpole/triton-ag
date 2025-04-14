@@ -1,17 +1,19 @@
 import os
-import json
 import asyncio
 import argparse
 from agents import (
     Agent,
     Runner,
-    RunHooks,
     RunConfig,
     trace,
+    function_tool,
 )
 from agents.mcp import MCPServerStdio
-from util import load_model, init_logging, prepare_next_run_folder
+from util import load_agent_model, init_logging, prepare_next_run_folder, get_run_hooks
 from logger import logger
+from pydantic import Field
+
+AGENT_NAME = "triton_coder"
 
 TRITON_CODER_SYSTEM_PROMPT = """
 You are an expert coder with experience in Triton kernels.  You understand tilings, parallelism,
@@ -31,70 +33,6 @@ When generating code, always follow these instructions:
 - You may create your own test cases to verify intermediate results, but the final and official verification will need to be done using the provided function.
 - When creating test cases, write them in subfolder under `tests`, with filename ends with `_test.py` (not in the main working directory)
 """
-
-
-DUMMY_SYSTEM_PROMPT = """
-You are an expert GPU programmer specializing in Triton kernels with deep understanding of
-GPU architecture, parallel computing patterns, memory access optimization, tilings,
-parallelism strategies, and numerical precision considerations.
-
-Context:
-- Working directory: {working_dir} (this will be replaced with an actual path)
-- All necessary development environments and dependencies have already been set up
-- You will be implementing and optimizing Triton kernels for specific computational tasks
-
-Implementation Workflow
-
-1. Task Analysis:
-- Thoroughly analyze the requested task to fully understand its computational requirements
-- Identify the mathematical operations, data access patterns, and potential parallelization opportunities
-- Determine appropriate tiling strategies and memory access patterns for optimal GPU utilization
-
-2. Code Structure Exploration:
-- Examine all Python files (.py) in the working directory and its subfolders
-- Focus particularly on:
-  - Existing kernel implementations in the main directory
-  - Verification code in the verifier/correctness.py file
-  - Any relevant utility functions in other folders
-- Understand how the verification system works before implementation
-
-3. Implementation Guidelines:
-- File Location: Implement your solution in a single file in the main working directory (not in any subfolder)
-- If the file already exists, modify it appropriately
-- If not, create a new file with a descriptive name related to the task
-
-4. Code Quality: Include clear documentation with explanations of your implementation choices
-- Add comments explaining complex sections, especially around tiling and parallelism strategies
-- Implement appropriate error handling for edge cases
-
-5. Verification Process:
-- Always use the provided functions in verifier/correctness.py to verify correctness
-- Create diverse test cases covering various input shapes, sizes, and values
-- Implement test cases in the tests subfolder with filenames ending with _test.py
-- Compare your Triton implementation against the PyTorch reference implementation
-- If verification fails:
-  - Analyze the failure points carefully
-  - Debug systematically and fix issues
-  - Re-verify until the implementation passes all tests
-  - Document what issues were encountered and how they were resolved
-
-6. Important Restrictions:
-- Do NOT modify any code in the verifier subfolder
-- Do NOT add any new files to the verifier subfolder
-- Keep all test code in the tests subfolder, not in the main working directory
-- Ensure all filenames for tests end with _test.py
-
-Completion Criteria:
-- Your implementation is considered complete when:
-  - The code is implemented in the correct location
-  - All verification tests pass using the official verification functions
-  - The code is well-documented with comments explaining key implementation decisions
-  - Any performance optimizations are clearly explained
-
-Provide clear, step-by-step reasoning for your implementation choices, focusing on correctness
-of Triton kernel programming.
-"""
-
 
 TRITON_CODER_NEXT_PROMPT = """
 Your task is to implement a single Module in Triton or a single kernel function in Triton.
@@ -116,17 +54,34 @@ Be concise in your reasoning, select the appropriate tool or action.
 """
 
 
-async def main(args):
-    model, model_settings = load_model(args.provider, args.model)
-    if args.working_dir and os.path.exists(args.working_dir):
-        run_folder = args.working_dir
-    else:
-        run_folder = prepare_next_run_folder()
-    print(f"Run folder: {run_folder}")
+@function_tool(
+    name_override=AGENT_NAME,
+    description_override="Triton Coder is an expert with experience in Triton kernels.  It will implement specific code for the given task, it can be either a single module or a single kernel function.  It can also add functionality to existing code.  It will verify correctness of the code before returning it (and won't perform any benchmarks)",
+)
+async def triton_coder(
+    working_dir: str = Field(
+        ...,
+        description="The working directory",
+    ),
+    task: str = Field(
+        ...,
+        description="The task to implement.  Please provide a detailed and specific task description",
+    ),
+):
+    return await run_triton_coder(working_dir, task)
+
+
+# this is the main function that will be called by the Runner
+async def run_triton_coder(working_dir: str, task: str):
+
+    logger.info(f"Running [{AGENT_NAME}] [{working_dir}] with task: {task}")
+
+    model, model_settings = load_agent_model(AGENT_NAME)
+
     file_server = MCPServerStdio(
         params={
             "command": "npx",
-            "args": ["-y", "@modelcontextprotocol/server-filesystem", run_folder],
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", working_dir],
         }
     )
     code_run_server = MCPServerStdio(
@@ -140,23 +95,12 @@ async def main(args):
             triton_coder = Agent(
                 model=model,
                 name="triton_coder",
-                instructions=TRITON_CODER_SYSTEM_PROMPT.format(working_dir=run_folder),
+                instructions=TRITON_CODER_SYSTEM_PROMPT.format(working_dir=working_dir),
                 mcp_servers=[fs, crs],
             )
-            prompt = TRITON_CODER_NEXT_PROMPT.format(task=args.input)
+            prompt = TRITON_CODER_NEXT_PROMPT.format(task=task)
 
-            run_hooks = RunHooks()
-
-            async def on_tool_start(context, agent, tool):
-                logger.info(f"Agent [{agent.name}] Tool [{tool.name}] started")
-
-            async def on_tool_end(context, agent, tool, result):
-                logger.info(
-                    f"Agent [{agent.name}] Tool [{tool.name}] ended with result:\n{result}\n"
-                )
-
-            run_hooks.on_tool_start = on_tool_start
-            run_hooks.on_tool_end = on_tool_end
+            run_hooks = get_run_hooks()
 
             with trace("Triton Coder"):
                 result = await Runner.run(
@@ -168,25 +112,19 @@ async def main(args):
                         model_settings=model_settings,
                     ),
                 )
-                print(result.final_output)
+                logger.info(result.final_output)
+                return result.final_output
+        except Exception as e:
+            logger.error(f"Error running Triton Coder: {e}")
+            return f"Error running Triton Coder: {e}"
         finally:
-            logger.info("Agent [triton_coder] completed!")
-            # try:
-            #   await file_server.__aexit__(None, None, None)
-            # except Exception as e:
-            #     logger.error(f"Error exiting servers: {e}")
-            # try:
-            #   await code_run_server.__aexit__(None, None, None)
-            # except Exception as e:
-            #     logger.error(f"Error exiting servers: {e}")
+            logger.info(f"Agent [{AGENT_NAME}] completed!")
 
 
 if __name__ == "__main__":
     # argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("-p", "--provider", type=str, default="anthropic")
-    parser.add_argument("-m", "--model", type=str, default="claude-3.7")
-    parser.add_argument("-w", "--working-dir", type=str, default="")
+    parser.add_argument("-d", "--working-dir", type=str, default="")
     parser.add_argument(
         "-i",
         "--input",
@@ -195,5 +133,13 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    init_logging(args)
-    asyncio.run(main(args))
+    init_logging(AGENT_NAME)
+
+    if args.working_dir and os.path.exists(args.working_dir):
+        working_dir = args.working_dir
+        logger.info(f"Working directory: {working_dir}")
+    else:
+        working_dir = prepare_next_run_folder()
+        logger.info(f"Working directory: {working_dir}")
+
+    asyncio.run(run_triton_coder(working_dir, args.input))
