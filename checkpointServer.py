@@ -17,14 +17,14 @@ def is_subfolder(parent_folder: str, child_folder: str) -> bool:
 
 @server.tool(
     name="create_checkpoint",
-    description="Create a checkpoint from the current directory",
+    description="Create a checkpoint from the source directory",
 )
 async def create_checkpoint(
     workspace_folder: str = Field(
         ..., description="The parent directory for checkpointing"
     ),
     source_folder: str = Field(
-        ..., description="The current folder to be checkpointed (preserved)"
+        ..., description="The source folder to be checkpointed (preserved)"
     ),
 ) -> str:
     try:
@@ -51,7 +51,7 @@ async def create_checkpoint(
 
 @server.tool(
     name="restore_checkpoint",
-    description="Restore a checkpoint to the current directory",
+    description="Restore a checkpoint to the target directory",
 )
 async def restore_last_checkpoint(
     workspace_folder: str = Field(
