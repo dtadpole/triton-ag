@@ -1,12 +1,13 @@
 import yaml
 from string import Template
 import os
-from agents import AsyncOpenAI, OpenAIChatCompletionsModel, ModelSettings
+from agents import AsyncOpenAI, OpenAIChatCompletionsModel, ModelSettings, RunHooks
 import mlflow
 import logging
+from logger import logger
 
 
-def init_logging(args):
+def init_logging(agent_name: str):
     # enable_verbose_stdout_logging()
     # stdout_logger = logging.getLogger("agents")
     # stdout_logger.setLevel(logging.INFO)
@@ -14,7 +15,7 @@ def init_logging(args):
 
     mlflow.openai.autolog()
     mlflow.set_tracking_uri("http://localhost:5050")
-    mlflow.set_experiment(f"Agent [{args.provider}] [{args.model}]")
+    mlflow.set_experiment(f"Agent [{agent_name}]")
 
     # weave.init("openai-agents")
     # set_trace_processors([WeaveTracingProcessor()])
@@ -94,3 +95,40 @@ def load_model(provider: str, model: str):
     )
 
     return model, model_settings
+
+
+def load_agent_model(agent_name: str):
+    # read from agent.yaml
+    with open("agent.yaml", "r") as f:
+        agent_yaml = yaml.safe_load(f)
+    if agent_name not in agent_yaml:
+        raise ValueError(f"Agent {agent_name} not found in agent.yaml")
+
+    if "model" not in agent_yaml[agent_name]:
+        raise ValueError(f"Model not found in agent.yaml for agent {agent_name}")
+
+    model_config = agent_yaml[agent_name]["model"]
+    if "provider" not in model_config:
+        raise ValueError(f"Provider not found in agent.yaml for agent {agent_name}")
+    if "model" not in model_config:
+        raise ValueError(f"Model not found in agent.yaml for agent {agent_name}")
+
+    model, model_settings = load_model(model_config["provider"], model_config["model"])
+    return model, model_settings
+
+
+def get_run_hooks():
+    run_hooks = RunHooks()
+
+    async def on_tool_start(context, agent, tool):
+        logger.info(f"Agent [{agent.name}] Tool [{tool.name}] started")
+
+    async def on_tool_end(context, agent, tool, result):
+        logger.info(
+            f"Agent [{agent.name}] Tool [{tool.name}] ended with result:\n{result}\n"
+        )
+
+    run_hooks.on_tool_start = on_tool_start
+    run_hooks.on_tool_end = on_tool_end
+
+    return run_hooks
