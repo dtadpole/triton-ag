@@ -57,7 +57,7 @@ Be concise in your reasoning, select the appropriate tool or action.
 
 @function_tool(
     name_override=AGENT_NAME,
-    description_override="Triton Coder is an expert with experience in Triton kernels.  It will implement specific code for the given task, it can be either a single module or a single kernel function.  It can also add functionality to existing code.  It will verify correctness of the code before returning it (and won't perform any benchmarks)",
+    description_override="Triton Coder is an expert with experience in Triton kernels.  It will implement specific code for the given task, which can be either a single module or a single kernel function.  It can also add functionality to existing code.  It will verify correctness of the code before returning (it won't perform any benchmarks)",
 )
 async def triton_coder(
     workspace_dir: str = Field(
@@ -66,7 +66,7 @@ async def triton_coder(
     ),
     task: str = Field(
         ...,
-        description="The task to implement.  Please provide a detailed and specific task description",
+        description="The task to implement.  Please provide specific task description",
     ),
 ):
     return await run_triton_coder(workspace_dir, task)
