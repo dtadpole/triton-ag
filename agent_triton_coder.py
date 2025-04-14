@@ -9,7 +9,7 @@ from agents import (
     function_tool,
 )
 from agents.mcp import MCPServerStdio
-from util import load_agent_model, init_logging, prepare_next_run_folder, get_run_hooks
+from util import load_agent_model, init_logging, get_next_run_folder, get_run_hooks
 from logger import logger
 from pydantic import Field
 
@@ -19,12 +19,12 @@ TRITON_CODER_SYSTEM_PROMPT = """
 You are an expert coder with experience in Triton kernels.  You understand tilings, parallelism,
 precision, numerical stability, and other concepts in the context of Triton and GPU programming.
 
-Working directory: {working_dir}
+Workspace directory: {workspace_dir}
 
 1. Analyze the request to understand the task scope
 2. All the relevant environments has already been setup
-3. Check the working directory and subfolders for Python files (ending with `.py`) to understand the current code structure
-4. Implement specific code for the given task, do not change anything else in the working directory
+3. Check the `{workspace_dir}/current` folder and subfolders for Python files (ending with `.py`) to understand the current code structure
+4. Implement specific code for the given task, do not change anything else
 
 When generating code, always follow these instructions:
 - Implement all key functionalities (functions and modules) in a single file directly in the working directory (not subfolder), check if such file already exists, if so, modify it, otherwise create a new one
@@ -39,16 +39,17 @@ Your task is to implement a single Module in Triton or a single kernel function 
 
 Task: {task}
 
-Implement the task step by step, minimize changes while working on the current step.
+Implement the task step by step, minimize changes while working on the current step, merge or replace existing code if necessary.
 
 Did you encounter error when running the final verification?
 Based on the error information, what's your next action?
 
 Choose the most efficient path forward:
-1. Do you understand the error? Can you fix the error immediately?
-2. If not sure why the error happened, can you create test cases to verify intermediate results and fix the code step by step?
-3. If you have fixed the error and verified intermediate results, verify again using the final and official verification.
-4. Finish the task if the final and official verification has passed.
+1. Do you understand the error? Can you fix the error easily?
+2. If not sure why the error happened, can you create debug test cases to check each intermediate result step by step, and fix the code at each individual step?
+3. If you have passed all the intermediate results, verify again using the final and official verification.
+4. If the final and official verification has passed, save the `{workspace_dir}/current` folder as a checkpoint, and stop the task.
+5. If the final and official verification fails repeatedly, restore from the last checkpoint to `{workspace_dir}/current` folder and try again.
 
 Be concise in your reasoning, select the appropriate tool or action.
 """
@@ -59,7 +60,7 @@ Be concise in your reasoning, select the appropriate tool or action.
     description_override="Triton Coder is an expert with experience in Triton kernels.  It will implement specific code for the given task, it can be either a single module or a single kernel function.  It can also add functionality to existing code.  It will verify correctness of the code before returning it (and won't perform any benchmarks)",
 )
 async def triton_coder(
-    working_dir: str = Field(
+    workspace_dir: str = Field(
         ...,
         description="The working directory",
     ),
@@ -68,63 +69,86 @@ async def triton_coder(
         description="The task to implement.  Please provide a detailed and specific task description",
     ),
 ):
-    return await run_triton_coder(working_dir, task)
+    return await run_triton_coder(workspace_dir, task)
 
 
 # this is the main function that will be called by the Runner
-async def run_triton_coder(working_dir: str, task: str):
+async def run_triton_coder(workspace_dir: str, task: str):
 
-    logger.info(f"Running [{AGENT_NAME}] [{working_dir}] with task: {task}")
+    logger.info(f"Running [{AGENT_NAME}] [{workspace_dir}] with task: {task}")
 
     model, model_settings = load_agent_model(AGENT_NAME)
 
-    file_server = MCPServerStdio(
-        params={
-            "command": "npx",
-            "args": ["-y", "@modelcontextprotocol/server-filesystem", working_dir],
-        }
-    )
-    code_run_server = MCPServerStdio(
+    checkpoint_server = MCPServerStdio(
         params={
             "command": "uv",
-            "args": ["run", "--with", "mcp", "mcp", "run", "codeRunServer.py"],
+            "args": ["run", "--with", "mcp", "mcp", "run", "checkpointServer.py"],
         }
     )
-    async with file_server as fs, code_run_server as crs:
-        try:
-            triton_coder = Agent(
-                model=model,
-                name="triton_coder",
-                instructions=TRITON_CODER_SYSTEM_PROMPT.format(working_dir=working_dir),
-                mcp_servers=[fs, crs],
-            )
-            prompt = TRITON_CODER_NEXT_PROMPT.format(task=task)
+    async with checkpoint_server as cs:
+        result = await cs.call_tool(
+            tool_name="init_workspace_folder",
+            arguments={
+                "workspace_folder": workspace_dir,
+            },
+        )
+        logger.info(result)
 
-            run_hooks = get_run_hooks()
-
-            with trace("Triton Coder"):
-                result = await Runner.run(
-                    triton_coder,
-                    input=prompt,
-                    max_turns=50,
-                    hooks=run_hooks,
-                    run_config=RunConfig(
-                        model_settings=model_settings,
+        file_server = MCPServerStdio(
+            params={
+                "command": "npx",
+                "args": [
+                    "-y",
+                    "@modelcontextprotocol/server-filesystem",
+                    os.path.join(workspace_dir, "current"),
+                ],
+            }
+        )
+        code_run_server = MCPServerStdio(
+            params={
+                "command": "uv",
+                "args": ["run", "--with", "mcp", "mcp", "run", "codeRunServer.py"],
+            }
+        )
+        async with file_server as fs, code_run_server as crs:
+            try:
+                triton_coder = Agent(
+                    model=model,
+                    name="triton_coder",
+                    instructions=TRITON_CODER_SYSTEM_PROMPT.format(
+                        workspace_dir=workspace_dir
                     ),
+                    mcp_servers=[fs, cs, crs],
                 )
-                logger.info(result.final_output)
-                return result.final_output
-        except Exception as e:
-            logger.error(f"Error running Triton Coder: {e}")
-            return f"Error running Triton Coder: {e}"
-        finally:
-            logger.info(f"Agent [{AGENT_NAME}] completed!")
+                prompt = TRITON_CODER_NEXT_PROMPT.format(
+                    task=task, workspace_dir=workspace_dir
+                )
+
+                run_hooks = get_run_hooks()
+
+                with trace("Triton Coder"):
+                    result = await Runner.run(
+                        triton_coder,
+                        input=prompt,
+                        max_turns=50,
+                        hooks=run_hooks,
+                        run_config=RunConfig(
+                            model_settings=model_settings,
+                        ),
+                    )
+                    logger.info(result.final_output)
+                    return result.final_output
+            except Exception as e:
+                logger.error(f"Error running Triton Coder: {e}")
+                return f"Error running Triton Coder: {e}"
+            finally:
+                logger.info(f"Agent [{AGENT_NAME}] completed!")
 
 
 if __name__ == "__main__":
     # argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("-d", "--working-dir", type=str, default="")
+    parser.add_argument("-d", "--workspace-dir", type=str, default="")
     parser.add_argument(
         "-i",
         "--input",
@@ -135,11 +159,11 @@ if __name__ == "__main__":
 
     init_logging(AGENT_NAME)
 
-    if args.working_dir and os.path.exists(args.working_dir):
-        working_dir = args.working_dir
-        logger.info(f"Working directory: {working_dir}")
+    if args.workspace_dir and os.path.exists(args.workspace_dir):
+        workspace_dir = args.workspace_dir
+        logger.info(f"Working directory: {workspace_dir}")
     else:
-        working_dir = prepare_next_run_folder()
-        logger.info(f"Working directory: {working_dir}")
+        workspace_dir = get_next_run_folder()
+        logger.info(f"Working directory: {workspace_dir}")
 
-    asyncio.run(run_triton_coder(working_dir, args.input))
+    asyncio.run(run_triton_coder(workspace_dir, args.input))

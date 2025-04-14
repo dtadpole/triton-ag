@@ -10,7 +10,7 @@ from agents import (
 )
 from agents.mcp import MCPServerStdio
 from agent_triton_coder import triton_coder
-from util import load_agent_model, init_logging, prepare_next_run_folder, get_run_hooks
+from util import load_agent_model, init_logging, get_next_run_folder, get_run_hooks
 from logger import logger
 from pydantic import Field
 
@@ -121,7 +121,7 @@ if __name__ == "__main__":
         working_dir = args.working_dir
         logger.info(f"Working directory: {working_dir}")
     else:
-        working_dir = prepare_next_run_folder()
+        working_dir = get_next_run_folder()
         logger.info(f"Working directory: {working_dir}")
 
     asyncio.run(run_planner(args.input, working_dir))
