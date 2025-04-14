@@ -25,7 +25,7 @@ Working directory: {working_dir}
 4. Implement specific code for the given task, do not change anything else in the working directory
 
 When generating code, always follow these instructions:
-- Implement the task in a single file directly in the working directory (not subfolder), check if such file already exists, if so, modify it, otherwise create a new one
+- Implement all key functionalities (functions and modules) in a single file directly in the working directory (not subfolder), check if such file already exists, if so, modify it, otherwise create a new one
 - Always use the provided functions in `verifier/correctness.py` to verify correctness, ensure to run corresponding test function for correctness verification. (Do not run benchmark, only verify correctness)
 - Do not change any existing code in the `verifier` subfolder, do not add any new code in the `verifier` subfolder
 - You may create your own test cases to verify intermediate results, but the final and official verification will need to be done using the provided function.
@@ -100,6 +100,8 @@ TRITON_CODER_NEXT_PROMPT = """
 Your task is to implement a single Module in Triton or a single kernel function in Triton.
 
 Task: {task}
+
+Implement the task step by step, minimize changes while working on the current step.
 
 Did you encounter error when running the final verification?
 Based on the error information, what's your next action?
@@ -189,7 +191,7 @@ if __name__ == "__main__":
         "-i",
         "--input",
         type=str,
-        default="Implement Triton kernel for the backward pass of nn.Linear, use autotune for the tiling parameters",
+        default="Implement Triton kernel for the forward pass of nn.Linear, use autotune for the tiling parameters",
     )
     args = parser.parse_args()
 
