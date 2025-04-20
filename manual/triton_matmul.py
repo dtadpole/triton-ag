@@ -3,12 +3,6 @@ import triton
 import triton.language as tl
 import triton.profiler as proton
 from task import input_t, output_t
-from triton._C.libtriton import nvidia
-from contextlib import contextmanager
-import cupy as cp
-
-cublas_workspace = torch.empty(32 * 1024 * 1024, device="cuda", dtype=torch.uint8)
-cublas = nvidia.cublas.CublasLt(cublas_workspace)
 
 
 # Create auto-tuned configurations
@@ -243,34 +237,9 @@ def triton_kernel_2(data: input_t) -> output_t:
     )
     return c
 
-def cublas_kernel(data: input_t) -> output_t:
-    # Check constraints.
-    a, b = data
-    assert a.shape[1] == b.shape[1], "Incompatible dimensions"  # b is transposed
-    M, K = a.shape
-    N, K = b.shape
-    dtype = a.dtype
-    # c = torch.empty((M, N), device=a.device, dtype=dtype)
-    # bytes_per_elem = a.element_size()
-    # flops_str = f"flops{bytes_per_elem * 8}"
-    # with proton.scope(f"cublas [M={M}, N={N}, K={K}]",
-    #                   {"bytes": bytes_per_elem * (M * K + N * K + M * N), flops_str: 2. * M * N * K}):
-    #     cublas.matmul(a, b, c)
-    # return c
-    c = cp.matmul(a, b)
-    return c
-
 def torch_kernel(data: input_t) -> output_t:
     a, b = data
     return a @ b
-
-@contextmanager
-def proton_context():
-    proton.activate(0)
-    try:
-        yield
-    finally:
-        proton.deactivate(0)
 
 def test_matmul():
     a = torch.randn(4096, 4096, device="cuda", dtype=torch.float16)
