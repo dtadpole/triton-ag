@@ -23,8 +23,8 @@ from task import input_t, output_t
         for bn in [32, 64, 128]
         for bk in [32, 64, 128]
         for gm in [8]
-        for ns in [3, 4]
-        for nw in [4, 8]
+        for ns in [3]
+        for nw in [4]
     ],
     key=["M", "N", "K"],
 )
@@ -121,8 +121,8 @@ def matmul_get_configs(pre_hook=None):
         for BM in [32, 64, 128] \
         for BN in [32, 64, 128] \
         for BK in [32, 64, 128] \
-        for s in ([3, 4]) \
-        for w in [4, 8] \
+        for s in ([4]) \
+        for w in [8] \
     ]
 
 
