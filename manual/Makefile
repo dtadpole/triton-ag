@@ -5,10 +5,10 @@ NVCC := nvcc
 CUTLASS_PATH := /home/centos/cutlass/build/install
 
 # Compilation flags
-NVCC_FLAGS := -I$(CUTLASS_PATH)/include -lcuda -gencode=arch=compute_80,code=sm_80 -std=c++17 --expt-relaxed-constexpr
-CUTE_FLAGS := -I$(CUTLASS_PATH)/include -lcuda -gencode=arch=compute_80,code=sm_80 -std=c++17 --expt-relaxed-constexpr
-CUDA_FLAGS := -lcuda -gencode=arch=compute_80,code=sm_80 -std=c++14 -O3 -lcublas
-TK_FLAGS := -O3 -arch=sm_80 -std=c++20 --expt-relaxed-constexpr -I/home/centos/triton-ag/manual/ThunderKittens/include -lcublas
+NVCC_FLAGS := -I$(CUTLASS_PATH)/include -lcuda -gencode=arch=compute_90,code=sm_90 -std=c++17 --expt-relaxed-constexpr
+CUTE_FLAGS := -I$(CUTLASS_PATH)/include -lcuda -gencode=arch=compute_90,code=sm_90 -std=c++17 --expt-relaxed-constexpr
+CUDA_FLAGS := -lcuda -gencode=arch=compute_90,code=sm_90 -std=c++14 -O3 -lcublas
+TK_FLAGS := -O3 -arch=sm_90 -std=c++20 --expt-relaxed-constexpr -I/home/centos/triton-ag/manual/ThunderKittens/include -lcublas
 
 # Source and output files
 SOURCES := cutlass_matmul.cu cute_matmul.cu cuda_matmul.cu tk_matmul.cu
