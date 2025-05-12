@@ -130,8 +130,13 @@ def load_agent_model(agent_name: str):
     if "model" not in model_config:
         raise ValueError(f"Model not found in agent.yaml for agent {agent_name}")
 
+    if "run_config" not in agent_yaml[agent_name]:
+        raise ValueError(f"Run config not found in agent.yaml for agent {agent_name}")
+
     model, model_settings = load_model(model_config["provider"], model_config["model"])
-    return model, model_settings
+    run_config = agent_yaml[agent_name]["run_config"]
+
+    return model, model_settings, run_config
 
 
 def get_run_hooks():

@@ -18,6 +18,9 @@ async def init_workspace_folder(
     workspace_folder: str = Field(
         ..., description="The workspace directory for checkpointing"
     ),
+    reference_pytorch_code: str = Field(
+        ..., description="The reference PyTorch code"
+    ),
 ):
     try:
         if not is_subfolder(parent_folder=os.getcwd(), child_folder=workspace_folder):
@@ -33,6 +36,11 @@ async def init_workspace_folder(
                 os.path.join(os.getcwd(), "verifier"),
                 os.path.join(init_checkpoint_folder, "verifier"),
             )
+        # copy task file to workspace_dir as "pytorch_reference.py"
+        shutil.copy(
+            reference_pytorch_code,
+            os.path.join(init_checkpoint_folder, "pytorch_reference.py"),
+        )
         # restore from the latest checkpoint
         await restore_last_checkpoint(
             workspace_folder=workspace_folder,
