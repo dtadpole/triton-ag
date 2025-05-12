@@ -1,4 +1,5 @@
 import os
+import shutil
 import asyncio
 import argparse
 from agents import (
@@ -17,9 +18,9 @@ from pydantic.json_schema import to_jsonable_python
 
 
 
-AGENT_NAME = "triton_coder"
+AGENT_NAME = "kernel_bench"
 
-TRITON_CODER_SYSTEM_PROMPT = """
+KERNEL_BENCH_SYSTEM_PROMPT = """
 You are an expert coder with experience in Triton kernels.  You understand tilings, parallelism,
 precision, numerical stability, and other concepts in the context of Triton and GPU programming.
 
@@ -38,7 +39,7 @@ When generating code, always follow these instructions:
 - When creating test cases, write them in subfolder under `tests`, with filename ends with `_test.py` (not in the main working directory)
 """
 
-TRITON_CODER_NEXT_PROMPT = """
+KERNEL_BENCH_NEXT_PROMPT = """
 Your task is to implement a single Module in Triton or a single kernel function in Triton.
 
 Task: {task}
@@ -59,29 +60,14 @@ Be concise in your reasoning, select the appropriate tool or action.
 """
 
 
-@function_tool(
-    name_override=AGENT_NAME,
-    description_override="Triton Coder is an expert with experience in Triton kernels.  It will implement specific code for the given task, which can be either a single module or a single kernel function.  It can also add functionality to existing code.  It will verify correctness of the code before returning (it won't perform any benchmarks)",
-)
-async def triton_coder(
-    workspace_dir: str = Field(
-        ...,
-        description="The working directory",
-    ),
-    task: str = Field(
-        ...,
-        description="The task to implement.  Please provide clear and concise task description",
-    ),
-):
-    return await run_triton_coder(workspace_dir, task)
-
-
 # this is the main function that will be called by the Runner
-async def run_triton_coder(workspace_dir: str, task: str):
+async def run_kernel_bench(workspace_dir: str, task: str):
 
     logger.info(f"Running [{AGENT_NAME}] [{workspace_dir}] with task: {task}")
 
     model, model_settings, run_config = load_agent_model(AGENT_NAME)
+
+    TASK_NAME = os.path.join(AGENT_NAME, os.path.basename(os.path.dirname(task)), os.path.basename(task))
 
     checkpoint_server = MCPServerStdio(
         params={
@@ -94,6 +80,7 @@ async def run_triton_coder(workspace_dir: str, task: str):
             tool_name="init_workspace_folder",
             arguments={
                 "workspace_folder": workspace_dir,
+                "reference_pytorch_code": task,
             },
         )
         logger.info(result)
@@ -117,23 +104,24 @@ async def run_triton_coder(workspace_dir: str, task: str):
         )
         async with file_server as fs, code_run_server as crs:
             try:
-                triton_coder = Agent(
+                kernel_bench = Agent(
                     model=model,
-                    name="triton_coder",
-                    instructions=TRITON_CODER_SYSTEM_PROMPT.format(
+                    name="kernel_bench",
+                    instructions=KERNEL_BENCH_SYSTEM_PROMPT.format(
                         workspace_dir=workspace_dir
                     ),
                     mcp_servers=[fs, cs, crs],
                 )
-                prompt = TRITON_CODER_NEXT_PROMPT.format(
-                    task=task, workspace_dir=workspace_dir
+                prompt = KERNEL_BENCH_NEXT_PROMPT.format(
+                    task="Implement Triton Kernel (forward pass only) for the given PyTorch code as in `pytorch_reference.py`",
+                    workspace_dir=workspace_dir
                 )
 
                 run_hooks = get_run_hooks()
 
-                with trace("Triton Coder"):
+                with trace("Kernel Bench"):
                     result = await Runner.run(
-                        triton_coder,
+                        kernel_bench,
                         input=prompt,
                         max_turns=run_config['max_turns'] if 'max_turns' in run_config else 50,
                         hooks=run_hooks,
@@ -141,12 +129,12 @@ async def run_triton_coder(workspace_dir: str, task: str):
                             model_settings=model_settings,
                         ),
                     )
-                    log_result_items(result, AGENT_NAME, workspace_dir)
+                    log_result_items(result, f"{TASK_NAME}", workspace_dir)
                     logger.info(result.final_output)
                     return result.final_output
             except Exception as e:
-                logger.error(f"Error running Triton Coder: {e}")
-                return f"Error running Triton Coder: {e}"
+                logger.error(f"Error running Kernel Bench: {e}")
+                return f"Error running Kernel Bench: {e}"
             finally:
                 logger.info(f"Agent [{AGENT_NAME}] completed!")
 
@@ -158,13 +146,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--workspace-dir", type=str, default="")
     parser.add_argument(
-        "-i",
-        "--input",
+        "-t",
+        "--task",
         type=str,
-        default="Implement Triton kernel for the forward pass of nn.Linear, use autotune for the tiling parameters",
+        default="./kernel-bench/level1/1_Square_matrix_multiplication_.py",
     )
     args = parser.parse_args()
 
+    # check if the task is a file name
+    if not os.path.exists(args.task):
+        logger.error(f"Task file {args.task} does not exist")
+        exit(1)
     init_logging(AGENT_NAME)
 
     if args.workspace_dir and os.path.exists(args.workspace_dir):
@@ -174,4 +166,4 @@ if __name__ == "__main__":
         workspace_dir = get_next_run_folder()
         logger.info(f"Working directory: {workspace_dir}")
 
-    asyncio.run(run_triton_coder(workspace_dir, args.input))
+    asyncio.run(run_kernel_bench(workspace_dir, args.task))
