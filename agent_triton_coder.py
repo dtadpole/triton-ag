@@ -81,7 +81,13 @@ async def run_triton_coder(workspace_dir: str, task: str):
 
     logger.info(f"Running [{AGENT_NAME}] [{workspace_dir}] with task: {task}")
 
-    model, model_settings, run_config = load_agent_model(AGENT_NAME)
+    model, model_settings, run_config, model_config = load_agent_model(AGENT_NAME)
+
+    TASK_NAME = os.path.join(AGENT_NAME, 
+                             model_config["provider"],
+                             model_config["model"])
+
+    MODEL_TAG = f"{model_config['provider']}_{model_config['model']}"
 
     checkpoint_server = MCPServerStdio(
         params={
@@ -141,7 +147,7 @@ async def run_triton_coder(workspace_dir: str, task: str):
                             model_settings=model_settings,
                         ),
                     )
-                    log_result_items(result, AGENT_NAME, workspace_dir)
+                    log_result_items(result, TASK_NAME, MODEL_TAG, workspace_dir)
                     logger.info(result.final_output)
                     return result.final_output
             except Exception as e:
