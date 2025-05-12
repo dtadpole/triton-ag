@@ -1,6 +1,7 @@
 import os
 import asyncio
 import argparse
+from typing import Union
 from agents import (
     Agent,
     Runner,
@@ -77,17 +78,17 @@ async def triton_coder(
 
 
 # this is the main function that will be called by the Runner
-async def run_triton_coder(workspace_dir: str, task: str):
+async def run_triton_coder(workspace_dir: str, task: str, provider: Union[str, None] = None, model_name: Union[str, None] = None):
 
     logger.info(f"Running [{AGENT_NAME}] [{workspace_dir}] with task: {task}")
 
-    model, model_settings, run_config, model_config = load_agent_model(AGENT_NAME)
+    model, model_settings, run_config, model_config = load_agent_model(AGENT_NAME, provider, model_name)
 
     TASK_NAME = os.path.join(AGENT_NAME, 
-                             model_config["provider"],
-                             model_config["model"])
+                             os.path.basename(os.path.dirname(task)),
+                             os.path.basename(task))
 
-    MODEL_TAG = f"{model_config['provider']}_{model_config['model']}"
+    MODEL_TAG = f"{provider or model_config['provider']}_{model_name or model_config['model']}"
 
     checkpoint_server = MCPServerStdio(
         params={
@@ -163,6 +164,8 @@ if __name__ == "__main__":
     # argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--workspace-dir", type=str, default="")
+    parser.add_argument("-p", "--provider", type=str, default=None)
+    parser.add_argument("-m", "--model-name", type=str, default=None)
     parser.add_argument(
         "-i",
         "--input",
@@ -180,4 +183,4 @@ if __name__ == "__main__":
         workspace_dir = get_next_run_folder()
         logger.info(f"Working directory: {workspace_dir}")
 
-    asyncio.run(run_triton_coder(workspace_dir, args.input))
+    asyncio.run(run_triton_coder(workspace_dir, args.input, args.provider, args.model_name))
