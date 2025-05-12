@@ -77,6 +77,9 @@ def _check_outputs_match(
     Returns:
         bool: True if outputs match within tolerance, False otherwise.
     """
+    if atol > 5e-2 or rtol > 5e-2:
+        raise ValueError(f"🚨 Tolerance is too high: atol={atol}, rtol={rtol}")
+
     mismatch = False
     if isinstance(torch_output, tuple):
         for i in range(len(torch_output)):
