@@ -118,7 +118,7 @@ async def run_kernel_bench(workspace_dir: str, task: str, provider: Union[str, N
                     mcp_servers=[fs, cs, crs],
                 )
                 prompt = KERNEL_BENCH_NEXT_PROMPT.format(
-                    task="Implement Triton Kernel (forward pass only) for the given PyTorch code as in `pytorch_reference.py`",
+                    task="Implement Triton Kernel (forward pass only) for the given PyTorch code in `pytorch_reference.py`. Verify that Triton kernel is correct by comparing the output with the reference PyTorch code.",
                     workspace_dir=workspace_dir
                 )
 
