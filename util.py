@@ -2,6 +2,7 @@ import yaml
 import json
 from string import Template
 import os
+from typing import Union
 from agents import AsyncOpenAI, OpenAIChatCompletionsModel, ModelSettings, RunHooks
 import boto3
 import mlflow
@@ -64,7 +65,6 @@ def get_next_run_folder():
 #    folder = os.path.join(os.getcwd(), f"_run_{i:03d}")
 #    return folder
 
-
 def load_model(provider: str, model: str):
     # read model.yaml
     with open("model.yaml", "r") as f:
@@ -114,7 +114,7 @@ def load_model(provider: str, model: str):
     return model, model_settings
 
 
-def load_agent_model(agent_name: str):
+def load_agent_model(agent_name: str, provider: Union[str, None] = None, model: Union[str, None] = None):
     # read from agent.yaml
     with open("agent.yaml", "r") as f:
         agent_yaml = yaml.safe_load(f)
@@ -125,15 +125,15 @@ def load_agent_model(agent_name: str):
         raise ValueError(f"Model not found in agent.yaml for agent {agent_name}")
 
     model_config = agent_yaml[agent_name]["model"]
-    if "provider" not in model_config:
+    if not provider and "provider" not in model_config:
         raise ValueError(f"Provider not found in agent.yaml for agent {agent_name}")
-    if "model" not in model_config:
+    if not model and "model" not in model_config:
         raise ValueError(f"Model not found in agent.yaml for agent {agent_name}")
 
     if "run_config" not in agent_yaml[agent_name]:
         raise ValueError(f"Run config not found in agent.yaml for agent {agent_name}")
 
-    model, model_settings = load_model(model_config["provider"], model_config["model"])
+    model, model_settings = load_model(provider or model_config["provider"], model or model_config["model"])
     run_config = agent_yaml[agent_name]["run_config"]
 
     return model, model_settings, run_config, model_config
