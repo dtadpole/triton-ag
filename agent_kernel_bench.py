@@ -172,4 +172,8 @@ if __name__ == "__main__":
         workspace_dir = get_next_run_folder()
         logger.info(f"Working directory: {workspace_dir}")
 
+    print('='*50)
+    print(f"Running [{AGENT_NAME}] [{workspace_dir}] with task: {args.task}")
+    print('='*50)
+
     asyncio.run(run_kernel_bench(workspace_dir, args.task, args.provider, args.model_name))
