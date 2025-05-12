@@ -55,6 +55,7 @@ Choose the most efficient path forward:
 3. If you have passed all the intermediate results, verify again using the final and official verification.
 4. If the final and official verification has passed and task is complete, save the `{workspace_dir}/current` folder as a checkpoint, and stop the task.
 5. If the final and official verification fails repeatedly, restore from the last checkpoint to `{workspace_dir}/current` folder and try again.
+6. Print the generated Triton kernel code in the final output.
 
 Be concise in your reasoning, select the appropriate tool or action.
 """
@@ -65,9 +66,13 @@ async def run_kernel_bench(workspace_dir: str, task: str):
 
     logger.info(f"Running [{AGENT_NAME}] [{workspace_dir}] with task: {task}")
 
-    model, model_settings, run_config = load_agent_model(AGENT_NAME)
+    model, model_settings, run_config, model_config = load_agent_model(AGENT_NAME)
 
-    TASK_NAME = os.path.join(AGENT_NAME, os.path.basename(os.path.dirname(task)), os.path.basename(task))
+    TASK_NAME = os.path.join(AGENT_NAME, 
+                             os.path.basename(os.path.dirname(task)),
+                             os.path.basename(task))
+
+    MODEL_TAG = f"{model_config['provider']}_{model_config['model']}"
 
     checkpoint_server = MCPServerStdio(
         params={
@@ -129,7 +134,7 @@ async def run_kernel_bench(workspace_dir: str, task: str):
                             model_settings=model_settings,
                         ),
                     )
-                    log_result_items(result, f"{TASK_NAME}", workspace_dir)
+                    log_result_items(result, TASK_NAME, MODEL_TAG, workspace_dir)
                     logger.info(result.final_output)
                     return result.final_output
             except Exception as e:
@@ -137,7 +142,6 @@ async def run_kernel_bench(workspace_dir: str, task: str):
                 return f"Error running Kernel Bench: {e}"
             finally:
                 logger.info(f"Agent [{AGENT_NAME}] completed!")
-
 
 
 

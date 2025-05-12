@@ -136,7 +136,7 @@ def load_agent_model(agent_name: str):
     model, model_settings = load_model(model_config["provider"], model_config["model"])
     run_config = agent_yaml[agent_name]["run_config"]
 
-    return model, model_settings, run_config
+    return model, model_settings, run_config, model_config
 
 
 def get_run_hooks():
@@ -156,7 +156,7 @@ def get_run_hooks():
     return run_hooks
 
 
-def log_result_items(result: RunResult, agent_name: str, folder: str):
+def log_result_items(result: RunResult, task_name: str, tag: str, folder: str):
     if not result.new_items:
         raise ValueError("No items to log")
     output = []
@@ -194,12 +194,12 @@ def log_result_items(result: RunResult, agent_name: str, folder: str):
 
     json_output = json.dumps(output, indent=2)
     # write to file
-    with open(os.path.join(folder, "logger.json"), "w") as f:
+    with open(os.path.join(folder, f"{tag}_logger.json"), "w") as f:
         f.write(json_output)
 
     # push to s3
     s3_client = boto3.client("s3")
     datetime_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    s3_client.put_object(Bucket="agent-xyz", Key=f"{agent_name}/{datetime_str}_logger.json", Body=json_output)
+    s3_client.put_object(Bucket="agent-xyz", Key=f"{task_name}/{tag}_{datetime_str}.json", Body=json_output)
 
     return output
