@@ -1,10 +1,16 @@
 import yaml
+import json
 from string import Template
 import os
 from agents import AsyncOpenAI, OpenAIChatCompletionsModel, ModelSettings, RunHooks
+import boto3
 import mlflow
+from datetime import datetime
 import logging
 from logger import logger
+from pydantic.json_schema import to_jsonable_python
+from agents import MessageOutputItem, ToolCallItem, ToolCallOutputItem
+from agents import RunResult
 
 
 def init_logging(agent_name: str):
@@ -143,3 +149,52 @@ def get_run_hooks():
     run_hooks.on_tool_end = on_tool_end
 
     return run_hooks
+
+
+def log_result_items(result: RunResult, agent_name: str, folder: str):
+    if not result.new_items:
+        raise ValueError("No items to log")
+    output = []
+    sys_msg = {
+        "role": "system",
+        "content": result.new_items[0].agent.instructions,
+    }
+    output.append(sys_msg)
+    user_msg = {
+        "role": "user",
+        "content": result.input,
+    }
+    output.append(user_msg)
+    for item in result.new_items:
+        if isinstance(item, MessageOutputItem):
+            json_item = {
+                "role": "assistant",
+                "content": to_jsonable_python(item.raw_item.content),
+            }
+            output.append(json_item)
+        elif isinstance(item, ToolCallItem):
+            json_item = {
+                "role": "assistant",
+                "content": to_jsonable_python(item.raw_item)
+            }
+            output.append(json_item)
+        elif isinstance(item, ToolCallOutputItem):
+            json_item = {
+                "role": "user",
+                "content": to_jsonable_python(item.raw_item),
+            }
+            output.append(json_item)
+        else:
+            raise ValueError(f"Unknown item type: {type(item)}")
+
+    json_output = json.dumps(output, indent=2)
+    # write to file
+    with open(os.path.join(folder, "logger.json"), "w") as f:
+        f.write(json_output)
+
+    # push to s3
+    s3_client = boto3.client("s3")
+    datetime_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    s3_client.put_object(Bucket="agent-xyz", Key=f"{agent_name}/{datetime_str}_logger.json", Body=json_output)
+
+    return output

@@ -7,11 +7,15 @@ from agents import (
     RunConfig,
     trace,
     function_tool,
+    RunResult,
 )
 from agents.mcp import MCPServerStdio
-from util import load_agent_model, init_logging, get_next_run_folder, get_run_hooks
+from util import load_agent_model, init_logging, get_next_run_folder, get_run_hooks, log_result_items
 from logger import logger
 from pydantic import Field
+from pydantic.json_schema import to_jsonable_python
+
+
 
 AGENT_NAME = "triton_coder"
 
@@ -108,7 +112,8 @@ async def run_triton_coder(workspace_dir: str, task: str):
             params={
                 "command": "uv",
                 "args": ["run", "--with", "mcp", "mcp", "run", "codeRunServer.py"],
-            }
+            },
+            client_session_timeout_seconds=120,
         )
         async with file_server as fs, code_run_server as crs:
             try:
@@ -136,6 +141,7 @@ async def run_triton_coder(workspace_dir: str, task: str):
                             model_settings=model_settings,
                         ),
                     )
+                    log_result_items(result, AGENT_NAME, workspace_dir)
                     logger.info(result.final_output)
                     return result.final_output
             except Exception as e:
@@ -143,6 +149,8 @@ async def run_triton_coder(workspace_dir: str, task: str):
                 return f"Error running Triton Coder: {e}"
             finally:
                 logger.info(f"Agent [{AGENT_NAME}] completed!")
+
+
 
 
 if __name__ == "__main__":
