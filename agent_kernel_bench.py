@@ -55,7 +55,7 @@ Choose the most efficient path forward:
 3. If you have passed all the intermediate results, verify again using the final and official verification.
 4. If the final and official verification has passed and task is complete, save the `{workspace_dir}/current` folder as a checkpoint, and stop the task.
 5. If the final and official verification fails repeatedly, restore from the last checkpoint to `{workspace_dir}/current` folder and try again.
-6. Print the generated Triton kernel code in the final output.
+6. Print the full Triton kernel code in the final output.
 
 Be concise in your reasoning, select the appropriate tool or action.
 """
