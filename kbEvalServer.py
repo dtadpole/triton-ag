@@ -31,8 +31,8 @@ server = FastMCP("kbEval")
 async def kb_eval(
     wd: str,
     tag: str,
-    reference_model_src: str,
-    generated_model_src: str,
+    reference_code_path: str,
+    generated_code_path: str,
     generated_summary: str,
 ) -> KernelExecResult:
     if not is_subfolder(parent_folder=os.getcwd(), child_folder=wd):
@@ -42,15 +42,13 @@ async def kb_eval(
 
     time_prefix = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    command = f"python kbEvalCli.py --wd {wd} --tag {tag}_{time_prefix} --reference_code {reference_code_path} --generated_code {generated_code_path}"
+
     # spawn a new process and run the eval_kernel_against_ref function
     process = await asyncio.create_subprocess_shell(
-        f"python -m kernel_bench.src.eval {reference_model_src} {generated_model_src} {generated_summary}",
+        command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-    )
-
-    process = await asyncio.create_subprocess_shell(
-        command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
 
     stdout, stderr = await process.communicate()
@@ -62,9 +60,9 @@ async def kb_eval(
         logger.info(f"Command '{command}' failed with exit code {process.returncode}.")
         logger.info("Error:", stderr.decode())
 
-    rc_file = f"{wd}/code_{tag}_{time_prefix}.rc"
-    stdout_file = f"{wd}/code_{tag}_{time_prefix}.stdout"
-    stderr_file = f"{wd}/code_{tag}_{time_prefix}.stderr"
+    rc_file = f"{wd}/kbeval_{tag}_{time_prefix}.rc"
+    stdout_file = f"{wd}/kbeval_{tag}_{time_prefix}.stdout"
+    stderr_file = f"{wd}/kbeval_{tag}_{time_prefix}.stderr"
 
     with open(rc_file, "w") as f:
         f.write(f"{process.returncode}\n")
@@ -73,12 +71,11 @@ async def kb_eval(
     with open(stderr_file, "w") as f:
         f.write(stderr.decode())
 
-    return RunResult(
-        returncode=process.returncode,
-        stdout=stdout.decode(),
-        stderr=stderr.decode(),
-    )
+    # read json from {wd}/kbeval_{tag}_{time_prefix}.json
+    with open(f"{wd}/kbeval_{tag}_{time_prefix}.json", "r") as f:
+        result = KernelExecResult.model_validate_json(f.read())
 
+    return result
 
 if __name__ == "__main__":
     server.run(transport="stdio")

@@ -43,6 +43,17 @@ if __name__ == "__main__":
         measure_performance=True,
         measure_performance_ref=args.measure_performance_ref,
     )
+
+    # check if there is compilation error
+    if 'compilation_error' in result.metadata:
+        # print exception and stack trace
+        exception = result.metadata['compilation_error']
+        exception_traceback_str = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
+        # print to stderr
+        print(exception_traceback_str, file=sys.stderr)
+        result.metadata['compilation_error'] = exception_traceback_str
+
+    # check if there is runtime error
     if 'runtime_error' in result.metadata:
         # print exception and stack trace
         exception = result.metadata['runtime_error']
