@@ -22,7 +22,8 @@ KERNEL_CODER_SYSTEM_PROMPT = """
 You are an expert coder with experience in CUDA kernels.  You understand tilings, parallelism,
 precision, numerical stability, and other concepts in the context of CUDA and GPU programming.
 
-Workspace directory: {workspace_dir}
+parent_dir: `{workspace_dir}`
+current_wd: `{workspace_dir}/current`
 
 1. Analyze the request to understand the task scope
 2. All the relevant environments has already been setup
@@ -30,7 +31,7 @@ Workspace directory: {workspace_dir}
 4. Implement specific code for the given task, do not change anything else
 
 When generating code, always follow these instructions:
-- Implement all key functionalities (functions and modules) in a single file directly in the working directory (not subfolder), check if such file already exists, if so, modify it, otherwise create a new one
+- Implement all key functionalities (functions and modules) in a single file directly in the working directory (not subfolder).
 - You may create your own test cases to verify intermediate results, but the final and official verification will need to be done using `kb_eval` tool.
 - When creating your own test cases, always write them in subfolder under `tests`, with filename ends with `_test.py` (not in the working directory directly)
 """
@@ -41,25 +42,27 @@ merge or replace existing code if necessary.
 
 Task: {task}
 
-model_tag: {model_tag}
-task_tag: {task_tag}
-rollout_id: {rollout_id}
+model_tag: `{model_tag}` 
+task_tag: `{task_tag}`
+rollout_id: `{rollout_id}`
 
-eval_tags: your eval_tag is rollout_id + sequence number when `kb_eval` is called. sequence number starts from 01 and increases by 1 each time when `kb_eval` is called. e.g. 
+eval_tag: the `eval_tag` is `rollout_id + sequence_number`. sequence number starts from 1 and increases by 1 each time when `kb_eval` is called. e.g. 
 -- if `kb_eval` is called 1st time, your eval_tag is '{rollout_id}_s01'
 -- if `kb_eval` is called 3rd time, your eval_tag is '{rollout_id}_s03'
 -- if `kb_eval` is called 10th time, your eval_tag is '{rollout_id}_s10'
 
 **GENERATE CODE**
 
-Write full generated kernel in a single file as `{workspace_dir}/current/'eval_tag'_cuda_kernel.py`.
+Write full generated kernel in a single file as {workspace_dir}/current/`eval_tag`_cuda_kernel.py.
+Generate a new file for each sequence number.  Keep improving performance of the kernel code.
 
 Replace pytorch operators in the given module with raw CUDA kernels, optimizing for performance
-on NVIDIA architecture (e.g. shared memory, kernel fusion, warp primitives, vectorization,...).
+on NVIDIA architecture (e.g. shared memory, kernel fusion, bank conflict avoidance, warp primitives,
+vectorization,...).
 
 Use torch.utils.cpp_extension.load_inline and name your optimized output module ModelNew.
 
-You're not allowed to use torch.nn (except for Parameter, containers, and init).
+You're NOT allowed to use torch.nn (except for Parameter, containers, and init).
 
 The input and output have to be on CUDA device. Your answer must be the complete new module
 (no testing code, no other code): it will be evaluated and you will be given feedback on its
@@ -74,8 +77,8 @@ Here's an example:
 **EVALUATE CODE**
 
 Use `kb_eval` tool to evaluate the correctness and performance of generated CUDA kernel.
-After each `kb_eval` call, summarize your changes in a few sentences, and call `kb_upload_summary` tool to upload the summary.
-Always call `kb_upload_summary` tool after each `kb_eval` call, even if the `kb_eval` call may return error.
+After each and every `kb_eval` call, summarize your changes in a few sentences, and call `kb_upload_summary` tool.
+Regardless of whether the `kb_eval` call returns error, always call `kb_upload_summary` after each and every `kb_eval` call.
 
 Did you encounter error when running `kb_eval` validation?
 Based on the error information, what's your next action?
@@ -85,7 +88,9 @@ Choose the most efficient path forward:
 2. If not sure why the error happened, can you create debug test cases to check each intermediate result step by step, and fix the code at each individual step?
 3. If you have passed all the intermediate test cases, verify using the `kb_eval` verification.
 4. If intermediate test cases fail repeatedly, restore from the last checkpoint to `{workspace_dir}/current` folder and try again.
-5. Maximum number of calls to `kb_eval` and `kb_upload_summary` is up to {max_eval_calls}. Stop the task if you have called `kb_eval` and `kb_upload_summary` total {max_eval_calls} times.
+5. Maximum number of calls to `kb_eval` and `kb_upload_summary` is up to {max_eval_calls}.
+6. Keep improving performance of the kernel code even if the code is correct, unless you have reached the maximum number of calls.
+7. Stop the task if you have reached the maximum number of calls.
 
 Be concise in your reasoning, select the appropriate tool or action.
 """
@@ -185,6 +190,16 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
             },
             client_session_timeout_seconds=10,
         )
+        sequential_thinking_server = MCPServerStdio(
+            params={
+                "command": "npx",
+                "args": [
+                    "-y",
+                    "@modelcontextprotocol/server-sequential-thinking",
+                ],
+            },
+            client_session_timeout_seconds=120,
+        )
         kb_eval_server = MCPServerStdio(
             params={
                 "command": "uv",
@@ -192,7 +207,7 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
             },
             client_session_timeout_seconds=120,
         )
-        async with file_server as fs, kb_eval_server as kbs:
+        async with file_server as fs, kb_eval_server as kbs, sequential_thinking_server as sqs:
             try:
                 kernel_bench = Agent(
                     model=model,
@@ -200,7 +215,7 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
                     instructions=KERNEL_CODER_SYSTEM_PROMPT.format(
                         workspace_dir=workspace_dir
                     ),
-                    mcp_servers=[fs, kbs, ckpts],
+                    mcp_servers=[fs, kbs, ckpts, sqs],
                 )
                 prompt = KERNEL_CODER_NEXT_PROMPT.format(
                     task="""Implement CUDA Kernel (forward pass only) for the given PyTorch code in
