@@ -86,6 +86,7 @@ async def run_kernel_bench(workspace_dir: str, task: str, provider: Union[str, N
             arguments={
                 "workspace_folder": workspace_dir,
                 "reference_pytorch_code": task,
+                "include_verifier": True,
             },
         )
         logger.info(result)
@@ -134,7 +135,7 @@ async def run_kernel_bench(workspace_dir: str, task: str, provider: Union[str, N
                             model_settings=model_settings,
                         ),
                     )
-                    log_result_items(result, TASK_NAME, MODEL_TAG, workspace_dir)
+                    log_result_items(result, AGENT_NAME, MODEL_TAG, TASK_NAME, workspace_dir)
                     logger.info(result.final_output)
                     return result.final_output
             except Exception as e:

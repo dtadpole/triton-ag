@@ -101,6 +101,7 @@ async def run_triton_coder(workspace_dir: str, task: str, provider: Union[str, N
             tool_name="init_workspace_folder",
             arguments={
                 "workspace_folder": workspace_dir,
+                "include_verifier": True,
             },
         )
         logger.info(result)
