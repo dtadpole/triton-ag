@@ -38,7 +38,7 @@ When generating code, always follow these instructions:
 
 KERNEL_CODER_NEXT_PROMPT = """
 Implement the task step by step, minimize changes while working on the current step,
-merge or replace existing code if necessary.
+Iterate step by step, consider all possible optimization techniques.
 
 Task: {task}
 
@@ -46,19 +46,20 @@ model_tag: `{model_tag}`
 task_tag: `{task_tag}`
 rollout_id: `{rollout_id}`
 
-eval_tag: the `eval_tag` is `rollout_id + sequence_number`. sequence number starts from 1 and increases by 1 each time when `kb_eval` is called. e.g. 
--- if `kb_eval` is called 1st time, your eval_tag is '{rollout_id}_s01'
--- if `kb_eval` is called 3rd time, your eval_tag is '{rollout_id}_s03'
--- if `kb_eval` is called 10th time, your eval_tag is '{rollout_id}_s10'
+eval_tag: the `eval_tag` is `rollout_id + iteration_number`. iteration number starts from 1 and increases by 1 each time when `kb_eval` is called. e.g. 
+-- if `kb_eval` is called 1st time, your eval_tag is '{rollout_id}_i01'
+-- if `kb_eval` is called 3rd time, your eval_tag is '{rollout_id}_i03'
+-- if `kb_eval` is called 10th time, your eval_tag is '{rollout_id}_i10'
 
 **GENERATE CODE**
 
 Write full generated kernel in a single file as {workspace_dir}/current/`eval_tag`_cuda_kernel.py.
-Generate a new file for each sequence number.  Keep improving performance of the kernel code.
+Generate a new file for each iteration.  Keep improving performance of the kernel code.
 
 Replace pytorch operators in the given module with raw CUDA kernels, optimizing for performance
-on NVIDIA architecture (e.g. shared memory, kernel fusion, bank conflict avoidance, warp primitives,
-vectorization,...).
+on NVIDIA architecture (e.g. shared memory, coalesced access, occupancy tuning, block size optimization, 
+grid stride loops, loop unrolling, kernel fusion, vectorized loads, bank conflict avoidance, warp primitives,
+arithmetic intenstiy, etc.).
 
 Use torch.utils.cpp_extension.load_inline and name your optimized output module ModelNew.
 
@@ -76,9 +77,9 @@ Here's an example:
 
 **EVALUATE CODE**
 
-Use `kb_eval` tool to evaluate the correctness and performance of generated CUDA kernel.
-After each and every `kb_eval` call, summarize your changes in a few sentences, and call `kb_upload_summary` tool.
-Regardless of whether the `kb_eval` call returns error, always call `kb_upload_summary` after each and every `kb_eval` call.
+For each iteration, use `kb_eval` tool to evaluate the correctness and performance of generated CUDA kernel.
+At end of each iteration, summarize your changes in a few sentences, and call `kb_upload_summary` to upload the summary.
+Always call `kb_upload_summary` for each and every iteration, even if the `kb_eval` call returns error.
 
 Did you encounter error when running `kb_eval` validation?
 Based on the error information, what's your next action?
@@ -88,9 +89,8 @@ Choose the most efficient path forward:
 2. If not sure why the error happened, can you create debug test cases to check each intermediate result step by step, and fix the code at each individual step?
 3. If you have passed all the intermediate test cases, verify using the `kb_eval` verification.
 4. If intermediate test cases fail repeatedly, restore from the last checkpoint to `{workspace_dir}/current` folder and try again.
-5. Maximum number of calls to `kb_eval` and `kb_upload_summary` is up to {max_eval_calls}.
-6. Keep improving performance of the kernel code even if the code is correct, unless you have reached the maximum number of calls.
-7. Stop the task if you have reached the maximum number of calls.
+5. Keep improving performance of the kernel code with more iterations, unless you have reached the maximum number of iterations.
+6. Stop the task if you have reached (or exceeded) the maximum number of iterations allowed: `{max_iterations}`.
 
 Be concise in your reasoning, select the appropriate tool or action.
 """
@@ -219,13 +219,13 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
                 )
                 prompt = KERNEL_CODER_NEXT_PROMPT.format(
                     task="""Implement CUDA Kernel (forward pass only) for the given PyTorch code in
-                    `pytorch_reference.py`.
+                    `pytorch_reference.py`, iteratively improving performance of the kernel code.
                     """,
                     workspace_dir=workspace_dir,
                     model_tag=MODEL_TAG,
                     task_tag=TASK_TAG,
                     rollout_id=f"r{args.rollout_id:02d}",
-                    max_eval_calls=args.max_eval_calls,
+                    max_iterations=args.max_iterations,
                     example_code=EXAMPLE_CODE,
                 )
 
@@ -259,7 +259,7 @@ if __name__ == "__main__":
     parser.add_argument("-d", "--workspace-dir", type=str, default="")
     parser.add_argument("-p", "--provider", type=str, default=None)
     parser.add_argument("-m", "--model-name", type=str, default=None)
-    parser.add_argument("-e", "--max-eval-calls", type=int, default=8)
+    parser.add_argument("-e", "--max-iterations", type=int, default=8)
     parser.add_argument("-r", "--rollout-id", type=int, default=1)
     parser.add_argument(
         "-t",

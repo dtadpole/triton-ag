@@ -67,7 +67,7 @@ async def kb_eval(
 
 @server.tool(
     name="kb_upload_summary",
-    description="Upload the summary of the evaluation to s3",
+    description="Upload the summary of the evaluation",
 )
 async def kb_upload_summary(
     model_tag: str = Field(..., description="The tag of the model"),
