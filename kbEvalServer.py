@@ -17,19 +17,19 @@ server = FastMCP("kbEval")
     description="Run kernel bench evaluation",
 )
 async def kb_eval(
-    wd: str = Field(..., description="The working directory"),
+    current_wd: str = Field(..., description="The current working directory"),
     eval_tag: str = Field(..., description="The tag of the evaluation"),
-    reference_code_path: str = Field(..., description="The path to the reference code"),
-    generated_code_path: str = Field(..., description="The path to the generated code"),
+    reference_code_filename: str = Field(..., description="The filename of the reference code"),
+    generated_code_filename: str = Field(..., description="The filename of the generated code"),
 ) -> KernelExecResult:
-    if not is_subfolder(parent_folder=os.getcwd(), child_folder=wd):
+    if not is_subfolder(parent_folder=os.getcwd(), child_folder=current_wd):
         raise ValueError(
-            f"Working directory {wd} is not a subfolder of cwd {os.getcwd()}"
+            f"Working directory {current_wd} is not a subfolder of cwd {os.getcwd()}"
         )
 
     time_prefix = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    command = f"python kbEvalCli.py --wd {wd} --tag {eval_tag}_{time_prefix} --reference_code {reference_code_path} --generated_code {generated_code_path}"
+    command = f"python kbEvalCli.py --wd {current_wd} --tag {eval_tag}_{time_prefix} --reference_code {reference_code_filename} --generated_code {generated_code_filename}"
 
     # spawn a new process and run the eval_kernel_against_ref function
     process = await asyncio.create_subprocess_shell(
@@ -47,9 +47,9 @@ async def kb_eval(
         logger.info(f"Command '{command}' failed with exit code {process.returncode}.")
         logger.info("Error:", stderr.decode())
 
-    rc_file = f"{wd}/kbeval_{eval_tag}_{time_prefix}.rc"
-    stdout_file = f"{wd}/kbeval_{eval_tag}_{time_prefix}.stdout"
-    stderr_file = f"{wd}/kbeval_{eval_tag}_{time_prefix}.stderr"
+    rc_file = f"{current_wd}/kbeval_{eval_tag}_{time_prefix}.rc"
+    stdout_file = f"{current_wd}/kbeval_{eval_tag}_{time_prefix}.stdout"
+    stderr_file = f"{current_wd}/kbeval_{eval_tag}_{time_prefix}.stderr"
 
     with open(rc_file, "w") as f:
         f.write(f"{process.returncode}\n")
@@ -58,8 +58,8 @@ async def kb_eval(
     with open(stderr_file, "w") as f:
         f.write(stderr.decode())
 
-    # read json from {wd}/kbeval_{tag}_{time_prefix}.json
-    with open(f"{wd}/kbeval_{eval_tag}_{time_prefix}.json", "r") as f:
+    # read json from {wd}/kbeval_{tag}.json
+    with open(f"{current_wd}/kbeval_{eval_tag}_{time_prefix}.json", "r") as f:
         result = KernelExecResult.model_validate_json(f.read())
 
     return result
@@ -72,19 +72,26 @@ async def kb_eval(
 async def kb_upload_summary(
     model_tag: str = Field(..., description="The tag of the model"),
     task_tag: str = Field(..., description="The tag of the task"),
-    wd: str = Field(..., description="The working directory"),
+    current_wd: str = Field(..., description="The current working directory"),
     eval_tag: str = Field(..., description="The tag of the evaluation"),
-    reference_code_path: str = Field(..., description="The path to the reference code"),
-    generated_code_path: str = Field(..., description="The path to the generated code"),
-    generated_summary: str = Field(..., description="The summary of the generated code"),
     result: KernelExecResult = Field(..., description="The result from kb_eval"),
+    reference_code_filename: str = Field(..., description="The filename of the reference code"),
+    generated_code_filename: str = Field(..., description="The filename of the generated code"),
+    generated_summary: str = Field(..., description="The summary of the generated code"),
 ) -> str:
     try:
+        logger.info(f"Uploading summary to s3: {model_tag}, {task_tag}, {eval_tag}")
+        logger.info(f"Current working directory: {current_wd}")
+        logger.info(f"Result: {result.model_dump()}")
+        logger.info(f"Reference code filename: {reference_code_filename}")
+        logger.info(f"Generated code filename: {generated_code_filename}")
+        logger.info(f"Generated summary: {generated_summary}")
+
         # read reference code
-        with open(reference_code_path, "r") as f:
+        with open(os.path.join(current_wd, reference_code_filename), "r") as f:
             reference_code = f.read()
         # read generated code
-        with open(generated_code_path, "r") as f:
+        with open(os.path.join(current_wd, generated_code_filename), "r") as f:
             generated_code = f.read()
 
         time_prefix = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -99,7 +106,7 @@ async def kb_upload_summary(
             "result": result.model_dump(),
         }
 
-        with open(f"{wd}/kbeval_{eval_tag}_{time_prefix}.summary.json", "w") as f:
+        with open(f"{current_wd}/kbeval_{eval_tag}_{time_prefix}.summary.json", "w") as f:
             f.write(json.dumps(summary, indent=4))
 
         # push to aws s3
