@@ -1,4 +1,5 @@
 import os
+import traceback
 from typing import Union
 import asyncio
 import argparse
@@ -13,16 +14,13 @@ from agents import (
 from agents.mcp import MCPServerStdio
 from util import load_agent_model, init_logging, get_next_run_folder, get_run_hooks, log_result_items
 from logger import logger
-from pydantic import Field
-from pydantic.json_schema import to_jsonable_python
-
 
 
 AGENT_NAME = "kernel_coder"
 
 KERNEL_CODER_SYSTEM_PROMPT = """
-You are an expert coder with experience in Triton kernels.  You understand tilings, parallelism,
-precision, numerical stability, and other concepts in the context of Triton and GPU programming.
+You are an expert coder with experience in CUDA kernels.  You understand tilings, parallelism,
+precision, numerical stability, and other concepts in the context of CUDA and GPU programming.
 
 Workspace directory: {workspace_dir}
 
@@ -33,59 +31,71 @@ Workspace directory: {workspace_dir}
 
 When generating code, always follow these instructions:
 - Implement all key functionalities (functions and modules) in a single file directly in the working directory (not subfolder), check if such file already exists, if so, modify it, otherwise create a new one
-- Always use the provided functions in `verifier/correctness.py` to verify correctness, ensure to run corresponding test function for correctness verification. (Do not run benchmark, only verify correctness)
-- Do not change any existing code in the `verifier` subfolder, do not add any new code in the `verifier` subfolder
-- You may create your own test cases to verify intermediate results, but the final and official verification will need to be done using the provided function.
-- When creating test cases, write them in subfolder under `tests`, with filename ends with `_test.py` (not in the main working directory)
+- You may create your own test cases to verify intermediate results, but the final and official verification will need to be done using `kb_eval` tool.
+- When creating your own test cases, always write them in subfolder under `tests`, with filename ends with `_test.py` (not in the working directory directly)
 """
 
 KERNEL_CODER_NEXT_PROMPT = """
 Implement the task step by step, minimize changes while working on the current step,
 merge or replace existing code if necessary.
 
-Did you encounter error when running the final verification?
+Task: {task}
+
+model_tag: {model_tag}
+task_tag: {task_tag}
+rollout_id: {rollout_id}
+
+eval_tags: your eval_tag is rollout_id + sequence number when `kb_eval` is called. sequence number starts from 01 and increases by 1 each time when `kb_eval` is called. e.g. 
+-- if `kb_eval` is called 1st time, your eval_tag is '{rollout_id}_s01'
+-- if `kb_eval` is called 3rd time, your eval_tag is '{rollout_id}_s03'
+-- if `kb_eval` is called 10th time, your eval_tag is '{rollout_id}_s10'
+
+**GENERATE CODE**
+
+Write full generated kernel in a single file as `{workspace_dir}/current/'eval_tag'_cuda_kernel.py`.
+
+Replace pytorch operators in the given module with raw CUDA kernels, optimizing for performance
+on NVIDIA architecture (e.g. shared memory, kernel fusion, warp primitives, vectorization,...).
+
+Use torch.utils.cpp_extension.load_inline and name your optimized output module ModelNew.
+
+You're not allowed to use torch.nn (except for Parameter, containers, and init).
+
+The input and output have to be on CUDA device. Your answer must be the complete new module
+(no testing code, no other code): it will be evaluated and you will be given feedback on its
+correctness and speedup so you can keep iterating, trying to maximize the speedup.
+
+Here's an example:
+
+```python
+{example_code}
+```
+
+**EVALUATE CODE**
+
+Use `kb_eval` tool to evaluate the correctness and performance of generated CUDA kernel.
+After each `kb_eval` call, summarize your changes in a few sentences, and call `kb_upload_summary` tool to upload the summary.
+Always call `kb_upload_summary` tool after each `kb_eval` call, even if the `kb_eval` call may return error.
+
+Did you encounter error when running `kb_eval` validation?
 Based on the error information, what's your next action?
 
 Choose the most efficient path forward:
 1. Do you understand the error? Can you fix the error easily?
 2. If not sure why the error happened, can you create debug test cases to check each intermediate result step by step, and fix the code at each individual step?
-3. If you have passed all the intermediate results, verify again using the final and official verification.
-4. If the final and official verification has passed and task is complete, save the `{workspace_dir}/current` folder as a checkpoint, and stop the task.
-5. If the final and official verification fails repeatedly, restore from the last checkpoint to `{workspace_dir}/current` folder and try again.
-6. Print the full Triton kernel code in the final output.
+3. If you have passed all the intermediate test cases, verify using the `kb_eval` verification.
+4. If intermediate test cases fail repeatedly, restore from the last checkpoint to `{workspace_dir}/current` folder and try again.
+5. Maximum number of calls to `kb_eval` and `kb_upload_summary` is up to {max_eval_calls}. Stop the task if you have called `kb_eval` and `kb_upload_summary` total {max_eval_calls} times.
 
 Be concise in your reasoning, select the appropriate tool or action.
+"""
 
-Task: You are given following PyTorch code:
-
-```python
-{pytorch_code}
-```
-
-Replace pytorch operators in the given module with raw CUDA kernels,
-optimizing for performance on NVIDIA H100 (e.g. shared memory, kernel fusion,
-warp primitives, vectorization,...).
-
-Use torch.utils.cpp_extension.load_inline and name your optimized output
-module CudaModel.
-
-You're not allowed to use torch.nn (except for Parameter, containers, and init).
-
-The input and output have to be on CUDA device. Your answer must be the complete
-new module (no testing code, no other code): it will be evaluated and you will
-be given feedback on its correctness and speedup so you can keep iterating,
-trying to maximize the speedup.
-
-After your answer, summarize your changes in a few sentences.
-
-Here's an example:
-
-```python
+EXAMPLE_CODE = '''
 import torch.nn as nn
 from torch.utils.cpp_extension import load_inline
 
 # Define the custom CUDA kernel for element-wise addition
-elementwise_add_source = '''
+elementwise_add_source = """
 #include <torch/extension.h>
 #include <cuda_runtime.h>
 
@@ -107,7 +117,7 @@ torch::Tensor elementwise_add_cuda(torch::Tensor a, torch::Tensor b) {
 
     return out;
 }
-'''
+"""
 
 elementwise_add_cpp_source = (
     "torch::Tensor elementwise_add_cuda(torch::Tensor a, torch::Tensor b);"
@@ -124,7 +134,6 @@ elementwise_add = load_inline(
     extra_ldflags=[""],
 )
 
-
 class ModelNew(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -132,9 +141,7 @@ class ModelNew(nn.Module):
 
     def forward(self, a, b):
         return self.elementwise_add.elementwise_add_cuda(a, b)
-```
-"""
-
+'''
 
 # this is the main function that will be called by the Runner
 async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, None] = None, model_name: Union[str, None] = None):
@@ -143,11 +150,12 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
 
     model, model_settings, run_config, model_config = load_agent_model(AGENT_NAME, provider, model_name)
 
-    TASK_NAME = os.path.join(AGENT_NAME, 
-                             os.path.basename(os.path.dirname(task)),
-                             os.path.basename(task))
+    MODEL_TAG = os.path.join(AGENT_NAME,
+                             f"{provider or model_config['provider']}",
+                             f"{model_name or model_config['model']}")
 
-    MODEL_TAG = f"{provider or model_config['provider']}_{model_name or model_config['model']}"
+    TASK_TAG = os.path.join(os.path.basename(os.path.dirname(task)),
+                            os.path.basename(task))
 
     checkpoint_server = MCPServerStdio(
         params={
@@ -155,12 +163,13 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
             "args": ["run", "--with", "mcp", "mcp", "run", "checkpointServer.py"],
         }
     )
-    async with checkpoint_server as cs:
-        result = await cs.call_tool(
+    async with checkpoint_server as ckpts:
+        result = await ckpts.call_tool(
             tool_name="init_workspace_folder",
             arguments={
                 "workspace_folder": workspace_dir,
                 "reference_pytorch_code": task,
+                "include_verifier": False,
             },
         )
         logger.info(result)
@@ -173,16 +182,17 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
                     "@modelcontextprotocol/server-filesystem",
                     os.path.join(workspace_dir, "current"),
                 ],
-            }
+            },
+            client_session_timeout_seconds=10,
         )
-        code_run_server = MCPServerStdio(
+        kb_eval_server = MCPServerStdio(
             params={
                 "command": "uv",
-                "args": ["run", "--with", "mcp", "mcp", "run", "codeRunServer.py"],
+                "args": ["run", "--with", "mcp", "mcp", "run", "kbEvalServer.py"],
             },
             client_session_timeout_seconds=120,
         )
-        async with file_server as fs, code_run_server as crs:
+        async with file_server as fs, kb_eval_server as kbs:
             try:
                 kernel_bench = Agent(
                     model=model,
@@ -190,11 +200,18 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
                     instructions=KERNEL_CODER_SYSTEM_PROMPT.format(
                         workspace_dir=workspace_dir
                     ),
-                    mcp_servers=[fs, cs, crs],
+                    mcp_servers=[fs, kbs, ckpts],
                 )
                 prompt = KERNEL_CODER_NEXT_PROMPT.format(
-                    task="Implement Triton Kernel (forward pass only) for the given PyTorch code in `pytorch_reference.py`. Verify that Triton kernel is correct by comparing the output with the reference PyTorch code.",
-                    workspace_dir=workspace_dir
+                    task="""Implement CUDA Kernel (forward pass only) for the given PyTorch code in
+                    `pytorch_reference.py`.
+                    """,
+                    workspace_dir=workspace_dir,
+                    model_tag=MODEL_TAG,
+                    task_tag=TASK_TAG,
+                    rollout_id=f"r{args.rollout_id:02d}",
+                    max_eval_calls=args.max_eval_calls,
+                    example_code=EXAMPLE_CODE,
                 )
 
                 run_hooks = get_run_hooks()
@@ -209,10 +226,11 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
                             model_settings=model_settings,
                         ),
                     )
-                    log_result_items(result, TASK_NAME, MODEL_TAG, workspace_dir)
+                    log_result_items(result, AGENT_NAME, MODEL_TAG, TASK_TAG, workspace_dir)
                     logger.info(result.final_output)
                     return result.final_output
             except Exception as e:
+                traceback.print_exc()
                 logger.error(f"Error running Kernel Coder: {e}")
                 return f"Error running Kernel Coder: {e}"
             finally:
@@ -226,11 +244,13 @@ if __name__ == "__main__":
     parser.add_argument("-d", "--workspace-dir", type=str, default="")
     parser.add_argument("-p", "--provider", type=str, default=None)
     parser.add_argument("-m", "--model-name", type=str, default=None)
+    parser.add_argument("-e", "--max-eval-calls", type=int, default=8)
+    parser.add_argument("-r", "--rollout-id", type=int, default=1)
     parser.add_argument(
         "-t",
         "--task",
         type=str,
-        default="./kernel-bench/level1/1_Square_matrix_multiplication_.py",
+        default="./kernel_bench/level1/1_Square_matrix_multiplication_.py",
     )
     args = parser.parse_args()
 

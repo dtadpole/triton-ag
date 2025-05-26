@@ -21,6 +21,9 @@ async def init_workspace_folder(
     reference_pytorch_code: str = Field(
         ..., description="The reference PyTorch code"
     ),
+    include_verifier: bool = Field(
+        False, description="Whether to include the verifier folder"
+    ),
 ):
     try:
         if not is_subfolder(parent_folder=os.getcwd(), child_folder=workspace_folder):
@@ -31,11 +34,12 @@ async def init_workspace_folder(
         init_checkpoint_folder = os.path.join(workspace_folder, f"{0:02d}.checkpoint")
         if not os.path.exists(init_checkpoint_folder):
             os.makedirs(init_checkpoint_folder, exist_ok=True)
-            # create verifier folder in the new run folder
-            shutil.copytree(
-                os.path.join(os.getcwd(), "verifier"),
-                os.path.join(init_checkpoint_folder, "verifier"),
-            )
+            if include_verifier:
+                # create verifier folder in the new run folder
+                shutil.copytree(
+                    os.path.join(os.getcwd(), "verifier"),
+                    os.path.join(init_checkpoint_folder, "verifier"),
+                )
         # copy task file to workspace_dir as "pytorch_reference.py"
         shutil.copy(
             reference_pytorch_code,

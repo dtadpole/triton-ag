@@ -156,7 +156,7 @@ def get_run_hooks():
     return run_hooks
 
 
-def log_result_items(result: RunResult, task_name: str, tag: str, folder: str):
+def log_result_items(result: RunResult, name_tag: str, model_tag: str, task_tag: str, folder: str):
     if not result.new_items:
         raise ValueError("No items to log")
     output = []
@@ -194,12 +194,12 @@ def log_result_items(result: RunResult, task_name: str, tag: str, folder: str):
 
     json_output = json.dumps(output, indent=2)
     # write to file
-    with open(os.path.join(folder, f"{tag}_logger.json"), "w") as f:
+    with open(os.path.join(folder, f"{name_tag}_logger.json"), "w") as f:
         f.write(json_output)
 
     # push to s3
     s3_client = boto3.client("s3")
     datetime_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    s3_client.put_object(Bucket="agent-xyz", Key=f"{task_name}/{tag}_{datetime_str}.json", Body=json_output)
+    s3_client.put_object(Bucket="agent-xyz", Key=f"{model_tag}/{task_tag}/{name_tag}_{datetime_str}.json", Body=json_output)
 
     return output
