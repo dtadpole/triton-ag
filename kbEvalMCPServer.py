@@ -125,10 +125,10 @@ async def kb_upload_summary(
             "task_tag": task_tag,
             "eval_tag": eval_tag,
             "time_tag": time_tag,
+            "summary": summary,
+            "result": result.model_dump(),
             "reference_code": reference_code,
             "generated_code": generated_code,
-            "result": result.model_dump(),
-            "summary": summary,
         }
 
         with open(f"{current_wd}/kbeval_{eval_tag}_{time_tag}.summary.json", "w") as f:
