@@ -5,8 +5,6 @@ from torch.utils.cpp_extension import load_inline
 elementwise_add_source = '''
 #include <torch/extension.h>
 #include <cuda_runtime.h>
-#include <iostream>
-
 
 __global__ void elementwise_add_kernel(const float* a, const float* b, float* out, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
