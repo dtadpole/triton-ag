@@ -19,7 +19,7 @@ def define_log_level(print_level="INFO", logfile_level="DEBUG", name: str = None
     )  # name a log with prefix name
 
     _logger.remove()
-    _logger.add(sys.stderr, level=print_level)
+    _logger.add(sys.stdout, level=print_level)
     # get current working directory
     _logger.add(
         os.path.join(os.getcwd(), "logs", f"{log_name}.log"), level=logfile_level

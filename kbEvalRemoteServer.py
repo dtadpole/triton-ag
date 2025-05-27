@@ -4,6 +4,7 @@ import traceback
 import json
 import argparse
 import asyncio
+import yaml
 from datetime import datetime
 import concurrent.futures
 import boto3
@@ -27,38 +28,10 @@ KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
 # Create app
 app = FastAPI()
 
-eval_tasks = []
-eval_queue = asyncio.Queue()
-result_queue = {}
-
 request_counter = 0
 request_counter_lock = asyncio.Lock()
 
-
-
-class EvalKernelRequest:
-    model_tag: str
-    task_tag: str
-    eval_tag: str
-    time_tag: str
-    Model: torch.nn.Module
-    get_init_inputs: callable
-    get_inputs: callable
-    ModelNew: torch.nn.Module
-    metadata: dict
-    context: dict
-
-    def __init__(self, model_tag: str, task_tag: str, eval_tag: str, time_tag: str, Model: torch.nn.Module, get_init_inputs: callable, get_inputs: callable, ModelNew: torch.nn.Module, metadata: dict, context: dict):
-        self.model_tag = model_tag
-        self.task_tag = task_tag
-        self.eval_tag = eval_tag
-        self.time_tag = time_tag
-        self.Model = Model
-        self.get_init_inputs = get_init_inputs
-        self.get_inputs = get_inputs
-        self.ModelNew = ModelNew
-        self.metadata = metadata
-        self.context = context
+devices = []
 
 
 async def get_pending_task_count():
@@ -67,11 +40,10 @@ async def get_pending_task_count():
 
 @app.get("/stats")
 async def stats():
-    global eval_queue, result_queue, request_counter
+    global request_counter
     return {
-        "num_eval_jobs": len(eval_tasks),
-        "pending_eval_tasks": len(result_queue),
-        "pending_eval_requests": request_counter,
+        "num_devices": len(devices),
+        "pending_requests": request_counter,
     }
 
 @app.post("/kb_eval")
@@ -93,9 +65,6 @@ async def kb_eval(
         temp_dir = os.path.join(KB_EVAL_DIR, model_tag, task_tag)
         os.makedirs(temp_dir, exist_ok=True)
 
-        build_dir = os.path.join(temp_dir, f"{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-        os.makedirs(build_dir, exist_ok=True)
-
         reference_file_path = os.path.join(temp_dir, f"{eval_tag}_{time_tag}_reference_code.py")
         with open(reference_file_path, "w") as f:
             f.write(reference_code)
@@ -104,378 +73,57 @@ async def kb_eval(
         with open(generated_file_path, "w") as f:
             f.write(generated_code)
 
+
+        # parser.add_argument("--wd", type=str, default="./kbEvalTest")
+        # parser.add_argument("--model_tag", type=str, default="model_tag")
+        # parser.add_argument("--task_tag", type=str, default="task_tag")
+        # parser.add_argument("--eval_tag", type=str, default="eval_tag")
+        # parser.add_argument("--time_tag", type=str, default="time_tag")
+        # parser.add_argument("--reference_code", type=str, default="elemAddRef.py")
+        # parser.add_argument("--generated_code", type=str, default="elemAddCuda.py")
+
         # pre-compile the generated code
-        command = f"python kbEvalCompile.py --model_src {generated_file_path} --build_dir {build_dir}"
+        command = f"python kbEvalCli.py --wd {temp_dir} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --time_tag {time_tag} --reference_code {reference_file_path} --generated_code {generated_file_path}"
         process = await asyncio.create_subprocess_shell(
             command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=os.environ.copy()
         )
 
-        logger.info(f"[Pre-compile {time_tag} START] =================================================")
-        logger.info(f"[Pre-compile {time_tag}] command: {command}")
+        logger.info(f"[KB Eval] START [{eval_tag}] ====================")
+        logger.info(f"[KB Eval] command: {command} [{eval_tag}]")
         stdout, stderr = await process.communicate()
-        logger.info(f"[Pre-compile {time_tag}] return code: {process.returncode}")
+        logger.info(f"[KB Eval] return code: {process.returncode} [{eval_tag}]")
         # read line by line and print
         for line in stdout.decode().splitlines():
-            logger.info(f"[Pre-compile {time_tag}] output: {line}")
+            logger.info(f"[KB Eval] output: {line} [{eval_tag}]")
         for line in stderr.decode().splitlines():
-            logger.info(f"[Pre-compile {time_tag}] error: {line}")
-        logger.info(f"[Pre-compile {time_tag} END] =================================================")
+            logger.error(f"[KB Eval] error: {line} [{eval_tag}]")
+        logger.info(f"[KB Eval] END [{eval_tag}] ====================")
 
-        # now actually evaluate the kernel
-        result = await compile_and_eval_kernel(
-            model_tag,
-            task_tag,
-            eval_tag,
-            time_tag,
-            reference_code,
-            generated_code,
-            build_dir=build_dir,
-        )
+        # read the result from {temp_dir}/kbeval_{eval_tag}.json
+        result_json_path = os.path.join(temp_dir, f"{eval_tag}_{time_tag}_kbeval.json")
+        with open(result_json_path, "r") as f:
+            result_text = f.read()
 
-        if result is None:
-            result = KernelExecResult(
-                compiled=False, correctness=False, metadata={"error": "Unknown error"}
-            )
-
-        # check if there is compilation error
-        if 'compilation_error' in result.metadata:
-            # print exception and stack trace
-            exception = result.metadata['compilation_error']
-            exception_traceback_str = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
-            # print to stderr
-            logger.error(exception_traceback_str)
-            result.metadata['compilation_error'] = exception_traceback_str
-
-        # check if there is runtime error
-        if 'runtime_error' in result.metadata:
-            # print exception and stack trace
-            exception = result.metadata['runtime_error']
-            exception_traceback_str = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
-            # print to stderr
-            logger.error(exception_traceback_str)
-            result.metadata['runtime_error'] = exception_traceback_str
-
-        # write result to {temp_dir}/kbeval_{eval_tag}.json
-        result_json = result.model_dump()
-        with open(os.path.join(temp_dir, f"{eval_tag}_{time_tag}_kbeval.json"), "w") as f:
-            f.write(json.dumps(result_json, indent=4))
+        result = KernelExecResult.model_validate_json(result_text)
 
         return result
     finally:
         async with request_counter_lock:
             request_counter -= 1 
             if request_counter < 0:
-                logger.error(f"Request counter is negative: {request_counter}")
+                logger.error(f"Request counter is negative: {request_counter}, resetting to 0")
                 request_counter = 0
 
 
+if __name__ == "__main__":
+    #read kbEval.yaml
+    with open("kbEval.yaml", "r") as f:
+        kbEval_config = yaml.load(f, Loader=yaml.FullLoader)
 
-async def compile_and_eval_kernel(
-    model_tag: str,
-    task_tag: str,
-    eval_tag: str,
-    time_tag: str,
-    reference_code: str,
-    generated_code: str,
-    build_dir: str = None,
-) -> KernelExecResult:
-    global eval_queue, result_queue
-
-    # loop = asyncio.get_event_loop()
-    # with concurrent.futures.ProcessPoolExecutor() as pool:
-    #    Model, get_init_inputs, get_inputs, ModelNew, metadata, context = await loop.run_in_executor(
-    #           pool, compile_kernel_new, model_tag, task_tag, eval_tag, time_tag, reference_code, generated_code)
-
-    Model, get_init_inputs, get_inputs, ModelNew, metadata, context = compile_kernel_new(
-       model_tag,
-       task_tag,
-       eval_tag,
-       time_tag,
-       reference_code,
-       generated_code,
-       build_dir=build_dir,
-       seed_num=42,
-       verbose=True,
-    )
-
-    request = EvalKernelRequest(
-        model_tag=model_tag,
-        task_tag=task_tag,
-        eval_tag=eval_tag,
-        time_tag=time_tag,
-        Model=Model,
-        get_init_inputs=get_init_inputs,
-        get_inputs=get_inputs,
-        ModelNew=ModelNew,
-        metadata=metadata,
-        context=context,
-    )
-
-    result_queue_key = f"{model_tag}_{task_tag}_{eval_tag}_{time_tag}"
-    try:
-        result_queue[result_queue_key] = asyncio.Queue()
-
-        # add request to eval queue
-        await eval_queue.put(request)
-   
-        # get result from result queue
-        result = await get_with_timeout(result_queue[result_queue_key], 120)
-
-        return result
-
-    except Exception as e:
-        logger.error(f"Error adding request to eval queue: {e}")
-        raise e
-
-    finally:
-        # delete result queue
-        del result_queue[result_queue_key]
-
-
-
-def compile_kernel_new(
-    model_tag: str,
-    task_tag: str,
-    eval_tag: str,
-    time_tag: str,
-    original_model_src: str,
-    custom_model_src: str,
-    build_dir: str = None,
-    seed_num: int = 42,
-    verbose: bool = False,
-) -> tuple[torch.nn.Module, callable, callable, torch.nn.Module, dict, dict]: # Model, get_init_inputs, get_inputs, ModelNew, metadata, context
-    """
-    Evaluate the custom kernel against the original model
-
-    num_correct_trials: number of trials to initialize different random inputs; correctness pass only if all trials pass
-    num_perf_trials: run the evalutation many times to take the average
-    device: GPU (cuda) device to run the evalutation on
-    """
-    assert torch.cuda.is_available(), "CUDA is not available, cannot run Eval"
-    torch.set_printoptions(
-        precision=4,  # Decimal places
-        threshold=10,  # Total number of elements before truncating
-        edgeitems=3,  # Number of elements at beginning and end of dimensions
-        linewidth=80,  # Maximum width before wrapping
-    )
-
-    eval_key = f"{model_tag}_{task_tag}_{eval_tag}_{time_tag}"
-
-    context = {}
-
-    metadata = {}  # for storing result metadata
-
-    # this is where compilation happens
-    try:
-        os.environ["TORCH_USE_CUDA_DSA"] = "1"  # compile with device side assertion
-        # add hash for later to distinguish between multi-turn kernels
-        ModelNew = load_custom_model(custom_model_src, context, build_dir)
-        # torch.cuda.synchronize(device=device)  # not sure if this is too much
-    except Exception as e:
-        print(
-            f"Failed to compile custom CUDA kernel: Record as compilation failure. \nError: {e}"
-        )
-        # TODO: add metadata for compilation error (how to we get the compilation error message?)
-
-        if "lock" in str(e) or "No such file or directory" in str(e):
-            # this is a lock file error, likely due to concurrent compilation
-            # this does not necessarily mean the compilation failed, but we should retry
-            logger.error(f"[Eval {eval_key}] Lock file error during compilation, Please retry. Error: {e}")
-            graceful_eval_cleanup(context, device=None)
-            raise e
-        else:
-            metadata["compilation_error"] = e
-            graceful_eval_cleanup(context, device=None)
-            # return KernelExecResult(
-            #    compiled=False, metadata=metadata
-            #)  # skip further steps
-            raise e
-
-    if verbose:
-        logger.info(f"[Eval {eval_key}] Start Evalulation!")
-        logger.info(f"[Eval {eval_key}] Loading Original Model")
-
-    Model, get_init_inputs, get_inputs = load_original_model_and_inputs(
-        original_model_src, context
-    )
-
-    return Model, get_init_inputs, get_inputs, ModelNew, metadata, context
-
-async def eval_kernel_against_ref_async(
-    device: torch.device, # have to run on GPU
-) -> KernelExecResult:
-
-    global eval_queue, result_queue
-    logger.info(f"[KB_Eval] Started on device {device}")
-
-    seed_num: int = 42
-    num_correct_trials: int = 2
-    num_perf_trials: int = 50
-    verbose: bool = False
-    measure_performance: bool = True
-    measure_performance_ref: bool = False
-
-    context: dict = {}
-
-    while True:
-        try:
-            request: EvalKernelRequest = await get_with_timeout(eval_queue, 10)
-            if request is None:
-                continue
-
-            eval_key = f"{request.model_tag}_{request.task_tag}_{request.eval_tag}_{request.time_tag}"
-            logger.info(f"[KB_Eval {eval_key}] Started...")
-
-            context = request.context
-
-            set_seed(seed_num)  # set seed for reproducible input
-            init_inputs = request.get_init_inputs()
-            init_inputs = [
-                x.cuda(device=device) if isinstance(x, torch.Tensor) else x for x in init_inputs
-            ]
-
-            with torch.no_grad():
-                set_seed(seed_num)  # set seed for reproducible weights
-                original_model = request.Model(*init_inputs)
-                assert hasattr(original_model, "forward")
-                if verbose:
-                    logger.info(f"[KB_Eval {eval_key}] Original Model Loaded")
-            if verbose:
-                logger.info(f"[KB_Eval {eval_key}] Loading and Compiling New Model with Custom CUDA Kernel")
-
-            request.metadata["hardware"] = torch.cuda.get_device_name(device=device)
-            request.metadata["device"] = str(device)  # for debugging
-
-
-            # at this point we passed compilation
-            try:
-                with torch.no_grad():
-                    set_seed(seed_num)  # set seed for reproducible weights
-                    custom_model = request.ModelNew(*init_inputs)
-                    assert hasattr(custom_model, "forward")
-                    torch.cuda.synchronize(device=device)
-                if verbose:
-                    logger.info(f"[KB_Eval {eval_key}] New Model with Custom CUDA Kernel Loaded")
-            except RuntimeError as e:
-                print(
-                    f"Failed to load custom CUDA kernel; Compiled but not able to run, count as runtime error. \nError: {e}"
-                )
-                # TODO: add metadata for runtime error e.g. error in launching kernel, illegal memory access, ...
-                graceful_eval_cleanup(context, device)
-                request.metadata["runtime_error"] = e
-                return KernelExecResult(
-                    compiled=True, correctness=False, metadata=request.metadata
-                )  # skip further steps
-
-            kernel_exec_result = None
-
-            # Check Correctness
-            if verbose:
-                logger.info(f"[KB_Eval {eval_key}] Checking Correctness")
-            try:
-                kernel_exec_result = run_and_check_correctness(
-                    original_model,
-                    custom_model,
-                    request.get_inputs,
-                    metadata=request.metadata,
-                    num_correct_trials=num_correct_trials,
-                    verbose=verbose,
-                    seed=seed_num,
-                    device=device,
-                )
-            except Exception as e:
-                # TODO: add metadata for runtime error e.g. error in launching kernel, illegal memory access, ...
-                request.metadata["runtime_error"] = e
-                kernel_exec_result = KernelExecResult(
-                    compiled=True, correctness=False, metadata=request.metadata
-                )
-
-            # Measure Performance [Optional] | conditioned on compilation + correctness + no exception so far
-            if measure_performance:
-                try:
-                    if kernel_exec_result and kernel_exec_result.correctness:
-                        if verbose:
-                            logger.info(f"[KB_Eval {eval_key}] Measuring Performance as Sample is Correct")
-
-                        torch.cuda.synchronize(device=device)
-                        set_seed(seed_num)
-                        inputs = request.get_inputs()
-                        inputs = [
-                            x.cuda(device=device) if isinstance(x, torch.Tensor) else x
-                            for x in inputs
-                        ]
-                        model_new = custom_model.cuda(device=device)
-                        torch.cuda.synchronize(device=device)
-
-                        elapsed_times = time_execution_with_cuda_event(
-                            model_new,
-                            *inputs,
-                            num_trials=num_perf_trials,
-                            verbose=verbose,
-                            device=device,
-                        )
-                        runtime_stats = get_timing_stats(elapsed_times, device=device)
-
-                        if verbose:
-                            logger.info(f"[KB_Eval {eval_key}] Performance Stats: {runtime_stats}")
-                        kernel_exec_result.runtime = runtime_stats["mean"]
-                        kernel_exec_result.runtime_stats = runtime_stats
-
-                        if measure_performance_ref:
-                            elapsed_times_ref = time_execution_with_cuda_event(
-                                original_model,
-                                *inputs,
-                                num_trials=num_perf_trials,
-                                verbose=verbose,
-                                device=device,
-                            )
-                            runtime_stats_ref = get_timing_stats(elapsed_times_ref, device=device)
-                            if verbose:
-                                logger.info(f"[KB_Eval {eval_key}] Performance Stats (Reference): {runtime_stats_ref}")
-                            kernel_exec_result.metadata["reference_runtime_stats"] = runtime_stats_ref
-
-                except Exception as e:
-                    if verbose:
-                        logger.error(f"[KB_Eval] Error in Measuring Performance: {e}")
-                    kernel_exec_result.metadata["error_during_performance"] = e
-
-            await result_queue[eval_key].put(kernel_exec_result)
-            logger.info(f"[KB_Eval {eval_key}] Result: {kernel_exec_result.model_dump()}")
-
-        except Exception as e:
-            # print exception and stack trace
-            logger.error(f"[KB_Eval {eval_key}] Error in Evaluating Kernel: {e}")
-            logger.error(traceback.format_exc())
-            await result_queue[eval_key].put(KernelExecResult(
-                compiled=False, correctness=False, metadata=request.metadata | {"error": str(e)}
-            ))
-        finally:
-            # clean up
-            graceful_eval_cleanup(context, device)
-
-
-async def main(args):
-    global eval_tasks
-    devices = [int(d) for d in args.devices.split(",")]
-    for device in devices:
-        eval_tasks.append(asyncio.create_task(eval_kernel_against_ref_async(device)))
+    host = kbEval_config["kbEvalRemoteServer"]["host"]
+    port = kbEval_config["kbEvalRemoteServer"]["port"]
+    devices = [int(d) for d in kbEval_config["kbEvalRemoteServer"]["devices"]]
 
     import uvicorn
-    logger.info(f"Starting server on port {args.port}")
-    server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=args.port))
-    server_task = asyncio.create_task(server.serve())
-    logger.info(f"Server started on port {args.port}")
-
-    await asyncio.gather(*eval_tasks, server_task)
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-p", "--port", type=int, default=5678)
-    parser.add_argument("-d", "--devices", type=str, default="0")
-    parser.add_argument("-m", "--max_jobs", type=int, default=4)
-    args = parser.parse_args()
-
-    os.environ["MAX_JOBS"] = str(args.max_jobs)  # for pre-compilation
-
-    asyncio.run(main(args))
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port))
+    asyncio.run(server.serve())
