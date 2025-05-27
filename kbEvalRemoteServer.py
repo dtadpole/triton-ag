@@ -5,12 +5,13 @@ import json
 import argparse
 import asyncio
 from datetime import datetime
+import concurrent.futures
 import boto3
 import torch
 from fastapi import FastAPI, Body
 from pydantic import BaseModel, Field
 
-from kbEvalTest.kbeval import KernelExecResult, eval_kernel_against_ref, set_seed, graceful_eval_cleanup, run_and_check_correctness, time_execution_with_cuda_event, get_timing_stats, load_original_model_and_inputs, load_custom_model
+from kbEvalTest.kbeval import KernelExecResult, set_seed, graceful_eval_cleanup, run_and_check_correctness, time_execution_with_cuda_event, get_timing_stats, load_original_model_and_inputs, load_custom_model
 from logger import logger
 
 
@@ -91,12 +92,30 @@ async def kb_eval(
         # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}
         temp_dir = os.path.join(KB_EVAL_DIR, model_tag, task_tag)
         os.makedirs(temp_dir, exist_ok=True)
-        
-        with open(os.path.join(temp_dir, f"{eval_tag}_{time_tag}_reference_code.py"), "w") as f:
+
+        reference_file_path = os.path.join(temp_dir, f"{eval_tag}_{time_tag}_reference_code.py")
+        with open(reference_file_path, "w") as f:
             f.write(reference_code)
-        with open(os.path.join(temp_dir, f"{eval_tag}_{time_tag}_generated_code.py"), "w") as f:
+
+        generated_file_path = os.path.join(temp_dir, f"{eval_tag}_{time_tag}_generated_code.py")
+        with open(generated_file_path, "w") as f:
             f.write(generated_code)
 
+        # pre-compile the generated code
+        command = f"python kbEvalCompile.py --model_src {generated_file_path}"
+        process = await asyncio.create_subprocess_shell(
+            command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+
+        logger.info(f"[Pre-compile] =================================================")
+        logger.info(f"[Pre-compile] command: {command}")
+        stdout, stderr = await process.communicate()
+        logger.info(f"[Pre-compile] return code: {process.returncode}")
+        logger.info(f"[Pre-compile] output: {stdout.decode()}")
+        logger.info(f"[Pre-compile] error: {stderr.decode()}")
+        logger.info(f"[Pre-compile] =================================================")
+
+        # now actually evaluate the kernel
         result = await compile_and_eval_kernel(
             model_tag,
             task_tag,
@@ -142,6 +161,8 @@ async def kb_eval(
                 logger.error(f"Request counter is negative: {request_counter}")
                 request_counter = 0
 
+
+
 async def compile_and_eval_kernel(
     model_tag: str,
     task_tag: str,
@@ -152,16 +173,21 @@ async def compile_and_eval_kernel(
 ) -> KernelExecResult:
     global eval_queue, result_queue
 
-    Model, get_init_inputs, get_inputs, ModelNew, metadata, context = compile_kernel(
-        model_tag,
-        task_tag,
-        eval_tag,
-        time_tag,
-        reference_code,
-        generated_code,
-        build_dir=None,
-        seed_num=42,
-        verbose=True,
+    # loop = asyncio.get_event_loop()
+    # with concurrent.futures.ProcessPoolExecutor() as pool:
+    #    Model, get_init_inputs, get_inputs, ModelNew, metadata, context = await loop.run_in_executor(
+    #           pool, compile_kernel_new, model_tag, task_tag, eval_tag, time_tag, reference_code, generated_code)
+
+    Model, get_init_inputs, get_inputs, ModelNew, metadata, context = compile_kernel_new(
+       model_tag,
+       task_tag,
+       eval_tag,
+       time_tag,
+       reference_code,
+       generated_code,
+       build_dir=None,
+       seed_num=42,
+       verbose=True,
     )
 
     request = EvalKernelRequest(
@@ -199,7 +225,7 @@ async def compile_and_eval_kernel(
 
 
 
-def compile_kernel(
+def compile_kernel_new(
     model_tag: str,
     task_tag: str,
     eval_tag: str,
@@ -209,7 +235,7 @@ def compile_kernel(
     build_dir: str = None,
     seed_num: int = 42,
     verbose: bool = False,
-) -> tuple[torch.nn.Module, callable, callable, torch.nn.Module, dict]: # Model, get_init_inputs, get_inputs, ModelNew, metadata, context
+) -> tuple[torch.nn.Module, callable, callable, torch.nn.Module, dict, dict]: # Model, get_init_inputs, get_inputs, ModelNew, metadata, context
     """
     Evaluate the custom kernel against the original model
 
@@ -255,14 +281,15 @@ def compile_kernel(
             # this is a lock file error, likely due to concurrent compilation
             # this does not necessarily mean the compilation failed, but we should retry
             logger.error(f"[Eval {eval_key}] Lock file error during compilation, Please retry. Error: {e}")
-            graceful_eval_cleanup(context)
-            return None
+            graceful_eval_cleanup(context, device=None)
+            raise e
         else:
             metadata["compilation_error"] = e
-            graceful_eval_cleanup(context)
-            return KernelExecResult(
-                compiled=False, metadata=metadata
-            )  # skip further steps
+            graceful_eval_cleanup(context, device=None)
+            # return KernelExecResult(
+            #    compiled=False, metadata=metadata
+            #)  # skip further steps
+            raise e
 
     return Model, get_init_inputs, get_inputs, ModelNew, metadata, context
 
@@ -388,7 +415,7 @@ async def eval_kernel_against_ref_async(
 
                         if measure_performance_ref:
                             elapsed_times_ref = time_execution_with_cuda_event(
-                                request.original_model,
+                                original_model,
                                 *inputs,
                                 num_trials=num_perf_trials,
                                 verbose=verbose,
@@ -438,9 +465,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-p", "--port", type=int, default=5678)
     parser.add_argument("-d", "--devices", type=str, default="0")
-    parser.add_argument("-m", "--max_jobs", type=int, default=16)
     args = parser.parse_args()
-
-    os.environ["MAX_JOBS"] = str(args.max_jobs)
 
     asyncio.run(main(args))

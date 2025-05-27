@@ -157,15 +157,16 @@ def graceful_eval_cleanup(curr_context: dict, device: torch.device):
     """  # delete ran-specific function definitions before next eval run
     del curr_context
     # Clear CUDA cache and reset GPU state
-    with torch.cuda.device(device):
-        torch.cuda.empty_cache()
+    if device is not None:
+        with torch.cuda.device(device):
+            torch.cuda.empty_cache()
 
-        # does this help?
-        torch.cuda.reset_peak_memory_stats(device=device)
+            # does this help?
+            torch.cuda.reset_peak_memory_stats(device=device)
 
-        torch.cuda.synchronize(
-            device=device
-        )  # Wait for all CUDA operations to complete
+            torch.cuda.synchronize(
+                device=device
+            )  # Wait for all CUDA operations to complete
 
     # _cleanup_cuda_extensions() # SIMON NOTE: is this necessary?
 
