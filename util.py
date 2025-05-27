@@ -193,13 +193,19 @@ def log_result_items(result: RunResult, name_tag: str, model_tag: str, task_tag:
             raise ValueError(f"Unknown item type: {type(item)}")
 
     json_output = json.dumps(output, indent=2)
-    # write to file
-    with open(os.path.join(folder, f"{name_tag}_{task_tag}_logger.json"), "w") as f:
-        f.write(json_output)
+    try:
+        # write to file
+        with open(os.path.join(folder, f"{name_tag}_logger.json"), "w") as f:
+            f.write(json_output)
+    except Exception as e:
+        logger.error(f"Error writing to file: {e}")
 
     # push to s3
-    s3_client = boto3.client("s3")
-    datetime_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    s3_client.put_object(Bucket="agent-xyz", Key=f"{model_tag}/{task_tag}/{name_tag}_{datetime_str}.json", Body=json_output)
+    try:
+        s3_client = boto3.client("s3")
+        datetime_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        s3_client.put_object(Bucket="agent-xyz", Key=f"{model_tag}/{task_tag}/{name_tag}_{datetime_str}.json", Body=json_output)
+    except Exception as e:
+        logger.error(f"Error pushing to s3: {e}")
 
     return output

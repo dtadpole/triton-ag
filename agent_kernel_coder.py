@@ -91,8 +91,8 @@ Choose the most efficient path forward:
 2. If not sure why the error happened, can you create debug test cases to check each intermediate result step by step, and fix the code at each individual step?
 3. If you have passed all the intermediate test cases, verify using the `kb_eval` verification.
 4. If intermediate test cases fail repeatedly, restore from the last checkpoint to `{workspace_dir}/current` folder and try again.
-5. Keep improving performance of the kernel code with more iterations, including iteration {max_iterations}.
-6. Stop the task after you have reached (or exceeded) the maximum number of iterations allowed: `{max_iterations}`.
+5. Keep improving performance of the kernel code with more iterations, up to and including iteration {max_iterations}.
+6. Stop the task after you have reached the maximum iterations allowed, do not exceed maximum iterations of `{max_iterations}`.
 
 Be concise in your reasoning, select the appropriate tool or action.
 """
@@ -244,7 +244,7 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
                             model_settings=model_settings,
                         ),
                     )
-                    log_result_items(result, f"{AGENT_NAME}_r{rollout_id}", MODEL_TAG, TASK_TAG, workspace_dir)
+                    log_result_items(result, f"{AGENT_NAME}_r{rollout_id:02d}", MODEL_TAG, TASK_TAG, workspace_dir)
                     logger.info(result.final_output)
                     return result.final_output
             except Exception as e:
@@ -289,7 +289,7 @@ if __name__ == "__main__":
     parser.add_argument("-d", "--workspace-dir", type=str, default="")
     parser.add_argument("-p", "--provider", type=str, default=None)
     parser.add_argument("-m", "--model-name", type=str, default=None)
-    parser.add_argument("-e", "--max-iterations", type=int, default=4)
+    parser.add_argument("-e", "--max-iterations", type=int, default=5)
     parser.add_argument("-r", "--total-rollouts", type=int, default=8)
     parser.add_argument(
         "-t",
