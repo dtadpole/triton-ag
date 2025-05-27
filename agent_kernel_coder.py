@@ -80,7 +80,8 @@ Here's an example:
 **EVALUATE CODE**
 
 For each iteration, use `kb_eval` tool to evaluate the correctness and performance of generated CUDA kernel.
-At end of each iteration, summarize your changes in a few sentences, and call `kb_upload_summary` to upload the summary.  Always generate a summary for each and every single iteration step, even if eval has error(s).
+After each iteration, summarize your changes in a few sentences, and call `kb_upload_summary` to upload the summary.  Always generate a summary and call `kb_upload_summary` for each and every single iteration step, regardless
+of whether `kb_eval` has error(s).
 
 Did you encounter error when running `kb_eval` validation?
 Based on the error information, what's your next action?
@@ -289,7 +290,7 @@ if __name__ == "__main__":
     parser.add_argument("-p", "--provider", type=str, default=None)
     parser.add_argument("-m", "--model-name", type=str, default=None)
     parser.add_argument("-e", "--max-iterations", type=int, default=8)
-    parser.add_argument("-r", "--total-rollouts", type=int, default=2)
+    parser.add_argument("-r", "--total-rollouts", type=int, default=4)
     parser.add_argument(
         "-t",
         "--task",

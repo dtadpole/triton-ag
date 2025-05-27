@@ -36,20 +36,28 @@ def compile_and_eval_kernel(
     args: argparse.Namespace,
 ) -> KernelExecResult:
 
-    Model, get_init_inputs, get_inputs, ModelNew, metadata, context = compile_kernel_new(
-       model_tag,
-       task_tag,
-       eval_tag,
-       time_tag,
-       reference_code,
-       generated_code,
-       verbose=args.verbose,
-    )
+    try:
+        Model, get_init_inputs, get_inputs, ModelNew, metadata, context = compile_kernel_new(
+            model_tag,
+            task_tag,
+            eval_tag,
+            time_tag,
+            reference_code,
+            generated_code,
+            verbose=args.verbose,
+        )
+    except Exception as e:
+        logger.error(f"[KB_Eval] Error compiling kernel: {e}")
+        result = KernelExecResult(
+            compiled=False, correctness=False, metadata={"compilation_error": e}
+        )
+        # return result
+        return result
 
     # get my own process id
     pid = os.getpid()
 
-    tag = f"{model_tag}_{task_tag}_{eval_tag}_{time_tag}"
+    eval_key = f"{model_tag}_{task_tag}_{eval_tag}_{time_tag}"
 
     # lock file is {HOME}/.kbeval/lock_{str(device)}
     lock_file = os.path.join(KB_EVAL_DIR, f".lock_{str(device)}")
@@ -57,7 +65,7 @@ def compile_and_eval_kernel(
     while True:
         try:
             with lock.acquire(timeout=1):
-                logger.info(f"[KB_Eval] Acquired lock {lock_file} [{tag}]")
+                logger.info(f"[KB_Eval] Acquired lock {lock_file} [{eval_key}]")
 
                 # write my pid to lock file
                 with open(lock_file, "w") as f:
@@ -81,22 +89,19 @@ def compile_and_eval_kernel(
                     measure_performance_ref=args.measure_performance_ref,
                 )
 
-                # write result to file
-                result_json_path = os.path.join(temp_dir, f"{eval_tag}_{time_tag}_kbeval.json")
-                with open(result_json_path, "w") as f:
-                    f.write(result.model_dump_json())
-
-                # remove lock file
                 os.remove(lock_file)
-                logger.info(f"[KB_Eval] Released lock {lock_file} [{tag}]")
+                logger.info(f"[KB_Eval] Released lock {lock_file} [{eval_key}]")
 
                 return result
         except Timeout:
-            logger.info(f"[KB_Eval] Waiting for lock to be released {lock_file} [{tag}]")
+            logger.info(f"[KB_Eval] Waiting for lock to be released {lock_file} [{eval_key}]")
             continue
         except Exception as e:
-            logger.error(f"[KB_Eval] Error acquiring lock: {e} [{tag}]")
-            continue
+            logger.error(f"[KB_Eval] Error acquiring lock: {e} [{eval_key}]")
+            result = KernelExecResult(
+                compiled=True, correctness=False, metadata={"runtime_error": e}
+            )
+            return result
         finally:
             # check lockfile modified time
             if os.path.exists(lock_file):
@@ -381,7 +386,8 @@ if __name__ == "__main__":
         result.metadata['runtime_error'] = exception_traceback_str
 
     # write to file
-    with open(os.path.join(temp_dir, f"kbeval_{args.eval_tag}_{args.time_tag}.json"), "w") as f:
+    with open(os.path.join(temp_dir, f"{args.eval_tag}_{args.time_tag}_kbeval.json"), "w") as f:
         f.write(json.dumps(result.model_dump(), indent=4))
+
 
     logger.info(f"Evaluation result: {json.dumps(result.model_dump(), indent=4)}")

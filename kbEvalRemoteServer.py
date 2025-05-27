@@ -88,16 +88,16 @@ async def kb_eval(
             command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=os.environ.copy()
         )
 
-        logger.info(f"[KB Eval] START [{eval_tag}] ====================")
-        logger.info(f"[KB Eval] command: {command} [{eval_tag}]")
+        logger.info(f"[KB Eval] [{eval_tag}] START ====================")
+        logger.info(f"[KB Eval] [{eval_tag}] command: {command}")
         stdout, stderr = await process.communicate()
-        logger.info(f"[KB Eval] return code: {process.returncode} [{eval_tag}]")
+        logger.info(f"[KB Eval] [{eval_tag}] return code: {process.returncode}")
         # read line by line and print
         for line in stdout.decode().splitlines():
-            logger.info(f"[KB Eval] output: {line} [{eval_tag}]")
+            logger.info(f"[KB Eval] [{eval_tag}] output: {line}")
         for line in stderr.decode().splitlines():
-            logger.error(f"[KB Eval] error: {line} [{eval_tag}]")
-        logger.info(f"[KB Eval] END [{eval_tag}] ====================")
+            logger.error(f"[KB Eval] [{eval_tag}] error: {line}")
+        logger.info(f"[KB Eval] [{eval_tag}] END ====================")
 
         # read the result from {temp_dir}/kbeval_{eval_tag}.json
         result_json_path = os.path.join(temp_dir, f"{eval_tag}_{time_tag}_kbeval.json")
