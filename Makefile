@@ -1,7 +1,7 @@
 mlflow:
 	mlflow server --host localhost --port 5050
 
-kbeval:
+kbEval:
 	uv run kbEvalRemoteServer.py 
 
 codeRunServer:

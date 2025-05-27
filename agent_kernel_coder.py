@@ -205,9 +205,9 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
         kb_eval_server = MCPServerStdio(
             params={
                 "command": "uv",
-                "args": ["run", "--with", "mcp", "mcp", "run", "kbEvalServer.py"],
+                "args": ["run", "--with", "mcp", "mcp", "run", "kbEvalMCPServer.py"],
             },
-            client_session_timeout_seconds=120,
+            client_session_timeout_seconds=150,
         )
         async with file_server as fs, kb_eval_server as kbs, sequential_thinking_server as sqs:
             try:
