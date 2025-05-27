@@ -194,7 +194,7 @@ def log_result_items(result: RunResult, name_tag: str, model_tag: str, task_tag:
 
     json_output = json.dumps(output, indent=2)
     # write to file
-    with open(os.path.join(folder, f"{name_tag}_logger.json"), "w") as f:
+    with open(os.path.join(folder, f"{name_tag}_{task_tag}_logger.json"), "w") as f:
         f.write(json_output)
 
     # push to s3
