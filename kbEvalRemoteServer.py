@@ -21,12 +21,12 @@ async def get_with_timeout(queue, timeout):
     except asyncio.TimeoutError:
         return None  # Or raise an exception, or handle it as needed
 
-
 KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
 
 # Create app
 app = FastAPI()
 
+eval_tasks = []
 eval_queue = asyncio.Queue()
 result_queue = {}
 
@@ -55,6 +55,19 @@ class EvalKernelRequest:
         self.context = context
 
 
+async def get_pending_task_count():
+    all_tasks = asyncio.all_tasks()
+    return len(set(all_tasks))
+
+@app.get("/stats")
+async def stats():
+    global eval_queue, result_queue
+    return {
+        "num_eval_tasks": len(eval_tasks),
+        "pending_eval_requests": len(result_queue),
+        "pending_tasks": await get_pending_task_count(),
+    }
+
 @app.post("/kb_eval")
 async def kb_eval(
     model_tag: str = Body(...),
@@ -82,6 +95,11 @@ async def kb_eval(
         generated_code
     )
 
+    if result is None:
+        result = KernelExecResult(
+            compiled=False, correctness=False, metadata={"error": "Unknown error"}
+        )
+
     # check if there is compilation error
     if 'compilation_error' in result.metadata:
         # print exception and stack trace
@@ -101,64 +119,11 @@ async def kb_eval(
         result.metadata['runtime_error'] = exception_traceback_str
 
     # write result to {temp_dir}/kbeval_{eval_tag}.json
+    result_json = result.model_dump()
     with open(os.path.join(temp_dir, f"{eval_tag}_{time_tag}_kbeval.json"), "w") as f:
-        f.write(json.dumps(result.model_dump(), indent=4))
+        f.write(json.dumps(result_json, indent=4))
 
     return result
-
-
-@app.post("/kb_upload_summary")
-async def kb_upload_summary(
-    model_tag: str,
-    task_tag: str,
-    eval_tag: str,
-    time_tag: str,
-    summary: str,
-) -> str:
-    # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}
-    temp_dir = os.path.join(KB_EVAL_DIR, model_tag, task_tag)
-
-    try:
-        # read result from {temp_dir}/kbeval_{eval_tag}.json
-        with open(os.path.join(temp_dir, f"{eval_tag}_{time_tag}_kbeval.json"), "r") as f:
-            result = KernelExecResult.model_validate_json(f.read())
-
-        logger.info(f"Uploading summary to s3: {model_tag}, {task_tag}, {eval_tag}")
-        logger.info(f"Result: {result.model_dump()}")
-        logger.info(f"Generated summary: {summary}")
-
-        # read reference code
-        with open(os.path.join(temp_dir, f"{eval_tag}_{time_tag}_reference_code.py"), "r") as f:
-            reference_code = f.read()
-        # read generated code
-        with open(os.path.join(temp_dir, f"{eval_tag}_{time_tag}_generated_code.py"), "r") as f:
-            generated_code = f.read()
-
-        # generate summary of this iteration, and write to disk as json
-        summary = {
-            "eval_tag": eval_tag,
-            "reference_code": reference_code,
-            "generated_code": generated_code,
-            "generated_summary": summary,
-            "result": result.model_dump(),
-        }
-
-        with open(os.path.join(temp_dir, f"{eval_tag}_{time_tag}_kbeval_summary.json"), "w") as f:
-            f.write(json.dumps(summary, indent=4))
-
-        # push to aws s3
-        s3_client = boto3.client("s3")
-        upload_key = f"kbeval/{model_tag}/{task_tag}/{eval_tag}_{time_tag}_kbeval_summary.json"
-        s3_client.put_object(Bucket="agent-xyz",
-                            Key=upload_key,
-                            Body=json.dumps(summary, indent=4))
-
-        return f"uploaded to s3://agent-xyz/{upload_key}"
-    except Exception as e:
-        logger.error(f"Error uploading summary to s3: {e}")
-        return f"Error uploading summary to s3: {e}"
-
-
 
 async def compile_and_eval_kernel(
     model_tag: str,
@@ -196,18 +161,25 @@ async def compile_and_eval_kernel(
     )
 
     result_queue_key = f"{model_tag}_{task_tag}_{eval_tag}_{time_tag}"
-    result_queue[result_queue_key] = asyncio.Queue()
+    try:
+        result_queue[result_queue_key] = asyncio.Queue()
 
-    # add request to eval queue
-    await eval_queue.put(request)
+        # add request to eval queue
+        await eval_queue.put(request)
+   
+        # get result from result queue
+        result = await get_with_timeout(result_queue[result_queue_key], 120)
 
-    # get result from result queue
-    result = await get_with_timeout(result_queue[result_queue_key], 120)
+        return result
 
-    # delete result queue
-    del result_queue[result_queue_key]
+    except Exception as e:
+        logger.error(f"Error adding request to eval queue: {e}")
+        raise e
 
-    return result
+    finally:
+        # delete result queue
+        del result_queue[result_queue_key]
+
 
 
 def compile_kernel(
@@ -431,18 +403,18 @@ async def eval_kernel_against_ref_async(
 
 
 async def main(args):
-    tasks = []
+    global eval_tasks
     devices = [int(d) for d in args.devices.split(",")]
     for device in devices:
-        tasks.append(asyncio.create_task(eval_kernel_against_ref_async(device)))
+        eval_tasks.append(asyncio.create_task(eval_kernel_against_ref_async(device)))
 
     import uvicorn
     logger.info(f"Starting server on port {args.port}")
     server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=args.port))
-    tasks.append(asyncio.create_task(server.serve()))
+    server_task = asyncio.create_task(server.serve())
     logger.info(f"Server started on port {args.port}")
 
-    await asyncio.gather(*tasks)
+    await asyncio.gather(*eval_tasks, server_task)
 
 
 if __name__ == "__main__":
