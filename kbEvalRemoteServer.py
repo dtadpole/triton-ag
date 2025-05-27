@@ -107,13 +107,13 @@ async def kb_eval(
             command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
 
-        logger.info(f"[Pre-compile] =================================================")
-        logger.info(f"[Pre-compile] command: {command}")
+        logger.info(f"[Pre-compile {time_tag} START] =================================================")
+        logger.info(f"[Pre-compile {time_tag}] command: {command}")
         stdout, stderr = await process.communicate()
-        logger.info(f"[Pre-compile] return code: {process.returncode}")
-        logger.info(f"[Pre-compile] output: {stdout.decode()}")
-        logger.info(f"[Pre-compile] error: {stderr.decode()}")
-        logger.info(f"[Pre-compile] =================================================")
+        logger.info(f"[Pre-compile {time_tag}] return code: {process.returncode}")
+        logger.info(f"[Pre-compile {time_tag}] output: {stdout.decode()}")
+        logger.info(f"[Pre-compile {time_tag}] error: {stderr.decode()}")
+        logger.info(f"[Pre-compile {time_tag} END] =================================================")
 
         # now actually evaluate the kernel
         result = await compile_and_eval_kernel(
