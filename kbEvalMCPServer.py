@@ -34,8 +34,8 @@ def pick_server():
     min_avg_load = float("inf")
     min_avg_load_server = None
     for server in stats:
-        if stats[server]["pending_eval_requests"] / stats[server]["num_eval_tasks"] < min_avg_load:
-            min_avg_load = stats[server]["pending_eval_requests"] / stats[server]["num_eval_tasks"]
+        if stats[server]["pending_eval_requests"] / stats[server]["num_eval_jobs"] < min_avg_load:
+            min_avg_load = stats[server]["pending_eval_requests"] / stats[server]["num_eval_jobs"]
             min_avg_load_server = server
     return min_avg_load_server
 

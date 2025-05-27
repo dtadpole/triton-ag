@@ -30,6 +30,11 @@ eval_tasks = []
 eval_queue = asyncio.Queue()
 result_queue = {}
 
+request_counter = 0
+request_counter_lock = asyncio.Lock()
+
+
+
 class EvalKernelRequest:
     model_tag: str
     task_tag: str
@@ -61,11 +66,11 @@ async def get_pending_task_count():
 
 @app.get("/stats")
 async def stats():
-    global eval_queue, result_queue
+    global eval_queue, result_queue, request_counter
     return {
-        "num_eval_tasks": len(eval_tasks),
-        "pending_eval_requests": len(result_queue),
-        "pending_tasks": await get_pending_task_count(),
+        "num_eval_jobs": len(eval_tasks),
+        "pending_eval_tasks": len(result_queue),
+        "pending_eval_requests": request_counter,
     }
 
 @app.post("/kb_eval")
@@ -77,53 +82,65 @@ async def kb_eval(
     reference_code: str = Body(...),
     generated_code: str = Body(...),
 ) -> KernelExecResult:
-    # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}
-    temp_dir = os.path.join(KB_EVAL_DIR, model_tag, task_tag)
-    os.makedirs(temp_dir, exist_ok=True)
-    
-    with open(os.path.join(temp_dir, f"{eval_tag}_{time_tag}_reference_code.py"), "w") as f:
-        f.write(reference_code)
-    with open(os.path.join(temp_dir, f"{eval_tag}_{time_tag}_generated_code.py"), "w") as f:
-        f.write(generated_code)
+    global request_counter, request_counter_lock
 
-    result = await compile_and_eval_kernel(
-        model_tag,
-        task_tag,
-        eval_tag,
-        time_tag,
-        reference_code,
-        generated_code
-    )
+    try:
+        async with request_counter_lock:
+            request_counter += 1
 
-    if result is None:
-        result = KernelExecResult(
-            compiled=False, correctness=False, metadata={"error": "Unknown error"}
+        # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}
+        temp_dir = os.path.join(KB_EVAL_DIR, model_tag, task_tag)
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        with open(os.path.join(temp_dir, f"{eval_tag}_{time_tag}_reference_code.py"), "w") as f:
+            f.write(reference_code)
+        with open(os.path.join(temp_dir, f"{eval_tag}_{time_tag}_generated_code.py"), "w") as f:
+            f.write(generated_code)
+
+        result = await compile_and_eval_kernel(
+            model_tag,
+            task_tag,
+            eval_tag,
+            time_tag,
+            reference_code,
+            generated_code
         )
 
-    # check if there is compilation error
-    if 'compilation_error' in result.metadata:
-        # print exception and stack trace
-        exception = result.metadata['compilation_error']
-        exception_traceback_str = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
-        # print to stderr
-        logger.error(exception_traceback_str)
-        result.metadata['compilation_error'] = exception_traceback_str
+        if result is None:
+            result = KernelExecResult(
+                compiled=False, correctness=False, metadata={"error": "Unknown error"}
+            )
 
-    # check if there is runtime error
-    if 'runtime_error' in result.metadata:
-        # print exception and stack trace
-        exception = result.metadata['runtime_error']
-        exception_traceback_str = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
-        # print to stderr
-        logger.error(exception_traceback_str)
-        result.metadata['runtime_error'] = exception_traceback_str
+        # check if there is compilation error
+        if 'compilation_error' in result.metadata:
+            # print exception and stack trace
+            exception = result.metadata['compilation_error']
+            exception_traceback_str = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
+            # print to stderr
+            logger.error(exception_traceback_str)
+            result.metadata['compilation_error'] = exception_traceback_str
 
-    # write result to {temp_dir}/kbeval_{eval_tag}.json
-    result_json = result.model_dump()
-    with open(os.path.join(temp_dir, f"{eval_tag}_{time_tag}_kbeval.json"), "w") as f:
-        f.write(json.dumps(result_json, indent=4))
+        # check if there is runtime error
+        if 'runtime_error' in result.metadata:
+            # print exception and stack trace
+            exception = result.metadata['runtime_error']
+            exception_traceback_str = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
+            # print to stderr
+            logger.error(exception_traceback_str)
+            result.metadata['runtime_error'] = exception_traceback_str
 
-    return result
+        # write result to {temp_dir}/kbeval_{eval_tag}.json
+        result_json = result.model_dump()
+        with open(os.path.join(temp_dir, f"{eval_tag}_{time_tag}_kbeval.json"), "w") as f:
+            f.write(json.dumps(result_json, indent=4))
+
+        return result
+    finally:
+        async with request_counter_lock:
+            request_counter -= 1 
+            if request_counter < 0:
+                logger.error(f"Request counter is negative: {request_counter}")
+                request_counter = 0
 
 async def compile_and_eval_kernel(
     model_tag: str,
@@ -421,6 +438,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-p", "--port", type=int, default=5678)
     parser.add_argument("-d", "--devices", type=str, default="0")
+    parser.add_argument("-m", "--max_jobs", type=int, default=16)
     args = parser.parse_args()
+
+    os.environ["MAX_JOBS"] = str(args.max_jobs)
 
     asyncio.run(main(args))
