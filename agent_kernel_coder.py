@@ -207,7 +207,7 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
                 "command": "uv",
                 "args": ["run", "--with", "mcp", "mcp", "run", "kbEvalMCPServer.py"],
             },
-            client_session_timeout_seconds=150,
+            client_session_timeout_seconds=300,
         )
         async with file_server as fs, kb_eval_server as kbs, sequential_thinking_server as sqs:
             try:
@@ -244,7 +244,7 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
                             model_settings=model_settings,
                         ),
                     )
-                    log_result_items(result, AGENT_NAME, MODEL_TAG, TASK_TAG, workspace_dir)
+                    log_result_items(result, f"{AGENT_NAME}_r{rollout_id}", MODEL_TAG, TASK_TAG, workspace_dir)
                     logger.info(result.final_output)
                     return result.final_output
             except Exception as e:
@@ -289,8 +289,8 @@ if __name__ == "__main__":
     parser.add_argument("-d", "--workspace-dir", type=str, default="")
     parser.add_argument("-p", "--provider", type=str, default=None)
     parser.add_argument("-m", "--model-name", type=str, default=None)
-    parser.add_argument("-e", "--max-iterations", type=int, default=8)
-    parser.add_argument("-r", "--total-rollouts", type=int, default=4)
+    parser.add_argument("-e", "--max-iterations", type=int, default=4)
+    parser.add_argument("-r", "--total-rollouts", type=int, default=8)
     parser.add_argument(
         "-t",
         "--task",

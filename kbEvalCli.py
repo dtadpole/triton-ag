@@ -338,7 +338,7 @@ if __name__ == "__main__":
     parser.add_argument("--generated_code", type=str, default="elemAddCuda.py")
     parser.add_argument("--measure_performance_ref", action="store_true")
     parser.add_argument("--device-list", type=str, default="0")
-    parser.add_argument("--max-jobs", type=int, default=4)
+    parser.add_argument("--max-jobs", type=int, default=8)
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
