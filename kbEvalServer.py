@@ -5,7 +5,7 @@ from datetime import datetime
 import os
 from util import is_subfolder
 from logger import logger
-from kernel_bench.src.eval import KernelExecResult
+from kbEvalTest.kbeval import KernelExecResult
 import boto3
 from pydantic import Field
 

@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 import traceback
 from typing import Union
 import asyncio
@@ -37,13 +38,16 @@ When generating code, always follow these instructions:
 """
 
 KERNEL_CODER_NEXT_PROMPT = """
-Implement the task step by step, minimize changes while working on the current step,
-Iterate step by step, consider all possible optimization techniques.
+Implement the task and iterate step by step, consider all possible optimization techniques.
+(e.g. shared memory, coalesced access, occupancy tuning, block size optimization, grid stride
+loops, loop unrolling, kernel fusion, vectorized loads, bank conflict avoidance, warp primitives,
+arithmetic intenstiy, etc.)
 
 Task: {task}
 
 model_tag: `{model_tag}` 
 task_tag: `{task_tag}`
+time_tag: `{time_tag}`
 rollout_id: `{rollout_id}`
 
 eval_tag: the `eval_tag` is `rollout_id + iteration_number`. iteration number starts from 1 and increases by 1 each time when `kb_eval` is called. e.g. 
@@ -57,9 +61,7 @@ Write full generated kernel in a single file as {workspace_dir}/current/`eval_ta
 Generate a new file for each iteration.  Keep improving performance of the kernel code.
 
 Replace pytorch operators in the given module with raw CUDA kernels, optimizing for performance
-on NVIDIA architecture (e.g. shared memory, coalesced access, occupancy tuning, block size optimization, 
-grid stride loops, loop unrolling, kernel fusion, vectorized loads, bank conflict avoidance, warp primitives,
-arithmetic intenstiy, etc.).
+on NVIDIA architecture.
 
 Use torch.utils.cpp_extension.load_inline and name your optimized output module ModelNew.
 
@@ -67,7 +69,7 @@ You're NOT allowed to use torch.nn (except for Parameter, containers, and init).
 
 The input and output have to be on CUDA device. Your answer must be the complete new module
 (no testing code, no other code): it will be evaluated and you will be given feedback on its
-correctness and speedup so you can keep iterating, trying to maximize the speedup.
+correctness and speedup so you can keep iterating to maximize the speedup.
 
 Here's an example:
 
@@ -89,8 +91,8 @@ Choose the most efficient path forward:
 2. If not sure why the error happened, can you create debug test cases to check each intermediate result step by step, and fix the code at each individual step?
 3. If you have passed all the intermediate test cases, verify using the `kb_eval` verification.
 4. If intermediate test cases fail repeatedly, restore from the last checkpoint to `{workspace_dir}/current` folder and try again.
-5. Keep improving performance of the kernel code with more iterations, unless you have reached the maximum number of iterations.
-6. Stop the task if you have reached (or exceeded) the maximum number of iterations allowed: `{max_iterations}`.
+5. Keep improving performance of the kernel code with more iterations, including iteration {max_iterations}.
+6. Stop the task after you have reached (or exceeded) the maximum number of iterations allowed: `{max_iterations}`.
 
 Be concise in your reasoning, select the appropriate tool or action.
 """
@@ -224,6 +226,7 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
                     workspace_dir=workspace_dir,
                     model_tag=MODEL_TAG,
                     task_tag=TASK_TAG,
+                    time_tag=datetime.now().strftime("%Y%m%d_%H%M%S"),
                     rollout_id=f"r{args.rollout_id:02d}",
                     max_iterations=args.max_iterations,
                     example_code=EXAMPLE_CODE,
