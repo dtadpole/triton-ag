@@ -80,8 +80,7 @@ Here's an example:
 **EVALUATE CODE**
 
 For each iteration, use `kb_eval` tool to evaluate the correctness and performance of generated CUDA kernel.
-At end of each iteration, summarize your changes in a few sentences, and call `kb_upload_summary` to upload the summary.
-Always call `kb_upload_summary` for each and every iteration, even if the `kb_eval` call returns error.
+At end of each iteration, summarize your changes in a few sentences, and call `kb_upload_summary` to upload the summary.  Always generate a summary for each and every single iteration step, even if eval has error(s).
 
 Did you encounter error when running `kb_eval` validation?
 Based on the error information, what's your next action?
@@ -151,7 +150,7 @@ class ModelNew(nn.Module):
 '''
 
 # this is the main function that will be called by the Runner
-async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, None] = None, model_name: Union[str, None] = None):
+async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, None] = None, model_name: Union[str, None] = None, rollout_id: int = 1):
 
     logger.info(f"Running [{AGENT_NAME}] [{workspace_dir}] with task: {task}")
 
@@ -227,7 +226,7 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
                     model_tag=MODEL_TAG,
                     task_tag=TASK_TAG,
                     time_tag=datetime.now().strftime("%Y%m%d_%H%M%S"),
-                    rollout_id=f"r{args.rollout_id:02d}",
+                    rollout_id=f"r{rollout_id:02d}",
                     max_iterations=args.max_iterations,
                     example_code=EXAMPLE_CODE,
                 )
@@ -255,23 +254,7 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
                 logger.info(f"Agent [{AGENT_NAME}] completed!")
 
 
-
-if __name__ == "__main__":
-    # argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-d", "--workspace-dir", type=str, default="")
-    parser.add_argument("-p", "--provider", type=str, default=None)
-    parser.add_argument("-m", "--model-name", type=str, default=None)
-    parser.add_argument("-e", "--max-iterations", type=int, default=8)
-    parser.add_argument("-r", "--rollout-id", type=int, default=1)
-    parser.add_argument(
-        "-t",
-        "--task",
-        type=str,
-        default="./kernel_bench/level1/1_Square_matrix_multiplication_.py",
-    )
-    args = parser.parse_args()
-
+async def main(args):
     # check if the task is a file name
     if not os.path.exists(args.task):
         logger.error(f"Task file {args.task} does not exist")
@@ -289,4 +272,30 @@ if __name__ == "__main__":
     print(f"Running [{AGENT_NAME}] [{workspace_dir}] with task: {args.task}")
     print('='*50)
 
-    asyncio.run(run_kernel_coder(workspace_dir, args.task, args.provider, args.model_name))
+    tasks = []
+    for rollout_id in range(1, args.total_rollouts + 1):
+        tasks.append(run_kernel_coder(workspace_dir,
+                                      args.task,
+                                      args.provider,
+                                      args.model_name,
+                                      rollout_id=rollout_id))
+    await asyncio.gather(*tasks)
+
+
+if __name__ == "__main__":
+        # argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-d", "--workspace-dir", type=str, default="")
+    parser.add_argument("-p", "--provider", type=str, default=None)
+    parser.add_argument("-m", "--model-name", type=str, default=None)
+    parser.add_argument("-e", "--max-iterations", type=int, default=8)
+    parser.add_argument("-r", "--total-rollouts", type=int, default=2)
+    parser.add_argument(
+        "-t",
+        "--task",
+        type=str,
+        default="./kernel_bench/level1/1_Square_matrix_multiplication_.py",
+    )
+    args = parser.parse_args()
+
+    asyncio.run(main(args))
