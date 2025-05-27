@@ -90,9 +90,8 @@ Choose the most efficient path forward:
 1. Do you understand the error? Can you fix the error easily?
 2. If not sure why the error happened, can you create debug test cases to check each intermediate result step by step, and fix the code at each individual step?
 3. If you have passed all the intermediate test cases, verify using the `kb_eval` verification.
-4. If intermediate test cases fail repeatedly, restore from the last checkpoint to `{workspace_dir}/current` folder and try again.
-5. Keep improving performance of the kernel code with more iterations, up to and including iteration {max_iterations}.
-6. Stop the task after you have reached the maximum iterations allowed, do not exceed maximum iterations of `{max_iterations}`.
+4. Keep improving performance of the kernel code with more iterations, up to and including iteration {max_iterations}.
+5. Stop the task after you have reached the maximum iterations allowed, do not exceed maximum iterations of `{max_iterations}`.
 
 Be concise in your reasoning, select the appropriate tool or action.
 """
