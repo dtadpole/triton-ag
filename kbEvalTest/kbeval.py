@@ -645,9 +645,10 @@ def run_and_check_correctness(
                 print("[Error] Exception happens during correctness check")
                 print(f"Error in launching kernel for ModelNew: {e}")
 
-                metadata = register_and_format_exception(
-                    "runtime_error", e, metadata, truncate=True
-                )
+                # metadata = register_and_format_exception(
+                #     "runtime_error", e, metadata, truncate=True
+                #)
+                metadata["runtime_error"] = e
                 return KernelExecResult(
                     compiled=True, correctness=False, metadata=metadata
                 )

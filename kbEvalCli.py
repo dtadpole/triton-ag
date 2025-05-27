@@ -108,7 +108,7 @@ def compile_and_eval_kernel(
                 lock_modified_time = os.path.getmtime(lock_file)
                 # if modified time is more than 2 minutes, delete lock file
                 if lock_modified_time < os.path.getmtime(lock_file) - 120:
-                    logger.info(f"[KB_Eval] Lock file {lock_file} is older than 2 minutes, deleting... [{tag}]")
+                    logger.info(f"[KB_Eval] Lock file {lock_file} is older than 2 minutes, deleting... [{eval_key}]")
                     os.remove(lock_file)
 
 def compile_kernel_new(
@@ -320,7 +320,7 @@ def eval_kernel_against_ref_new(
         logger.error(f"[KB_Eval] Error in Evaluating Kernel: {e} [{eval_key}]")
         logger.error(traceback.format_exc())
         return KernelExecResult(
-            compiled=False, correctness=False, metadata=metadata | {"error": str(e)}
+            compiled=False, correctness=False, metadata=metadata | {"evaluation_error": e}
         )
     finally:
         # clean up
@@ -384,6 +384,15 @@ if __name__ == "__main__":
         # print to stderr
         logger.error(exception_traceback_str)
         result.metadata['runtime_error'] = exception_traceback_str
+
+    # check if there is evaluation error
+    if 'evaluation_error' in result.metadata:
+        # print exception and stack trace
+        exception = result.metadata['evaluation_error']
+        exception_traceback_str = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
+        # print to stderr
+        logger.error(exception_traceback_str)
+        result.metadata['evaluation_error'] = exception_traceback_str
 
     # write to file
     with open(os.path.join(temp_dir, f"{args.eval_tag}_{args.time_tag}_kbeval.json"), "w") as f:
