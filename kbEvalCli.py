@@ -1,7 +1,7 @@
 import argparse
 import sys
 import traceback
-from kernel_bench.src.eval import eval_kernel_against_ref
+from kbEvalTest.kbeval import eval_kernel_against_ref
 import os
 import json
 from datetime import datetime
