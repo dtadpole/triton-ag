@@ -93,6 +93,9 @@ async def kb_eval(
         temp_dir = os.path.join(KB_EVAL_DIR, model_tag, task_tag)
         os.makedirs(temp_dir, exist_ok=True)
 
+        build_dir = os.path.join(temp_dir, f"{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        os.makedirs(build_dir, exist_ok=True)
+
         reference_file_path = os.path.join(temp_dir, f"{eval_tag}_{time_tag}_reference_code.py")
         with open(reference_file_path, "w") as f:
             f.write(reference_code)
@@ -102,17 +105,20 @@ async def kb_eval(
             f.write(generated_code)
 
         # pre-compile the generated code
-        command = f"python kbEvalCompile.py --model_src {generated_file_path}"
+        command = f"python kbEvalCompile.py --model_src {generated_file_path} --build_dir {build_dir}"
         process = await asyncio.create_subprocess_shell(
-            command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=os.environ.copy()
         )
 
         logger.info(f"[Pre-compile {time_tag} START] =================================================")
         logger.info(f"[Pre-compile {time_tag}] command: {command}")
         stdout, stderr = await process.communicate()
         logger.info(f"[Pre-compile {time_tag}] return code: {process.returncode}")
-        logger.info(f"[Pre-compile {time_tag}] output: {stdout.decode()}")
-        logger.info(f"[Pre-compile {time_tag}] error: {stderr.decode()}")
+        # read line by line and print
+        for line in stdout.decode().splitlines():
+            logger.info(f"[Pre-compile {time_tag}] output: {line}")
+        for line in stderr.decode().splitlines():
+            logger.info(f"[Pre-compile {time_tag}] error: {line}")
         logger.info(f"[Pre-compile {time_tag} END] =================================================")
 
         # now actually evaluate the kernel
@@ -122,7 +128,8 @@ async def kb_eval(
             eval_tag,
             time_tag,
             reference_code,
-            generated_code
+            generated_code,
+            build_dir=build_dir,
         )
 
         if result is None:
@@ -170,6 +177,7 @@ async def compile_and_eval_kernel(
     time_tag: str,
     reference_code: str,
     generated_code: str,
+    build_dir: str = None,
 ) -> KernelExecResult:
     global eval_queue, result_queue
 
@@ -185,7 +193,7 @@ async def compile_and_eval_kernel(
        time_tag,
        reference_code,
        generated_code,
-       build_dir=None,
+       build_dir=build_dir,
        seed_num=42,
        verbose=True,
     )
@@ -255,14 +263,6 @@ def compile_kernel_new(
 
     context = {}
 
-    if verbose:
-        logger.info(f"[Eval {eval_key}] Start Evalulation!")
-        logger.info(f"[Eval {eval_key}] Loading Original Model")
-
-    Model, get_init_inputs, get_inputs = load_original_model_and_inputs(
-        original_model_src, context
-    )
-
     metadata = {}  # for storing result metadata
 
     # this is where compilation happens
@@ -290,6 +290,14 @@ def compile_kernel_new(
             #    compiled=False, metadata=metadata
             #)  # skip further steps
             raise e
+
+    if verbose:
+        logger.info(f"[Eval {eval_key}] Start Evalulation!")
+        logger.info(f"[Eval {eval_key}] Loading Original Model")
+
+    Model, get_init_inputs, get_inputs = load_original_model_and_inputs(
+        original_model_src, context
+    )
 
     return Model, get_init_inputs, get_inputs, ModelNew, metadata, context
 
@@ -465,6 +473,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-p", "--port", type=int, default=5678)
     parser.add_argument("-d", "--devices", type=str, default="0")
+    parser.add_argument("-m", "--max_jobs", type=int, default=4)
     args = parser.parse_args()
+
+    os.environ["MAX_JOBS"] = str(args.max_jobs)  # for pre-compilation
 
     asyncio.run(main(args))
