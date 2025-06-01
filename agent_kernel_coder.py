@@ -32,32 +32,27 @@ current_wd: `{workspace_dir}/current`
 4. Implement specific code for the given task, do not change anything else
 
 When generating code, always follow these instructions:
-- Implement all key functionalities (functions and modules) in a single file directly in the working directory (not subfolder).
-- You may create your own test cases to verify intermediate results, but the final and official verification will need to be done using `kb_eval_iteration` tool.
-- When creating your own test cases, always write them in subfolder under `tests`, with filename ends with `_test.py` (not in the working directory directly)
+- Implement all key functionalities (functions and modules) in a single file in the working directory (not subfolder).
+- You may create your own test cases to verify intermediate results, but the final and official verification will need to use `kb_eval_iteration` tool.
+- When creating your own test cases, always write them under `tests` subfolder (not in the working directory directly), with filename ends with `_test.py`
 """
 
 KERNEL_CODER_NEXT_PROMPT = """
 You will iteratively improve a CUDA kernel for a given PyTorch code, up to and including iteration `{max_iterations}`.
 
-Within each iteration, use sequential thinking to think and act step by step.
+Within each iteration, complete each and every single step of the following:
 -- Step 1: Implement the task.
 -- Step 2: Evaluate the correctness and performance of the generated CUDA kernel using `kb_eval_iteration` tool.
--- Step 3: Recap the changes for the current iteration in a few sentences.
--- Step 4: Upload the recap of the current iteration using `kb_upload_iteration` tool.
-Complete all steps of the current iteration, including recap the changes and uploading the iteration recap, before
-moving to the next iteration.
+-- Step 3: Recap the changes for the current iteration in a few sentences and upload the recap of the current iteration using `kb_upload_iteration` tool.
+Complete all steps of the current iteration, including recap the changes and uploading the recap, before starting
+the next iteration.
 
 Recap examples:
 -- "Iteration 1: Implemented the basic matrix multiplication kernel."
 -- "Iteration 2: Added loop unrolling (UNROLL_FACTOR=4). Runtime: 4.79 ms (slight regression). Correctness: passed."
 -- "Iteration 3: Attempted register blocking optimization with 4x4 register tiles, but encountered correctness issues. Max difference: 202.18, indicating significant numerical errors. Need to fix indexing and memory access patterns."
 
-Once all steps within an iteration has fully completed (including recap of the changes and uploading the iteration recap), 
-start the next iteration until you have reached the maximum iterations allowed, including iteration `{max_iterations}` but do not exceed maximum iterations of `{max_iterations}`.  For each iteration, keep improving performance of the kernel code.
-Consider all possible optimization techniques. (e.g. shared memory, coalesced access, occupancy tuning, block size, 
-optimization, grid stride loops, loop unrolling, kernel fusion, vectorized loads, bank conflict avoidance, warp primitives,
-arithmetic intenstiy, etc.)
+Do not start the next iteration until you have completed all steps of the current iteration. Once all steps within an iteration has fully completed (including recap of the changes and uploading the iteration recap), start the next iteration.  Repeat with a new iteration until you have reached the maximum iterations allowed, including iteration `{max_iterations}` but do not exceed maximum iterations of `{max_iterations}`.  For each iteration, keep improving performance of the kernel code. Consider all possible optimization techniques. (e.g. shared memory, coalesced access, occupancy tuning, block size, optimization, grid stride loops, loop unrolling, kernel fusion, vectorized loads, bank conflict avoidance, warp primitives, arithmetic intenstiy, etc.)
 
 Task: {task}
 
@@ -66,26 +61,22 @@ task_tag: `{task_tag}`
 time_tag: `{time_tag}`
 rollout_id: `{rollout_id}`
 
-eval_tag: the `eval_tag` is `rollout_id + iteration_number`. iteration number starts from 1 and increases by 1 each time when `kb_eval_iteration` is called. e.g. 
--- if `kb_eval_iteration` is called 1st time, your eval_tag is '{rollout_id}_i01'
--- if `kb_eval_iteration` is called 3rd time, your eval_tag is '{rollout_id}_i03'
--- if `kb_eval_iteration` is called 10th time, your eval_tag is '{rollout_id}_i10'
+eval_tag: the `eval_tag` is `rollout_id + iteration_number`. iteration number starts from 1 and increases by 1 for each iteration. e.g. 
+-- for iteration 1, your eval_tag is '{rollout_id}_i01'
+-- for iteration 3, your eval_tag is '{rollout_id}_i03'
+-- for iteration 10, your eval_tag is '{rollout_id}_i10'
 
 **GENERATE CODE**
 
-Write full generated kernel in a single file as {workspace_dir}/current/`eval_tag`_cuda_kernel.py.
-Generate a new file for each iteration.  Keep improving performance of the kernel code.
+Write full generated kernel in a single file as {workspace_dir}/current/`eval_tag`_cuda_kernel.py. Generate a new file for each iteration.  Keep improving performance of the kernel code.
 
-Replace pytorch operators in the given module with raw CUDA kernels, optimizing for performance
-on NVIDIA architecture.
+Replace pytorch operators in the given module with raw CUDA kernels, optimizing for performance on NVIDIA architecture.
 
 Use torch.utils.cpp_extension.load_inline and name your optimized output module ModelNew.
 
 You're NOT allowed to use torch.nn (except for Parameter, containers, and init).
 
-The input and output have to be on CUDA device. Your answer must be the complete new module
-(no testing code, no other code): it will be evaluated and you will be given feedback on its
-correctness and speedup so you can keep iterating to maximize the speedup.
+The input and output have to be on CUDA device. Your answer must be the complete new module (no testing code, no other code): it will be evaluated and you will be given feedback on its correctness and speedup so you can keep iterating to maximize the speedup.
 
 Here's an example:
 
