@@ -39,11 +39,54 @@ def pick_server():
             min_avg_load_server = server
     return min_avg_load_server
 
+def upload_recap_to_s3(current_wd: str,
+                         model_tag: str,
+                         task_tag: str,
+                         eval_tag: str,
+                         time_tag: str,
+                         result: dict,
+                         reference_code: str,
+                         generated_code: str,
+                         recap: str = "",
+    ):
+    summary = {
+        "model_tag": model_tag,
+        "task_tag": task_tag,
+        "eval_tag": eval_tag,
+        "time_tag": time_tag,
+        "summary": recap,
+        "result": result,
+        "reference_code": reference_code,
+        "generated_code": generated_code,
+    }
+
+    try:
+        with open(f"{current_wd}/kbeval_{eval_tag}_{time_tag}.summary.json", "w") as f:
+            f.write(json.dumps(summary, indent=4))
+    except Exception as e:
+        logger.error(f"Error writing recap to file: {e}")
+        logger.error(traceback.format_exc())
+
+    upload_key = f"kbeval/{model_tag}/{task_tag}/{eval_tag}_{time_tag}.summary.json"
+
+    # push to aws s3
+    try:
+        s3_client = boto3.client("s3")
+        s3_client.put_object(Bucket="agent-xyz",
+                            Key=upload_key,
+                            Body=json.dumps(summary, indent=4))
+        return f"uploaded to s3://agent-xyz/{upload_key}"
+    except Exception as e:
+        logger.error(f"Error pushing to s3: {e}")
+        logger.error(traceback.format_exc())
+        return f"Error pushing to s3: {e}"
+
+
 @server.tool(
-    name="kb_eval",
-    description="Run kernel bench evaluation",
+    name="kb_eval_iteration",
+    description="Run kernel bench evaluation for a specific iteration",
 )
-async def kb_eval(
+async def kb_eval_iteration(
     current_wd: str = Field(..., description="The current working directory"),
     model_tag: str = Field(..., description="The tag of the model"),
     task_tag: str = Field(..., description="The tag of the task"),
@@ -85,6 +128,17 @@ async def kb_eval(
             f.write(json.dumps(response_json, indent=4))
         logger.info(f"Response from remote server: {json.dumps(response_json, indent=4)}")
 
+        # upload recap to s3
+        upload_recap_to_s3(current_wd,
+                             model_tag,
+                             task_tag,
+                             eval_tag,
+                             time_tag,
+                             response_json,
+                             reference_code,
+                             generated_code,
+                             recap="")
+
         return KernelExecResult.model_validate_json(response.text)
     except Exception as e:
         logger.error(f"Error in kb_eval: {e}")
@@ -93,22 +147,22 @@ async def kb_eval(
 
 
 @server.tool(
-    name="kb_upload_summary",
-    description="Upload the summary of the evaluation",
+    name="kb_upload_iteration",
+    description="Upload the iteration recap for a specific iteration of the kernel generation and evaluation",
 )
-async def kb_upload_summary(
+async def kb_upload_iteration(
     current_wd: str = Field(..., description="The current working directory"),
     model_tag: str = Field(..., description="The tag of the model"),
     task_tag: str = Field(..., description="The tag of the task"),
-    eval_tag: str = Field(..., description="The tag of the evaluation"),
     time_tag: str = Field(..., description="The tag of the time"),
+    eval_tag: str = Field(..., description="The tag of the evaluation"),
     reference_code_filename: str = Field(..., description="The filename of the reference code"),
     generated_code_filename: str = Field(..., description="The filename of the generated code"),
-    summary: str = Field(..., description="The summary of the evaluation"),
+    recap: str = Field(..., description="The recap of the evaluation"),
 ) -> str:
     try:
-        logger.info(f"Uploading summary to s3: {model_tag}, {task_tag}, {eval_tag}")
-        logger.info(f"Generated summary: {summary}")
+        logger.info(f"Uploading recap to s3: {model_tag}, {task_tag}, {eval_tag}")
+        logger.info(f"Generated recap: {recap}")
 
         # read reference code
         with open(os.path.join(current_wd, reference_code_filename), "r") as f:
@@ -120,30 +174,18 @@ async def kb_upload_summary(
         with open(f"{current_wd}/kbeval_{eval_tag}_{time_tag}.result.json", "r") as f:
             result = KernelExecResult.model_validate_json(f.read())
 
-        summary = {
-            "model_tag": model_tag,
-            "task_tag": task_tag,
-            "eval_tag": eval_tag,
-            "time_tag": time_tag,
-            "summary": summary,
-            "result": result.model_dump(),
-            "reference_code": reference_code,
-            "generated_code": generated_code,
-        }
-
-        with open(f"{current_wd}/kbeval_{eval_tag}_{time_tag}.summary.json", "w") as f:
-            f.write(json.dumps(summary, indent=4))
-
-        # push to aws s3
-        s3_client = boto3.client("s3")
-        upload_key = f"kbeval/{model_tag}/{task_tag}/{eval_tag}_{time_tag}.summary.json"
-        s3_client.put_object(Bucket="agent-xyz",
-                            Key=upload_key,
-                            Body=json.dumps(summary, indent=4))
-
-        return f"uploaded to s3://agent-xyz/{upload_key}"
+        msg = upload_recap_to_s3(current_wd,
+                             model_tag,
+                             task_tag,
+                             eval_tag,
+                             time_tag,
+                             result.model_dump(),
+                             reference_code,
+                             generated_code,
+                             recap)
+        return msg
     except Exception as e:
-        logger.error(f"Error uploading summary to s3: {e}")
+        logger.error(f"Error uploading recap to s3: {e}")
         logger.error(traceback.format_exc())
         raise e
 
