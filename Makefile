@@ -40,4 +40,8 @@ llama.cpp-server-qwen3-32b:
 	--jinja -fa \
 	--model models/Qwen3-32B-Q4_K_M.gguf \
 	--ctx-size 40960 \
-	--n_gpu_layers 96 \
+	--n_gpu_layers 128 \
+	--temp 0.6 \
+	--top-k 40 \
+	--top-p 0.95 \
+	--min-p 0.05
