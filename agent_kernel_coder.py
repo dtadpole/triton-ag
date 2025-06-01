@@ -21,7 +21,7 @@ AGENT_NAME = "kernel_coder"
 
 KERNEL_CODER_SYSTEM_PROMPT = """
 You are an expert coder with experience in CUDA kernels.  You understand tilings, parallelism,
-precision, numerical stability, and other concepts in the context of CUDA and GPU programming.
+precision, numerical stability, and other advanced concepts in the context of CUDA and GPU programming.
 
 parent_dir: `{workspace_dir}`
 current_wd: `{workspace_dir}/current`
@@ -33,14 +33,30 @@ current_wd: `{workspace_dir}/current`
 
 When generating code, always follow these instructions:
 - Implement all key functionalities (functions and modules) in a single file directly in the working directory (not subfolder).
-- You may create your own test cases to verify intermediate results, but the final and official verification will need to be done using `kb_eval` tool.
+- You may create your own test cases to verify intermediate results, but the final and official verification will need to be done using `kb_eval_iteration` tool.
 - When creating your own test cases, always write them in subfolder under `tests`, with filename ends with `_test.py` (not in the working directory directly)
 """
 
 KERNEL_CODER_NEXT_PROMPT = """
-Implement the task and iterate step by step, consider all possible optimization techniques.
-(e.g. shared memory, coalesced access, occupancy tuning, block size optimization, grid stride
-loops, loop unrolling, kernel fusion, vectorized loads, bank conflict avoidance, warp primitives,
+You will iteratively improve a CUDA kernel for a given PyTorch code, up to and including iteration `{max_iterations}`.
+
+Within each iteration, use sequential thinking to think and act step by step.
+-- Step 1: Implement the task.
+-- Step 2: Evaluate the correctness and performance of the generated CUDA kernel using `kb_eval_iteration` tool.
+-- Step 3: Recap the changes for the current iteration in a few sentences.
+-- Step 4: Upload the recap of the current iteration using `kb_upload_iteration` tool.
+Complete all steps of the current iteration, including recap the changes and uploading the iteration recap, before
+moving to the next iteration.
+
+Recap examples:
+-- "Iteration 1: Implemented the basic matrix multiplication kernel."
+-- "Iteration 2: Added loop unrolling (UNROLL_FACTOR=4). Runtime: 4.79 ms (slight regression). Correctness: passed."
+-- "Iteration 3: Attempted register blocking optimization with 4x4 register tiles, but encountered correctness issues. Max difference: 202.18, indicating significant numerical errors. Need to fix indexing and memory access patterns."
+
+Once all steps within an iteration has fully completed (including recap of the changes and uploading the iteration recap), 
+start the next iteration until you have reached the maximum iterations allowed, including iteration `{max_iterations}` but do not exceed maximum iterations of `{max_iterations}`.  For each iteration, keep improving performance of the kernel code.
+Consider all possible optimization techniques. (e.g. shared memory, coalesced access, occupancy tuning, block size, 
+optimization, grid stride loops, loop unrolling, kernel fusion, vectorized loads, bank conflict avoidance, warp primitives,
 arithmetic intenstiy, etc.)
 
 Task: {task}
@@ -50,10 +66,10 @@ task_tag: `{task_tag}`
 time_tag: `{time_tag}`
 rollout_id: `{rollout_id}`
 
-eval_tag: the `eval_tag` is `rollout_id + iteration_number`. iteration number starts from 1 and increases by 1 each time when `kb_eval` is called. e.g. 
--- if `kb_eval` is called 1st time, your eval_tag is '{rollout_id}_i01'
--- if `kb_eval` is called 3rd time, your eval_tag is '{rollout_id}_i03'
--- if `kb_eval` is called 10th time, your eval_tag is '{rollout_id}_i10'
+eval_tag: the `eval_tag` is `rollout_id + iteration_number`. iteration number starts from 1 and increases by 1 each time when `kb_eval_iteration` is called. e.g. 
+-- if `kb_eval_iteration` is called 1st time, your eval_tag is '{rollout_id}_i01'
+-- if `kb_eval_iteration` is called 3rd time, your eval_tag is '{rollout_id}_i03'
+-- if `kb_eval_iteration` is called 10th time, your eval_tag is '{rollout_id}_i10'
 
 **GENERATE CODE**
 
@@ -79,21 +95,25 @@ Here's an example:
 
 **EVALUATE CODE**
 
-For each iteration, use `kb_eval` tool to evaluate the correctness and performance of generated CUDA kernel.
-After each iteration, summarize your changes in a few sentences, and call `kb_upload_summary` to upload the summary.  Always generate a summary and call `kb_upload_summary` for each and every single iteration step, regardless
-of whether `kb_eval` has error(s).
-
-Did you encounter error when running `kb_eval` validation?
+Did you encounter error when running `kb_eval_iteration` validation?
 Based on the error information, what's your next action?
 
 Choose the most efficient path forward:
 1. Do you understand the error? Can you fix the error easily?
 2. If not sure why the error happened, can you create debug test cases to check each intermediate result step by step, and fix the code at each individual step?
-3. If you have passed all the intermediate test cases, verify using the `kb_eval` verification.
+3. If you have passed all the intermediate test cases, verify using the `kb_eval_iteration` verification.
 4. Keep improving performance of the kernel code with more iterations, up to and including iteration {max_iterations}.
 5. Stop the task after you have reached the maximum iterations allowed, do not exceed maximum iterations of `{max_iterations}`.
+6. Immediately stop if you have exceeded maximum iterations of `{max_iterations}`.
 
 Be concise in your reasoning, select the appropriate tool or action.
+"""
+
+"""
+In each iteration, use `kb_eval_iteration` tool to evaluate the correctness and performance of generated CUDA kernel.
+At each iteration, summarize your changes in a few sentences, and use `kb_upload_iteration` tool to upload
+the summary.  Always generate a summary and upload use `kb_upload_iteration` tool at each and every single iteration
+step, regardless of whether `kb_eval_iteration` has error(s).  If `kb_eval_iteration` has error(s), upload the summary with the error information.  If `kb_eval_iteration` has no error(s), you should also summarize the changes in a few sentences and use `kb_upload_iteration` tool to upload the iterationsummary.
 """
 
 EXAMPLE_CODE = '''
@@ -175,6 +195,10 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
             arguments={
                 "workspace_folder": workspace_dir,
                 "reference_pytorch_code": task,
+                "environ_vars": {
+                    "provider": provider,
+                    "model_name": model_name,
+                },
                 "include_verifier": False,
             },
         )
@@ -201,14 +225,14 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
             },
             client_session_timeout_seconds=120,
         )
-        kb_eval_server = MCPServerStdio(
+        kb_eval_iteration_server = MCPServerStdio(
             params={
                 "command": "uv",
                 "args": ["run", "--with", "mcp", "mcp", "run", "kbEvalMCPServer.py"],
             },
             client_session_timeout_seconds=300,
         )
-        async with file_server as fs, kb_eval_server as kbs, sequential_thinking_server as sqs:
+        async with file_server as fs, kb_eval_iteration_server as kbs, sequential_thinking_server as sqs:
             try:
                 kernel_bench = Agent(
                     model=model,
@@ -288,7 +312,7 @@ if __name__ == "__main__":
     parser.add_argument("-d", "--workspace-dir", type=str, default="")
     parser.add_argument("-p", "--provider", type=str, default=None)
     parser.add_argument("-m", "--model-name", type=str, default=None)
-    parser.add_argument("-e", "--max-iterations", type=int, default=5)
+    parser.add_argument("-e", "--max-iterations", type=int, default=3)
     parser.add_argument("-r", "--total-rollouts", type=int, default=8)
     parser.add_argument(
         "-t",

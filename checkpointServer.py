@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pydantic import Field
 from datetime import datetime
 import os
+import json
 import shutil
 from util import is_subfolder
 
@@ -20,6 +21,9 @@ async def init_workspace_folder(
     ),
     reference_pytorch_code: str = Field(
         ..., description="The reference PyTorch code"
+    ),
+    environ_vars: dict = Field(
+        {}, description="Environment variables to set"
     ),
     include_verifier: bool = Field(
         False, description="Whether to include the verifier folder"
@@ -45,6 +49,9 @@ async def init_workspace_folder(
             reference_pytorch_code,
             os.path.join(init_checkpoint_folder, "pytorch_reference.py"),
         )
+        # write environ_vars to a file in the init_checkpoint_folder
+        with open(os.path.join(init_checkpoint_folder, "environ_vars.json"), "w") as f:
+            json.dump(environ_vars, f)
         # restore from the latest checkpoint
         await restore_last_checkpoint(
             workspace_folder=workspace_folder,
