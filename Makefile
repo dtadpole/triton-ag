@@ -32,5 +32,11 @@ llama.cpp-qwen3-32b:
 	--model models/Qwen3-32B-Q4_K_M.gguf \
 	--n_ctx 40960 \
 	--n_gpu_layers 128 \
-	--n_batch 128 \
-	--n_threads 4
+	--n_batch 32 \
+	--n_threads 8
+
+llama.cpp-server-qwen3-32b:
+	../llama.cpp/build/bin/llama-server \
+	--jinja -fa \
+	--model models/Qwen3-32B-Q4_K_M.gguf \
+	--n_gpu_layers 128 \
