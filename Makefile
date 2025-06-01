@@ -1,3 +1,5 @@
+CUDA_VISIBLE_DEVICES = ${GPU}
+
 mlflow:
 	mlflow server --host localhost --port 5050
 
