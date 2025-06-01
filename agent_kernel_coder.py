@@ -44,14 +44,23 @@ Within each iteration, complete each and every step of the following:
 -- Step 1: Generate the CUDA kernel code.
 -- Step 2: Evaluate the correctness and performance of the generated CUDA kernel using `kb_eval_iteration` tool.
 -- Step 3: Recap the changes for the current iteration in a few sentences and upload the recap using `kb_upload_iteration` tool.
-Complete all steps of the current iteration, including uploading the recap of the changes, before starting the next iteration.
+Complete all steps of the current iteration, including uploading a recap of the changes, before starting the next iteration.
 
 Recap examples:
 -- "Iteration 1: Implemented the basic matrix multiplication kernel."
 -- "Iteration 2: Added loop unrolling (UNROLL_FACTOR=4). Runtime: 4.79 ms (slight regression). Correctness: passed."
 -- "Iteration 3: Attempted register blocking optimization with 4x4 register tiles, but encountered correctness issues. Max difference: 202.18, indicating significant numerical errors. Need to fix indexing and memory access patterns."
 
-Do not start the next iteration until you have completed all steps of the current iteration, including uploading the recap of the changes (using `kb_upload_iteration` tool).  Start the next iteration if and only if all steps within the current iteration (including uploading the recap of the changes using `kb_upload_iteration` tool) has fully completed.  Repeat with a new iteration until you have reached the maximum iterations allowed, up to and including iteration `{max_iterations}` but do not exceed maximum iterations of `{max_iterations}`.  For each iteration, keep improving performance of the kernel code. Consider all possible optimization techniques. (e.g. shared memory, coalesced access, occupancy tuning, block size, optimization, grid stride loops, loop unrolling, kernel fusion, vectorized loads, bank conflict avoidance, warp primitives, arithmetic intenstiy, etc.)
+Start the next iteration if and only if all steps within the current iteration (including uploading the recap of the changes using `kb_upload_iteration` tool) has fully completed.  Repeat with a new iteration until you have reached the maximum iterations allowed, up to and including iteration `{max_iterations}` but do not exceed maximum iterations of `{max_iterations}`. for example, if you have `{max_iterations}` iterations, you will run the following sequence of steps (from <START> to <END>):
+
+<START>
+-> Iteration 1: step 1 (generate kernel code) -> Iteration 1: step 2 (evaluate correctness and performance) -> Iteration 1: step 3 (upload recap)
+-> Iteration 2: step 1 (generate kernel code) -> Iteration 2: step 2 (evaluate correctness and performance) -> Iteration 2: step 3 (upload recap)
+-> ...
+-> Iteration {max_iterations}: step 1 (generate kernel code) -> Iteration {max_iterations}: step 2 (evaluate correctness and performance) -> Iteration {max_iterations}: step 3 (upload recap)
+-> <END>
+
+For each iteration, keep improving performance of the kernel code. Consider all possible optimization techniques. (e.g. shared memory, coalesced access, occupancy tuning, block size, optimization, grid stride loops, loop unrolling, kernel fusion, vectorized loads, bank conflict avoidance, warp primitives, arithmetic intenstiy, etc.)
 
 Task: {task}
 
