@@ -21,7 +21,7 @@ AGENT_NAME = "kernel_coder"
 
 KERNEL_CODER_SYSTEM_PROMPT = """
 You are an expert coder with experience in CUDA kernels.  You understand tilings, parallelism,
-precision, numerical stability, and other advanced concepts in the context of CUDA and GPU programming.
+precision, numerical stability, and other advanced concepts in the context of CUDA and GPU programming. Consider all possible optimization techniques. (e.g. shared memory, coalesced access, occupancy tuning, block size, optimization, grid stride loops, loop unrolling, kernel fusion, vectorized loads, bank conflict avoidance, warp primitives, arithmetic intenstiy, etc.)
 
 parent_dir: `{workspace_dir}`
 current_wd: `{workspace_dir}/current`
@@ -32,35 +32,33 @@ current_wd: `{workspace_dir}/current`
 4. Implement specific code for the given task, do not change anything else
 
 When generating code, always follow these instructions:
-- Implement all key functionalities (functions and modules) in a single file in the working directory (not subfolder).
+- Implement all functionalities (functions and modules) in a single file in the current working directory (not subfolder).
 - You may create your own test cases to verify intermediate results, but the official verification will need to use `kb_eval_iteration` tool.
-- When creating your own test cases, always write them under `tests` subfolder (not in the working directory directly), with filename ends with `_test.py`
+- When creating your own test cases, always write them under `tests` subfolder (under the current working directory), with filename ends with `_test.py`
 """
 
 KERNEL_CODER_NEXT_PROMPT = """
 You will iteratively improve a CUDA kernel for a given PyTorch code, up to and including iteration `{max_iterations}`.
 
-Within each iteration, complete each and every step of the following:
--- Step 1: Generate the CUDA kernel code.
--- Step 2: Evaluate the correctness and performance of the generated CUDA kernel using `kb_eval_iteration` tool (function call: `kb_eval_iteration`).
--- Step 3: Recap the changes for the current iteration in a few sentences and upload the recap using `kb_upload_iteration` tool (function call: `kb_upload_iteration`).
-Complete all steps of the current iteration, including uploading a recap of the changes, before starting the next iteration.
+Within each iteration, ensure that you have completed each and every step of the following:
+-- Generate the CUDA kernel code.
+-- Evaluate the correctness and performance of the generated CUDA kernel using `kb_eval_iteration` tool.
+-- Recap the changes for the current iteration in a few sentences and upload the iteration recap using `kb_upload_iteration` tool.
+Ensure that you have completed the current iteration, including uploading the iteration recap, before starting the next iteration.
 
 Recap examples:
 -- "Iteration 1: Implemented the basic matrix multiplication kernel."
 -- "Iteration 2: Added loop unrolling (UNROLL_FACTOR=4). Runtime: 4.79 ms (slight regression). Correctness: passed."
 -- "Iteration 3: Attempted register blocking optimization with 4x4 register tiles, but encountered correctness issues. Max difference: 202.18, indicating significant numerical errors. Need to fix indexing and memory access patterns."
 
-Start the next iteration if and only if all steps within the current iteration (including uploading the recap of the changes using `kb_upload_iteration` tool) has fully completed.  Repeat with a new iteration until you have reached the maximum iterations allowed, up to and including iteration `{max_iterations}` but do not exceed maximum iterations of `{max_iterations}`. for example, if you have `{max_iterations}` iterations, you will run the following sequence of steps (from <START> to <END>):
+Start the next iteration if and only if the current iteration has fully completed, ensure to include uploading the iteration recap using `kb_upload_iteration` tool.  Repeat new iteration and keep improving performance of the kernel code until you have reached the maximum iterations allowed, up to and including iteration `{max_iterations}` but do not exceed maximum iterations of `{max_iterations}`. for example, if you have `{max_iterations}` iterations, you will run the following sequence from <START> to <END>:
 
 <START>
--> Iteration 1: step 1 (generate kernel code) -> Iteration 1: step 2 (evaluate correctness and performance) -> Iteration 1: step 3 (upload recap)
--> Iteration 2: step 1 (generate kernel code) -> Iteration 2: step 2 (evaluate correctness and performance) -> Iteration 2: step 3 (upload recap)
+-> [Iteration 1: generate kernel code] -> [Iteration 1: evaluate correctness and performance] -> [Iteration 1: recap and upload]
+-> [Iteration 2: generate kernel code] -> [Iteration 2: evaluate correctness and performance] -> [Iteration 2: recap and upload]
 -> ...
--> Iteration {max_iterations}: step 1 (generate kernel code) -> Iteration {max_iterations}: step 2 (evaluate correctness and performance) -> Iteration {max_iterations}: step 3 (upload recap)
+-> [Iteration {max_iterations}: generate kernel code] -> [Iteration {max_iterations}: evaluate correctness and performance] -> [Iteration {max_iterations}: recap and upload]
 -> <END>
-
-For each iteration, keep improving performance of the kernel code. Consider all possible optimization techniques. (e.g. shared memory, coalesced access, occupancy tuning, block size, optimization, grid stride loops, loop unrolling, kernel fusion, vectorized loads, bank conflict avoidance, warp primitives, arithmetic intenstiy, etc.)
 
 Task: {task}
 
