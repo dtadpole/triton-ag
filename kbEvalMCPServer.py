@@ -91,7 +91,7 @@ async def kb_eval_iteration(
     model_tag: str = Field(..., description="The tag of the model"),
     task_tag: str = Field(..., description="The tag of the task"),
     time_tag: str = Field(..., description="The tag of the time"),
-    eval_tag: str = Field(..., description="The tag of the evaluation"),
+    eval_tag: str = Field(..., description="The tag of the iteration"),
     reference_code_filename: str = Field(..., description="The filename of the reference code"),
     generated_code_filename: str = Field(..., description="The filename of the generated code"),
 ) -> KernelExecResult:
@@ -155,10 +155,10 @@ async def kb_upload_iteration(
     model_tag: str = Field(..., description="The tag of the model"),
     task_tag: str = Field(..., description="The tag of the task"),
     time_tag: str = Field(..., description="The tag of the time"),
-    eval_tag: str = Field(..., description="The tag of the evaluation"),
+    eval_tag: str = Field(..., description="The tag of the iteration"),
     reference_code_filename: str = Field(..., description="The filename of the reference code"),
     generated_code_filename: str = Field(..., description="The filename of the generated code"),
-    recap: str = Field(..., description="The recap of the evaluation"),
+    recap: str = Field(..., description="The recap of the iteration"),
 ) -> str:
     try:
         logger.info(f"Uploading recap to s3: {model_tag}, {task_tag}, {eval_tag}")
