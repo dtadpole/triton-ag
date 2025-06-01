@@ -33,7 +33,7 @@ current_wd: `{workspace_dir}/current`
 
 When generating code, always follow these instructions:
 - Implement all key functionalities (functions and modules) in a single file in the working directory (not subfolder).
-- You may create your own test cases to verify intermediate results, but the final and official verification will need to use `kb_eval_iteration` tool.
+- You may create your own test cases to verify intermediate results, but the official verification will need to use `kb_eval_iteration` tool.
 - When creating your own test cases, always write them under `tests` subfolder (not in the working directory directly), with filename ends with `_test.py`
 """
 
@@ -42,8 +42,8 @@ You will iteratively improve a CUDA kernel for a given PyTorch code, up to and i
 
 Within each iteration, complete each and every step of the following:
 -- Step 1: Generate the CUDA kernel code.
--- Step 2: Evaluate the correctness and performance of the generated CUDA kernel using `kb_eval_iteration` tool.
--- Step 3: Recap the changes for the current iteration in a few sentences and upload the recap using `kb_upload_iteration` tool.
+-- Step 2: Evaluate the correctness and performance of the generated CUDA kernel using `kb_eval_iteration` tool (function call: `kb_eval_iteration`).
+-- Step 3: Recap the changes for the current iteration in a few sentences and upload the recap using `kb_upload_iteration` tool (function call: `kb_upload_iteration`).
 Complete all steps of the current iteration, including uploading a recap of the changes, before starting the next iteration.
 
 Recap examples:
@@ -100,7 +100,7 @@ Based on the error information, what's your next action?
 Choose the most efficient path forward:
 1. Do you understand the error? Can you fix the error easily?
 2. If not sure why the error happened, can you create debug test cases to check each intermediate result step by step, and fix the code at each individual step?
-3. If you have passed all the intermediate test cases, verify using the `kb_eval_iteration` verification.
+3. If you have passed all the intermediate test cases, verify using the `kb_eval_iteration` tool.
 4. Keep improving performance of the kernel code with more iterations, up to and including iteration {max_iterations}.
 5. Stop the task after you have reached the maximum iterations allowed, do not exceed maximum iterations of `{max_iterations}`.
 6. Immediately stop if you have exceeded maximum iterations of `{max_iterations}`.
@@ -311,7 +311,7 @@ if __name__ == "__main__":
     parser.add_argument("-d", "--workspace-dir", type=str, default="")
     parser.add_argument("-p", "--provider", type=str, default=None)
     parser.add_argument("-m", "--model-name", type=str, default=None)
-    parser.add_argument("-e", "--max-iterations", type=int, default=3)
+    parser.add_argument("-e", "--max-iterations", type=int, default=4)
     parser.add_argument("-r", "--total-rollouts", type=int, default=8)
     parser.add_argument(
         "-t",
