@@ -83,7 +83,7 @@ async def kb_eval(
         # parser.add_argument("--generated_code", type=str, default="elemAddCuda.py")
 
         # pre-compile the generated code
-        command = f"python kbEvalCli.py --wd {temp_dir} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --time_tag {time_tag} --reference_code {reference_file_path} --generated_code {generated_file_path} --device-list {','.join(devices)}"
+        command = f"python kbEvalCli.py --wd {temp_dir} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --time_tag {time_tag} --reference_code {reference_file_path} --generated_code {generated_file_path} --device-list {','.join(str(devices))}"
         process = await asyncio.create_subprocess_shell(
             command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=os.environ.copy()
         )
