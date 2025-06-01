@@ -105,7 +105,7 @@ Choose the most efficient path forward:
 5. Stop the task after you have reached the maximum iterations allowed, do not exceed maximum iterations of `{max_iterations}`.
 6. Immediately stop if you have exceeded maximum iterations of `{max_iterations}`.
 
-Be concise in your reasoning, select the appropriate tool or action.
+Be concise in your reasoning (think concisely), select the appropriate tool or action.
 """
 
 """
