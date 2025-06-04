@@ -8,18 +8,41 @@ source .venv/bin/activate
 uv pip install -r requirements.txt
 ```
 
-## Run Agent Triton Coder
+## Prepare API key for LLM access
+
+create your API keys with relevant LLM provider and store them in ${HOME}/.keys/<provider>.api.key
+
+e.g.
+
+-- for Claude, store your API key in file ${HOME}/.keys/anthropic.api.key
+-- for Deepseek, store your API key in file ${HOME}/.keys/deepseek.api.key
+-- for Gemini, store your API key in file ${HOME}/.keys/gemini.api.key
+-- for OpenAI, store your API key in file ${HOME}/.keys/gemini.api.key
+
+use model.yaml to add and/or configure models.
+
+use agentl.yaml to add and/or configure agents.
+
+## Prepare background services
+
+Run Observability Service:
 
 ```bash
-python agent_triton_coder.py -i "Implement Triton kernel for the forward pass of nn.Linear, use autotune for the tiling parameters"
+make mlflow
 ```
 
-This will create a new working directory under `_run_{ddd}` and generate the triton kernel implementation.
-
-## Run Agent Planner
+Run Evaluator Service (adapted from Kernel Bench):
 
 ```bash
-python agent_planner.py -g "Generate triton kernel for nn.linear, no bias, both forward and backward, compare to PyTorch implementation, verify correctness, do _not_ benchmark performance"
+make kbEval
 ```
 
-This will create a new working directory under `_run_{ddd}` and generate the triton kernel implementation.
+
+## Run Agent Kernel Coder
+
+```bash
+python agent_kernel_coder.py
+```
+
+This will create a new working directory under `_run_{ddd}` and generate kernel implementation.
+
