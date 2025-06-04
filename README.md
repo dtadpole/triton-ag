@@ -39,6 +39,11 @@ Run Evaluator Service (adapted from Kernel Bench):
 make kbEval
 ```
 
+Clone the KernelBench git repo under ${HOME} to access various KernelBench test cases.
+
+```bash
+git clone git@github.com:ScalingIntelligence/KernelBench.git
+```
 
 ## Run Agent Kernel Coder
 
