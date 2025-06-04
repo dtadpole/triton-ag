@@ -43,8 +43,9 @@ Clone the KernelBench git repo under ${HOME} to access various KernelBench test 
 
 ```bash
 cd ${HOME}
-git clone git@github.com:ScalingIntelligence/KernelBench.git
+git clone git@github.com:dtadpole/KernelBench.git
 ```
+Note that our own version of KernelBench has increased dimension sizes for simple kernels [level 1, 19-87], to increas run time to be meaningfully higher than just the kernel launch time (4-8 us).
 
 ## Run Agent Kernel Coder
 
