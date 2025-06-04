@@ -10,7 +10,7 @@ uv pip install -r requirements.txt
 
 ## Prepare API key for LLM access
 
-create your API keys with relevant LLM provider and store them in ${HOME}/.keys/<provider>.api.key
+create your API keys with relevant LLM provider and store them in ${HOME}/.keys/{provider}.api.key
 
 e.g.
 
