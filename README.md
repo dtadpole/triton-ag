@@ -14,6 +14,7 @@ create your API keys with relevant LLM provider and store them in ${HOME}/.keys/
 
 e.g.
 
+```
 -- for Claude, store your API key in file ${HOME}/.keys/anthropic.api.key
 -- for Deepseek, store your API key in file ${HOME}/.keys/deepseek.api.key
 -- for Gemini, store your API key in file ${HOME}/.keys/gemini.api.key
@@ -22,6 +23,7 @@ e.g.
 use model.yaml to add and/or configure models.
 
 use agentl.yaml to add and/or configure agents.
+```
 
 ## Prepare background services
 
