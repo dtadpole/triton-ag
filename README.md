@@ -1,4 +1,4 @@
-# Triton Multi-Agent Code Generation
+# Triton and CUDA Kernel Agent based Code Generation
 
 ## Setup Environment
 
