@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES = ${GPU}
+# CUDA_VISIBLE_DEVICES = ${GPU}
 
 mlflow:
 	mlflow server --host localhost --port 5050
@@ -36,7 +36,7 @@ llama.cpp-qwen3-32b:
 	--n_threads 8
 
 llama.cpp-server-qwen3-32b:
-	../llama.cpp/build/bin/llama-server \
+	CUDA_VISIBLE_DEVICES=0,1,2,3 ../llama.cpp/build/bin/llama-server \
 	--jinja -fa \
 	--model models/Qwen3-32B-Q4_K_M.gguf \
 	--model-draft models/Qwen3-1.7B-Q4_K_M.gguf \
@@ -53,23 +53,11 @@ llama.cpp-server-qwen3-32b:
 	--device-draft CUDA1 \
 	--cache-type-k q8_0 \
 	--cache-type-v q8_0 \
+	--ctx-size 131072 \
+	-np 4 \
+	--n_gpu_layers 65 \
 	--temp 0.6 \
 	--top-k 40 \
 	--top-p 0.95 \
 	--min-p 0.05 \
-
-# --ctx-size 81920
-# --flash-attn
-# --slots
-# --model /models/qwen2.5-coder-32b-instruct-q4_k_m.gguf
-# --device CUDA0
-# --model-draft /models/qwen2.5-coder-0.5b-instruct-q8_0.gguf
-# -ngld 99
-# --draft-max 16
-# --draft-min 4
-# --draft-p-min 0.4
-# --device-draft CUDA0
-# --ctx-size 20000
-# --cache-type-k q8_0
-# --cache-type-v q8_0
-# --n-gpu-layers 65
+	--host 0.0.0.0
