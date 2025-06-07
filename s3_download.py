@@ -1,6 +1,7 @@
 import os
 import boto3
 import yaml
+import argparse
 from urllib.parse import urlparse
 
 def load_config(config_path="finetune.yaml"):
@@ -77,4 +78,9 @@ def main():
     print("\nS3 download test completed!")
 
 if __name__ == "__main__":
-    main() 
+    # argparse
+    parser = argparse.ArgumentParser(description='Download S3 folders')
+    parser.add_argument('-c', '--config', type=str, required=True, help='Path to the configuration file')
+    args = parser.parse_args()
+    
+    main(args.config) 
