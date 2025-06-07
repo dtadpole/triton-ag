@@ -34,22 +34,78 @@ def load_experiences(local_dir):
                 print(f"Loading experiences from: {file_path}")
                 with open(file_path, 'r') as f:
                     data = json.load(f)
-                    experiences.extend(data)
+                    for d in data:
+                        if d["role"] == "system":
+                            pass
+                        elif d["role"] == "user":
+                            if isinstance(d["content"], dict):
+                                if d["content"]["type"] == "function_call_output":
+                                    d["role"] = "function"
+                                    d["content"] = d["content"]["output"]
+                                else:
+                                    raise ValueError(f"Unknown content type: {d['content']}")
+                            elif isinstance(d["content"], str):
+                                pass
+                            else:
+                                raise ValueError(f"Unknown content type: {d['content']}")
+                        elif d["role"] == "assistant":
+                            if isinstance(d["content"], dict):
+                                if d["content"]["type"] == "function_call":
+                                    d["function_call"] = {
+                                        "name": d["content"]["name"],
+                                        "arguments": d["content"]["arguments"]
+                                    }
+                                    d["content"] = None
+                                else:
+                                    raise ValueError(f"Unknown content type: {d['content']}")
+                            elif isinstance(d["content"], list) and len(d["content"]) > 0:
+                                if d["content"][0]["type"] == "output_text":
+                                    d["content"] = d["content"][0]["text"]
+                                else:
+                                    raise ValueError(f"Unknown content type: {d['content'][0]['type']}")
+                            elif isinstance(d["content"], str):
+                                pass
+                            else:
+                                raise ValueError(f"Unknown content type: {d['content']}")
+                        else:
+                            raise ValueError(f"Unknown role: {d['role']}")
+
+
+                    conversation = { "messages": data }
+                    experiences.append(conversation)
     
     print(f"Total number of experiences loaded: {len(experiences)}")
     return experiences
 
 def prepare_dataset(experiences):
-    """Convert experiences to HuggingFace dataset format."""
-    texts = []
-    for exp in experiences:
-        # Adjust this based on your experience format
-        text = f"Instruction: {exp.get('instruction', '')}\n"
-        text += f"Input: {exp.get('input', '')}\n"
-        text += f"Output: {exp.get('output', '')}\n"
-        texts.append(text)
+    # prepare the dataset in the format of { "messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}] }
+    dataset = Dataset.from_list(experiences[:1])
+    dataset = dataset.map(lambda x: { "messages": [{"role": "user", "content": x["messages"][0]["content"]}, {"role": "assistant", "content": x["messages"][1]["content"]}] })
+    return dataset
+
+def format_function_call_data(example):
+    """Convert function call examples to training format"""
+    messages = example["messages"]
+    formatted_text = ""
     
-    return Dataset.from_dict({"text": texts})
+    for msg in messages:
+        if msg["role"] == "system":
+            formatted_text += f"<|im_start|>system\n{msg['content']}<|im_end|>\n"
+        elif msg["role"] == "user":
+            formatted_text += f"<|im_start|>user\n{msg['content']}<|im_end|>\n"
+        elif msg["role"] == "assistant":
+            formatted_text += f"<|im_start|>assistant\n"
+            if msg.get("function_call"):
+                func_call = msg["function_call"]
+                formatted_text += f"<function_call>\n{func_call['name']}\n{func_call['arguments']}\n</function_call>"
+            else:
+                formatted_text += msg["content"]
+            formatted_text += "<|im_end|>\n"
+        elif msg["role"] == "function":
+            formatted_text += f"<function_response>\n{msg['content']}\n</function_response>\n"
+    
+    return {"text": formatted_text}
+
 
 def main():
     # Parse command line arguments
@@ -69,16 +125,18 @@ def main():
     
     # Load model and tokenizer
     print("Loading model and tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(config['model']['name'], trust_remote_code=True)
+    # load the tokenizer and the model
+    model_name = "Qwen/Qwen3-32B-AWQ"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(
-        config['model']['name'],
-        device_map="auto",
-        trust_remote_code=True,
-        torch_dtype=torch.float16
+        model_name,
+        # torch_dtype="auto",
+        torch_dtype=torch.float16,
+        device_map="auto"
     )
     
     # Prepare model for training
-    model = prepare_model_for_kbit_training(model)
+    # model = prepare_model_for_kbit_training(model)
     
     # Configure LoRA
     lora_config = LoraConfig(

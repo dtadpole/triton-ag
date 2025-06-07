@@ -9,6 +9,7 @@ quantization_config = BitsAndBytesConfig(load_in_8bit=True, llm_int8_enable_fp32
 # Load 4-bit quantized model
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name="unsloth/Qwen3-32B-unsloth-bnb-4bit",
+    # model_name="Qwen/Qwen3-32B-AWQ",
     max_seq_length=2048,
     dtype=None,  # Auto-detect
     load_in_4bit=True,
