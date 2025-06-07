@@ -80,8 +80,7 @@ def load_experiences(local_dir):
 def prepare_dataset(experiences):
     # prepare the dataset in the format of { "messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}] }
     dataset = Dataset.from_list(experiences[:1])
-    dataset = dataset.map(lambda x: { "messages": [{"role": "user", "content": x["messages"][0]["content"]}, {"role": "assistant", "content": x["messages"][1]["content"]}] })
-    return dataset
+    return experiences.map(format_function_call_data)
 
 def format_function_call_data(example):
     """Convert function call examples to training format"""
