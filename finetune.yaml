@@ -1,9 +1,34 @@
-s3:
-  folders:
+model:
+  name: "Qwen/Qwen3-32B-AWQ"
+  quantization: true
+  bits: 4
+
+data:
+  s3_folders:
     - s3://agent-xyz/kernel_coder/anthropic
     - s3://agent-xyz/kernel_coder/deepseek
     - s3://agent-xyz/kernel_coder/fireworks/deepseek-v3
     - s3://agent-xyz/kernel_coder/gemini/gemini-2.5-pro
     - s3://agent-xyz/kernel_bench/level1
     - s3://agent-xyz/kernel_bench/level2
+  local_dir: "finetune_experiences"
+
+training:
+  num_epochs: 3
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 2e-4
+  max_length: 512
+  warmup_ratio: 0.1
+  output_dir: "./qwen3-finetuned"
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
 

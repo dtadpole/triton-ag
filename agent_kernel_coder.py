@@ -212,16 +212,16 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
             },
             client_session_timeout_seconds=10,
         )
-        sequential_thinking_server = MCPServerStdio(
-            params={
-                "command": "npx",
-                "args": [
-                    "-y",
-                    "@modelcontextprotocol/server-sequential-thinking",
-                ],
-            },
-            client_session_timeout_seconds=120,
-        )
+        # sequential_thinking_server = MCPServerStdio(
+        #     params={
+        #         "command": "npx",
+        #         "args": [
+        #             "-y",
+        #             "@modelcontextprotocol/server-sequential-thinking",
+        #         ],
+        #     },
+        #     client_session_timeout_seconds=120,
+        # )
         kb_eval_iteration_server = MCPServerStdio(
             params={
                 "command": "uv",
@@ -229,7 +229,7 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
             },
             client_session_timeout_seconds=300,
         )
-        async with file_server as fs, kb_eval_iteration_server as kbs, sequential_thinking_server as sqs:
+        async with file_server as fs, kb_eval_iteration_server as kbs: #, sequential_thinking_server as sqs:
             try:
                 kernel_bench = Agent(
                     model=model,
@@ -237,7 +237,7 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
                     instructions=KERNEL_CODER_SYSTEM_PROMPT.format(
                         workspace_dir=workspace_dir
                     ),
-                    mcp_servers=[fs, kbs, ckpts, sqs],
+                    mcp_servers=[fs, kbs, ckpts], #, sqs],
                 )
                 prompt = KERNEL_CODER_NEXT_PROMPT.format(
                     task="""Implement CUDA Kernel (forward pass only) for the given PyTorch code in
