@@ -1,16 +1,15 @@
 import os
 import torch
-import boto3
 import json
 import yaml
-from urllib.parse import urlparse
+import argparse
 from datasets import Dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     TrainingArguments,
     Trainer,
-    DataCollatorForLanguageModeling
+    DataCollatorForLanguageModeling,
 )
 from peft import (
     prepare_model_for_kbit_training,
@@ -23,78 +22,21 @@ def load_config(config_path="finetune.yaml"):
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
-def parse_s3_url(s3_url):
-    """Parse S3 URL into bucket and prefix."""
-    parsed = urlparse(s3_url)
-    if parsed.scheme != 's3':
-        raise ValueError(f"Invalid S3 URL: {s3_url}")
-    bucket = parsed.netloc
-    prefix = parsed.path.lstrip('/')
-    return bucket, prefix
-
-def download_from_s3(bucket_name, prefix, local_dir):
-    """Download files from S3 bucket to local directory, maintaining folder structure."""
-    s3_client = boto3.client('s3')
-    os.makedirs(local_dir, exist_ok=True)
-    
-    # List all objects under the prefix, including those in subfolders
-    paginator = s3_client.get_paginator('list_objects_v2')
-    for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
-        for obj in page.get('Contents', []):
-            key = obj['Key']
-            
-            # Skip if it's the prefix itself
-            if key == prefix:
-                continue
-                
-            # Get the relative path from the prefix
-            relative_path = key[len(prefix):].lstrip('/')
-            if not relative_path:
-                continue
-                
-            # Create the full local path, maintaining the S3 folder structure
-            local_path = os.path.join(local_dir, relative_path)
-            
-            # Create all necessary subdirectories
-            os.makedirs(os.path.dirname(local_path), exist_ok=True)
-            
-            # Download the file
-            s3_client.download_file(bucket_name, key, local_path)
-            print(f"Downloaded {key} to {local_path}")
-
-def download_all_targets(config):
-    """Download all targets specified in the configuration, maintaining S3 folder structure."""
-    local_base_dir = config['data']['local_dir']
-    
-    for s3_url in config['data']['s3_folders']:
-        bucket, prefix = parse_s3_url(s3_url)
-        
-        # Create a subdirectory structure that mirrors the S3 path
-        # For example, s3://agent-xyz/kernel_coder/anthropic becomes
-        # finetune_experiences/kernel_coder/anthropic
-        path_parts = prefix.split('/')
-        if len(path_parts) > 1:
-            # Use the full path structure after the bucket name
-            local_dir = os.path.join(local_base_dir, *path_parts)
-        else:
-            # If it's just a single folder, use it directly
-            local_dir = os.path.join(local_base_dir, prefix)
-        
-        print(f"Downloading from {s3_url} to {local_dir}")
-        download_from_s3(bucket, prefix, local_dir)
-
-def load_experiences(config):
-    """Load and process experiences from all local directories."""
+def load_experiences(local_dir):
+    """Load and process experiences from all local directories recursively."""
     experiences = []
-    base_dir = config['data']['local_dir']
     
     # Walk through all subdirectories recursively
-    for root, _, files in os.walk(base_dir):
+    for root, _, files in os.walk(local_dir):
         for filename in files:
             if filename.endswith('.json'):
-                with open(os.path.join(root, filename), 'r') as f:
+                file_path = os.path.join(root, filename)
+                print(f"Loading experiences from: {file_path}")
+                with open(file_path, 'r') as f:
                     data = json.load(f)
                     experiences.extend(data)
+    
+    print(f"Total number of experiences loaded: {len(experiences)}")
     return experiences
 
 def prepare_dataset(experiences):
@@ -110,16 +52,19 @@ def prepare_dataset(experiences):
     return Dataset.from_dict({"text": texts})
 
 def main():
-    # Load configuration
-    config = load_config()
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Fine-tune Qwen model with local experiences')
+    parser.add_argument('-e', '--experiences_dir', type=str, default='finetune_experiences', help='Directory containing experience JSON files')
+    parser.add_argument('-c', '--config', type=str, default='finetune.yaml',
+                      help='Path to configuration file (default: finetune.yaml)')
+    args = parser.parse_args()
     
-    # Download experiences from S3
-    print("Downloading experiences from S3...")
-    download_all_targets(config)
+    # Load configuration
+    config = load_config(args.config)
     
     # Load and prepare dataset
-    print("Loading and preparing dataset...")
-    experiences = load_experiences(config)
+    print(f"Loading experiences from directory: {args.experiences_dir}")
+    experiences = load_experiences(args.experiences_dir)
     dataset = prepare_dataset(experiences)
     
     # Load model and tokenizer
@@ -129,7 +74,7 @@ def main():
         config['model']['name'],
         device_map="auto",
         trust_remote_code=True,
-        quantization_config={"load_in_4bit": config['model']['quantization']}
+        torch_dtype=torch.float16
     )
     
     # Prepare model for training
