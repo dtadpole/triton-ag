@@ -3,9 +3,9 @@
 
 # Model Configuration
 model:
-  name: "unsloth/Qwen3-32B-bnb-4bit"
+  # name: "unsloth/Qwen3-32B-bnb-4bit"
   # name: "unsloth/Qwen3-8B"
-  # name: "Qwen/Qwen3-8B"
+  name: "Qwen/Qwen3-8B"
   # name: "Qwen/Qwen3-8B-AWQ"
   # name: "Qwen/Qwen2.5-0.5B-Instruct"
   # name: "Qwen/Qwen3-0.6B"
@@ -21,7 +21,7 @@ training:
   warmup_steps: 5
   
   # Batch and memory settings
-  per_device_batch_size: 2
+  per_device_batch_size: 1
   gradient_accumulation_steps: 4
   
   # Optimization
@@ -33,10 +33,18 @@ training:
   logging_steps: 1
   save_steps: 25
   save_total_limit: 2
-  output_dir: "./qwen3-unsloth-finetuned"
+  output_dir: "../qwen3-unsloth-finetuned"
   
-  # Multi-GPU settings
+  # Multi-GPU and system settings
   dataloader_num_workers: 4
+  seed: 3407
+  dataloader_pin_memory: false
+  ddp_find_unused_parameters: false
+  remove_unused_columns: false
+  
+  # Dataset processing
+  dataset_num_proc: 2
+  packing: false
 
 # LoRA Configuration
 lora:
@@ -51,6 +59,12 @@ lora:
     - "gate_proj"
     - "down_proj"
     - "up_proj"
+  # Advanced LoRA settings
+  bias: "none"
+  use_gradient_checkpointing: "unsloth"
+  random_state: 3407
+  use_rslora: false
+  loftq_config: null
 
 # Data Configuration  
 data:
