@@ -17,15 +17,22 @@ data:
 training:
   num_epochs: 2
   batch_size: 4
-  gradient_accumulation_steps: 4
-  learning_rate: 0.00003
-  max_length: 40960
+  gradient_accumulation_steps: 16  # Further increased to maintain effective batch size
+  learning_rate: 0.00005
+  max_length: 2048  # Further reduced for memory efficiency
   warmup_ratio: 0.1
   output_dir: "./qwen3-finetuned"
 
+# Multi-GPU Configuration
+gpu:
+  count: 4  # Number of GPUs to use
+  strategy: "fsdp"  # Options: "data_parallel", "model_parallel", "fsdp", "auto"
+  per_device_batch_size: 1  # Batch size per GPU device (reduced for longer sequences)
+  dataloader_num_workers: 2  # Reduced to save memory
+
 lora:
-  r: 16
-  alpha: 32
+  r: 8  # Reduced rank for memory efficiency with longer sequences
+  alpha: 16  # Proportionally reduced
   dropout: 0.05
   target_modules:
     - "q_proj"
