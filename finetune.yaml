@@ -1,10 +1,12 @@
 model:
-  # name: "Qwen/Qwen3-32B-AWQ"
-  name: "Qwen/Qwen2.5-0.5B-Instruct"
-  quantization: true
-  bits: 4
+  # name: "Qwen/Qwen3-8B"
+  # name: "Qwen/Qwen3-8B-AWQ"
+  # name: "Qwen/Qwen2.5-0.5B-Instruct"
+  name: "Qwen/Qwen3-0.6B"
+  # quantization: false  # Disabled for FSDP compatibility
 
 data:
+  local_dir: "finetune_experiences"
   s3_folders:
     - s3://agent-xyz/kernel_coder/anthropic
     - s3://agent-xyz/kernel_coder/deepseek
@@ -12,31 +14,28 @@ data:
     - s3://agent-xyz/kernel_coder/gemini/gemini-2.5-pro
     - s3://agent-xyz/kernel_bench/level1
     - s3://agent-xyz/kernel_bench/level2
-  local_dir: "finetune_experiences"
 
 training:
   num_epochs: 2
-  batch_size: 4
-  gradient_accumulation_steps: 16  # Further increased to maintain effective batch size
   learning_rate: 0.00005
-  max_length: 2048  # Further reduced for memory efficiency
+  max_length: 4096
   warmup_ratio: 0.1
   output_dir: "./qwen3-finetuned"
-
-# Multi-GPU Configuration
-gpu:
-  count: 4  # Number of GPUs to use
-  strategy: "fsdp"  # Options: "data_parallel", "model_parallel", "fsdp", "auto"
-  per_device_batch_size: 1  # Batch size per GPU device (reduced for longer sequences)
-  dataloader_num_workers: 2  # Reduced to save memory
+  # Batch configuration
+  per_device_batch_size: 1
+  gradient_accumulation_steps: 4
+  # Multi-GPU settings
+  gpu_count: 4
+  strategy: "fsdp"  # Options: "data_parallel", "model_parallel", "fsdp"
+  dataloader_num_workers: 8
 
 lora:
-  r: 8  # Reduced rank for memory efficiency with longer sequences
-  alpha: 16  # Proportionally reduced
+  r: 16
+  alpha: 32
   dropout: 0.05
   target_modules:
     - "q_proj"
-    - "k_proj"
+    - "k_proj" 
     - "v_proj"
     - "o_proj"
     - "gate_proj"
