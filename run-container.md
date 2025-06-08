@@ -63,7 +63,7 @@ rm cuda_12.9.0_575.51.03_linux.run
 
 
 python -m vllm.entrypoints.openai.api_server \
-  --model unsloth/Qwen3-8B-bnb-4bit \
+  --model unsloth/Qwen3-32B-bnb-4bit \
   --host 0.0.0.0 \
   --port 8091 \
   --dtype bfloat16 \
