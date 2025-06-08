@@ -120,9 +120,18 @@ if __name__ == "__main__":
     with open("kbEval.yaml", "r") as f:
         kbEval_config = yaml.load(f, Loader=yaml.FullLoader)
 
-    host = kbEval_config["kbEvalRemoteServer"]["host"]
-    port = kbEval_config["kbEvalRemoteServer"]["port"]
-    devices = [int(d) for d in kbEval_config["kbEvalRemoteServer"]["devices"]]
+    import socket
+    hostname = socket.gethostname()
+    # if hostname is not in kbEval_config["kbEvalRemoteServer"], use "one"  
+    if hostname not in kbEval_config["kbEvalRemoteServer"]:
+        logger.error(f"Hostname {hostname} not found in kbEval.yaml")
+        exit(1)
+
+    host = kbEval_config["kbEvalRemoteServer"][hostname]["host"]
+    port = kbEval_config["kbEvalRemoteServer"][hostname]["port"]
+
+    devices = [int(d) for d in kbEval_config["kbEvalRemoteServer"][hostname]["devices"]]
+    logger.info(f"Running on [{hostname}:{port}] with devices: {devices}")
 
     import uvicorn
     server = uvicorn.Server(uvicorn.Config(app, host=host, port=port))
