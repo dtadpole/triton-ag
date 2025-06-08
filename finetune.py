@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Qwen Fine-tuning with Unsloth
-A clean and efficient script for fine-tuning Qwen models using Unsloth for optimized training.
+Clean and efficient script for fine-tuning Qwen models using Unsloth optimization.
 """
 
 # Import unsloth first for optimizations
@@ -25,8 +25,7 @@ def setup_distributed():
         local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(local_rank)
         return local_rank
-    else:
-        return 0
+    return 0
 
 
 def is_distributed():
@@ -35,7 +34,7 @@ def is_distributed():
 
 
 class QwenUnslothTrainer:
-    """Fine-tune Qwen models using Unsloth for optimized training with distributed support."""
+    """Fine-tune Qwen models using Unsloth with distributed support."""
     
     def __init__(self, config_path="finetune.yaml"):
         """Initialize trainer with configuration."""
@@ -46,6 +45,7 @@ class QwenUnslothTrainer:
         self._validate_cuda()
         self.tokenizer = None
         self.model = None
+
     def _load_config(self, config_path):
         """Load configuration from YAML file."""
         try:
@@ -55,7 +55,7 @@ class QwenUnslothTrainer:
             if self.local_rank == 0:
                 logger.warning(f"Config file {config_path} not found. Using defaults.")
             return self._get_default_config()
-    
+
     def _get_default_config(self):
         """Get default configuration."""
         return {
@@ -66,81 +66,79 @@ class QwenUnslothTrainer:
                 'load_in_4bit': True
             },
             'training': {
-                'num_epochs': 2,
                 'learning_rate': 2e-4,
-                'max_length': 2048,
+                'max_steps': 50,
+                'warmup_steps': 5,
                 'per_device_batch_size': 2,
                 'gradient_accumulation_steps': 4,
-                'gpu_count': 1,
-                'strategy': 'unsloth',
+                'optim': 'adamw_8bit',
+                'weight_decay': 0.01,
+                'lr_scheduler_type': 'linear',
+                'logging_steps': 1,
+                'save_steps': 25,
+                'save_total_limit': 2,
                 'output_dir': "./qwen3-unsloth-finetuned",
-                'max_steps': 50,
-                'warmup_steps': 5
+                'dataloader_num_workers': 4
             },
             'data': {'local_dir': 'finetune_experiences'},
-            'lora': {'r': 16, 'alpha': 16, 'dropout': 0.0}
+            'lora': {
+                'r': 16, 
+                'alpha': 16, 
+                'dropout': 0.0,
+                'target_modules': ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+            }
         }
-    
+
     def _setup_configuration(self):
-        """Setup configuration parameters."""
+        """Setup configuration parameters from loaded config."""
         # Model settings
-        model = self.config.get('model', {})
-        self.model_name = model.get('name', "unsloth/Qwen3-8B-bnb-4bit")
-        self.max_seq_length = model.get('max_seq_length', 2048)
-        self.dtype = model.get('dtype', None)
-        self.load_in_4bit = model.get('load_in_4bit', True)
+        model_cfg = self.config.get('model', {})
+        self.model_name = model_cfg.get('name', "unsloth/Qwen3-8B-bnb-4bit")
+        self.max_seq_length = int(model_cfg.get('max_seq_length', 2048))
+        self.dtype = model_cfg.get('dtype', None)
+        self.load_in_4bit = bool(model_cfg.get('load_in_4bit', True))
         
         # Training settings
-        training = self.config.get('training', {})
-        self.num_epochs = training.get('num_epochs', 2)
-        self.learning_rate = training.get('learning_rate', 2e-4)
-        self.max_length = training.get('max_length', 2048)
-        self.warmup_steps = training.get('warmup_steps', 5)
-        self.max_steps = training.get('max_steps', 50)
-        self.output_dir = training.get('output_dir', "./qwen3-unsloth-finetuned")
+        train_cfg = self.config.get('training', {})
+        self.learning_rate = float(train_cfg.get('learning_rate', 2e-4))
+        self.max_steps = int(train_cfg.get('max_steps', 50))
+        self.warmup_steps = int(train_cfg.get('warmup_steps', 5))
+        self.per_device_batch_size = int(train_cfg.get('per_device_batch_size', 2))
+        self.gradient_accumulation_steps = int(train_cfg.get('gradient_accumulation_steps', 4))
+        self.output_dir = train_cfg.get('output_dir', "./qwen3-unsloth-finetuned")
         
-        # Batch settings
-        self.per_device_batch_size = training.get('per_device_batch_size', 2)
-        self.gradient_accumulation_steps = training.get('gradient_accumulation_steps', 4)
+        # Optimization settings
+        self.optim = train_cfg.get('optim', 'adamw_8bit')
+        self.weight_decay = float(train_cfg.get('weight_decay', 0.01))
+        self.lr_scheduler_type = train_cfg.get('lr_scheduler_type', 'linear')
         
-        # Unsloth specific settings
-        self.optim = training.get('optim', 'adamw_8bit')
-        self.weight_decay = training.get('weight_decay', 0.01)
-        self.lr_scheduler_type = training.get('lr_scheduler_type', 'linear')
-        self.logging_steps = training.get('logging_steps', 1)
-        self.save_steps = training.get('save_steps', 25)
-        self.save_total_limit = training.get('save_total_limit', 2)
+        # Logging and saving
+        self.logging_steps = int(train_cfg.get('logging_steps', 1))
+        self.save_steps = int(train_cfg.get('save_steps', 25))
+        self.save_total_limit = int(train_cfg.get('save_total_limit', 2))
+        self.dataloader_num_workers = int(train_cfg.get('dataloader_num_workers', 4))
         
-        # Multi-GPU settings (simplified for unsloth)
-        self.gpu_count = training.get('gpu_count', 1)
-        self.gpu_strategy = training.get('strategy', 'unsloth')
-        self.dataloader_num_workers = training.get('dataloader_num_workers', 2)
-        
-        # Data settings
-        self.experience_dir = self.config.get('data', {}).get('local_dir', 'finetune_experiences')
+        # Data and LoRA settings
+        self.data_dir = self.config.get('data', {}).get('local_dir', 'finetune_experiences')
+        self.lora_config = self.config.get('lora', {})
         
         if self.local_rank == 0:
-            strategy_desc = "distributed" if self.is_distributed else self.gpu_strategy
-            logger.info(f"Configuration loaded: {self.gpu_count} GPU(s) with {strategy_desc} strategy")
-    
+            mode = "distributed" if self.is_distributed else "single GPU"
+            logger.info(f"Configuration loaded: {mode} training with {self.max_seq_length} max sequence length")
+
     def _validate_cuda(self):
-        """Validate CUDA availability and adjust GPU count."""
+        """Validate CUDA availability."""
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is not available! Please ensure GPU drivers are installed.")
         
-        available_gpus = torch.cuda.device_count()
-        logger.info(f"Available CUDA devices: {available_gpus}")
-        
-        if self.gpu_count > available_gpus:
-            logger.warning(f"Requested {self.gpu_count} GPUs but only {available_gpus} available.")
-            self.gpu_count = available_gpus
-    
-    def setup_model_and_tokenizer(self):
-        """Initialize model and tokenizer using Unsloth with distributed support."""
         if self.local_rank == 0:
-            logger.info(f"Loading model with Unsloth: {self.model_name}")
+            logger.info(f"Available CUDA devices: {torch.cuda.device_count()}")
+
+    def setup_model_and_tokenizer(self):
+        """Initialize model and tokenizer using Unsloth."""
+        if self.local_rank == 0:
+            logger.info(f"Loading model: {self.model_name}")
         
-        # Load model and tokenizer using Unsloth FastLanguageModel
         model_kwargs = {
             'model_name': self.model_name,
             'max_seq_length': self.max_seq_length,
@@ -148,45 +146,39 @@ class QwenUnslothTrainer:
             'load_in_4bit': self.load_in_4bit,
         }
         
-        # Add device mapping for distributed training
         if self.is_distributed:
             model_kwargs['device_map'] = {"": self.local_rank}
         
         self.model, self.tokenizer = FastLanguageModel.from_pretrained(**model_kwargs)
-        
-        # Setup LoRA using Unsloth
-        self._setup_unsloth_lora()
+        self._setup_lora()
         
         if self.local_rank == 0:
-            logger.info("Model and tokenizer setup complete with Unsloth")
-    
-    def _setup_unsloth_lora(self):
+            logger.info("Model and tokenizer setup complete")
+
+    def _setup_lora(self):
         """Configure and apply LoRA using Unsloth."""
-        lora_config = self.config.get('lora', {})
-        
         self.model = FastLanguageModel.get_peft_model(
             self.model,
-            r=lora_config.get('r', 16),
-            target_modules=lora_config.get('target_modules', [
-                "q_proj", "k_proj", "v_proj", "o_proj",
-                "gate_proj", "up_proj", "down_proj"
+            r=self.lora_config.get('r', 16),
+            target_modules=self.lora_config.get('target_modules', [
+                "q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"
             ]),
-            lora_alpha=lora_config.get('alpha', 16),
-            lora_dropout=lora_config.get('dropout', 0.0),
+            lora_alpha=self.lora_config.get('alpha', 16),
+            lora_dropout=self.lora_config.get('dropout', 0.0),
             bias="none",
             use_gradient_checkpointing="unsloth",
             random_state=3407,
             use_rslora=False,
             loftq_config=None,
         )
-    
+
     def load_experiences(self):
         """Load and process conversation experiences."""
         experiences = []
         if self.local_rank == 0:
-            logger.info(f"Loading experiences from: {self.experience_dir}")
+            logger.info(f"Loading experiences from: {self.data_dir}")
         
-        for root, _, files in os.walk(self.experience_dir):
+        for root, _, files in os.walk(self.data_dir):
             for filename in files:
                 if filename.endswith('.json'):
                     file_path = os.path.join(root, filename)
@@ -203,7 +195,7 @@ class QwenUnslothTrainer:
         if self.local_rank == 0:
             logger.info(f"Loaded {len(experiences)} conversations")
         return experiences
-    
+
     def _process_conversation(self, data):
         """Process and clean conversation data."""
         processed = []
@@ -242,122 +234,104 @@ class QwenUnslothTrainer:
                     processed.append({"role": "assistant", "content": content})
         
         return processed
-    
-    def format_conversation(self, example):
-        """Convert conversation to training format using Qwen's chat template."""
-        messages = example["messages"]
-        conversation = ""
-        
-        for message in messages:
-            role = message["role"]
-            content = message.get("content", "")
-            
-            if role == "system":
-                conversation += f"<|im_start|>system\n{content}<|im_end|>\n"
-            elif role == "user":
-                conversation += f"<|im_start|>user\n{content}<|im_end|>\n"
-            elif role == "assistant":
-                conversation += f"<|im_start|>assistant\n"
-                if "function_call" in message:
-                    func_call = message["function_call"]
-                    conversation += f"<function_call>\n{json.dumps(func_call)}\n</function_call>"
-                if content:
-                    conversation += content
-                conversation += "<|im_end|>\n"
-            elif role == "function":
-                name = message.get("name", "unknown")
-                conversation += f"<|im_start|>function name={name}\n{content}<|im_end|>\n"
-        
-        return {"text": conversation}
-    
-    def formatting_prompts_func(self, examples):
-        """Format data for SFTTrainer - batch processing."""
+
+    def format_conversations(self, examples):
+        """Format conversations for training."""
         texts = []
-        messages_list = examples["messages"]
-        for messages in messages_list:
-            text = self.format_conversation({"messages": messages})["text"]
-            texts.append(text)
+        for messages in examples["messages"]:
+            conversation = ""
+            for message in messages:
+                role = message["role"]
+                content = message.get("content", "")
+                
+                if role == "system":
+                    conversation += f"<|im_start|>system\n{content}<|im_end|>\n"
+                elif role == "user":
+                    conversation += f"<|im_start|>user\n{content}<|im_end|>\n"
+                elif role == "assistant":
+                    conversation += f"<|im_start|>assistant\n"
+                    if "function_call" in message:
+                        func_call = message["function_call"]
+                        conversation += f"<function_call>\n{json.dumps(func_call)}\n</function_call>"
+                    if content:
+                        conversation += content
+                    conversation += "<|im_end|>\n"
+                elif role == "function":
+                    name = message.get("name", "unknown")
+                    conversation += f"<|im_start|>function name={name}\n{content}<|im_end|>\n"
+            
+            texts.append(conversation)
         return {"text": texts}
-    
+
     def create_dataset(self):
         """Create and prepare training dataset."""
         experiences = self.load_experiences()
         dataset = Dataset.from_list(experiences)
-        
-        # Format the dataset for SFTTrainer
-        formatted_dataset = dataset.map(
-            self.formatting_prompts_func,
-            batched=True,
-        )
+        formatted_dataset = dataset.map(self.format_conversations, batched=True)
         
         if self.local_rank == 0:
             logger.info(f"Created dataset with {len(formatted_dataset)} examples")
         return formatted_dataset
-    
+
     def get_training_arguments(self):
-        """Get training arguments for Unsloth with distributed support."""
+        """Get training arguments."""
         if self.is_distributed:
             world_size = int(os.environ.get("WORLD_SIZE", "1"))
             effective_batch_size = self.per_device_batch_size * world_size * self.gradient_accumulation_steps
         else:
-            effective_batch_size = self.per_device_batch_size * self.gpu_count * self.gradient_accumulation_steps
+            effective_batch_size = self.per_device_batch_size * self.gradient_accumulation_steps
         
         if self.local_rank == 0:
             logger.info(f"Effective batch size: {effective_batch_size}")
         
-        args = {
-            "output_dir": self.output_dir,
-            "per_device_train_batch_size": self.per_device_batch_size,
-            "gradient_accumulation_steps": self.gradient_accumulation_steps,
-            "warmup_steps": self.warmup_steps,
-            "max_steps": self.max_steps,
-            "learning_rate": self.learning_rate,
-            "fp16": not torch.cuda.is_bf16_supported(),
-            "bf16": torch.cuda.is_bf16_supported(),
-            "logging_steps": self.logging_steps,
-            "optim": self.optim,
-            "weight_decay": self.weight_decay,
-            "lr_scheduler_type": self.lr_scheduler_type,
-            "seed": 3407,
-            "save_steps": self.save_steps,
-            "save_total_limit": self.save_total_limit,
-            "dataloader_num_workers": self.dataloader_num_workers,
-            "report_to": None,
-            # Distributed training settings
-            "ddp_find_unused_parameters": False,
-            "dataloader_pin_memory": False,
-            "remove_unused_columns": False,
-        }
-        
-        return TrainingArguments(**args)
-    
+        return TrainingArguments(
+            output_dir=self.output_dir,
+            per_device_train_batch_size=self.per_device_batch_size,
+            gradient_accumulation_steps=self.gradient_accumulation_steps,
+            warmup_steps=self.warmup_steps,
+            max_steps=self.max_steps,
+            learning_rate=self.learning_rate,
+            fp16=not torch.cuda.is_bf16_supported(),
+            bf16=torch.cuda.is_bf16_supported(),
+            logging_steps=self.logging_steps,
+            optim=self.optim,
+            weight_decay=self.weight_decay,
+            lr_scheduler_type=self.lr_scheduler_type,
+            seed=3407,
+            save_steps=self.save_steps,
+            save_total_limit=self.save_total_limit,
+            dataloader_num_workers=self.dataloader_num_workers,
+            report_to=None,
+            ddp_find_unused_parameters=False,
+            dataloader_pin_memory=False,
+            remove_unused_columns=False,
+        )
+
     def train(self):
-        """Train the model with Unsloth with distributed support."""
+        """Train the model."""
         if self.local_rank == 0:
             mode = "distributed" if self.is_distributed else "single GPU"
-            logger.info(f"Starting fine-tuning process with Unsloth ({mode})...")
+            logger.info(f"Starting fine-tuning ({mode})...")
         
-        # Setup
         self.setup_model_and_tokenizer()
         train_dataset = self.create_dataset()
         training_args = self.get_training_arguments()
         
-        # Initialize SFTTrainer with Unsloth
         trainer = SFTTrainer(
             model=self.model,
             train_dataset=train_dataset,
             dataset_text_field="text",
             max_seq_length=self.max_seq_length,
-            dataset_num_proc=2,  # Reduced for distributed stability
-            packing=False,  # Disable packing for distributed training stability
+            dataset_num_proc=2,
+            packing=False,
             args=training_args,
         )
         
         if self.local_rank == 0:
             torch.cuda.empty_cache()
-            logger.info(f"GPU {self.local_rank} memory before training: {torch.cuda.memory_allocated()/1024**3:.2f} GB")
+            memory_gb = torch.cuda.memory_allocated() / 1024**3
+            logger.info(f"GPU memory before training: {memory_gb:.2f} GB")
         
-        # Start training
         trainer.train()
         
         # Save model only on rank 0 for distributed training
@@ -365,9 +339,9 @@ class QwenUnslothTrainer:
             trainer.save_model()
             self.tokenizer.save_pretrained(self.output_dir)
             logger.info(f"Training completed! Model saved to {self.output_dir}")
-    
+
     def test_model(self, prompt):
-        """Test the fine-tuned model using Unsloth."""
+        """Test the fine-tuned model."""
         if self.model is None or self.tokenizer is None:
             if self.local_rank == 0:
                 logger.error("Model not loaded! Run train() first.")
@@ -375,11 +349,9 @@ class QwenUnslothTrainer:
         
         # Only test on rank 0 for distributed training
         if self.is_distributed and self.local_rank != 0:
-            return "Inference skipped on non-zero rank for distributed training"
+            return "Inference skipped on non-zero rank"
         
-        # Enable fast inference with Unsloth
         FastLanguageModel.for_inference(self.model)
-        
         device = f"cuda:{self.local_rank}" if self.is_distributed else "cuda"
         inputs = self.tokenizer([prompt], return_tensors="pt").to(device)
         
@@ -403,7 +375,6 @@ class QwenUnslothTrainer:
 
 def main():
     """Main function to run the fine-tuning process."""
-    # Check if we're running in distributed mode
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     is_dist = is_distributed()
     
@@ -412,8 +383,6 @@ def main():
         logger.info(f"Starting Qwen fine-tuning with Unsloth ({mode})...")
     
     trainer = QwenUnslothTrainer()
-    
-    # Train the model
     trainer.train()
     
     # Test model only on rank 0
