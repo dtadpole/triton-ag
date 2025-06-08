@@ -1,11 +1,11 @@
 """
-Simple Qwen Model Fine-tuning with Hugging Face Transformers and FSDP
-Minimal setup for fine-tuning Qwen models using Fully Sharded Data Parallel
+Simple Qwen3 Model Fine-tuning with Hugging Face Transformers and FSDP
+Minimal setup for fine-tuning Qwen3 models using Fully Sharded Data Parallel
 """
 
 import os
 # Disable GPU 0 - only use GPUs 1-5
-os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3,4,5"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3,4"
 
 import torch
 from transformers import (
@@ -23,9 +23,9 @@ import json
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# 1. Load Qwen model and tokenizer
-model_name = "Qwen/Qwen2.5-0.5B-Instruct"  # Using smallest model for demo
-# Other options: "Qwen/Qwen2.5-1.5B-Instruct", "Qwen/Qwen2.5-3B-Instruct", etc.
+# 1. Load Qwen3 model and tokenizer
+model_name = "Qwen/Qwen3-0.6B"  # Using Qwen3 0.6B model
+# Other Qwen3 options: "Qwen/Qwen3-1.8B", "Qwen/Qwen3-8B", etc.
 
 print("Loading tokenizer...")
 tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -51,7 +51,7 @@ lora_config = LoraConfig(
     r=8,                    # Rank - controls the number of trainable parameters
     lora_alpha=16,          # LoRA scaling parameter
     lora_dropout=0.1,       # Dropout probability for LoRA layers
-    target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]  # Target modules for Qwen2.5
+    target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]  # Target modules for Qwen3
 )
 
 # Apply LoRA to the model
@@ -59,12 +59,13 @@ model = get_peft_model(model, lora_config)
 print("LoRA applied successfully!")
 model.print_trainable_parameters()
 
-# 2. Prepare sample training data
+# 2. Prepare sample training data for Qwen3
 # Replace this with your actual dataset
 sample_data = [
-    {"text": "Question: What is Python? Answer: Python is a programming language."},
-    {"text": "Question: What is machine learning? Answer: Machine learning is a subset of AI."},
-    {"text": "Question: What is fine-tuning? Answer: Fine-tuning adapts pre-trained models."},
+    {"text": "<|im_start|>user\nWhat is Python?<|im_end|>\n<|im_start|>assistant\nPython is a high-level programming language known for its simplicity and versatility.<|im_end|>"},
+    {"text": "<|im_start|>user\nWhat is machine learning?<|im_end|>\n<|im_start|>assistant\nMachine learning is a subset of artificial intelligence that enables computers to learn and improve from data without explicit programming.<|im_end|>"},
+    {"text": "<|im_start|>user\nWhat is fine-tuning?<|im_end|>\n<|im_start|>assistant\nFine-tuning is the process of adapting a pre-trained model to a specific task by training it on task-specific data.<|im_end|>"},
+    {"text": "<|im_start|>user\nExplain Qwen3 models<|im_end|>\n<|im_start|>assistant\nQwen3 is a series of large language models developed by Alibaba, featuring improved capabilities and efficiency compared to previous versions.<|im_end|>"},
     # Add more training examples here
 ]
 
@@ -83,7 +84,7 @@ tokenized_dataset = dataset.map(tokenize_function, batched=True, remove_columns=
 
 # 4. Set up training arguments with FSDP configuration
 training_args = TrainingArguments(
-    output_dir="./qwen_finetuned",
+    output_dir="./qwen3_finetuned",
     overwrite_output_dir=True,
     num_train_epochs=3,
     per_device_train_batch_size=1,  # Small batch size for memory efficiency
@@ -107,7 +108,7 @@ training_args = TrainingArguments(
         "xla_fsdp_grad_ckpt": False,
     },
     # FSDP transformer wrapping policy
-    fsdp_transformer_layer_cls_to_wrap="Qwen2DecoderLayer",  # Wrap each transformer layer
+    fsdp_transformer_layer_cls_to_wrap="Qwen3DecoderLayer",  # Wrap each transformer layer for Qwen3
     
     # Additional FSDP settings
     dataloader_pin_memory=False,  # Disable pin memory for FSDP
@@ -135,9 +136,9 @@ try:
     print("Fine-tuning completed!")
     
     # Save the fine-tuned LoRA model
-    trainer.save_model("./qwen_lora_finetuned_final")
-    tokenizer.save_pretrained("./qwen_lora_finetuned_final")
-    print("LoRA model saved to ./qwen_lora_finetuned_final")
+    trainer.save_model("./qwen3_lora_finetuned_final")
+    tokenizer.save_pretrained("./qwen3_lora_finetuned_final")
+    print("LoRA model saved to ./qwen3_lora_finetuned_final")
     
 except Exception as e:
     print(f"Error during training: {e}")
@@ -179,6 +180,6 @@ def test_model(prompt):
 # Example usage
 if __name__ == "__main__":
     # Test the model after training
-    test_prompt = "Question: What is AI?"
+    test_prompt = "<|im_start|>user\nWhat is AI?<|im_end|>\n<|im_start|>assistant\n"
     print(f"\nTest prompt: {test_prompt}")
     print(f"Response: {test_model(test_prompt)}")

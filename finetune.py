@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Qwen Fine-tuning with LoRA
-A clean and efficient script for fine-tuning Qwen models using LoRA (Low-Rank Adaptation)
-on function calling and conversation data.
+Qwen Fine-tuning with LoRA and FSDP
+A clean and efficient script for fine-tuning Qwen models using LoRA with distributed training support.
 """
 
 import os
@@ -22,66 +21,160 @@ from util import logger
 
 
 class QwenLoRATrainer:
-    """Fine-tune Qwen models using LoRA for memory-efficient training."""
+    """Fine-tune Qwen models using LoRA with distributed training support."""
     
-    def __init__(self, config=None):
-        # Load configuration
-        if config is None:
-            config = self.load_config()
-        
-        self.config = config
-        self.model_name = config.get('model', {}).get('name', "Qwen/Qwen2.5-0.5B-Instruct")
-        self.output_dir = config.get('training', {}).get('output_dir', "./qwen-lora-finetuned")
-        self.max_length = config.get('training', {}).get('max_length', 4096)
+    def __init__(self, config_path="finetune.yaml"):
+        """Initialize trainer with configuration."""
+        self.config = self._load_config(config_path)
+        self._setup_configuration()
+        self._validate_cuda()
         self.tokenizer = None
         self.model = None
+    def _load_config(self, config_path):
+        """Load configuration from YAML file."""
+        try:
+            with open(config_path, 'r') as f:
+                return yaml.safe_load(f)
+        except FileNotFoundError:
+            logger.warning(f"Config file {config_path} not found. Using defaults.")
+            return self._get_default_config()
+    
+    def _get_default_config(self):
+        """Get default configuration."""
+        return {
+            'model': {'name': "Qwen/Qwen3-0.6B"},
+            'training': {
+                'num_epochs': 2,
+                'learning_rate': 5e-5,
+                'max_length': 4096,
+                'per_device_batch_size': 1,
+                'gradient_accumulation_steps': 8,
+                'gpu_count': 1,
+                'strategy': 'data_parallel',
+                'output_dir': "./qwen-lora-finetuned"
+            },
+            'data': {'local_dir': 'finetune_experiences'},
+            'lora': {'r': 16, 'alpha': 32, 'dropout': 0.05}
+        }
+    
+    def _setup_configuration(self):
+        """Setup configuration parameters."""
+        # Model settings
+        self.model_name = self.config.get('model', {}).get('name', "Qwen/Qwen2.5-0.5B-Instruct")
         
-        # Multi-GPU configuration
-        self.gpu_count = config.get('gpu', {}).get('count', 1)
-        self.gpu_strategy = config.get('gpu', {}).get('strategy', 'data_parallel')
-        self.per_device_batch_size = config.get('gpu', {}).get('per_device_batch_size', 1)
+        # Training settings
+        training = self.config.get('training', {})
+        self.num_epochs = training.get('num_epochs', 2)
+        self.learning_rate = training.get('learning_rate', 5e-5)
+        self.max_length = training.get('max_length', 4096)
+        self.warmup_ratio = training.get('warmup_ratio', 0.1)
+        self.output_dir = training.get('output_dir', "./qwen-lora-finetuned")
         
-        # Ensure CUDA is available
+        # Batch settings
+        self.per_device_batch_size = training.get('per_device_batch_size', 1)
+        self.gradient_accumulation_steps = training.get('gradient_accumulation_steps', 4)
+        
+        # Multi-GPU settings
+        self.gpu_count = training.get('gpu_count', 1)
+        self.gpu_strategy = training.get('strategy', 'data_parallel')
+        self.dataloader_num_workers = training.get('dataloader_num_workers', 4)
+        
+        # Data settings
+        self.experience_dir = self.config.get('data', {}).get('local_dir', 'finetune_experiences')
+        
+        logger.info(f"Configuration loaded: {self.gpu_count} GPU(s) with {self.gpu_strategy} strategy")
+    
+    def _validate_cuda(self):
+        """Validate CUDA availability and adjust GPU count."""
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is not available! Please ensure GPU drivers are installed.")
         
         available_gpus = torch.cuda.device_count()
         logger.info(f"Available CUDA devices: {available_gpus}")
         
-        # Adjust GPU count if more requested than available
         if self.gpu_count > available_gpus:
-            logger.warning(f"Requested {self.gpu_count} GPUs but only {available_gpus} available. Using {available_gpus} GPUs.")
+            logger.warning(f"Requested {self.gpu_count} GPUs but only {available_gpus} available.")
             self.gpu_count = available_gpus
+    
+    def setup_model_and_tokenizer(self):
+        """Initialize model and tokenizer."""
+        logger.info(f"Loading model: {self.model_name}")
         
-        logger.info(f"Using {self.gpu_count} GPU(s) with {self.gpu_strategy} strategy")
+        # Setup tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.model_name,
+            trust_remote_code=True,
+            padding_side="right"
+        )
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        
+        # Setup model with appropriate device mapping
+        device_map = self._get_device_map()
+        model_kwargs = {
+            'torch_dtype': torch.float16,
+            'trust_remote_code': True
+        }
+        
+        if device_map is not None:
+            model_kwargs['device_map'] = device_map
+        
+        self.model = AutoModelForCausalLM.from_pretrained(self.model_name, **model_kwargs)
+        
+        # Configure gradient checkpointing
+        if self.gpu_strategy != "fsdp":
+            self.model.gradient_checkpointing_enable()
+        
+        # Resize embeddings and setup LoRA
+        self.model.resize_token_embeddings(len(self.tokenizer))
+        self._setup_lora()
+        
+        logger.info("Model and tokenizer setup complete")
     
-    def load_config(self, config_path="finetune.yaml"):
-        """Load configuration from YAML file."""
-        try:
-            with open(config_path, 'r') as f:
-                return yaml.safe_load(f)
-        except FileNotFoundError:
-            logger.warning(f"Config file {config_path} not found. Using default configuration.")
-            return {}
+    def _get_device_map(self):
+        """Get appropriate device mapping based on strategy."""
+        if self.gpu_strategy == "fsdp":
+            return None  # FSDP handles device mapping
+        elif self.gpu_strategy == "model_parallel":
+            return "auto"  # Automatic model parallelism
+        else:
+            return "cuda:0"  # Data parallel or single GPU
     
-    def load_experiences(self, experience_dir="./finetune_experiences"):
-        """Load conversation experiences from JSON files."""
+    def _setup_lora(self):
+        """Configure and apply LoRA to the model."""
+        lora_config = self.config.get('lora', {})
+        
+        config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            inference_mode=False,
+            r=lora_config.get('r', 16),
+            lora_alpha=lora_config.get('alpha', 32),
+            lora_dropout=lora_config.get('dropout', 0.1),
+            target_modules=lora_config.get('target_modules', [
+                "q_proj", "k_proj", "v_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj"
+            ])
+        )
+        
+        self.model = get_peft_model(self.model, config)
+        self.model.print_trainable_parameters()
+        self.model.enable_input_require_grads()
+    
+    def load_experiences(self):
+        """Load and process conversation experiences."""
         experiences = []
+        logger.info(f"Loading experiences from: {self.experience_dir}")
         
-        logger.info(f"Loading experiences from: {experience_dir}")
-        for root, _, files in os.walk(experience_dir):
+        for root, _, files in os.walk(self.experience_dir):
             for filename in files:
                 if filename.endswith('.json'):
                     file_path = os.path.join(root, filename)
-                    logger.info(f"Processing: {file_path}")
-                    
                     try:
                         with open(file_path, 'r') as f:
                             data = json.load(f)
-                            # Process conversation data
-                            processed_data = self._process_conversation(data)
-                            if processed_data:
-                                experiences.append({"messages": processed_data})
+                            processed = self._process_conversation(data)
+                            if processed:
+                                experiences.append({"messages": processed})
                     except Exception as e:
                         logger.warning(f"Error processing {file_path}: {e}")
         
@@ -99,122 +192,33 @@ class QwenLoRATrainer:
             
             if role == "system":
                 processed.append({"role": "system", "content": content})
-            
             elif role == "user":
-                if isinstance(content, dict):
-                    if content["type"] == "function_call_output":
-                        # Convert to function response
-                        processed.append({
-                            "role": "function",
-                            "name": function_name or "unknown",
-                            "content": content["output"]
-                        })
+                if isinstance(content, dict) and content.get("type") == "function_call_output":
+                    processed.append({
+                        "role": "function",
+                        "name": function_name or "unknown",
+                        "content": content["output"]
+                    })
                 elif isinstance(content, str):
                     processed.append({"role": "user", "content": content})
-            
             elif role == "assistant":
-                if isinstance(content, dict):
-                    if content["type"] == "function_call":
-                        function_name = content["name"]
-                        processed.append({
-                            "role": "assistant",
-                            "content": None,
-                            "function_call": {
-                                "name": content["name"],
-                                "arguments": content["arguments"]
-                            }
-                        })
+                if isinstance(content, dict) and content.get("type") == "function_call":
+                    function_name = content["name"]
+                    processed.append({
+                        "role": "assistant",
+                        "content": None,
+                        "function_call": {
+                            "name": content["name"],
+                            "arguments": content["arguments"]
+                        }
+                    })
                 elif isinstance(content, list) and content:
-                    if content[0]["type"] == "output_text":
+                    if content[0].get("type") == "output_text":
                         processed.append({"role": "assistant", "content": content[0]["text"]})
                 elif isinstance(content, str):
                     processed.append({"role": "assistant", "content": content})
         
         return processed
-    
-    def setup_model_and_tokenizer(self):
-        """Initialize model and tokenizer with multi-GPU optimization."""
-        logger.info(f"Loading model: {self.model_name}")
-        
-        # Load tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.model_name,
-            trust_remote_code=True,
-            padding_side="right"
-        )
-        
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        
-        # Configure device mapping for multi-GPU
-        if self.gpu_count > 1 and self.gpu_strategy == "fsdp":
-            # FSDP: Don't use device_map, let FSDP handle distribution
-            device_map = None
-        elif self.gpu_count > 1 and self.gpu_strategy == "model_parallel":
-            # Model parallel: split model across GPUs
-            device_map = "auto"
-        elif self.gpu_count > 1 and self.gpu_strategy == "data_parallel":
-            # Data parallel: model on all GPUs, data split
-            device_map = "cuda:0"  # Primary GPU for model loading
-        else:
-            # Single GPU
-            device_map = "cuda:0"
-        
-        # Load model with multi-GPU optimization
-        if device_map is not None:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_name,
-                torch_dtype=torch.float16,
-                device_map=device_map,
-                trust_remote_code=True
-            )
-        else:
-            # For FSDP, don't specify device_map
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_name,
-                torch_dtype=torch.float16,
-                trust_remote_code=True
-            )
-        
-        # Enable gradient checkpointing for memory efficiency with long sequences
-        # Only enable if not using FSDP, as FSDP handles this through training arguments
-        if self.gpu_strategy != "fsdp":
-            self.model.gradient_checkpointing_enable()
-        
-        # Resize embeddings if needed
-        self.model.resize_token_embeddings(len(self.tokenizer))
-        
-        # Setup LoRA
-        self._setup_lora()
-        
-        # Setup data parallel if using multiple GPUs
-        if self.gpu_count > 1 and self.gpu_strategy == "data_parallel":
-            logger.info(f"Setting up DataParallel across {self.gpu_count} GPUs")
-            # DataParallel will be handled by the Trainer with proper TrainingArguments
-        
-        logger.info("Model and tokenizer setup complete")
-    
-    def _setup_lora(self):
-        """Configure and apply LoRA to the model."""
-        lora_config_params = self.config.get('lora', {})
-        
-        lora_config = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
-            inference_mode=False,
-            r=lora_config_params.get('r', 16),
-            lora_alpha=lora_config_params.get('alpha', 32),
-            lora_dropout=lora_config_params.get('dropout', 0.1),
-            target_modules=lora_config_params.get('target_modules', [
-                "q_proj", "k_proj", "v_proj", "o_proj",  # Attention layers
-                "gate_proj", "up_proj", "down_proj"       # MLP layers
-            ])
-        )
-        
-        self.model = get_peft_model(self.model, lora_config)
-        self.model.print_trainable_parameters()
-        
-        # Enable gradient computation for input embeddings (required for PEFT)
-        self.model.enable_input_require_grads()
     
     def format_conversation(self, example):
         """Convert conversation to training format."""
@@ -231,15 +235,11 @@ class QwenLoRATrainer:
                 conversation += f"<|im_start|>user\n{content}<|im_end|>\n"
             elif role == "assistant":
                 conversation += f"<|im_start|>assistant\n"
-                
-                # Handle function calls
                 if "function_call" in message:
                     func_call = message["function_call"]
                     conversation += f"<function_call>\n{json.dumps(func_call)}\n</function_call>"
-                
                 if content:
                     conversation += content
-                
                 conversation += "<|im_end|>\n"
             elif role == "function":
                 name = message.get("name", "unknown")
@@ -259,26 +259,14 @@ class QwenLoRATrainer:
             return_tensors=None
         )
         
-        # Set labels for causal language modeling
         tokenized["labels"] = tokenized["input_ids"].copy()
         return tokenized
     
-    def create_dataset(self, experience_dir="./finetune_experiences", max_examples=None):
+    def create_dataset(self):
         """Create and prepare training dataset."""
-        # Load experiences
-        experiences = self.load_experiences(experience_dir)
-        
-        # Use all experiences unless max_examples is specified
-        if max_examples is not None and len(experiences) > max_examples:
-            logger.info(f"Limiting dataset from {len(experiences)} to {max_examples} examples")
-            experiences = experiences[:max_examples]
-        else:
-            logger.info(f"Using all {len(experiences)} experiences for comprehensive training")
-        
-        # Create dataset
+        experiences = self.load_experiences()
         dataset = Dataset.from_list(experiences)
         
-        # Tokenize
         tokenized_dataset = dataset.map(
             self.tokenize_data,
             batched=False,
@@ -288,78 +276,76 @@ class QwenLoRATrainer:
         logger.info(f"Created dataset with {len(tokenized_dataset)} examples")
         return tokenized_dataset
     
-    def train(self, experience_dir="./finetune_experiences"):
-        """Train the model with LoRA using configuration from YAML."""
-        logger.info("Starting fine-tuning process...")
+    def _get_decoder_layer_class(self):
+        """Get the appropriate decoder layer class based on model architecture."""
+        if "qwen3" in self.model_name.lower():
+            return "Qwen3DecoderLayer"
+        elif "qwen2" in self.model_name.lower():
+            return "Qwen2DecoderLayer"
+        else:
+            # Default fallback - try to detect from model config
+            logger.warning(f"Could not detect model architecture from {self.model_name}, using Qwen3DecoderLayer")
+            return "Qwen3DecoderLayer"
+
+    def get_training_arguments(self):
+        """Get training arguments based on strategy."""
+        effective_batch_size = self.per_device_batch_size * self.gpu_count * self.gradient_accumulation_steps
+        logger.info(f"Effective batch size: {effective_batch_size}")
         
-        # Setup model and tokenizer
-        self.setup_model_and_tokenizer()
-        
-        # Create dataset
-        train_dataset = self.create_dataset(experience_dir)
-        
-        # Get training parameters from config
-        training_config = self.config.get('training', {})
-        gpu_config = self.config.get('gpu', {})
-        
-        epochs = training_config.get('num_epochs', 1)
-        learning_rate = training_config.get('learning_rate', 5e-5)
-        per_device_batch_size = gpu_config.get('per_device_batch_size', 1)
-        gradient_accumulation_steps = training_config.get('gradient_accumulation_steps', 32)
-        dataloader_num_workers = gpu_config.get('dataloader_num_workers', 4)
-        
-        # Calculate effective batch size
-        effective_batch_size = per_device_batch_size * self.gpu_count * gradient_accumulation_steps
-        logger.info(f"Effective batch size: {effective_batch_size} (per_device: {per_device_batch_size}, "
-                   f"gpus: {self.gpu_count}, grad_accum: {gradient_accumulation_steps})")
-        
-        # Training arguments with multi-GPU support
-        training_args_dict = {
+        args = {
             "output_dir": self.output_dir,
-            "num_train_epochs": epochs,
-            "per_device_train_batch_size": per_device_batch_size,
-            "gradient_accumulation_steps": gradient_accumulation_steps,
-            "learning_rate": learning_rate,
-            "warmup_ratio": training_config.get('warmup_ratio', 0.1),
+            "num_train_epochs": self.num_epochs,
+            "per_device_train_batch_size": self.per_device_batch_size,
+            "gradient_accumulation_steps": self.gradient_accumulation_steps,
+            "learning_rate": self.learning_rate,
+            "warmup_ratio": self.warmup_ratio,
             "logging_steps": 1,
-            "save_steps": 10,  # Less frequent saving for long sequences
+            "save_steps": 10,
             "save_total_limit": 2,
             "prediction_loss_only": True,
             "remove_unused_columns": False,
             "dataloader_pin_memory": False,
-            "dataloader_num_workers": dataloader_num_workers,
-            "gradient_checkpointing": True,  # Enable gradient checkpointing
-            "ddp_find_unused_parameters": False,  # Optimize for multi-GPU training
+            "dataloader_num_workers": self.dataloader_num_workers,
+            "gradient_checkpointing": False,
+            "ddp_find_unused_parameters": False,
             "report_to": None
         }
         
-        # Configure precision and FSDP based on strategy
+        # Configure precision and FSDP
         if self.gpu_strategy == "fsdp":
-            # FSDP configuration from test4.py learnings
-            training_args_dict.update({
-                "bf16": True,  # Use bf16 instead of fp16 for better FSDP compatibility
-                "fsdp": "full_shard auto_wrap",  # Enable full sharding with auto wrapping
+            decoder_layer_class = self._get_decoder_layer_class()
+            args.update({
+                "bf16": True,
+                "fsdp": "full_shard auto_wrap",
                 "fsdp_config": {
-                    "min_num_params": 0,  # Minimum number of parameters for a layer to be wrapped
+                    "min_num_params": 0,
                     "xla": False,
                     "xla_fsdp_v2": False,
                     "xla_fsdp_grad_ckpt": False,
                 },
-                "fsdp_transformer_layer_cls_to_wrap": "Qwen2DecoderLayer",  # Wrap each transformer layer
+                "fsdp_transformer_layer_cls_to_wrap": decoder_layer_class,
             })
         else:
-            # Use fp16 for non-FSDP strategies
-            training_args_dict["fp16"] = True
+            args["fp16"] = True
         
-        training_args = TrainingArguments(**training_args_dict)
+        return TrainingArguments(**args)
+    
+    def train(self):
+        """Train the model with LoRA."""
+        logger.info("Starting fine-tuning process...")
+        
+        # Setup
+        self.setup_model_and_tokenizer()
+        train_dataset = self.create_dataset()
+        training_args = self.get_training_arguments()
         
         # Data collator
         data_collator = DataCollatorForLanguageModeling(
             tokenizer=self.tokenizer,
-            mlm=False  # Causal language modeling
+            mlm=False
         )
         
-        # Initialize trainer
+        # Initialize and run trainer
         trainer = Trainer(
             model=self.model,
             args=training_args,
@@ -367,7 +353,6 @@ class QwenLoRATrainer:
             data_collator=data_collator,
         )
         
-        # Clear GPU memory and start training
         torch.cuda.empty_cache()
         logger.info(f"GPU memory before training: {torch.cuda.memory_allocated()/1024**3:.2f} GB")
         
@@ -376,7 +361,6 @@ class QwenLoRATrainer:
         # Save model
         trainer.save_model()
         self.tokenizer.save_pretrained(self.output_dir)
-        
         logger.info(f"Training completed! Model saved to {self.output_dir}")
     
     def test_model(self, prompt):
@@ -385,20 +369,24 @@ class QwenLoRATrainer:
             logger.error("Model not loaded! Run train() first.")
             return None
         
-        # For FSDP models, we need to ensure the model is in the right state for inference
-        self.model.eval()  # Set to evaluation mode
+        # For FSDP models in distributed mode, only test on rank 0
+        if self.gpu_strategy == "fsdp" and "RANK" in os.environ:
+            rank = int(os.environ.get("RANK", "0"))
+            if rank != 0:
+                return "Inference skipped on non-zero rank for FSDP"
         
+        self.model.eval()
         inputs = self.tokenizer(prompt, return_tensors="pt")
         
-        # Move inputs to CUDA if available
+        # Move inputs to the same device as model
         if torch.cuda.is_available():
-            inputs = {k: v.cuda() for k, v in inputs.items()}
+            device = next(self.model.parameters()).device
+            inputs = {k: v.to(device) for k, v in inputs.items()}
         
-        with torch.no_grad():
-            # Use torch.autocast for mixed precision inference
-            if self.gpu_strategy == "fsdp":
-                # Use bf16 autocast for FSDP compatibility
-                with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
+        try:
+            with torch.no_grad():
+                dtype = torch.bfloat16 if self.gpu_strategy == "fsdp" else torch.float16
+                with torch.amp.autocast('cuda', enabled=True, dtype=dtype):
                     outputs = self.model.generate(
                         **inputs,
                         max_new_tokens=100,
@@ -406,43 +394,30 @@ class QwenLoRATrainer:
                         do_sample=True,
                         pad_token_id=self.tokenizer.eos_token_id
                     )
-            else:
-                # Use standard fp16 autocast for other strategies
-                with torch.cuda.amp.autocast(enabled=True, dtype=torch.float16):
-                    outputs = self.model.generate(
-                        **inputs,
-                        max_new_tokens=100,
-                        temperature=0.7,
-                        do_sample=True,
-                        pad_token_id=self.tokenizer.eos_token_id
-                    )
-        
-        response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        return response[len(prompt):].strip()
+            
+            response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            return response[len(prompt):].strip()
+        except Exception as e:
+            logger.error(f"Error during inference: {e}")
+            return f"Inference failed: {e}"
 
 
 def main():
     """Main function to run the fine-tuning process."""
-    logger.info("Starting Qwen LoRA fine-tuning with multi-GPU support...")
+    logger.info("Starting Qwen LoRA fine-tuning...")
     
-    # Initialize trainer with YAML configuration
     trainer = QwenLoRATrainer()
     
-    # Check if FSDP is being used and if we're in distributed mode
-    if trainer.gpu_strategy == "fsdp":
-        import os
-        if "RANK" not in os.environ:
-            logger.error("FSDP requires distributed training. Please run with:")
-            logger.error("torchrun --nproc_per_node=4 finetune.py")
-            return
-    
-    # Get experience directory from config
-    experience_dir = trainer.config.get('data', {}).get('local_dir', './finetune_experiences')
+    # Check for distributed training requirement
+    if trainer.gpu_strategy == "fsdp" and "RANK" not in os.environ:
+        logger.error("FSDP requires distributed training. Please run with:")
+        logger.error("torchrun --nproc_per_node=4 finetune.py")
+        return
     
     # Train the model
-    trainer.train(experience_dir=experience_dir)
+    trainer.train()
     
-    # Test the model (only on rank 0 for distributed training)
+    # Test model (only on rank 0 for distributed training)
     if trainer.gpu_strategy != "fsdp" or os.environ.get("RANK", "0") == "0":
         test_prompt = "<|im_start|>user\nWhat is machine learning?<|im_end|>\n<|im_start|>assistant\n"
         logger.info("Testing the fine-tuned model...")
