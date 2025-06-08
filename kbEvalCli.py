@@ -337,7 +337,7 @@ if __name__ == "__main__":
     parser.add_argument("--reference_code", type=str, default="elemAddRef.py")
     parser.add_argument("--generated_code", type=str, default="elemAddCuda.py")
     parser.add_argument("--measure_performance_ref", action="store_true")
-    parser.add_argument("--device-list", type=str, default="0")
+    parser.add_argument("--device-list", type=str, default="1")
     parser.add_argument("--max-jobs", type=int, default=8)
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
@@ -384,6 +384,15 @@ if __name__ == "__main__":
         # print to stderr
         logger.error(exception_traceback_str)
         result.metadata['runtime_error'] = exception_traceback_str
+
+    # check if there is runtime error
+    if 'error_during_performance' in result.metadata:
+        # print exception and stack trace
+        exception = result.metadata['error_during_performance']
+        exception_traceback_str = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
+        # print to stderr
+        logger.error(exception_traceback_str)
+        result.metadata['error_during_performance'] = exception_traceback_str
 
     # check if there is evaluation error
     if 'evaluation_error' in result.metadata:

@@ -535,24 +535,27 @@ def time_execution_with_cuda_event(
     )
     elapsed_times = []
 
-    # Actual trials
-    for trial in range(num_trials):
-        # create event marker default is not interprocess
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
+    with torch.cuda.device(device):
+        # Actual trials
+        for trial in range(num_trials):
+            # create event marker default is not interprocess
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            # start_event.device = device
+            # end_event.device = device
 
-        start_event.record()
-        kernel_fn(*args)
-        end_event.record()
+            start_event.record()
+            kernel_fn(*args)
+            end_event.record()
 
-        # Synchronize to ensure the events have completed
-        torch.cuda.synchronize(device=device)
+            # Synchronize to ensure the events have completed
+            torch.cuda.synchronize(device=device)
 
-        # Calculate the elapsed time in milliseconds
-        elapsed_time_ms = start_event.elapsed_time(end_event)
-        if verbose:
-            print(f"Trial {trial + 1}: {elapsed_time_ms:.3g} ms")
-        elapsed_times.append(elapsed_time_ms)
+            # Calculate the elapsed time in milliseconds
+            elapsed_time_ms = start_event.elapsed_time(end_event)
+            if verbose:
+                print(f"Trial {trial + 1}: {elapsed_time_ms:.3g} ms")
+            elapsed_times.append(elapsed_time_ms)
 
     return elapsed_times
 

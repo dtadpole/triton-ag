@@ -309,8 +309,8 @@ if __name__ == "__main__":
     parser.add_argument("-d", "--workspace-dir", type=str, default="")
     parser.add_argument("-p", "--provider", type=str, default=None)
     parser.add_argument("-m", "--model-name", type=str, default=None)
-    parser.add_argument("-e", "--max-iterations", type=int, default=4)
-    parser.add_argument("-r", "--total-rollouts", type=int, default=8)
+    parser.add_argument("-i", "--max-iterations", type=int, default=2)
+    parser.add_argument("-r", "--total-rollouts", type=int, default=1)
     parser.add_argument(
         "-t",
         "--task",

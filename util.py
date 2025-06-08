@@ -169,6 +169,7 @@ def log_result_items(result: RunResult, name_tag: str, model_tag: str, task_tag:
         "role": "user",
         "content": result.input,
     }
+    function_calls = {}
     output.append(user_msg)
     for item in result.new_items:
         if isinstance(item, MessageOutputItem):
@@ -178,15 +179,21 @@ def log_result_items(result: RunResult, name_tag: str, model_tag: str, task_tag:
             }
             output.append(json_item)
         elif isinstance(item, ToolCallItem):
+            function_calls[item.raw_item.call_id] = item.raw_item
             json_item = {
                 "role": "assistant",
-                "content": to_jsonable_python(item.raw_item)
+                "content": None,
+                "function_call": {
+                    "name": item.raw_item.name,
+                    "arguments": to_jsonable_python(item.raw_item.args),
+                },
             }
             output.append(json_item)
         elif isinstance(item, ToolCallOutputItem):
             json_item = {
-                "role": "user",
-                "content": to_jsonable_python(item.raw_item),
+                "role": "function",
+                "name": function_calls[item.raw_item.call_id].name if item.raw_item.call_id in function_calls else None,
+                "content": item.raw_item.output,
             }
             output.append(json_item)
         else:
