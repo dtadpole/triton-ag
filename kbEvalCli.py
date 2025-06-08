@@ -1,5 +1,6 @@
 import argparse
 import sys
+import time
 import traceback
 from kbEvalTest.kbeval import KernelExecResult, eval_kernel_against_ref, graceful_eval_cleanup, run_and_check_correctness, time_execution_with_cuda_event, get_timing_stats, load_original_model_and_inputs, load_custom_model, set_seed
 import torch
@@ -65,7 +66,10 @@ def compile_and_eval_kernel(
     while True:
         try:
             with lock.acquire(timeout=1):
-                logger.info(f"[KB_Eval] Acquired lock {lock_file} [{eval_key}]")
+                logger.warning(f"[KB_Eval] Acquired lock {lock_file} [{eval_key}]")
+
+                # verify lock is working by sleeping randome between 10 and 20 seconds
+                # time.sleep(random.randint(10, 20)) # verified lock is working
 
                 # write my pid to lock file
                 with open(lock_file, "w") as f:
@@ -90,7 +94,7 @@ def compile_and_eval_kernel(
                 )
 
                 os.remove(lock_file)
-                logger.info(f"[KB_Eval] Released lock {lock_file} [{eval_key}]")
+                logger.warning(f"[KB_Eval] Released lock {lock_file} [{eval_key}]")
 
                 return result
         except Timeout:
@@ -106,9 +110,9 @@ def compile_and_eval_kernel(
             # check lockfile modified time
             if os.path.exists(lock_file):
                 lock_modified_time = os.path.getmtime(lock_file)
-                # if modified time is more than 2 minutes, delete lock file
-                if lock_modified_time < os.path.getmtime(lock_file) - 120:
-                    logger.info(f"[KB_Eval] Lock file {lock_file} is older than 2 minutes, deleting... [{eval_key}]")
+                # if modified time is more than 5 minutes, delete lock file
+                if lock_modified_time < os.path.getmtime(lock_file) - 300:
+                    logger.error(f"[KB_Eval] Lock file {lock_file} is older than 5 minutes, deleting... [{eval_key}]")
                     os.remove(lock_file)
 
 def compile_kernel_new(
