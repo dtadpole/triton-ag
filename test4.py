@@ -1,7 +1,11 @@
 """
-Simple Qwen Model Fine-tuning with Hugging Face Transformers
-Minimal setup for fine-tuning Qwen models
+Simple Qwen Model Fine-tuning with Hugging Face Transformers and FSDP
+Minimal setup for fine-tuning Qwen models using Fully Sharded Data Parallel
 """
+
+import os
+# Disable GPU 0 - only use GPUs 1-5
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3,4,5"
 
 import torch
 from transformers import (
@@ -33,10 +37,10 @@ if tokenizer.pad_token is None:
 print("Loading model...")
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
-    torch_dtype=torch.float16,  # Use float16 for memory efficiency with LoRA
-    device_map={"": torch.cuda.current_device()} if torch.cuda.is_available() else None,
+    torch_dtype=torch.float16,  # Use float16 for memory efficiency
+    # Remove device_map for FSDP compatibility
     trust_remote_code=True,
-    load_in_8bit=True  # Use 8-bit quantization for memory efficiency
+    # Remove load_in_8bit for FSDP compatibility - FSDP handles memory efficiency
 )
 
 # Apply LoRA configuration
@@ -77,7 +81,7 @@ def tokenize_function(examples):
 dataset = Dataset.from_list(sample_data)
 tokenized_dataset = dataset.map(tokenize_function, batched=True, remove_columns=["text"])
 
-# 4. Set up training arguments
+# 4. Set up training arguments with FSDP configuration
 training_args = TrainingArguments(
     output_dir="./qwen_finetuned",
     overwrite_output_dir=True,
@@ -88,11 +92,26 @@ training_args = TrainingArguments(
     logging_steps=10,
     save_steps=500,
     learning_rate=5e-4,  # Higher learning rate often works better with LoRA
-    fp16=True,  # Enable mixed precision for memory efficiency with LoRA
+    bf16=True,  # Use bf16 instead of fp16 for better FSDP compatibility
     logging_dir="./logs",
     report_to=None,  # Disable wandb logging
     save_strategy="steps",
     eval_strategy="no",  # No evaluation for simplicity
+    
+    # FSDP Configuration
+    fsdp="full_shard auto_wrap",  # Enable full sharding with auto wrapping
+    fsdp_config={
+        "min_num_params": 0,  # Minimum number of parameters for a layer to be wrapped
+        "xla": False,  # Set to True if using TPUs
+        "xla_fsdp_v2": False,
+        "xla_fsdp_grad_ckpt": False,
+    },
+    # FSDP transformer wrapping policy
+    fsdp_transformer_layer_cls_to_wrap="Qwen2DecoderLayer",  # Wrap each transformer layer
+    
+    # Additional FSDP settings
+    dataloader_pin_memory=False,  # Disable pin memory for FSDP
+    remove_unused_columns=False,  # Keep all columns for FSDP
 )
 
 # 5. Data collator for language modeling
@@ -110,7 +129,7 @@ trainer = Trainer(
 )
 
 # 7. Start fine-tuning
-print("Starting fine-tuning...")
+print("Starting fine-tuning with FSDP...")
 try:
     trainer.train()
     print("Fine-tuning completed!")
@@ -125,20 +144,34 @@ except Exception as e:
 
 # 8. Test the fine-tuned model
 def test_model(prompt):
+    # For FSDP models, we need to ensure the model is in the right state for inference
+    model.eval()  # Set to evaluation mode
+    
     inputs = tokenizer(prompt, return_tensors="pt")
     
-    # Move inputs to the same device as the model
-    model_device = next(model.parameters()).device
-    inputs = {k: v.to(model_device) for k, v in inputs.items()}
+    # Move inputs to the same device as the model and ensure consistent dtype
+    if torch.cuda.is_available():
+        inputs = {k: v.cuda() for k, v in inputs.items()}
+    
+    # Ensure model parameters are in consistent dtype for inference
+    # Convert model to float16 for inference to avoid dtype mismatch
+    model_dtype = next(model.parameters()).dtype
+    if model_dtype != torch.float16:
+        # Convert inputs to match model dtype
+        if hasattr(inputs, 'input_ids'):
+            # input_ids should remain as long/int, only convert embeddings if needed
+            pass
     
     with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_length=inputs["input_ids"].shape[1] + 50,
-            temperature=0.7,
-            do_sample=True,
-            pad_token_id=tokenizer.eos_token_id
-        )
+        # Use torch.autocast to handle mixed precision inference
+        with torch.cuda.amp.autocast(enabled=True, dtype=torch.float16):
+            outputs = model.generate(
+                **inputs,
+                max_length=inputs["input_ids"].shape[1] + 50,
+                temperature=0.7,
+                do_sample=True,
+                pad_token_id=tokenizer.eos_token_id
+            )
     
     response = tokenizer.decode(outputs[0], skip_special_tokens=True)
     return response[len(prompt):]
