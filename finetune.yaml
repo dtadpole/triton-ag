@@ -1,16 +1,61 @@
+# Qwen Fine-tuning Configuration
+# Clean, structured configuration for Unsloth-based fine-tuning
+
+# Model Configuration
 model:
-  name: "unsloth/Qwen3-8B-bnb-4bit"
+  name: "unsloth/Qwen3-32B-bnb-4bit"
   # name: "unsloth/Qwen3-8B"
   # name: "Qwen/Qwen3-8B"
   # name: "Qwen/Qwen3-8B-AWQ"
   # name: "Qwen/Qwen2.5-0.5B-Instruct"
   # name: "Qwen/Qwen3-0.6B"
-  max_seq_length: 8192
-  dtype: null  # None for auto detection
+  max_seq_length: 40960
+  dtype: null  # Auto-detection
   load_in_4bit: true
 
+# Training Configuration
+training:
+  # Core training parameters
+  learning_rate: 3e-5
+  max_steps: -1  # Set to -1 for full epochs
+  warmup_steps: 5
+  
+  # Batch and memory settings
+  per_device_batch_size: 2
+  gradient_accumulation_steps: 4
+  
+  # Optimization
+  optim: "adamw_8bit"
+  weight_decay: 0.01
+  lr_scheduler_type: "linear"
+  
+  # Logging and saving
+  logging_steps: 1
+  save_steps: 25
+  save_total_limit: 2
+  output_dir: "./qwen3-unsloth-finetuned"
+  
+  # Multi-GPU settings
+  dataloader_num_workers: 4
+
+# LoRA Configuration
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "down_proj"
+    - "up_proj"
+
+# Data Configuration  
 data:
   local_dir: "finetune_experiences"
+  # S3 data sources (if needed)
   s3_folders:
     - s3://agent-xyz/kernel_coder/anthropic
     - s3://agent-xyz/kernel_coder/deepseek
@@ -18,38 +63,3 @@ data:
     - s3://agent-xyz/kernel_coder/gemini/gemini-2.5-pro
     - s3://agent-xyz/kernel_bench/level1
     - s3://agent-xyz/kernel_bench/level2
-
-training:
-  num_epochs: 2
-  learning_rate: 0.0002  # 2e-4 works well with unsloth
-  max_length: 8192
-  warmup_steps: 5
-  max_steps: 50  # Set to -1 for full training
-  output_dir: "./qwen3-unsloth-finetuned"
-  # Batch configuration
-  per_device_batch_size: 2  # Optimized for both single and distributed
-  gradient_accumulation_steps: 4  # Works well for distributed
-  # Multi-GPU settings - auto-detects distributed vs single GPU
-  gpu_count: 4  # Will be used for single GPU mode (for distributed, use torchrun)
-  strategy: "unsloth"  # Use unsloth optimization
-  dataloader_num_workers: 4
-  # Unsloth specific settings
-  optim: "adamw_8bit"
-  weight_decay: 0.01
-  lr_scheduler_type: "linear"
-  logging_steps: 1
-  save_steps: 25
-  save_total_limit: 2
-
-lora:
-  r: 16
-  alpha: 32
-  dropout: 0.05
-  target_modules:
-    - "q_proj"
-    - "k_proj" 
-    - "v_proj"
-    - "o_proj"
-    - "gate_proj"
-    - "down_proj"
-    - "up_proj"
