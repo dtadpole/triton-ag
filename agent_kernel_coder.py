@@ -184,7 +184,8 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
         params={
             "command": "uv",
             "args": ["run", "--with", "mcp", "mcp", "run", "checkpointServer.py"],
-        }
+        },
+        client_session_timeout_seconds=10,
     )
     async with checkpoint_server as ckpts:
         result = await ckpts.call_tool(
@@ -309,7 +310,7 @@ if __name__ == "__main__":
     parser.add_argument("-d", "--workspace-dir", type=str, default="")
     parser.add_argument("-p", "--provider", type=str, default=None)
     parser.add_argument("-m", "--model-name", type=str, default=None)
-    parser.add_argument("-i", "--max-iterations", type=int, default=2)
+    parser.add_argument("-i", "--max-iterations", type=int, default=1)
     parser.add_argument("-r", "--total-rollouts", type=int, default=1)
     parser.add_argument(
         "-t",

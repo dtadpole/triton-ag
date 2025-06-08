@@ -179,21 +179,44 @@ def log_result_items(result: RunResult, name_tag: str, model_tag: str, task_tag:
             }
             output.append(json_item)
         elif isinstance(item, ToolCallItem):
-            function_calls[item.raw_item.call_id] = item.raw_item
+            if "call_id" in item.raw_item:
+                call_id = item.raw_item["call_id"]
+            elif hasattr(item.raw_item, "call_id"):
+                call_id = item.raw_item.call_id
+            else:
+                call_id = None
+            if call_id:
+                function_calls[call_id] = item.raw_item
+            # final json item
             json_item = {
                 "role": "assistant",
                 "content": None,
                 "function_call": {
                     "name": item.raw_item.name,
-                    "arguments": to_jsonable_python(item.raw_item.args),
+                    "arguments": to_jsonable_python(item.raw_item.arguments),
                 },
             }
             output.append(json_item)
         elif isinstance(item, ToolCallOutputItem):
+            if "call_id" in item.raw_item:
+                call_id = item.raw_item["call_id"]
+            elif hasattr(item.raw_item, "call_id"):
+                call_id = item.raw_item.call_id
+            else:
+                call_id = None
+                logger.error(f"Tool call item has no call_id: {item.raw_item}")
+            if "output" in item.raw_item:
+                output = item.raw_item["output"]
+            elif hasattr(item.raw_item, "output"):
+                output = item.raw_item.output
+            else:
+                output = None
+                logger.error(f"Tool call item has no output: {item.raw_item}")
+            # final json item
             json_item = {
                 "role": "function",
-                "name": function_calls[item.raw_item.call_id].name if item.raw_item.call_id in function_calls else None,
-                "content": item.raw_item.output,
+                "name": function_calls[call_id].name if call_id and call_id in function_calls else None,
+                "content": output,
             }
             output.append(json_item)
         else:
