@@ -10,7 +10,7 @@ codeRunServer:
 	mcp dev codeRunServer.py
 
 finetune:
-	.venv/bin/torchrun --nproc_per_node=4 finetune.py
+	torchrun --nproc_per_node=4 finetune.py
 
 vllm-qwen3-8b:
 	vllm serve unsloth/DeepSeek-R1-0528-Qwen3-8B-bnb-4bit \
