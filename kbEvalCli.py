@@ -34,6 +34,7 @@ def compile_and_eval_kernel(
     reference_code: str,
     generated_code: str,
     device: torch.device,
+    build_directory: str,
     args: argparse.Namespace,
 ) -> KernelExecResult:
 
@@ -45,6 +46,7 @@ def compile_and_eval_kernel(
             time_tag,
             reference_code,
             generated_code,
+            build_directory=build_directory,
             verbose=args.verbose,
         )
     except Exception as e:
@@ -124,6 +126,7 @@ def compile_kernel_new(
     time_tag: str,
     original_model_src: str,
     custom_model_src: str,
+    build_directory: str = None,
     verbose: bool = False,
 ) -> tuple[torch.nn.Module, callable, callable, torch.nn.Module, dict, dict]: # Model, get_init_inputs, get_inputs, ModelNew, metadata, context
     """
@@ -151,7 +154,7 @@ def compile_kernel_new(
     try:
         os.environ["TORCH_USE_CUDA_DSA"] = "1"  # compile with device side assertion
         # add hash for later to distinguish between multi-turn kernels
-        ModelNew = load_custom_model(custom_model_src, context, build_directory=None)
+        ModelNew = load_custom_model(custom_model_src, context, build_directory=build_directory)
         # torch.cuda.synchronize(device=device)  # not sure if this is too much
     except Exception as e:
         logger.warning(
@@ -339,7 +342,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_tag", type=str, default="model_tag")
     parser.add_argument("--task_tag", type=str, default="task_tag")
     parser.add_argument("--eval_tag", type=str, default="eval_tag")
-    parser.add_argument("--time_tag", type=str, default="time_tag")
+    parser.add_argument("--time_tag", type=str, default="auto")
     parser.add_argument("--reference_code", type=str, default="elemAddRef.py")
     parser.add_argument("--generated_code", type=str, default="elemAddCuda.py")
     parser.add_argument("--measure_performance_ref", action="store_true")
@@ -350,8 +353,9 @@ if __name__ == "__main__":
 
     os.environ["MAX_JOBS"] = str(args.max_jobs)
 
-    # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}
-    temp_dir = os.path.join(KB_EVAL_DIR, args.model_tag, args.task_tag)
+    # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}/{time_tag}
+    time_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+    temp_dir = os.path.join(KB_EVAL_DIR, args.model_tag, args.task_tag, args.eval_tag, time_tag if args.time_tag == "auto" else args.time_tag)
     os.makedirs(temp_dir, exist_ok=True)
 
     # read from file
@@ -373,6 +377,7 @@ if __name__ == "__main__":
             reference_code=reference_model_src,
             generated_code=generated_model_src,
             device=device,
+            build_directory=temp_dir,
             args=args,
         )
 
@@ -409,7 +414,7 @@ if __name__ == "__main__":
 
     finally:
         # write to file
-        with open(os.path.join(temp_dir, f"{args.eval_tag}_{args.time_tag}_kbeval.json"), "w") as f:
+        with open(os.path.join(temp_dir, f"{args.eval_tag}_kbeval.json"), "w") as f:
             f.write(json.dumps(result.model_dump(), indent=4))
 
         exit(exit_code)

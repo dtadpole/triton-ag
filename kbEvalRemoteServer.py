@@ -75,15 +75,15 @@ async def kb_eval(
         async with request_counter_lock:
             request_counter += 1
 
-        # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}
-        temp_dir = os.path.join(KB_EVAL_DIR, model_tag, task_tag)
+        # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}/{eval_tag}/{time_tag}
+        temp_dir = os.path.join(KB_EVAL_DIR, model_tag, task_tag, eval_tag, time_tag)
         os.makedirs(temp_dir, exist_ok=True)
 
-        reference_file_path = os.path.join(temp_dir, f"{eval_tag}_{time_tag}_reference_code.py")
+        reference_file_path = os.path.join(temp_dir, f"reference_code.py")
         with open(reference_file_path, "w") as f:
             f.write(reference_code)
 
-        generated_file_path = os.path.join(temp_dir, f"{eval_tag}_{time_tag}_generated_code.py")
+        generated_file_path = os.path.join(temp_dir, f"generated_code.py")
         with open(generated_file_path, "w") as f:
             f.write(generated_code)
 
@@ -114,7 +114,10 @@ async def kb_eval(
         
         # Wait for all output to be processed
         await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
-        logger.info(f"[KB Eval] [{eval_tag}] return code: {process.returncode}")
+        if process.returncode != 0:
+            logger.error(f"[KB Eval] [{eval_tag}] return code: {process.returncode}")
+        else:
+            logger.info(f"[KB Eval] [{eval_tag}] return code: {process.returncode}")
  
         # stdout, stderr = await process.communicate()
         # read line by line and print
@@ -125,7 +128,7 @@ async def kb_eval(
         logger.info(f"[KB Eval] [{eval_tag}] END ====================")
 
         # read the result from {temp_dir}/kbeval_{eval_tag}.json
-        result_json_path = os.path.join(temp_dir, f"{eval_tag}_{time_tag}_kbeval.json")
+        result_json_path = os.path.join(temp_dir, f"{eval_tag}_kbeval.json")
         with open(result_json_path, "r") as f:
             result_text = f.read()
 
