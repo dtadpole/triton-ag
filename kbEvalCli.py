@@ -355,7 +355,7 @@ if __name__ == "__main__":
 
     # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}/{time_tag}
     time_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
-    temp_dir = os.path.join(KB_EVAL_DIR, args.model_tag, args.task_tag, args.eval_tag, time_tag if args.time_tag == "auto" else args.time_tag)
+    temp_dir = os.path.join(KB_EVAL_DIR, args.model_tag, args.task_tag, time_tag if args.time_tag == "auto" else args.time_tag, args.eval_tag)
     os.makedirs(temp_dir, exist_ok=True)
 
     # read from file

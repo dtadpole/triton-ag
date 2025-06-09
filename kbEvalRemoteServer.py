@@ -76,7 +76,7 @@ async def kb_eval(
             request_counter += 1
 
         # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}/{eval_tag}/{time_tag}
-        temp_dir = os.path.join(KB_EVAL_DIR, model_tag, task_tag, eval_tag, time_tag)
+        temp_dir = os.path.join(KB_EVAL_DIR, model_tag, task_tag, time_tag, eval_tag)
         os.makedirs(temp_dir, exist_ok=True)
 
         reference_file_path = os.path.join(temp_dir, f"reference_code.py")
