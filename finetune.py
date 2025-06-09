@@ -13,9 +13,10 @@ import yaml
 import torch
 import torch.distributed as dist
 from datasets import Dataset
-from transformers import TrainingArguments
+from transformers import TrainingArguments, DataCollatorForLanguageModeling
 from trl import SFTTrainer
 from util import logger
+import numpy as np
 
 
 def setup_distributed():
@@ -31,6 +32,239 @@ def setup_distributed():
 def is_distributed():
     """Check if we're running in distributed mode."""
     return "RANK" in os.environ
+
+
+class CustomDataCollatorWithMasking(DataCollatorForLanguageModeling):
+    """Custom data collator that masks system, user, and function tokens."""
+    
+    def __init__(self, tokenizer, mlm=False, ignore_index=-100):
+        super().__init__(tokenizer=tokenizer, mlm=mlm)
+        self.ignore_index = ignore_index
+        
+    def torch_call(self, examples):
+        # Handle different input formats
+        if isinstance(examples[0], dict):
+            # Check if examples are already tokenized (have input_ids)
+            if "input_ids" in examples[0]:
+                # Examples are already tokenized tensors - use them directly
+                batch = self._collate_tokenized_examples(examples)
+            elif "text" in examples[0]:
+                # Examples have text field - extract and tokenize
+                texts = [example["text"] for example in examples]
+                batch = self._tokenize_and_prepare(texts)
+            else:
+                # Unknown dict format - try to use as is
+                batch = super().torch_call(examples)
+        elif isinstance(examples[0], str):
+            # Examples are raw text strings
+            batch = self._tokenize_and_prepare(examples)
+        else:
+            # Fall back to parent class
+            batch = super().torch_call(examples)
+        
+        # Apply masking to labels
+        if "labels" in batch:
+            input_ids = batch["input_ids"]
+            labels = batch["labels"].clone()
+            
+            # Create masks for different roles
+            for i, input_seq in enumerate(input_ids):
+                labels[i] = self._mask_non_assistant_tokens(input_seq, labels[i])
+            
+            batch["labels"] = labels
+        
+        return batch
+    
+    def _tokenize_and_prepare(self, texts):
+        """Tokenize texts and prepare batch."""
+        batch = self.tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=getattr(self.tokenizer, 'model_max_length', 2048),
+            return_tensors="pt"
+        )
+        # Create labels from input_ids
+        batch["labels"] = batch["input_ids"].clone()
+        return batch
+    
+    def _collate_tokenized_examples(self, examples):
+        """Collate examples that are already tokenized."""
+        # Extract data from examples and convert to tensors if needed
+        input_ids = []
+        attention_mask = []
+        labels = []
+        
+        for ex in examples:
+            # Convert to tensor if it's a list
+            if isinstance(ex["input_ids"], list):
+                seq_input = torch.tensor(ex["input_ids"], dtype=torch.long)
+            else:
+                seq_input = ex["input_ids"].clone()
+            
+            if isinstance(ex["attention_mask"], list):
+                seq_attention = torch.tensor(ex["attention_mask"], dtype=torch.long)
+            else:
+                seq_attention = ex["attention_mask"].clone()
+            
+            # Handle labels - use input_ids if labels not present
+            if "labels" in ex:
+                if isinstance(ex["labels"], list):
+                    seq_labels = torch.tensor(ex["labels"], dtype=torch.long)
+                else:
+                    seq_labels = ex["labels"].clone()
+            else:
+                seq_labels = seq_input.clone()
+            
+            input_ids.append(seq_input)
+            attention_mask.append(seq_attention)
+            labels.append(seq_labels)
+        
+        # Pad sequences to same length
+        max_length = max(len(seq.squeeze()) for seq in input_ids)
+        
+        padded_input_ids = []
+        padded_attention_mask = []
+        padded_labels = []
+        
+        for i in range(len(input_ids)):
+            seq_input = input_ids[i].squeeze()
+            seq_attention = attention_mask[i].squeeze()
+            seq_labels = labels[i].squeeze()
+            
+            # Pad sequences
+            pad_length = max_length - len(seq_input)
+            if pad_length > 0:
+                pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
+                seq_input = torch.cat([seq_input, torch.full((pad_length,), pad_token_id, dtype=seq_input.dtype)])
+                seq_attention = torch.cat([seq_attention, torch.zeros(pad_length, dtype=seq_attention.dtype)])
+                seq_labels = torch.cat([seq_labels, torch.full((pad_length,), self.ignore_index, dtype=seq_labels.dtype)])
+            
+            padded_input_ids.append(seq_input)
+            padded_attention_mask.append(seq_attention)
+            padded_labels.append(seq_labels)
+        
+        return {
+            "input_ids": torch.stack(padded_input_ids),
+            "attention_mask": torch.stack(padded_attention_mask),
+            "labels": torch.stack(padded_labels)
+        }
+    
+    def _mask_non_assistant_tokens(self, input_ids, labels):
+        """Mask tokens that are not assistant responses."""
+        # Convert to list for easier processing and ensure 1D
+        input_ids_list = input_ids.squeeze().tolist() if input_ids.dim() > 1 else input_ids.tolist()
+        labels_list = labels.squeeze().tolist() if labels.dim() > 1 else labels.tolist()
+        original_loss_tokens = sum(1 for l in labels_list if l != self.ignore_index)
+        
+        # Special tokens for Qwen format - ensure we catch all variations
+        system_start = self.tokenizer.encode("<|im_start|>system", add_special_tokens=False)
+        user_start = self.tokenizer.encode("<|im_start|>user", add_special_tokens=False)
+        assistant_start = self.tokenizer.encode("<|im_start|>assistant", add_special_tokens=False)
+        function_start = self.tokenizer.encode("<|im_start|>function", add_special_tokens=False)
+        im_end = self.tokenizer.encode("<|im_end|>", add_special_tokens=False)
+        function_call_start = self.tokenizer.encode("<function_call>", add_special_tokens=False)
+        function_call_end = self.tokenizer.encode("</function_call>", add_special_tokens=False)
+        
+        # Debug output removed - masking working correctly
+        
+        # Track current state and what we're masking
+        current_role = "unknown"  # Track current role for debugging
+        in_assistant_content = False  # Only true when in actual assistant response content
+        in_function_call = False
+        i = 0
+        
+        # Initially mask everything until we know the role
+        while i < len(input_ids_list):
+            # Check for role transitions
+            if self._token_sequence_match(input_ids_list, i, system_start):
+                current_role = "system"
+                in_assistant_content = False
+                in_function_call = False
+                # Mask the entire system role marker and advance
+                for j in range(len(system_start)):
+                    if i + j < len(labels_list):
+                        labels_list[i + j] = self.ignore_index
+                i += len(system_start)
+                
+            elif self._token_sequence_match(input_ids_list, i, user_start):
+                current_role = "user"
+                in_assistant_content = False
+                in_function_call = False
+                # Mask the entire user role marker and advance
+                for j in range(len(user_start)):
+                    if i + j < len(labels_list):
+                        labels_list[i + j] = self.ignore_index
+                i += len(user_start)
+                
+            elif self._token_sequence_match(input_ids_list, i, assistant_start):
+                current_role = "assistant"
+                in_assistant_content = True
+                in_function_call = False
+                # Mask the assistant start tokens themselves (role marker should not be trained on)
+                for j in range(len(assistant_start)):
+                    if i + j < len(labels_list):
+                        labels_list[i + j] = self.ignore_index
+                i += len(assistant_start)
+                
+            elif self._token_sequence_match(input_ids_list, i, function_start):
+                current_role = "function"
+                in_assistant_content = False
+                in_function_call = False
+                # Mask the entire function role marker and advance
+                for j in range(len(function_start)):
+                    if i + j < len(labels_list):
+                        labels_list[i + j] = self.ignore_index
+                i += len(function_start)
+                
+            elif self._token_sequence_match(input_ids_list, i, function_call_start):
+                # Function calls within assistant responses should be TRAINED ON (not masked)
+                # Only set the flag to track we're in a function call, but don't mask
+                in_function_call = True
+                i += len(function_call_start)
+                
+            elif self._token_sequence_match(input_ids_list, i, function_call_end):
+                in_function_call = False
+                i += len(function_call_end)
+                
+            elif self._token_sequence_match(input_ids_list, i, im_end):
+                # End of any role - mask the end marker and reset state
+                for j in range(len(im_end)):
+                    if i + j < len(labels_list):
+                        labels_list[i + j] = self.ignore_index
+                current_role = "unknown"
+                in_assistant_content = False
+                in_function_call = False
+                i += len(im_end)
+                
+            else:
+                # Apply masking based on current state
+                should_mask = True
+                
+                if current_role == "assistant" and in_assistant_content:
+                    # Train on ALL assistant content including function calls
+                    should_mask = False
+                    
+                # Always mask: system instructions, user prompts, function outputs
+                # Note: function calls within assistant responses are now trained on
+                if current_role in ["system", "user", "function"]:
+                    should_mask = True
+                
+                if should_mask:
+                    labels_list[i] = self.ignore_index
+                    
+                i += 1
+        
+        # Debug: Count how many tokens will be used for loss calculation
+        masked_loss_tokens = sum(1 for l in labels_list if l != self.ignore_index)
+        
+        return torch.tensor(labels_list, dtype=labels.dtype)
+    
+    def _token_sequence_match(self, input_ids, start_idx, target_sequence):
+        """Check if token sequence matches at given position."""
+        if start_idx + len(target_sequence) > len(input_ids):
+            return False
+        return input_ids[start_idx:start_idx + len(target_sequence)] == target_sequence
 
 
 class QwenUnslothTrainer:
@@ -68,7 +302,8 @@ class QwenUnslothTrainer:
             'cpu_offload_params': True,
             'max_grad_norm': 1.0,
             'auto_find_batch_size': True,
-            'gradient_checkpointing': True
+            'gradient_checkpointing': True,
+            'use_custom_loss_masking': True
         },
         'data': {'local_dir': 'finetune_experiences'},
         'lora': {
@@ -383,15 +618,36 @@ class QwenUnslothTrainer:
         training_args = self.get_training_arguments()
         train_config = self.config['training']
         
-        trainer = SFTTrainer(
-            model=self.model,
-            train_dataset=train_dataset,
-            dataset_text_field="text",
-            max_seq_length=int(self._get_config_value('model', 'max_seq_length')),
-            dataset_num_proc=int(train_config['dataset_num_proc']),
-            packing=bool(train_config['packing']),
-            args=training_args,
-        )
+        # Create trainer with optional custom data collator
+        trainer_kwargs = {
+            'model': self.model,
+            'train_dataset': train_dataset,
+            'dataset_text_field': "text",
+            'max_seq_length': int(self._get_config_value('model', 'max_seq_length')),
+            'dataset_num_proc': int(train_config['dataset_num_proc']),
+            'packing': bool(train_config['packing']),
+            'args': training_args,
+        }
+        
+        # Add custom data collator if masking is enabled
+        if train_config.get('use_custom_loss_masking', True):
+            data_collator = CustomDataCollatorWithMasking(
+                tokenizer=self.tokenizer,
+                mlm=False,
+                ignore_index=-100
+            )
+            trainer_kwargs['data_collator'] = data_collator
+            self._log_main("Using custom loss function with masking for system, user, and function outputs (but training on assistant function calls)")
+            
+            # Test masking with a sample
+            self._test_masking_sample(data_collator)
+            
+            # Verify masking on actual training data  
+            self._verify_dataset_masking(train_dataset, data_collator)
+        else:
+            self._log_main("Using standard loss function without custom masking")
+        
+        trainer = SFTTrainer(**trainer_kwargs)
         
         # Additional memory optimization callback for periodic cache clearing
         if hasattr(trainer, 'add_callback'):
@@ -438,6 +694,166 @@ class QwenUnslothTrainer:
             trainer.save_model()
             self.tokenizer.save_pretrained(output_dir)
             self._log_main(f"Training completed! Model saved to {output_dir}")
+
+    def _test_masking_sample(self, data_collator):
+        """Test the masking function with comprehensive sample conversations."""
+        if self.local_rank == 0:  # Only test on main process
+            # Test case 1: Basic conversation
+            sample_text1 = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWhat is AI?<|im_end|>\n<|im_start|>assistant\nAI stands for Artificial Intelligence.<|im_end|>"
+            
+            # Test case 2: Conversation with function call
+            sample_text2 = "<|im_start|>system\nYou are helpful.<|im_end|>\n<|im_start|>user\nWhat's the weather?<|im_end|>\n<|im_start|>assistant\n<function_call>\n{\"name\": \"get_weather\", \"arguments\": {}}\n</function_call>\nThe weather is sunny.<|im_end|>\n<|im_start|>function name=get_weather\nSunny, 75F<|im_end|>\n<|im_start|>assistant\nBased on the weather data, it's a beautiful sunny day at 75°F!<|im_end|>"
+            
+            self._log_main("=== Testing Masking Function ===")
+            
+            for i, (name, sample_text) in enumerate([("Basic", sample_text1), ("Function Call", sample_text2)], 1):
+                self._log_main(f"\n--- Test Case {i}: {name} ---")
+                
+                # Tokenize sample
+                tokenized = self.tokenizer(sample_text, return_tensors="pt", truncation=True, padding=True)
+                
+                # Create a mock batch
+                example = {
+                    'input_ids': tokenized['input_ids'],
+                    'attention_mask': tokenized['attention_mask'],
+                    'labels': tokenized['input_ids'].clone()
+                }
+                
+                # Apply masking
+                masked_batch = data_collator.torch_call([example])
+                
+                # Detailed analysis
+                input_ids = tokenized['input_ids'].squeeze()
+                labels = masked_batch['labels'].squeeze()
+                
+                # Count tokens by category
+                total_tokens = len(input_ids)
+                training_tokens = (labels != -100).sum().item()
+                masked_tokens = total_tokens - training_tokens
+                
+                self._log_main(f"Total tokens: {total_tokens}, Training tokens: {training_tokens}, Masked tokens: {masked_tokens}")
+                self._log_main(f"Masking ratio: {masked_tokens/total_tokens*100:.1f}%")
+                
+                # Show what's being trained on
+                if training_tokens > 0:
+                    training_token_ids = labels[labels != -100]
+                    training_text = self.tokenizer.decode(training_token_ids, skip_special_tokens=False)
+                    self._log_main(f"Training content: '{training_text}'")
+                
+                # Verify masking by showing token-by-token breakdown
+                self._log_main("Token breakdown (first 10 tokens):")
+                for j in range(min(10, len(input_ids))):
+                    token = self.tokenizer.decode([input_ids[j]], skip_special_tokens=False)
+                    masked = "MASKED" if labels[j].item() == -100 else "TRAIN"
+                    self._log_main(f"  {j:2d}: '{token}' -> {masked}")
+                
+                # Verify specific requirements
+                full_text = self.tokenizer.decode(input_ids, skip_special_tokens=False)
+                
+                # Check that system instructions are masked
+                if "<|im_start|>system" in full_text:
+                    self._log_main("✓ System instructions detected - should be masked")
+                
+                # Check that user prompts are masked  
+                if "<|im_start|>user" in full_text:
+                    self._log_main("✓ User prompts detected - should be masked")
+                
+                # Check that function outputs are masked
+                if "<|im_start|>function" in full_text:
+                    self._log_main("✓ Function outputs detected - should be masked")
+                
+                # Check that function calls are NOT masked (should be trained on)
+                if "<function_call>" in full_text:
+                    self._log_main("✓ Function calls detected - should be TRAINED ON (not masked)")
+                
+            self._log_main("=== Masking Test Complete ===\n")
+
+    def _verify_dataset_masking(self, dataset, data_collator):
+        """Verify masking is working correctly on actual training data."""
+        if self.local_rank == 0 and len(dataset) > 0:
+            self._log_main("=== Verifying Dataset Masking ===")
+            
+            # Check a few random samples from the dataset
+            import random
+            sample_indices = random.sample(range(len(dataset)), min(3, len(dataset)))
+            
+            total_masking_stats = {"total_tokens": 0, "training_tokens": 0, "masked_tokens": 0}
+            
+            for i, idx in enumerate(sample_indices):
+                self._log_main(f"\n--- Dataset Sample {i+1} (index {idx}) ---")
+                
+                sample = dataset[idx]
+                text = sample["text"]
+                
+                # Tokenize
+                tokenized = self.tokenizer(text, return_tensors="pt", truncation=True, padding=True)
+                
+                # Create example
+                example = {
+                    'input_ids': tokenized['input_ids'],
+                    'attention_mask': tokenized['attention_mask'],
+                    'labels': tokenized['input_ids'].clone()
+                }
+                
+                # Apply masking
+                masked_batch = data_collator.torch_call([example])
+                
+                # Analyze
+                input_ids = tokenized['input_ids'].squeeze()
+                labels = masked_batch['labels'].squeeze()
+                
+                total_tokens = len(input_ids)
+                training_tokens = (labels != -100).sum().item()
+                masked_tokens = total_tokens - training_tokens
+                
+                # Accumulate stats
+                total_masking_stats["total_tokens"] += total_tokens
+                total_masking_stats["training_tokens"] += training_tokens
+                total_masking_stats["masked_tokens"] += masked_tokens
+                
+                self._log_main(f"Sample length: {len(text)} chars, {total_tokens} tokens")
+                self._log_main(f"Training on: {training_tokens} tokens ({training_tokens/total_tokens*100:.1f}%)")
+                self._log_main(f"Masked: {masked_tokens} tokens ({masked_tokens/total_tokens*100:.1f}%)")
+                
+                # Show what content is being trained on (first 100 chars)
+                if training_tokens > 0:
+                    training_token_ids = labels[labels != -100]
+                    training_text = self.tokenizer.decode(training_token_ids, skip_special_tokens=False)
+                    self._log_main(f"Training content preview: '{training_text[:100]}{'...' if len(training_text) > 100 else ''}'")
+                
+                # Verify key requirements
+                checks = []
+                if "<|im_start|>system" in text:
+                    checks.append("System instructions present (will be masked)")
+                if "<|im_start|>user" in text:
+                    checks.append("User prompts present (will be masked)")
+                if "<|im_start|>function" in text:
+                    checks.append("Function outputs present (will be masked)")
+                if "<function_call>" in text:
+                    checks.append("Function calls present (will be trained on)")
+                
+                if checks:
+                    self._log_main(f"Content analysis: {', '.join(checks)}")
+            
+            # Overall statistics
+            if total_masking_stats["total_tokens"] > 0:
+                overall_training_ratio = total_masking_stats["training_tokens"] / total_masking_stats["total_tokens"]
+                overall_masking_ratio = total_masking_stats["masked_tokens"] / total_masking_stats["total_tokens"]
+                
+                self._log_main(f"\n--- Overall Dataset Masking Statistics ---")
+                self._log_main(f"Total tokens across samples: {total_masking_stats['total_tokens']}")
+                self._log_main(f"Training tokens: {total_masking_stats['training_tokens']} ({overall_training_ratio*100:.1f}%)")
+                self._log_main(f"Masked tokens: {total_masking_stats['masked_tokens']} ({overall_masking_ratio*100:.1f}%)")
+                
+                # Validate the masking is working as expected
+                if overall_masking_ratio > 0.5:
+                    self._log_main("✓ Good masking ratio - most tokens are properly masked")
+                elif overall_masking_ratio > 0.3:
+                    self._log_main("⚠ Moderate masking ratio - verify system/user/function content is being masked")
+                else:
+                    self._log_main("⚠ Low masking ratio - check if masking logic is working correctly")
+            
+            self._log_main("=== Dataset Masking Verification Complete ===\n")
 
     def test_model(self, prompt):
         """Test the fine-tuned model."""
