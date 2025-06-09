@@ -114,9 +114,9 @@ def compile_and_eval_kernel(
             # check lockfile modified time
             if os.path.exists(lock_file):
                 lock_modified_time = os.path.getmtime(lock_file)
-                # if modified time is more than 2 minutes, delete lock file
-                if lock_modified_time < os.path.getmtime(lock_file) - 120:
-                    logger.error(f"[KB_Eval] Lock file {lock_file} is older than 2 minutes, deleting... [{eval_key}]")
+                # if modified time is more than 1.5 minutes, delete lock file
+                if lock_modified_time < os.path.getmtime(lock_file) - 90:
+                    logger.error(f"[KB_Eval] Lock file {lock_file} is older than 1.5 minutes, deleting... [{eval_key}]")
                     os.remove(lock_file)
 
 def compile_kernel_new(
