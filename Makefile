@@ -10,7 +10,7 @@ codeRunServer:
 	mcp dev codeRunServer.py
 
 finetune:
-	torchrun --nproc_per_node=4 finetune.py
+	CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 finetune.py
 
 vllm-qwen3-8b:
 	vllm serve unsloth/DeepSeek-R1-0528-Qwen3-8B-bnb-4bit \

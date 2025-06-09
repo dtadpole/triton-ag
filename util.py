@@ -12,6 +12,7 @@ from logger import logger
 from pydantic.json_schema import to_jsonable_python
 from agents import MessageOutputItem, ToolCallItem, ToolCallOutputItem
 from agents import RunResult
+from agents.tool import Tool
 
 
 def init_logging(agent_name: str):
@@ -156,28 +157,38 @@ def get_run_hooks():
     return run_hooks
 
 
-def log_result_items(result: RunResult, name_tag: str, model_tag: str, task_tag: str, folder: str):
+def log_result_items(tools: list[Tool], result: RunResult, name_tag: str, model_tag: str, task_tag: str, folder: str):
     if not result.new_items:
         raise ValueError("No items to log")
-    output = []
+
+    # process tools
+    functions = []
+    for tool in tools:
+        function = to_jsonable_python(tool)
+        function["parameters"] = function["inputSchema"]
+        del function["inputSchema"]
+        functions.append(function)
+
+    # process messages
+    messages = []
     sys_msg = {
         "role": "system",
         "content": result.new_items[0].agent.instructions,
     }
-    output.append(sys_msg)
+    messages.append(sys_msg)
     user_msg = {
         "role": "user",
         "content": result.input,
     }
     function_calls = {}
-    output.append(user_msg)
+    messages.append(user_msg)
     for item in result.new_items:
         if isinstance(item, MessageOutputItem):
             json_item = {
                 "role": "assistant",
                 "content": to_jsonable_python(item.raw_item.content),
             }
-            output.append(json_item)
+            messages.append(json_item)
         elif isinstance(item, ToolCallItem):
             if "call_id" in item.raw_item:
                 call_id = item.raw_item["call_id"]
@@ -196,7 +207,7 @@ def log_result_items(result: RunResult, name_tag: str, model_tag: str, task_tag:
                     "arguments": to_jsonable_python(item.raw_item.arguments),
                 },
             }
-            output.append(json_item)
+            messages.append(json_item)
         elif isinstance(item, ToolCallOutputItem):
             if "call_id" in item.raw_item:
                 call_id = item.raw_item["call_id"]
@@ -210,7 +221,7 @@ def log_result_items(result: RunResult, name_tag: str, model_tag: str, task_tag:
             elif hasattr(item.raw_item, "output"):
                 output = item.raw_item.output
             else:
-                output = None
+                messages = None
                 logger.error(f"Tool call item has no output: {item.raw_item}")
             # final json item
             json_item = {
@@ -218,11 +229,11 @@ def log_result_items(result: RunResult, name_tag: str, model_tag: str, task_tag:
                 "name": function_calls[call_id].name if call_id and call_id in function_calls else None,
                 "content": output,
             }
-            output.append(json_item)
+            messages.append(json_item)
         else:
             raise ValueError(f"Unknown item type: {type(item)}")
 
-    json_output = json.dumps(output, indent=2)
+    json_output = json.dumps({"functions": functions, "messages": messages}, indent=2)
     try:
         # write to file
         with open(os.path.join(folder, f"{name_tag}_logger.json"), "w") as f:
@@ -234,8 +245,8 @@ def log_result_items(result: RunResult, name_tag: str, model_tag: str, task_tag:
     try:
         s3_client = boto3.client("s3")
         datetime_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        s3_client.put_object(Bucket="agent-xyz", Key=f"{model_tag}/{task_tag}/{name_tag}_{datetime_str}.json", Body=json_output)
+        s3_client.put_object(Bucket="agent-xyz", Key=f"agent/{model_tag}/{task_tag}/{name_tag}_{datetime_str}.json", Body=json_output)
     except Exception as e:
         logger.error(f"Error pushing to s3: {e}")
 
-    return output
+    return messages

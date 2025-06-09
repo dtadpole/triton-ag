@@ -5,7 +5,8 @@
 model:
   # name: "unsloth/Qwen3-32B-bnb-4bit"
   # name: "unsloth/Qwen3-8B"
-  name: "Qwen/Qwen3-8B"
+  # name: "Qwen/Qwen3-8B"
+  name: "Qwen/Qwen3-32B"
   # name: "Qwen/Qwen3-8B-AWQ"
   # name: "Qwen/Qwen2.5-0.5B-Instruct"
   # name: "Qwen/Qwen3-0.6B"
@@ -22,10 +23,10 @@ training:
   
   # Batch and memory settings
   per_device_batch_size: 1
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 2
   
-  # Optimization
-  optim: "adamw_8bit"
+  # Optimization - Using paged optimizer for CPU offloading
+  optim: "paged_adamw_8bit"
   weight_decay: 0.01
   lr_scheduler_type: "linear"
   
@@ -45,11 +46,18 @@ training:
   # Dataset processing
   dataset_num_proc: 2
   packing: false
+  
+  # Memory optimization - CPU offloading and advanced techniques
+  cpu_offload_optimizer: true
+  cpu_offload_params: true
+  gradient_checkpointing: true
+  auto_find_batch_size: true
+  max_grad_norm: 1.0
 
-# LoRA Configuration
+# LoRA Configuration - Optimized for memory efficiency
 lora:
-  r: 16
-  alpha: 32
+  r: 8  # Reduced rank for memory savings
+  alpha: 16  # Adjusted proportionally
   dropout: 0.05
   target_modules:
     - "q_proj"

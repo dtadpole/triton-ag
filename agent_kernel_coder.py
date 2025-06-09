@@ -11,6 +11,7 @@ from agents import (
     trace,
     function_tool,
     RunResult,
+    Tool,
 )
 from agents.mcp import MCPServerStdio
 from util import load_agent_model, init_logging, get_next_run_folder, get_run_hooks, log_result_items
@@ -265,7 +266,13 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
                             model_settings=model_settings,
                         ),
                     )
-                    log_result_items(result, f"{AGENT_NAME}_r{rollout_id:02d}", MODEL_TAG, TASK_TAG, workspace_dir)
+                    # collect a list of all the tools
+                    tools = [tool for tool in kernel_bench.tools if isinstance(tool, Tool)]
+                    for mcp_server in kernel_bench.mcp_servers:
+                        for tool in mcp_server._tools_list:
+                            tools.append(tool)
+                    # log result items
+                    log_result_items(tools, result, f"{AGENT_NAME}_r{rollout_id:02d}", MODEL_TAG, TASK_TAG, workspace_dir)
                     logger.info(result.final_output)
                     return result.final_output
             except Exception as e:
@@ -310,7 +317,7 @@ if __name__ == "__main__":
     parser.add_argument("-d", "--workspace-dir", type=str, default="")
     parser.add_argument("-p", "--provider", type=str, default=None)
     parser.add_argument("-m", "--model-name", type=str, default=None)
-    parser.add_argument("-i", "--max-iterations", type=int, default=1)
+    parser.add_argument("-i", "--max-iterations", type=int, default=4)
     parser.add_argument("-r", "--total-rollouts", type=int, default=1)
     parser.add_argument(
         "-t",

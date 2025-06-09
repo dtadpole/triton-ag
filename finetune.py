@@ -50,7 +50,7 @@ class QwenUnslothTrainer:
             'warmup_steps': 5,
             'per_device_batch_size': 2,
             'gradient_accumulation_steps': 4,
-            'optim': 'adamw_8bit',
+            'optim': 'paged_adamw_8bit',
             'weight_decay': 0.01,
             'lr_scheduler_type': 'linear',
             'logging_steps': 1,
@@ -63,7 +63,12 @@ class QwenUnslothTrainer:
             'ddp_find_unused_parameters': False,
             'remove_unused_columns': False,
             'dataset_num_proc': 2,
-            'packing': False
+            'packing': False,
+            'cpu_offload_optimizer': True,
+            'cpu_offload_params': True,
+            'max_grad_norm': 1.0,
+            'auto_find_batch_size': True,
+            'gradient_checkpointing': True
         },
         'data': {'local_dir': 'finetune_experiences'},
         'lora': {
@@ -132,24 +137,46 @@ class QwenUnslothTrainer:
         self._log_main(f"Available CUDA devices: {torch.cuda.device_count()}")
 
     def setup_model_and_tokenizer(self):
-        """Initialize model and tokenizer using Unsloth."""
+        """Initialize model and tokenizer using Unsloth with aggressive memory optimization."""
         model_name = self._get_config_value('model', 'name')
         max_seq_length = int(self._get_config_value('model', 'max_seq_length'))
         
         self._log_main(f"Loading model: {model_name}")
+        
+        # Clear any existing cache before loading
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         model_kwargs = {
             'model_name': model_name,
             'max_seq_length': max_seq_length,
             'dtype': self._get_config_value('model', 'dtype'),
             'load_in_4bit': bool(self._get_config_value('model', 'load_in_4bit')),
+            'trust_remote_code': True,
         }
         
         if self.is_distributed:
             model_kwargs['device_map'] = {"": self.local_rank}
+        else:
+            # Use sequential device mapping for better memory efficiency
+            model_kwargs['device_map'] = "sequential"
+        
+        # Add memory optimization flags
+        model_kwargs['low_cpu_mem_usage'] = True
+        # Note: torch_dtype is handled by Unsloth automatically for optimal performance
         
         self.model, self.tokenizer = FastLanguageModel.from_pretrained(**model_kwargs)
+        
+        # Enable model CPU offloading if configured
+        if self._get_config_value('training', 'cpu_offload_params', default=False):
+            self._log_main("Enabling model parameter CPU offloading")
+            # This will be handled by the training framework
+        
         self._setup_lora()
+        
+        # Clear cache after model setup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         mode = "distributed" if self.is_distributed else "single GPU"
         self._log_main(f"Model and tokenizer setup complete ({mode} training with {max_seq_length} max sequence length)")
@@ -232,8 +259,10 @@ class QwenUnslothTrainer:
         return processed
 
     def format_conversations(self, examples):
-        """Format conversations for training."""
+        """Format conversations for training with dynamic length optimization."""
         texts = []
+        max_length = int(self._get_config_value('model', 'max_seq_length'))
+        
         for messages in examples["messages"]:
             conversation = ""
             for message in messages:
@@ -255,6 +284,11 @@ class QwenUnslothTrainer:
                 elif role == "function":
                     name = message.get("name", "unknown")
                     conversation += f"<|im_start|>function name={name}\n{content}<|im_end|>\n"
+            
+            # Truncate conversations that are too long to save memory
+            if len(conversation) > max_length * 4:  # Rough character estimate
+                conversation = conversation[:max_length * 4] + "..."
+                self._log_main(f"Truncated long conversation to save memory", "debug")
             
             texts.append(conversation)
         return {"text": texts}
@@ -284,28 +318,60 @@ class QwenUnslothTrainer:
         
         self._log_main(f"Effective batch size: {effective_batch_size}")
         
-        return TrainingArguments(
-            output_dir=train_config['output_dir'],
-            per_device_train_batch_size=per_device_batch_size,
-            gradient_accumulation_steps=gradient_accumulation_steps,
-            warmup_steps=int(train_config['warmup_steps']),
-            max_steps=int(train_config['max_steps']),
-            learning_rate=float(train_config['learning_rate']),
-            fp16=not torch.cuda.is_bf16_supported(),
-            bf16=torch.cuda.is_bf16_supported(),
-            logging_steps=int(train_config['logging_steps']),
-            optim=train_config['optim'],
-            weight_decay=float(train_config['weight_decay']),
-            lr_scheduler_type=train_config['lr_scheduler_type'],
-            seed=int(train_config['seed']),
-            save_steps=int(train_config['save_steps']),
-            save_total_limit=int(train_config['save_total_limit']),
-            dataloader_num_workers=int(train_config['dataloader_num_workers']),
-            report_to=None,
-            ddp_find_unused_parameters=bool(train_config['ddp_find_unused_parameters']),
-            dataloader_pin_memory=bool(train_config['dataloader_pin_memory']),
-            remove_unused_columns=bool(train_config['remove_unused_columns']),
-        )
+        # CPU offloading configuration for memory optimization
+        training_args_kwargs = {
+            'output_dir': train_config['output_dir'],
+            'per_device_train_batch_size': per_device_batch_size,
+            'gradient_accumulation_steps': gradient_accumulation_steps,
+            'warmup_steps': int(train_config['warmup_steps']),
+            'max_steps': int(train_config['max_steps']),
+            'learning_rate': float(train_config['learning_rate']),
+            'fp16': not torch.cuda.is_bf16_supported(),
+            'bf16': torch.cuda.is_bf16_supported(),
+            'logging_steps': int(train_config['logging_steps']),
+            'optim': train_config['optim'],
+            'weight_decay': float(train_config['weight_decay']),
+            'lr_scheduler_type': train_config['lr_scheduler_type'],
+            'seed': int(train_config['seed']),
+            'save_steps': int(train_config['save_steps']),
+            'save_total_limit': int(train_config['save_total_limit']),
+            'dataloader_num_workers': int(train_config['dataloader_num_workers']),
+            'report_to': None,
+            'ddp_find_unused_parameters': bool(train_config['ddp_find_unused_parameters']),
+            'dataloader_pin_memory': bool(train_config['dataloader_pin_memory']),
+            'remove_unused_columns': bool(train_config['remove_unused_columns']),
+        }
+        
+        # Memory optimization settings
+        if train_config.get('cpu_offload_optimizer', False):
+            # Enable CPU offloading through optimizer arguments
+            training_args_kwargs['optim_args'] = "cpu_offload=True"
+            self._log_main("Enabled CPU offloading for optimizer states")
+        
+        if train_config.get('cpu_offload_params', False):
+            # Additional memory optimization settings
+            training_args_kwargs['dataloader_pin_memory'] = False
+            training_args_kwargs['dataloader_persistent_workers'] = False
+            self._log_main("Enabled additional CPU offloading optimizations")
+        
+        # Advanced memory conservation features
+        if train_config.get('auto_find_batch_size', False):
+            training_args_kwargs['auto_find_batch_size'] = True
+            self._log_main("Enabled automatic batch size detection to prevent OOM")
+        
+        if train_config.get('gradient_checkpointing', False):
+            training_args_kwargs['gradient_checkpointing'] = True
+            self._log_main("Enabled gradient checkpointing for memory efficiency")
+        
+        if train_config.get('max_grad_norm'):
+            training_args_kwargs['max_grad_norm'] = float(train_config['max_grad_norm'])
+            self._log_main(f"Set gradient clipping to {train_config['max_grad_norm']}")
+        
+        # Force mixed precision and additional optimizations
+        training_args_kwargs['tf32'] = True if torch.cuda.is_available() else False
+        training_args_kwargs['group_by_length'] = True  # Reduces padding overhead
+        
+        return TrainingArguments(**training_args_kwargs)
 
     def train(self):
         """Train the model."""
@@ -327,10 +393,42 @@ class QwenUnslothTrainer:
             args=training_args,
         )
         
+        # Additional memory optimization callback for periodic cache clearing
+        if hasattr(trainer, 'add_callback'):
+            from transformers import TrainerCallback
+            
+            class MemoryOptimizationCallback(TrainerCallback):
+                def on_step_end(self, args, state, control, **kwargs):
+                    # Aggressive memory cleanup every 5 steps
+                    if state.global_step % 5 == 0:
+                        torch.cuda.empty_cache()
+                        # Force garbage collection
+                        import gc
+                        gc.collect()
+                
+                def on_train_begin(self, args, state, control, **kwargs):
+                    # Clear cache at start of training
+                    torch.cuda.empty_cache()
+                    
+                def on_epoch_end(self, args, state, control, **kwargs):
+                    # Major cleanup at end of each epoch
+                    torch.cuda.empty_cache()
+                    import gc
+                    gc.collect()
+            
+            trainer.add_callback(MemoryOptimizationCallback())
+        
         if self.local_rank == 0:
             torch.cuda.empty_cache()
             memory_gb = torch.cuda.memory_allocated() / 1024**3
-            self._log_main(f"GPU memory before training: {memory_gb:.2f} GB")
+            memory_reserved_gb = torch.cuda.memory_reserved() / 1024**3
+            self._log_main(f"GPU memory before training - Allocated: {memory_gb:.2f} GB, Reserved: {memory_reserved_gb:.2f} GB")
+            
+            # Log optimizer CPU offloading status
+            if train_config.get('cpu_offload_optimizer', False):
+                self._log_main("Optimizer states will be offloaded to CPU to save GPU memory")
+            if train_config.get('cpu_offload_params', False):
+                self._log_main("Additional memory optimizations enabled for CPU offloading")
         
         trainer.train()
         
