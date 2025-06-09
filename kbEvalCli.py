@@ -48,7 +48,7 @@ def compile_and_eval_kernel(
             verbose=args.verbose,
         )
     except Exception as e:
-        logger.error(f"[KB_Eval] Error compiling kernel: {e}")
+        logger.warning(f"[KB_Eval] Error compiling kernel: {e}")
         result = KernelExecResult(
             compiled=False, correctness=False, metadata={"compilation_error": e}
         )
@@ -101,7 +101,7 @@ def compile_and_eval_kernel(
             logger.info(f"[KB_Eval] Waiting for lock to be released {lock_file} [{eval_key}]")
             continue
         except Exception as e:
-            logger.error(f"[KB_Eval] Error acquiring lock: {e} [{eval_key}]")
+            logger.warning(f"[KB_Eval] Error acquiring lock: {e} [{eval_key}]")
             result = KernelExecResult(
                 compiled=True, correctness=False, metadata={"runtime_error": e}
             )
@@ -112,9 +112,9 @@ def compile_and_eval_kernel(
             # check lockfile modified time
             if os.path.exists(lock_file):
                 lock_modified_time = os.path.getmtime(lock_file)
-                # if modified time is more than 3 minutes, delete lock file
-                if lock_modified_time < os.path.getmtime(lock_file) - 180:
-                    logger.error(f"[KB_Eval] Lock file {lock_file} is older than 3 minutes, deleting... [{eval_key}]")
+                # if modified time is more than 2 minutes, delete lock file
+                if lock_modified_time < os.path.getmtime(lock_file) - 120:
+                    logger.error(f"[KB_Eval] Lock file {lock_file} is older than 2 minutes, deleting... [{eval_key}]")
                     os.remove(lock_file)
 
 def compile_kernel_new(
@@ -154,7 +154,7 @@ def compile_kernel_new(
         ModelNew = load_custom_model(custom_model_src, context, build_directory=None)
         # torch.cuda.synchronize(device=device)  # not sure if this is too much
     except Exception as e:
-        logger.error(
+        logger.warning(
             f"[KB_Eval] Failed to compile custom CUDA kernel: Record as compilation failure. \nError: {e} [{eval_key}]"
         )
         # TODO: add metadata for compilation error (how to we get the compilation error message?)
@@ -162,7 +162,7 @@ def compile_kernel_new(
         if "lock" in str(e) or "No such file or directory" in str(e):
             # this is a lock file error, likely due to concurrent compilation
             # this does not necessarily mean the compilation failed, but we should retry
-            logger.error(f"[KB_Eval] Lock file error during compilation, Please retry. Error: {e} [{eval_key}]")
+            logger.warning(f"[KB_Eval] Lock file error during compilation, Please retry. Error: {e} [{eval_key}]")
             graceful_eval_cleanup(context, device=None)
             raise e
         else:
@@ -236,7 +236,7 @@ def eval_kernel_against_ref_new(
             if verbose:
                 logger.info(f"[KB_Eval] New Model with Custom CUDA Kernel Loaded [{eval_key}]")
         except RuntimeError as e:
-            logger.error(
+            logger.warning(
                 f"[KB_Eval] Failed to load custom CUDA kernel; Compiled but not able to run, count as runtime error. \nError: {e} [{eval_key}]"
             )
             # TODO: add metadata for runtime error e.g. error in launching kernel, illegal memory access, ...
@@ -315,7 +315,7 @@ def eval_kernel_against_ref_new(
 
             except Exception as e:
                 if verbose:
-                    logger.error(f"[KB_Eval] Error in Measuring Performance: {e} [{eval_key}]")
+                    logger.warning(f"[KB_Eval] Error in Measuring Performance: {e} [{eval_key}]")
                 kernel_exec_result.metadata["error_during_performance"] = e
 
         logger.info(f"[KB_Eval] Result: {kernel_exec_result.model_dump()} [{eval_key}]")
@@ -323,8 +323,8 @@ def eval_kernel_against_ref_new(
 
     except Exception as e:
         # print exception and stack trace
-        logger.error(f"[KB_Eval] Error in Evaluating Kernel: {e} [{eval_key}]")
-        logger.error(traceback.format_exc())
+        logger.warning(f"[KB_Eval] Error in Evaluating Kernel: {e} [{eval_key}]")
+        logger.warning(traceback.format_exc())
         return KernelExecResult(
             compiled=False, correctness=False, metadata=metadata | {"evaluation_error": e}
         )
@@ -362,56 +362,54 @@ if __name__ == "__main__":
     # select a random device from devices
     device = torch.device(int(devices[random.randint(0, len(devices) - 1)]))
 
-    result = compile_and_eval_kernel(
-        model_tag=args.model_tag,
-        task_tag=args.task_tag,
-        eval_tag=args.eval_tag,
-        time_tag=args.time_tag,
-        reference_code=reference_model_src,
-        generated_code=generated_model_src,
-        device=device,
-        args=args,
-    )
+    result = None
+    exit_code = 0
+    try:
+        result = compile_and_eval_kernel(
+            model_tag=args.model_tag,
+            task_tag=args.task_tag,
+            eval_tag=args.eval_tag,
+            time_tag=args.time_tag,
+            reference_code=reference_model_src,
+            generated_code=generated_model_src,
+            device=device,
+            args=args,
+        )
 
-    # check if there is compilation error
-    if 'compilation_error' in result.metadata:
-        # print exception and stack trace
-        exception = result.metadata['compilation_error']
+        # recursively check if there is any Exception in the metadata, and if so, print the exception and stack trace, and replace the Exception with the exception traceback string
+        def check_exception_in_metadata(metadata):
+            for key, value in metadata.items():
+                if isinstance(value, Exception):
+                    exception_traceback_str = "".join(traceback.format_exception(type(value), value, value.__traceback__))
+                    logger.warning(exception_traceback_str)
+                    metadata[key] = exception_traceback_str
+                elif isinstance(value, dict):
+                    check_exception_in_metadata(value)
+            return
+
+        check_exception_in_metadata(result.metadata)
+
+        logger.info(f"Evaluation result: {json.dumps(result.model_dump(), indent=4)}")
+    
+    except Exception as e:
+        exit_code = 1
+        exception = e
         exception_traceback_str = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
-        # print to stderr
         logger.error(exception_traceback_str)
-        result.metadata['compilation_error'] = exception_traceback_str
 
-    # check if there is runtime error
-    if 'runtime_error' in result.metadata:
-        # print exception and stack trace
-        exception = result.metadata['runtime_error']
-        exception_traceback_str = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
-        # print to stderr
-        logger.error(exception_traceback_str)
-        result.metadata['runtime_error'] = exception_traceback_str
+        # generate a result with empty metadata
+        if result is None:
+            result = KernelExecResult(
+                compiled=False, correctness=False, metadata={
+                    'processing_error': exception_traceback_str
+                }
+            )
+        else:
+            result.metadata['processing_error'] = exception_traceback_str
 
-    # check if there is runtime error
-    if 'error_during_performance' in result.metadata:
-        # print exception and stack trace
-        exception = result.metadata['error_during_performance']
-        exception_traceback_str = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
-        # print to stderr
-        logger.error(exception_traceback_str)
-        result.metadata['error_during_performance'] = exception_traceback_str
+    finally:
+        # write to file
+        with open(os.path.join(temp_dir, f"{args.eval_tag}_{args.time_tag}_kbeval.json"), "w") as f:
+            f.write(json.dumps(result.model_dump(), indent=4))
 
-    # check if there is evaluation error
-    if 'evaluation_error' in result.metadata:
-        # print exception and stack trace
-        exception = result.metadata['evaluation_error']
-        exception_traceback_str = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
-        # print to stderr
-        logger.error(exception_traceback_str)
-        result.metadata['evaluation_error'] = exception_traceback_str
-
-    # write to file
-    with open(os.path.join(temp_dir, f"{args.eval_tag}_{args.time_tag}_kbeval.json"), "w") as f:
-        f.write(json.dumps(result.model_dump(), indent=4))
-
-
-    logger.info(f"Evaluation result: {json.dumps(result.model_dump(), indent=4)}")
+        exit(exit_code)
