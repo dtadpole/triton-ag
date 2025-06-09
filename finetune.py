@@ -560,6 +560,7 @@ class QwenUnslothTrainer:
             'gradient_accumulation_steps': gradient_accumulation_steps,
             'warmup_steps': int(train_config['warmup_steps']),
             'max_steps': int(train_config['max_steps']),
+            'num_train_epochs': int(train_config.get('num_train_epochs', 3)),
             'learning_rate': float(train_config['learning_rate']),
             'fp16': not torch.cuda.is_bf16_supported(),
             'bf16': torch.cuda.is_bf16_supported(),
