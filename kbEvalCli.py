@@ -109,7 +109,7 @@ def compile_and_eval_kernel(
             )
             return result
         finally:
-            torch.cuda.synchronize(device=device)
+            # torch.cuda.synchronize(device=device)
             lock.release()
             # check lockfile modified time
             if os.path.exists(lock_file):

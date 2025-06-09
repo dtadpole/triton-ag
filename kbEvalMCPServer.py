@@ -124,7 +124,9 @@ async def kb_eval_iteration(
 
         # write response to file
         response_json = json.loads(response.text)
-        response_json["tags"] = {
+        if "metadata" not in response_json:
+            response_json["metadata"] = {}
+        response_json["metadata"]["tags"] = {
             "model_tag": model_tag,
             "task_tag": task_tag,
             "eval_tag": eval_tag,
