@@ -23,6 +23,20 @@ async def get_with_timeout(queue, timeout):
     except asyncio.TimeoutError:
         return None  # Or raise an exception, or handle it as needed
 
+async def read_stream(stream, prefix: str, is_error: bool = False):
+    """Read from a stream and print each line with a prefix."""
+    while True:
+        line = await stream.readline()
+        if not line:
+            break
+        # Decode bytes to string and strip newline
+        output = line.decode('utf-8').rstrip()
+        if is_error:
+            logger.error(f"[{prefix}] {output}")
+        else:
+            logger.info(f"[{prefix}] {output}")
+
+
 KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
 
 # Create app
@@ -90,13 +104,24 @@ async def kb_eval(
 
         logger.info(f"[KB Eval] [{eval_tag}] START ====================")
         logger.info(f"[KB Eval] [{eval_tag}] command: {command}")
-        stdout, stderr = await process.communicate()
+
+       # Create tasks to read stdout and stderr concurrently
+        stdout_task = asyncio.create_task(read_stream(process.stdout, eval_tag, is_error=False))
+        stderr_task = asyncio.create_task(read_stream(process.stderr, eval_tag, is_error=True))
+        
+        # Wait for the process to complete
+        return_code = await process.wait()
+        
+        # Wait for all output to be processed
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
         logger.info(f"[KB Eval] [{eval_tag}] return code: {process.returncode}")
+ 
+        # stdout, stderr = await process.communicate()
         # read line by line and print
-        for line in stdout.decode().splitlines():
-            logger.info(f"[KB Eval] [{eval_tag}] output: {line}")
-        for line in stderr.decode().splitlines():
-            logger.error(f"[KB Eval] [{eval_tag}] error: {line}")
+        # for line in stdout.decode().splitlines():
+        #     logger.info(f"[KB Eval] [{eval_tag}] output: {line}")
+        # for line in stderr.decode().splitlines():
+        #     logger.error(f"[KB Eval] [{eval_tag}] error: {line}")
         logger.info(f"[KB Eval] [{eval_tag}] END ====================")
 
         # read the result from {temp_dir}/kbeval_{eval_tag}.json

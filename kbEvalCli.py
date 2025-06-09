@@ -93,10 +93,10 @@ def compile_and_eval_kernel(
                     measure_performance_ref=args.measure_performance_ref,
                 )
 
-                os.remove(lock_file)
-                logger.warning(f"[KB_Eval] Released lock {lock_file} [{eval_key}]")
-
-                return result
+            # os.remove(lock_file)
+            logger.warning(f"[KB_Eval] Released lock {lock_file} [{eval_key}]")
+            return result
+        
         except Timeout:
             logger.info(f"[KB_Eval] Waiting for lock to be released {lock_file} [{eval_key}]")
             continue
@@ -107,12 +107,13 @@ def compile_and_eval_kernel(
             )
             return result
         finally:
+            lock.release()
             # check lockfile modified time
             if os.path.exists(lock_file):
                 lock_modified_time = os.path.getmtime(lock_file)
-                # if modified time is more than 5 minutes, delete lock file
-                if lock_modified_time < os.path.getmtime(lock_file) - 300:
-                    logger.error(f"[KB_Eval] Lock file {lock_file} is older than 5 minutes, deleting... [{eval_key}]")
+                # if modified time is more than 3 minutes, delete lock file
+                if lock_modified_time < os.path.getmtime(lock_file) - 180:
+                    logger.error(f"[KB_Eval] Lock file {lock_file} is older than 3 minutes, deleting... [{eval_key}]")
                     os.remove(lock_file)
 
 def compile_kernel_new(
@@ -341,7 +342,7 @@ if __name__ == "__main__":
     parser.add_argument("--reference_code", type=str, default="elemAddRef.py")
     parser.add_argument("--generated_code", type=str, default="elemAddCuda.py")
     parser.add_argument("--measure_performance_ref", action="store_true")
-    parser.add_argument("--device-list", type=str, default="1")
+    parser.add_argument("--device-list", type=str, default="4")
     parser.add_argument("--max-jobs", type=int, default=8)
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()

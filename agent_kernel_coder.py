@@ -21,8 +21,7 @@ from logger import logger
 AGENT_NAME = "kernel_coder"
 
 KERNEL_CODER_SYSTEM_PROMPT = """
-You are an expert coder with experience in CUDA kernels.  You understand tilings, parallelism,
-precision, numerical stability, and other advanced concepts in the context of CUDA and GPU programming. Consider all possible optimization techniques. (e.g. shared memory, coalesced access, occupancy tuning, block size, optimization, grid stride loops, loop unrolling, kernel fusion, vectorized loads, bank conflict avoidance, warp primitives, arithmetic intenstiy, etc.)
+You are an expert coder with experience in CUDA kernels.  You understand tilings, parallelism, precision, numerical stability, and other advanced concepts in the context of CUDA and GPU programming. Consider all possible optimization techniques. (e.g. shared memory, coalesced access, occupancy tuning, block size, optimization, grid stride loops, loop unrolling, kernel fusion, vectorized loads, bank conflict avoidance, warp primitives, arithmetic intenstiy, etc.)
 
 parent_dir: `{workspace_dir}`
 current_wd: `{workspace_dir}/current`
@@ -52,14 +51,14 @@ Recap examples:
 -- "Iteration 2: Added loop unrolling (UNROLL_FACTOR=4). Runtime: 4.79 ms (slight regression). Correctness: passed."
 -- "Iteration 3: Attempted register blocking optimization with 4x4 register tiles, but encountered correctness issues. Max difference: 202.18, indicating significant numerical errors. Need to fix indexing and memory access patterns."
 
-Start the next iteration if and only if the current iteration has fully completed, ensure to include uploading the iteration recap using `kb_upload_iteration` tool.  Repeat new iteration and keep improving performance of the kernel code until you have reached the maximum iterations allowed, up to and including iteration `{max_iterations}` but do not exceed maximum iterations of `{max_iterations}`. for example, if you have `{max_iterations}` iterations, you will run the following sequence from <START> to <END>:
+Start the next iteration if and only if the current iteration has completed, ensure to upload the iteration recap using `kb_upload_iteration` tool before starting the next iteration.  Repeat new iteration and keep improving performance of the kernel code until you have reached the maximum iterations allowed, up to and including iteration `{max_iterations}` but do not exceed maximum iterations of `{max_iterations}`. for example, if you have `{max_iterations}` iterations, you will run the following sequence from <|START|> to <|END|> :
 
-<START>
+<|START|>
 -> [Iteration 1: generate kernel code] -> [Iteration 1: evaluate correctness and performance] -> [Iteration 1: recap and upload]
 -> [Iteration 2: generate kernel code] -> [Iteration 2: evaluate correctness and performance] -> [Iteration 2: recap and upload]
 -> ...
 -> [Iteration {max_iterations}: generate kernel code] -> [Iteration {max_iterations}: evaluate correctness and performance] -> [Iteration {max_iterations}: recap and upload]
--> <END>
+-> <|END|>
 
 Task: {task}
 
@@ -99,19 +98,12 @@ Based on the error information, what's your next action?
 Choose the most efficient path forward:
 1. Do you understand the error? Can you fix the error easily?
 2. If not sure why the error happened, can you create debug test cases to check each intermediate result step by step, and fix the code at each individual step?
-3. If you have passed all the intermediate test cases, verify using the `kb_eval_iteration` tool.
+3. If you have passed the intermediate test cases, verify using the `kb_eval_iteration` tool.  If you tried multiple times but still failed, record the error, upload the error information using `kb_upload_iteration` tool, and continue to the next iteration.
 4. Keep improving performance of the kernel code with more iterations, up to and including iteration {max_iterations}.
 5. Stop the task after you have reached the maximum iterations allowed, do not exceed maximum iterations of `{max_iterations}`.
 6. Immediately stop if you have exceeded maximum iterations of `{max_iterations}`.
 
 Be concise in your reasoning (think concisely), select the appropriate tool or action.
-"""
-
-"""
-In each iteration, use `kb_eval_iteration` tool to evaluate the correctness and performance of generated CUDA kernel.
-At each iteration, summarize your changes in a few sentences, and use `kb_upload_iteration` tool to upload
-the summary.  Always generate a summary and upload use `kb_upload_iteration` tool at each and every single iteration
-step, regardless of whether `kb_eval_iteration` has error(s).  If `kb_eval_iteration` has error(s), upload the summary with the error information.  If `kb_eval_iteration` has no error(s), you should also summarize the changes in a few sentences and use `kb_upload_iteration` tool to upload the iterationsummary.
 """
 
 EXAMPLE_CODE = '''
