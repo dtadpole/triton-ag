@@ -146,8 +146,9 @@ async def kb_eval_iteration(
                              reference_code,
                              generated_code,
                              recap="")
-
-        return KernelExecResult.model_validate_json(response.text)
+        
+        return KernelExecResult.model_validate_json(json.dumps(response_json))
+    
     except Exception as e:
         logger.error(f"Error in kb_eval: {e}")
         logger.error(traceback.format_exc())
