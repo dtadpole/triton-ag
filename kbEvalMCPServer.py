@@ -179,12 +179,6 @@ async def kb_upload_iteration(
         # read response from file
         with open(f"{current_wd}/kbeval_{eval_tag}_{time_tag}.result.json", "r") as f:
             result = KernelExecResult.model_validate_json(f.read())
-            result["tags"] = {
-                "model_tag": model_tag,
-                "task_tag": task_tag,
-                "eval_tag": eval_tag,
-                "time_tag": time_tag,
-            }
             
         msg = upload_recap_to_s3(current_wd,
                              model_tag,
