@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Simplified Qwen Fine-tuning with Unsloth
-Clean and efficient script for fine-tuning Qwen models.
+Qwen Fine-tuning with Unsloth
+Clean and efficient script for fine-tuning Qwen models using Unsloth optimization.
 """
 
 # Import unsloth first for optimizations
 from unsloth import FastLanguageModel
 
 import os
+import json
 import yaml
 import torch
 import torch.distributed as dist
@@ -20,44 +21,42 @@ from data_util import create_dataset, CustomDataCollatorWithMasking
 def setup_distributed():
     """Initialize distributed training if running in distributed mode."""
     if "RANK" in os.environ:
-        try:
-            dist.init_process_group(backend="nccl", timeout=torch.distributed.default_pg_timeout)
-            local_rank = int(os.environ["LOCAL_RANK"])
-            torch.cuda.set_device(local_rank)
-            
-            # Test communication to ensure DDP is working
-            if dist.is_initialized():
-                test_tensor = torch.tensor([local_rank], dtype=torch.float32).cuda()
-                dist.all_reduce(test_tensor)
-                logger.info(f"DDP initialized successfully on rank {local_rank}")
-            
-            return local_rank
-        except Exception as e:
-            logger.error(f"Failed to initialize distributed training: {e}")
-            logger.info("Falling back to single GPU training")
-            return 0
+        dist.init_process_group(backend="nccl")
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        return local_rank
     return 0
 
 
+def is_distributed():
+    """Check if we're running in distributed mode."""
+    return "RANK" in os.environ
+
+
 class QwenUnslothTrainer:
-    """Simplified Qwen fine-tuning with Unsloth."""
+    """Fine-tune Qwen models using Unsloth with distributed support."""
     
     def __init__(self, config_path="finetune.yaml"):
+        """Initialize trainer with configuration."""
         self.local_rank = setup_distributed()
-        self.is_distributed = "RANK" in os.environ
+        self.is_distributed = is_distributed()
         self.config = self._load_config(config_path)
+        self._validate_cuda()
         self.tokenizer = None
         self.model = None
 
     def _log_main(self, message, level="info"):
-        """Log message only on main process."""
+        """Log message only on main process (rank 0)."""
         if self.local_rank == 0:
             getattr(logger, level)(message)
 
     def _load_config(self, config_path):
         """Load configuration from YAML file."""
-        with open(config_path, 'r') as f:
-            return yaml.safe_load(f)
+        try:
+            with open(config_path, 'r') as f:
+                return yaml.safe_load(f)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Config file {config_path} not found.")
 
     def _get_config_value(self, *keys, default=None):
         """Get nested configuration value."""
@@ -68,6 +67,12 @@ class QwenUnslothTrainer:
             else:
                 return default
         return value
+
+    def _validate_cuda(self):
+        """Validate CUDA availability."""
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available!")
+        self._log_main(f"Available CUDA devices: {torch.cuda.device_count()}")
 
     def setup_model_and_tokenizer(self):
         """Initialize model and tokenizer using Unsloth."""
@@ -84,10 +89,7 @@ class QwenUnslothTrainer:
             'trust_remote_code': True,
         }
         
-        # Configure device mapping based on training mode
-        if self._get_config_value('gpu', 'single_gpu', False):
-            model_kwargs['device_map'] = {"": 0}  # Force GPU 0
-        elif self.is_distributed or self._get_config_value('gpu', 'data_parallel', False):
+        if self.is_distributed:
             model_kwargs['device_map'] = {"": self.local_rank}
         else:
             model_kwargs['device_map'] = "auto"
@@ -95,18 +97,12 @@ class QwenUnslothTrainer:
         self.model, self.tokenizer = FastLanguageModel.from_pretrained(**model_kwargs)
         self._setup_lora()
         
-        self._log_main("Model setup complete")
+        mode = "distributed" if self.is_distributed else "single GPU"
+        self._log_main(f"Model setup complete ({mode})")
 
     def _setup_lora(self):
         """Configure and apply LoRA using Unsloth."""
         lora_config = self.config['lora']
-        
-        # Disable gradient checkpointing for multi-GPU to avoid DDP conflicts
-        use_gradient_checkpointing = "unsloth"
-        if self.is_distributed:
-            use_gradient_checkpointing = True  # Use standard PyTorch checkpointing for DDP
-            self._log_main("Using standard gradient checkpointing for multi-GPU compatibility")
-        
         self.model = FastLanguageModel.get_peft_model(
             self.model,
             r=int(lora_config['r']),
@@ -114,21 +110,32 @@ class QwenUnslothTrainer:
             lora_alpha=int(lora_config['alpha']),
             lora_dropout=float(lora_config['dropout']),
             bias=lora_config['bias'],
-            use_gradient_checkpointing=use_gradient_checkpointing,
-            random_state=3407,
-            use_rslora=False,
-            loftq_config=None,
+            use_gradient_checkpointing=lora_config.get('use_gradient_checkpointing', 'unsloth'),
+            random_state=int(lora_config.get('random_state', 3407)),
+            use_rslora=bool(lora_config.get('use_rslora', False)),
+            loftq_config=lora_config.get('loftq_config'),
         )
 
     def get_training_arguments(self):
         """Get training arguments from configuration."""
         train_config = self.config['training']
         
+        # Calculate effective batch size
+        per_device_batch_size = int(train_config['per_device_batch_size'])
+        gradient_accumulation_steps = int(train_config['gradient_accumulation_steps'])
+        
+        if self.is_distributed:
+            world_size = int(os.environ.get("WORLD_SIZE", "1"))
+            effective_batch_size = per_device_batch_size * world_size * gradient_accumulation_steps
+        else:
+            effective_batch_size = per_device_batch_size * gradient_accumulation_steps
+        
+        self._log_main(f"Effective batch size: {effective_batch_size}")
+        
         training_args = {
-            'num_train_epochs': int(train_config['num_train_epochs']),
             'output_dir': train_config['output_dir'],
-            'per_device_train_batch_size': int(train_config['per_device_batch_size']),
-            'gradient_accumulation_steps': int(train_config['gradient_accumulation_steps']),
+            'per_device_train_batch_size': per_device_batch_size,
+            'gradient_accumulation_steps': gradient_accumulation_steps,
             'warmup_steps': int(train_config['warmup_steps']),
             'max_steps': int(train_config['max_steps']),
             'learning_rate': float(train_config['learning_rate']),
@@ -143,58 +150,43 @@ class QwenUnslothTrainer:
             'remove_unused_columns': False,
         }
         
-        # Add optimizer-specific hyperparameters if available
-        if 'adam_beta1' in train_config:
-            training_args['adam_beta1'] = float(train_config['adam_beta1'])
-        if 'adam_beta2' in train_config:
-            training_args['adam_beta2'] = float(train_config['adam_beta2'])
-        if 'adam_epsilon' in train_config:
-            training_args['adam_epsilon'] = float(train_config['adam_epsilon'])
-        
-        # Learning rate scheduler kwargs
-        if 'lr_scheduler_kwargs' in train_config:
-            training_args['lr_scheduler_kwargs'] = train_config['lr_scheduler_kwargs']
-        
         # Gradient clipping
-        if train_config.get('max_grad_norm', 0) > 0:
-            training_args['max_grad_norm'] = float(train_config['max_grad_norm'])
+        max_grad_norm = train_config.get('max_grad_norm', 1.0)
+        if max_grad_norm > 0:
+            training_args['max_grad_norm'] = float(max_grad_norm)
+            self._log_main(f"Gradient clipping enabled: max_grad_norm={max_grad_norm}")
         
         # Mixed precision
         training_args['fp16'] = not torch.cuda.is_bf16_supported()
         training_args['bf16'] = torch.cuda.is_bf16_supported()
         
-        # DDP-specific configurations for multi-GPU stability
-        if self.is_distributed:
-            training_args['ddp_find_unused_parameters'] = False
-            training_args['ddp_bucket_cap_mb'] = 25
-            training_args['dataloader_pin_memory'] = False
-            self._log_main("Applied DDP-specific configurations for stability")
-        
         return TrainingArguments(**training_args)
 
     def train(self):
         """Train the model."""
-        self._log_main("Starting fine-tuning...")
+        mode = "distributed" if self.is_distributed else "single GPU"
+        self._log_main(f"Starting fine-tuning ({mode})...")
         
         self.setup_model_and_tokenizer()
         data_dir = self._get_config_value('data', 'local_dir')
         max_length = int(self._get_config_value('model', 'max_seq_length'))
-        train_dataset = create_dataset(data_dir, max_length, self.local_rank, self.tokenizer)
+        train_dataset = create_dataset(data_dir, max_length, self.local_rank)
         training_args = self.get_training_arguments()
+        train_config = self.config['training']
         
         # Create trainer
         trainer_kwargs = {
             'model': self.model,
             'train_dataset': train_dataset,
             'dataset_text_field': "text",
-            'max_seq_length': max_length,
-            'dataset_num_proc': 2,
-            'packing': False,
+            'max_seq_length': int(self._get_config_value('model', 'max_seq_length')),
+            'dataset_num_proc': int(train_config.get('dataset_num_proc', 2)),
+            'packing': bool(train_config.get('packing', False)),
             'args': training_args,
         }
         
-        # Add custom data collator for masking
-        if self._get_config_value('training', 'use_custom_loss_masking', True):
+        # Add custom data collator if masking is enabled
+        if train_config.get('use_custom_loss_masking', True):
             data_collator = CustomDataCollatorWithMasking(
                 tokenizer=self.tokenizer,
                 mlm=False,
@@ -205,18 +197,13 @@ class QwenUnslothTrainer:
         
         trainer = SFTTrainer(**trainer_kwargs)
         
-        # Fix DDP issues for multi-GPU training
-        if self.is_distributed and hasattr(trainer.model, 'module'):
-            # Set static graph for DDP to avoid parameter marking issues
-            try:
-                trainer.model._set_static_graph()
-                self._log_main("Set static graph for DDP compatibility")
-            except AttributeError:
-                self._log_main("Static graph not available, continuing with standard DDP")
+        if self.local_rank == 0:
+            memory_gb = torch.cuda.memory_allocated() / 1024**3
+            self._log_main(f"GPU memory before training: {memory_gb:.2f} GB")
         
         trainer.train()
         
-        # Save model
+        # Save model only on rank 0 for distributed training
         if not self.is_distributed or self.local_rank == 0:
             output_dir = self._get_config_value('training', 'output_dir')
             trainer.save_model()
@@ -229,6 +216,7 @@ class QwenUnslothTrainer:
             self._log_main("Model not loaded! Run train() first.", "error")
             return None
         
+        # Only test on rank 0 for distributed training
         if self.is_distributed and self.local_rank != 0:
             return "Inference skipped on non-zero rank"
         
@@ -240,7 +228,7 @@ class QwenUnslothTrainer:
             with torch.no_grad():
                 outputs = self.model.generate(
                     **inputs,
-                    max_new_tokens=1024,
+                    max_new_tokens=64,
                     use_cache=True,
                     temperature=0.7,
                     do_sample=True,
@@ -257,15 +245,17 @@ class QwenUnslothTrainer:
 def main():
     """Main function to run the fine-tuning process."""
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    is_dist = is_distributed()
     
     if local_rank == 0:
-        logger.info("Starting Qwen fine-tuning with Unsloth...")
+        mode = "distributed" if is_dist else "single GPU"
+        logger.info(f"Starting Qwen fine-tuning with Unsloth ({mode})...")
     
     trainer = QwenUnslothTrainer()
     trainer.train()
     
-    # Test model
-    if local_rank == 0:
+    # Test model only on rank 0
+    if not is_dist or local_rank == 0:
         test_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWhat is machine learning?<|im_end|>\n<|im_start|>assistant\n"
         logger.info("Testing the fine-tuned model...")
         response = trainer.test_model(test_prompt)
@@ -273,4 +263,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()

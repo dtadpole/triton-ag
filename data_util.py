@@ -1,0 +1,409 @@
+#!/usr/bin/env python3
+"""
+Data processing utilities for Qwen fine-tuning.
+Handles loading, processing, and formatting of conversation data.
+"""
+
+import os
+import json
+import torch
+from datasets import Dataset
+from transformers import DataCollatorForLanguageModeling
+from util import logger
+
+
+class CustomDataCollatorWithMasking(DataCollatorForLanguageModeling):
+    """Custom data collator that masks system, user, and function tokens."""
+    
+    def __init__(self, tokenizer, mlm=False, ignore_index=-100):
+        super().__init__(tokenizer=tokenizer, mlm=mlm)
+        self.ignore_index = ignore_index
+        
+    def torch_call(self, examples):
+        # Handle different input formats
+        if isinstance(examples[0], dict):
+            # Check if examples are already tokenized (have input_ids)
+            if "input_ids" in examples[0]:
+                # Examples are already tokenized tensors - use them directly
+                batch = self._collate_tokenized_examples(examples)
+            elif "text" in examples[0]:
+                # Examples have text field - extract and tokenize
+                texts = [example["text"] for example in examples]
+                batch = self._tokenize_and_prepare(texts)
+            else:
+                # Unknown dict format - try to use as is
+                batch = super().torch_call(examples)
+        elif isinstance(examples[0], str):
+            # Examples are raw text strings
+            batch = self._tokenize_and_prepare(examples)
+        else:
+            # Fall back to parent class
+            batch = super().torch_call(examples)
+        
+        # Apply masking to labels
+        if "labels" in batch:
+            input_ids = batch["input_ids"]
+            labels = batch["labels"].clone()
+            
+            total_masked = 0
+            total_unmasked = 0
+            
+            # Create masks for different roles
+            for i, input_seq in enumerate(input_ids):
+                original_labels = labels[i].clone()
+                labels[i] = self._mask_non_assistant_tokens(input_seq, labels[i])
+                
+                # Count masked vs unmasked tokens for this sequence
+                masked_count = (labels[i] == self.ignore_index).sum().item()
+                unmasked_count = (labels[i] != self.ignore_index).sum().item()
+                
+                total_masked += masked_count
+                total_unmasked += unmasked_count
+            
+            # Print masking statistics
+            total_tokens = total_masked + total_unmasked
+            if total_tokens > 0:
+                masked_pct = (total_masked / total_tokens) * 100
+                unmasked_pct = (total_unmasked / total_tokens) * 100
+                logger.info(f"Masking stats - Total: {total_tokens}, Masked: {total_masked} ({masked_pct:.1f}%), Unmasked: {total_unmasked} ({unmasked_pct:.1f}%)")
+            
+            batch["labels"] = labels
+        
+        return batch
+    
+    def _tokenize_and_prepare(self, texts):
+        """Tokenize texts and prepare batch."""
+        batch = self.tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=getattr(self.tokenizer, 'model_max_length', 2048),
+            return_tensors="pt"
+        )
+        # Create labels from input_ids
+        batch["labels"] = batch["input_ids"].clone()
+        return batch
+    
+    def _collate_tokenized_examples(self, examples):
+        """Collate examples that are already tokenized."""
+        # Extract data from examples and convert to tensors if needed
+        input_ids = []
+        attention_mask = []
+        labels = []
+        
+        for ex in examples:
+            # Convert to tensor if it's a list
+            if isinstance(ex["input_ids"], list):
+                seq_input = torch.tensor(ex["input_ids"], dtype=torch.long)
+            else:
+                seq_input = ex["input_ids"].clone()
+            
+            if isinstance(ex["attention_mask"], list):
+                seq_attention = torch.tensor(ex["attention_mask"], dtype=torch.long)
+            else:
+                seq_attention = ex["attention_mask"].clone()
+            
+            # Handle labels - use input_ids if labels not present
+            if "labels" in ex:
+                if isinstance(ex["labels"], list):
+                    seq_labels = torch.tensor(ex["labels"], dtype=torch.long)
+                else:
+                    seq_labels = ex["labels"].clone()
+            else:
+                seq_labels = seq_input.clone()
+            
+            input_ids.append(seq_input)
+            attention_mask.append(seq_attention)
+            labels.append(seq_labels)
+        
+        # Pad sequences to same length
+        max_length = max(len(seq.squeeze()) for seq in input_ids)
+        
+        padded_input_ids = []
+        padded_attention_mask = []
+        padded_labels = []
+        
+        for i in range(len(input_ids)):
+            seq_input = input_ids[i].squeeze()
+            seq_attention = attention_mask[i].squeeze()
+            seq_labels = labels[i].squeeze()
+            
+            # Pad sequences
+            pad_length = max_length - len(seq_input)
+            if pad_length > 0:
+                pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
+                seq_input = torch.cat([seq_input, torch.full((pad_length,), pad_token_id, dtype=seq_input.dtype)])
+                seq_attention = torch.cat([seq_attention, torch.zeros(pad_length, dtype=seq_attention.dtype)])
+                seq_labels = torch.cat([seq_labels, torch.full((pad_length,), self.ignore_index, dtype=seq_labels.dtype)])
+            
+            padded_input_ids.append(seq_input)
+            padded_attention_mask.append(seq_attention)
+            padded_labels.append(seq_labels)
+        
+        return {
+            "input_ids": torch.stack(padded_input_ids),
+            "attention_mask": torch.stack(padded_attention_mask),
+            "labels": torch.stack(padded_labels)
+        }
+    
+    def _mask_non_assistant_tokens(self, input_ids, labels):
+        """Mask tokens that are not assistant responses."""
+        # Convert to list for easier processing and ensure 1D
+        input_ids_list = input_ids.squeeze().tolist() if input_ids.dim() > 1 else input_ids.tolist()
+        labels_list = labels.squeeze().tolist() if labels.dim() > 1 else labels.tolist()
+        original_loss_tokens = sum(1 for l in labels_list if l != self.ignore_index)
+        
+        # Special tokens for Qwen format - ensure we catch all variations
+        system_start = self.tokenizer.encode("<|im_start|>system", add_special_tokens=False)
+        user_start = self.tokenizer.encode("<|im_start|>user", add_special_tokens=False)
+        assistant_start = self.tokenizer.encode("<|im_start|>assistant", add_special_tokens=False)
+        function_start = self.tokenizer.encode("<|im_start|>function", add_special_tokens=False)
+        im_end = self.tokenizer.encode("<|im_end|>", add_special_tokens=False)
+        function_call_start = self.tokenizer.encode("<function_call>", add_special_tokens=False)
+        function_call_end = self.tokenizer.encode("</function_call>", add_special_tokens=False)
+        
+        # Track current state and what we're masking
+        current_role = "unknown"  # Track current role for debugging
+        in_assistant_content = False  # Only true when in actual assistant response content
+        in_function_call = False
+        i = 0
+        
+        # Initially mask everything until we know the role
+        while i < len(input_ids_list):
+            # Check for role transitions
+            if self._token_sequence_match(input_ids_list, i, system_start):
+                current_role = "system"
+                in_assistant_content = False
+                in_function_call = False
+                # Mask the entire system role marker and advance
+                for j in range(len(system_start)):
+                    if i + j < len(labels_list):
+                        labels_list[i + j] = self.ignore_index
+                i += len(system_start)
+                
+            elif self._token_sequence_match(input_ids_list, i, user_start):
+                current_role = "user"
+                in_assistant_content = False
+                in_function_call = False
+                # Mask the entire user role marker and advance
+                for j in range(len(user_start)):
+                    if i + j < len(labels_list):
+                        labels_list[i + j] = self.ignore_index
+                i += len(user_start)
+                
+            elif self._token_sequence_match(input_ids_list, i, assistant_start):
+                current_role = "assistant"
+                in_assistant_content = True
+                in_function_call = False
+                # Mask the assistant start tokens themselves (role marker should not be trained on)
+                for j in range(len(assistant_start)):
+                    if i + j < len(labels_list):
+                        labels_list[i + j] = self.ignore_index
+                i += len(assistant_start)
+                
+            elif self._token_sequence_match(input_ids_list, i, function_start):
+                current_role = "function"
+                in_assistant_content = False
+                in_function_call = False
+                # Mask the entire function role marker and advance
+                for j in range(len(function_start)):
+                    if i + j < len(labels_list):
+                        labels_list[i + j] = self.ignore_index
+                i += len(function_start)
+                
+            elif self._token_sequence_match(input_ids_list, i, function_call_start):
+                # Function calls within assistant responses should be TRAINED ON (not masked)
+                # Only set the flag to track we're in a function call, but don't mask
+                in_function_call = True
+                i += len(function_call_start)
+                
+            elif self._token_sequence_match(input_ids_list, i, function_call_end):
+                in_function_call = False
+                i += len(function_call_end)
+                
+            elif self._token_sequence_match(input_ids_list, i, im_end):
+                # End of any role - mask the end marker and reset state
+                for j in range(len(im_end)):
+                    if i + j < len(labels_list):
+                        labels_list[i + j] = self.ignore_index
+                current_role = "unknown"
+                in_assistant_content = False
+                in_function_call = False
+                i += len(im_end)
+                
+            else:
+                # Apply masking based on current state
+                should_mask = True
+                
+                if current_role == "assistant" and in_assistant_content:
+                    # Train on ALL assistant content including function calls
+                    should_mask = False
+                    
+                # Always mask: system instructions, user prompts, function outputs
+                # Note: function calls within assistant responses are now trained on
+                if current_role in ["system", "user", "function"]:
+                    should_mask = True
+                
+                if should_mask:
+                    labels_list[i] = self.ignore_index
+                    
+                i += 1
+        
+        return torch.tensor(labels_list, dtype=labels.dtype)
+    
+    def _token_sequence_match(self, input_ids, start_idx, target_sequence):
+        """Check if token sequence matches at given position."""
+        if start_idx + len(target_sequence) > len(input_ids):
+            return False
+        return input_ids[start_idx:start_idx + len(target_sequence)] == target_sequence
+
+
+def load_experiences(data_dir, local_rank=0):
+    """Load and process conversation experiences."""
+    experiences = []
+    if local_rank == 0:
+        logger.info(f"Loading experiences from: {data_dir}")
+    
+    for root, _, files in os.walk(data_dir):
+        for filename in files:
+            if filename.endswith('.json'):
+                file_path = os.path.join(root, filename)
+                try:
+                    with open(file_path, 'r') as f:
+                        data = json.load(f)
+                        processed = process_conversation(data)
+                        if processed:
+                            experiences.append({"messages": processed})
+                except Exception as e:
+                    if local_rank == 0:
+                        logger.warning(f"Error processing {file_path}: {e}")
+    
+    if local_rank == 0:
+        logger.info(f"Loaded {len(experiences)} conversations")
+    return experiences
+
+
+def process_conversation(data):
+    """Process and clean conversation data."""
+    processed = []
+    function_name = None
+    
+    for msg in data:
+        role = msg["role"]
+        content = msg["content"]
+        
+        if role == "system":
+            processed.append({"role": "system", "content": content})
+        elif role == "user":
+            if isinstance(content, dict) and content.get("type") == "function_call_output":
+                processed.append({
+                    "role": "function",
+                    "name": function_name or "unknown",
+                    "content": content["output"]
+                })
+            elif isinstance(content, str):
+                processed.append({"role": "user", "content": content})
+        elif role == "assistant":
+            if isinstance(content, dict) and content.get("type") == "function_call":
+                function_name = content["name"]
+                processed.append({
+                    "role": "assistant",
+                    "content": None,
+                    "function_call": {
+                        "name": content["name"],
+                        "arguments": content["arguments"]
+                    }
+                })
+            elif isinstance(content, list) and content:
+                if content[0].get("type") == "output_text":
+                    processed.append({"role": "assistant", "content": content[0]["text"]})
+            elif isinstance(content, str):
+                processed.append({"role": "assistant", "content": content})
+    
+    return processed
+
+
+def format_conversations(examples, max_length, local_rank=0, tokenizer=None):
+    """Format conversations for training with token length validation."""
+    texts = []
+    removed_count = 0
+    
+    for messages in examples["messages"]:
+        conversation = ""
+        for message in messages:
+            role = message["role"]
+            content = message.get("content", "")
+            
+            if role == "system":
+                conversation += f"<|im_start|>system\n{content}<|im_end|>\n"
+            elif role == "user":
+                conversation += f"<|im_start|>user\n{content}<|im_end|>\n"
+            elif role == "assistant":
+                conversation += f"<|im_start|>assistant\n"
+                if "function_call" in message:
+                    func_call = message["function_call"]
+                    conversation += f"<function_call>\n{json.dumps(func_call)}\n</function_call>"
+                if content:
+                    conversation += content
+                conversation += "<|im_end|>\n"
+            elif role == "function":
+                name = message.get("name", "unknown")
+                conversation += f"<|im_start|>function name={name}\n{content}<|im_end|>\n"
+        
+        # Check token length if tokenizer is provided
+        if tokenizer is not None:
+            tokens = tokenizer.encode(conversation, add_special_tokens=False)
+            sample_idx = len(texts) + 1
+            
+            if len(tokens) > max_length:
+                removed_count += 1
+                if local_rank == 0:
+                    logger.warning(f"Sample {sample_idx}: {len(tokens)} tokens - REMOVED (exceeds max_length {max_length})")
+                texts.append("")  # Add empty string instead of skipping
+                continue
+        else:
+            # Fallback: rough character-based estimate (less accurate)
+            estimated_tokens = len(conversation) // 4
+            sample_idx = len(texts) + 1
+            
+            if len(conversation) > max_length * 4:  # Rough character estimate
+                removed_count += 1
+                if local_rank == 0:
+                    logger.warning(f"Sample {sample_idx}: ~{estimated_tokens} estimated tokens - REMOVED (exceeds max_length {max_length})")
+                texts.append("")  # Add empty string instead of skipping
+                continue
+            else:
+                if local_rank == 0:
+                    logger.info(f"Sample {sample_idx}: ~{estimated_tokens} estimated tokens - KEPT")
+        
+        texts.append(conversation)
+    
+    if local_rank == 0 and removed_count > 0:
+        logger.info(f"Removed {removed_count} samples that exceeded max_length {max_length}")
+    
+    return {"text": texts}
+
+
+def create_dataset(data_dir, max_length, local_rank=0, tokenizer=None):
+    """Create and prepare training dataset with token length validation."""
+    experiences = load_experiences(data_dir, local_rank)
+    dataset = Dataset.from_list(experiences)
+    
+    # Format conversations and filter by token length
+    formatted_dataset = dataset.map(
+        lambda examples: format_conversations(examples, max_length, local_rank, tokenizer), 
+        batched=True
+    )
+    
+    # Filter out empty texts (samples that were removed due to length)
+    if tokenizer is not None:
+        original_len = len(formatted_dataset)
+        formatted_dataset = formatted_dataset.filter(lambda x: len(x["text"].strip()) > 0)
+        filtered_len = len(formatted_dataset)
+        
+        if local_rank == 0 and original_len != filtered_len:
+            logger.info(f"Filtered out {original_len - filtered_len} empty samples after token length validation")
+    
+    if local_rank == 0:
+        logger.info(f"Created dataset with {len(formatted_dataset)} examples")
+    return formatted_dataset 

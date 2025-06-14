@@ -1,36 +1,29 @@
-# Qwen Fine-tuning Configuration
-# Clean, structured configuration for Unsloth-based fine-tuning
+# Simplified Qwen Fine-tuning Configuration
 
 # Model Configuration
 model:
-  # name: "unsloth/Qwen3-32B-bnb-4bit"
-  # name: "unsloth/Qwen3-8B"
-  # name: "Qwen/Qwen3-8B"
-  # name: "Qwen/Qwen3-32B"
   name: "Qwen/Qwen3-14B"
-  # name: "Qwen/Qwen3-8B-AWQ"
-  # name: "Qwen/Qwen2.5-0.5B-Instruct"
-  # name: "Qwen/Qwen3-0.6B"
-  max_seq_length: 40960
+  max_seq_length: 81920
   dtype: null  # Auto-detection
   load_in_4bit: true
 
 # Training Configuration
 training:
   # Core training parameters
+  num_train_epochs: 1
   learning_rate: 3e-5
   max_steps: -1  # Set to -1 for full epochs
-  num_train_epochs: 1  # Number of training epochs
-  warmup_steps: 15
+  warmup_steps: 5
   
-  # Batch and memory settings
-  per_device_batch_size: 1
+  # Batch settings
+  per_device_batch_size: 4
   gradient_accumulation_steps: 1
   
-  # Optimization - Using paged optimizer for CPU offloading
-  optim: "paged_adamw_8bit"
-  weight_decay: 0.01
-  lr_scheduler_type: "linear"
+  # Optimization
+  optim: "paged_adamw_16bit"
+  weight_decay: 0.05
+  lr_scheduler_type: "cosine"
+  max_grad_norm: 0.5  # Gradient clipping
   
   # Logging and saving
   logging_steps: 1
@@ -38,31 +31,14 @@ training:
   save_total_limit: 3
   output_dir: "../qwen3-unsloth-finetuned"
   
-  # Multi-GPU and system settings
-  dataloader_num_workers: 0
+  # System settings
   seed: 3407
-  dataloader_pin_memory: false
-  ddp_find_unused_parameters: false
-  remove_unused_columns: false
-  
-  # Dataset processing
-  dataset_num_proc: 2
-  packing: false
-  
-  # Memory optimization - CPU offloading and advanced techniques
-  cpu_offload_optimizer: true
-  cpu_offload_params: true
-  gradient_checkpointing: true
-  auto_find_batch_size: true
-  max_grad_norm: 1.0
-  
-  # Custom loss function with masking
   use_custom_loss_masking: true
 
-# LoRA Configuration - Optimized for memory efficiency
+# LoRA Configuration
 lora:
-  r: 32  # Reduced rank for memory savings
-  alpha: 32  # Adjusted proportionally
+  r: 32
+  alpha: 32
   dropout: 0.05
   target_modules:
     - "q_proj"
@@ -72,21 +48,13 @@ lora:
     - "gate_proj"
     - "down_proj"
     - "up_proj"
-  # Advanced LoRA settings
   bias: "none"
-  use_gradient_checkpointing: "unsloth"
-  random_state: 3407
-  use_rslora: false
-  loftq_config: null
 
 # Data Configuration  
 data:
   local_dir: "finetune_experiences"
-  # S3 data sources (if needed)
-  s3_folders:
-    - s3://agent-xyz/kernel_coder/anthropic
-    - s3://agent-xyz/kernel_coder/deepseek
-    - s3://agent-xyz/kernel_coder/fireworks/deepseek-v3
-    - s3://agent-xyz/kernel_coder/gemini/gemini-2.5-pro
-    - s3://agent-xyz/kernel_bench/level1
-    - s3://agent-xyz/kernel_bench/level2
+
+# GPU Configuration
+gpu:
+  single_gpu: false  # Enable multi-GPU for data parallel training
+  data_parallel: true  # Use data parallel training
