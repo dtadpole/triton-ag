@@ -3,9 +3,7 @@
 ## Setup Environment
 
 ```bash
-uv venv --python 3.12
-source .venv/bin/activate
-uv pip install -r requirements.txt
+make env
 ```
 
 ## Prepare API key for LLM access
@@ -27,15 +25,17 @@ use agentl.yaml to add and/or configure agents.
 
 ## Prepare background services
 
-Run Observability Service:
+Run Observability Service on another terminal or tmux session
 
 ```bash
+make env 
 make mlflow
 ```
 
-Run Evaluator Service (adapted from Kernel Bench):
+Run Evaluator Service on another terminal or tmux session (adapted from Kernel Bench):
 
 ```bash
+make env
 make kbEval
 ```
 
