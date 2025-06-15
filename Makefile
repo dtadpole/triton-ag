@@ -25,23 +25,15 @@ codeRunServer:
 # Fine-tuning targets
 finetune:
 	@echo "Starting data parallel fine-tuning on 4 GPUs..."
-	bash -c "source .venv/bin/activate && export NCCL_P2P_DISABLE=1 && export NCCL_IB_DISABLE=1 && CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29500 finetune.py"
+	bash -c "source .venv/bin/activate && CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29500 finetune.py"
 
 finetune-single:
 	@echo "Starting single GPU fine-tuning..."
-	bash -c "source .venv/bin/activate && CUDA_VISIBLE_DEVICES=0 python finetune.py"
+	bash -c "source .venv/bin/activate && CUDA_VISIBLE_DEVICES=1 python finetune.py"
 
 finetune-2gpu:
 	@echo "Starting data parallel fine-tuning on 2 GPUs..."
-	bash -c "source .venv/bin/activate && export NCCL_P2P_DISABLE=1 && export NCCL_IB_DISABLE=1 && CUDA_VISIBLE_DEVICES=2,3 torchrun --nproc_per_node=2 --master_port=29500 finetune.py"
-
-finetune-debug:
-	@echo "Starting debug mode fine-tuning with verbose logging..."
-	bash -c "source .venv/bin/activate && export NCCL_P2P_DISABLE=1 && export NCCL_IB_DISABLE=1 && export NCCL_DEBUG=INFO && CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29500 --log_level=DEBUG finetune.py"
-
-finetune-safe:
-	@echo "Starting safe multi-GPU fine-tuning with model parallelism..."
-	bash -c "source .venv/bin/activate && CUDA_VISIBLE_DEVICES=0,1,2,3 python finetune.py"
+	bash -c "source .venv/bin/activate && CUDA_VISIBLE_DEVICES=2,3 torchrun --nproc_per_node=2 --master_port=29500 finetune.py"
 
 vllm-qwen3-8b:
 	vllm serve unsloth/DeepSeek-R1-0528-Qwen3-8B-bnb-4bit \

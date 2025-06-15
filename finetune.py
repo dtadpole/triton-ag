@@ -240,7 +240,7 @@ class QwenUnslothTrainer:
             with torch.no_grad():
                 outputs = self.model.generate(
                     **inputs,
-                    max_new_tokens=1024,
+                    max_new_tokens=512,
                     use_cache=True,
                     temperature=0.7,
                     do_sample=True,
