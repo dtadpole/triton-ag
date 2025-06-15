@@ -246,10 +246,29 @@ class CustomDataCollatorWithMasking(DataCollatorForLanguageModeling):
                 
                 if should_mask:
                     labels_list[i] = self.ignore_index
-                    
+                
                 i += 1
         
-        return torch.tensor(labels_list, dtype=labels.dtype)
+        # Convert back to tensor - ensure proper shape
+        result = torch.tensor(labels_list, dtype=labels.dtype)
+        if labels.dim() > 1:
+            result = result.view(labels.shape)
+        
+        # CRITICAL: Prevent completely masked samples (which cause division by zero)
+        unmasked_count = (result != self.ignore_index).sum().item()
+        if unmasked_count == 0:
+            # If everything is masked, unmask the last non-padding token
+            # Find the last meaningful token (not padding)
+            for idx in range(len(result) - 1, -1, -1):
+                if result[idx] != self.ignore_index and input_ids_list[idx] != self.tokenizer.pad_token_id:
+                    result[idx] = input_ids_list[idx]
+                    break
+            else:
+                # Fallback: unmask the last token regardless
+                if len(result) > 0:
+                    result[-1] = input_ids_list[-1] if len(input_ids_list) > 0 else 0
+        
+        return result
     
     def _token_sequence_match(self, input_ids, start_idx, target_sequence):
         """Check if token sequence matches at given position."""
