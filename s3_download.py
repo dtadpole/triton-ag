@@ -4,7 +4,7 @@ import yaml
 import argparse
 from urllib.parse import urlparse
 
-def load_config(config_path="finetune.yaml"):
+def load_config(config_path="s3_download.yaml"):
     """Load configuration from YAML file."""
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
@@ -50,9 +50,9 @@ def download_from_s3(bucket_name, prefix, local_dir):
 
 def download_all_targets(config):
     """Download all targets specified in the configuration, maintaining S3 folder structure."""
-    local_base_dir = config['data']['local_dir']
+    local_base_dir = config['local_dir']
     
-    for s3_url in config['data']['s3_folders']:
+    for s3_url in config['s3_folders']:
         bucket, prefix = parse_s3_url(s3_url)
         
         # Create a subdirectory structure that mirrors the S3 path
@@ -68,9 +68,9 @@ def download_all_targets(config):
         print(f"Local directory: {local_dir}")
         download_from_s3(bucket, prefix, local_dir)
 
-def main():
+def main(config_path):
     # Load configuration
-    config = load_config()
+    config = load_config(config_path)
     
     # Download experiences from S3
     print("Starting S3 download test...")
@@ -80,7 +80,7 @@ def main():
 if __name__ == "__main__":
     # argparse
     parser = argparse.ArgumentParser(description='Download S3 folders')
-    parser.add_argument('-c', '--config', type=str, required=True, help='Path to the configuration file')
+    parser.add_argument('-c', '--config', type=str, default='s3_download.yaml', help='Path to the configuration file')
     args = parser.parse_args()
     
     main(args.config) 

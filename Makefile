@@ -8,6 +8,19 @@ build_docker: Dockerfile
 env: build_docker
 	docker run -it  --gpus all --net=host  -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v ${PWD}:/app/ -w /app/ triton_ag /bin/bash
 
+.PHONY: help finetune finetune-single finetune-2gpu finetune-debug
+
+help:
+	@echo "Available targets:"
+	@echo "  finetune        - Run data parallel fine-tuning on 4 GPUs"
+	@echo "  finetune-single - Run single GPU fine-tuning"
+	@echo "  finetune-2gpu   - Run data parallel fine-tuning on 2 GPUs"
+	@echo "  finetune-debug  - Run data parallel fine-tuning with debug logging"
+	@echo "  finetune-safe   - Run safe multi-GPU fine-tuning with model parallelism"
+	@echo "  mlflow          - Start MLflow server"
+	@echo "  kbEval          - Run knowledge base evaluation server"
+	@echo "  codeRunServer   - Run code execution server"
+
 mlflow:
 	mlflow server --host localhost --port 5050
 
@@ -17,8 +30,18 @@ kbEval:
 codeRunServer:
 	mcp dev codeRunServer.py
 
+# Fine-tuning targets
 finetune:
-	CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 finetune.py
+	@echo "Starting data parallel fine-tuning on 4 GPUs..."
+	bash -c "source .venv/bin/activate && CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29500 finetune.py"
+
+finetune-single:
+	@echo "Starting single GPU fine-tuning..."
+	bash -c "source .venv/bin/activate && CUDA_VISIBLE_DEVICES=1 python finetune.py"
+
+finetune-2gpu:
+	@echo "Starting data parallel fine-tuning on 2 GPUs..."
+	bash -c "source .venv/bin/activate && CUDA_VISIBLE_DEVICES=2,3 torchrun --nproc_per_node=2 --master_port=29500 finetune.py"
 
 vllm-qwen3-8b:
 	vllm serve unsloth/DeepSeek-R1-0528-Qwen3-8B-bnb-4bit \
