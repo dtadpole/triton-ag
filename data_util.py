@@ -570,7 +570,7 @@ if __name__ == "__main__":
     }]
     dataset = create_dataset(experiences, tokenizer, 4096, 0)
 
-    collate_fn = CustomDataCollatorWithMasking(tokenizer, mlm=False, return_tensors="pt", pad_to_multiple_of=16)
+    collate_fn = CustomDataCollatorWithMasking(tokenizer, mlm=False, return_tensors="pt", max_length=4096)
 
     # Pass it to dataloader
     dataloader = torch.utils.data.DataLoader(dataset=dataset, collate_fn=collate_fn, batch_size=2)
