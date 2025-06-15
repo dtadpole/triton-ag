@@ -16,15 +16,64 @@ from util import logger
 
 
 class CustomDataCollatorWithMasking(DataCollatorForLanguageModeling):
-    """Custom data collator that masks system, user, and function tokens."""
+    """Custom data collator that masks system, user, and function tokens with dynamic length support."""
     
-    def __init__(self, tokenizer, mlm=False, ignore_index=-100, return_tensors="pt", pad_to_multiple_of=16):
+    def __init__(self, tokenizer, mlm=False, ignore_index=-100, return_tensors="pt", pad_to_multiple_of=8, max_length=None, use_dynamic_padding=True):
         super().__init__(tokenizer=tokenizer, mlm=mlm, return_tensors=return_tensors, pad_to_multiple_of=pad_to_multiple_of)
         self.ignore_index = ignore_index
+        self.max_length = max_length
+        self.use_dynamic_padding = use_dynamic_padding
         
     def torch_call(self, examples):
-
-        batch = super().torch_call(examples).data
+        if self.use_dynamic_padding:
+            # Use dynamic padding - find max length in this batch
+            max_len_in_batch = max(len(ex['input_ids']) for ex in examples)
+            
+            # Optionally limit to global max_length
+            if self.max_length is not None:
+                max_len_in_batch = min(max_len_in_batch, self.max_length)
+            
+            # Pad to multiple for efficiency
+            if self.pad_to_multiple_of is not None:
+                max_len_in_batch = ((max_len_in_batch + self.pad_to_multiple_of - 1) 
+                                   // self.pad_to_multiple_of * self.pad_to_multiple_of)
+            
+            # Manually pad each example to the batch max length
+            batch_input_ids = []
+            batch_attention_mask = []
+            batch_labels = []
+            
+            for example in examples:
+                input_ids = example['input_ids'][:max_len_in_batch]
+                attention_mask = example.get('attention_mask', [1] * len(input_ids))[:max_len_in_batch]
+                labels = example.get('labels', input_ids.copy())[:max_len_in_batch]
+                
+                # Pad sequences to batch max length
+                padding_length = max_len_in_batch - len(input_ids)
+                if padding_length > 0:
+                    pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
+                    
+                    input_ids = input_ids + [pad_token_id] * padding_length
+                    attention_mask = attention_mask + [0] * padding_length
+                    labels = labels + [self.ignore_index] * padding_length
+                
+                batch_input_ids.append(input_ids)
+                batch_attention_mask.append(attention_mask)
+                batch_labels.append(labels)
+            
+            # Create batch dict
+            batch = {
+                'input_ids': torch.tensor(batch_input_ids, dtype=torch.long),
+                'attention_mask': torch.tensor(batch_attention_mask, dtype=torch.long),
+                'labels': torch.tensor(batch_labels, dtype=torch.long)
+            }
+            
+            # Log occasionally to show dynamic padding is working
+            if torch.rand(1).item() < 0.01:  # Log ~1% of batches
+                logger.info(f"Dynamic batch - Max length in batch: {max_len_in_batch}, Batch size: {len(examples)}")
+        else:
+            # Use original super() method for fixed-length padding
+            batch = super().torch_call(examples).data
 
         # Apply masking to labels
         input_ids = batch["input_ids"]

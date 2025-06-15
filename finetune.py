@@ -126,12 +126,17 @@ class QwenUnslothTrainer:
             self.max_seq_length,
             self.local_rank
         )
+        # Create data collator with dynamic padding
         self.collate_fn = CustomDataCollatorWithMasking(
             tokenizer=self.tokenizer,
             mlm=False,
-            ignore_index=-100
+            ignore_index=-100,
+            max_length=self.config['model']['max_seq_length'],
+            pad_to_multiple_of=8,  # For efficiency on modern GPUs
+            use_dynamic_padding=True  # Enable dynamic length padding
         )
 
+        # Create dataloader with dynamic batching
         self.train_dataloader = DataLoader(
             self.train_dataset,
             batch_size=self.config['training']['per_device_batch_size'],
@@ -142,7 +147,10 @@ class QwenUnslothTrainer:
             collate_fn=self.collate_fn,
         )
         
+        self.log_main(f"Dataloader has {len(self.train_dataloader)} batches")
+        
         self.log_main(f"Created dataset with {len(self.train_dataset)} examples")
+        self.log_main("Using dynamic length batching for improved efficiency")
 
     def setup_optimizer_and_scheduler(self):
         """Setup optimizer and learning rate scheduler."""
