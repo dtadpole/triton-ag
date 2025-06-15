@@ -72,6 +72,23 @@ class QwenUnslothTrainer:
         if self.local_rank == 0:
             getattr(logger, level)(message)
 
+    def get_model_for_save(self):
+        """Get the underlying model for saving, handling both PEFT and DDP cases."""
+        # For PEFT models, we don't need to unwrap .module
+        # The PEFT model itself can be saved directly
+        if hasattr(self.model, 'module'):
+            # This is a DDP wrapped model
+            return self.model.module
+        else:
+            # This is likely a PEFT model or regular model
+            return self.model
+    
+    def get_model_parameters(self):
+        """Get model parameters, handling both PEFT and DDP cases."""
+        # For PEFT models, self.model.parameters() works directly
+        # regardless of distributed training
+        return self.model.parameters()
+
     def setup_model_and_tokenizer(self):
         """Initialize model and tokenizer using Unsloth."""
         model_config = self.config['model']
@@ -155,10 +172,7 @@ class QwenUnslothTrainer:
     def setup_optimizer_and_scheduler(self):
         """Setup optimizer and learning rate scheduler."""
         # Get model parameters
-        if self.is_distributed:
-            model_params = self.model.module.parameters()
-        else:
-            model_params = self.model.parameters()
+        model_params = self.get_model_parameters()
             
         # Setup optimizer
         if self.config['training']['optim'] == 'adamw':
@@ -254,10 +268,7 @@ class QwenUnslothTrainer:
         # Gradient clipping
         max_grad_norm = self.config['training'].get('max_grad_norm', 0.5)
         if max_grad_norm > 0:
-            if self.is_distributed:
-                torch.nn.utils.clip_grad_norm_(self.model.module.parameters(), max_grad_norm)
-            else:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
+            torch.nn.utils.clip_grad_norm_(self.get_model_parameters(), max_grad_norm)
         
         # Optimizer step
         self.optimizer.step()
@@ -316,9 +327,11 @@ class QwenUnslothTrainer:
                 if (step + 1) % gradient_accumulation_steps == 0:
                     self.optimizer_step()
                     
+                    # Calculate current learning rate (needed for both progress bar and logging)
+                    current_lr = self.scheduler.get_last_lr()[0] if self.scheduler else training_config['learning_rate']
+                    
                     # Update progress bar
                     if self.local_rank == 0:
-                        current_lr = self.scheduler.get_last_lr()[0] if self.scheduler else training_config['learning_rate']
                         pbar.set_postfix({
                             'loss': f"{step_loss/gradient_accumulation_steps:.4f}",
                             'lr': f"{current_lr:.2e}",
@@ -381,7 +394,7 @@ class QwenUnslothTrainer:
         os.makedirs(output_dir, exist_ok=True)
         
         # Save the model (handle DDP case)
-        model_to_save = self.model.module if self.is_distributed else self.model
+        model_to_save = self.get_model_for_save()
         
         # Save with FastLanguageModel for Unsloth compatibility
         try:
