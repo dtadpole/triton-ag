@@ -423,7 +423,7 @@ def format_conversation(example) -> str:
             if not "name" in message:
                 raise ValueError(f"Function name is required: {message}")
             name = message.get("name")
-            conversation += f"<|im_start|>function name={name}\n{content}<|im_end|>\n"
+            conversation += f"<|im_start|>function\nname={name}\n{content}<|im_end|>\n"
             prev_role = "function"
 
     return conversation
