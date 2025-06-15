@@ -9,12 +9,15 @@ from unsloth import FastLanguageModel
 
 import os
 import yaml
+from torch.utils.data import DataLoader
 import torch
+import tqdm
 import torch.distributed as dist
-from transformers import TrainingArguments
-from trl import SFTTrainer
+from torch.optim import AdamW
+from transformers import get_linear_schedule_with_warmup
+import math
 from util import logger
-from data_util import create_dataset, CustomDataCollatorWithMasking
+from data_util import load_experiences, create_dataset, CustomDataCollatorWithMasking
 
 
 def setup_distributed():
@@ -51,7 +54,18 @@ class QwenUnslothTrainer:
         
         self.tokenizer = None
         self.model = None
+        self.optimizer = None
+        self.scheduler = None
+        self.train_dataloader = None
+        
+        # Training state
+        self.global_step = 0
+        self.epoch = 0
+        self.best_loss = float('inf')
 
+        self.max_seq_length = self.config['model']['max_seq_length']
+        self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+       
     def log_main(self, message, level="info"):
         """Log message only on main process."""
         if self.local_rank == 0:
@@ -102,98 +116,281 @@ class QwenUnslothTrainer:
         
         self.log_main("Model setup complete")
 
-    def get_training_arguments(self):
-        """Get training arguments from configuration."""
-        train_config = self.config['training']
-        
-        # Base arguments
-        args = {
-            'num_train_epochs': train_config['num_train_epochs'],
-            'output_dir': train_config['output_dir'],
-            'per_device_train_batch_size': train_config['per_device_batch_size'],
-            'gradient_accumulation_steps': train_config['gradient_accumulation_steps'],
-            'warmup_steps': train_config['warmup_steps'],
-            'max_steps': train_config['max_steps'],
-            'learning_rate': train_config['learning_rate'],
-            'logging_steps': train_config['logging_steps'],
-            'optim': train_config['optim'],
-            'weight_decay': train_config['weight_decay'],
-            'lr_scheduler_type': train_config['lr_scheduler_type'],
-            'seed': train_config['seed'],
-            'save_steps': train_config['save_steps'],
-            'save_total_limit': train_config['save_total_limit'],
-            'report_to': None,
-            'remove_unused_columns': False,
-        }
-        
-        # Mixed precision
-        args['fp16'] = not torch.cuda.is_bf16_supported()
-        args['bf16'] = torch.cuda.is_bf16_supported()
-        
-        # DDP-specific configurations
-        if self.is_distributed:
-            args.update({
-                'ddp_find_unused_parameters': False,
-                'ddp_bucket_cap_mb': 25,
-                'dataloader_pin_memory': False
-            })
-            self.log_main("Applied DDP-specific configurations for stability")
-        
-        return TrainingArguments(**args)
-
-    def train(self):
-        """Train the model."""
-        self.log_main("Starting fine-tuning...")
-        
-        self.setup_model_and_tokenizer()
-        
+    def setup_dataset(self):
         # Create dataset
-        max_length = self.config['model']['max_seq_length']
-        train_dataset = create_dataset(
-            self.config['data']['local_dir'], 
-            max_length, 
-            self.local_rank, 
-            self.tokenizer
+        experiences = load_experiences(self.config['data']['local_dir'])
+        self.train_dataset = create_dataset(
+            experiences, 
+            self.tokenizer,
+            self.max_seq_length,
+            self.local_rank
+        )
+        self.collate_fn = CustomDataCollatorWithMasking(
+            tokenizer=self.tokenizer,
+            mlm=False,
+            ignore_index=-100
+        )
+
+        self.train_dataloader = DataLoader(
+            self.train_dataset,
+            batch_size=self.config['training']['per_device_batch_size'],
+            shuffle=True,
+            num_workers=self.config['training'].get('num_workers', 4),
+            pin_memory=True,
+            drop_last=True,
+            collate_fn=self.collate_fn,
         )
         
-        # Setup trainer
-        trainer_kwargs = {
-            'model': self.model,
-            'train_dataset': train_dataset,
-            'dataset_text_field': "text",
-            'max_seq_length': max_length,
-            'dataset_num_proc': 2,
-            'packing': False,
-            'args': self.get_training_arguments(),
-        }
-        
-        # Add custom data collator if enabled
-        if self.config['training'].get('use_custom_loss_masking', True):
-            trainer_kwargs['data_collator'] = CustomDataCollatorWithMasking(
-                tokenizer=self.tokenizer,
-                mlm=False,
-                ignore_index=-100
+        self.log_main(f"Created dataset with {len(self.train_dataset)} examples")
+
+    def setup_optimizer_and_scheduler(self):
+        """Setup optimizer and learning rate scheduler."""
+        # Get model parameters
+        if self.is_distributed:
+            model_params = self.model.module.parameters()
+        else:
+            model_params = self.model.parameters()
+            
+        # Setup optimizer
+        if self.config['training']['optim'] == 'adamw':
+            self.optimizer = AdamW(
+                model_params,
+                lr=self.config['training']['learning_rate'],
+                weight_decay=self.config['training']['weight_decay'],
+                betas=(0.9, 0.999),
+                eps=1e-8
             )
-            self.log_main("Using custom loss masking")
-        
-        trainer = SFTTrainer(**trainer_kwargs)
-        
-        # Handle DDP static graph
-        if self.is_distributed and hasattr(trainer.model, 'module'):
+        elif self.config['training']['optim'] == 'paged_adamw_8bit':
             try:
-                trainer.model._set_static_graph()
-                self.log_main("Set static graph for DDP compatibility")
-            except AttributeError:
-                self.log_main("Static graph not available, continuing with standard DDP")
+                import bitsandbytes as bnb
+                self.optimizer = bnb.optim.PagedAdamW8bit(
+                    model_params,
+                    lr=self.config['training']['learning_rate'],
+                    weight_decay=self.config['training']['weight_decay'],
+                    betas=(0.9, 0.999),
+                    eps=1e-8
+                )
+            except ImportError:
+                logger.warning("bitsandbytes not available, falling back to AdamW")
+                self.optimizer = AdamW(
+                    model_params,
+                    lr=self.config['training']['learning_rate'],
+                    weight_decay=self.config['training']['weight_decay']
+                )
+        else:
+            raise ValueError(f"Unsupported optimizer: {self.config['training']['optim']}")
+            
+        # Calculate total training steps
+        steps_per_epoch = len(self.train_dataloader)
+        if self.config['training']['max_steps'] > 0:
+            self.total_steps = self.config['training']['max_steps']
+            self.num_epochs = math.ceil(self.total_steps / steps_per_epoch)
+        else:
+            self.num_epochs = self.config['training']['num_train_epochs']
+            self.total_steps = steps_per_epoch * self.num_epochs
+            
+        # Setup learning rate scheduler
+        if self.config['training']['lr_scheduler_type'] == 'cosine':
+            self.scheduler = get_linear_schedule_with_warmup(
+                self.optimizer,
+                num_warmup_steps=self.config['training']['warmup_steps'],
+                num_training_steps=self.total_steps
+            )
+        elif self.config['training']['lr_scheduler_type'] == 'linear':
+            self.scheduler = get_linear_schedule_with_warmup(
+                self.optimizer,
+                num_warmup_steps=self.config['training']['warmup_steps'],
+                num_training_steps=self.total_steps
+            )
+        else:
+            # No scheduler
+            self.scheduler = None
+            
+        self.log_main(f"Total training steps: {self.total_steps}")
+        self.log_main(f"Number of epochs: {self.num_epochs}")
+
+    def train_step(self, batch):
+        """Execute a single training step."""
+        self.model.train()
         
-        # Train and save
-        trainer.train()
+        # Move batch to device
+        batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
+                for k, v in batch.items()}
         
+        # Forward pass
+        outputs = self.model(
+            input_ids=batch['input_ids'],
+            attention_mask=batch['attention_mask'],
+            labels=batch['labels']
+        )
+        
+        loss = outputs.loss
+        
+        # Scale loss for gradient accumulation
+        loss = loss / self.config['training']['gradient_accumulation_steps']
+        
+        # Backward pass
+        loss.backward()
+        
+        return {'loss': loss.item() * self.config['training']['gradient_accumulation_steps']}
+        
+    def optimizer_step(self):
+        """Execute optimizer step with gradient clipping."""
+        # Gradient clipping
+        max_grad_norm = self.config['training'].get('max_grad_norm', 0.5)
+        if self.is_distributed:
+            torch.nn.utils.clip_grad_norm_(self.model.module.parameters(), max_grad_norm)
+        else:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
+        
+        # Optimizer step
+        self.optimizer.step()
+        
+        # Scheduler step
+        if self.scheduler is not None:
+            self.scheduler.step()
+            
+        # Zero gradients
+        self.optimizer.zero_grad()
+        
+        self.global_step += 1
+
+    def train(self):
+        """Main training loop."""
+        self.log_main("Starting training...")
+
+        # Setup everything
+        self.setup_model_and_tokenizer()
+        self.setup_dataset()
+        self.setup_optimizer_and_scheduler()
+        
+        # Training loop
+        total_loss = 0.0
+        steps_since_log = 0
+        gradient_accumulation_steps = self.config['training']['gradient_accumulation_steps']
+        
+        for epoch in range(self.num_epochs):
+            self.epoch = epoch
+            self.log_main(f"Starting epoch {epoch + 1}/{self.num_epochs}")
+            
+            if self.is_distributed:
+                self.train_dataloader.sampler.set_epoch(epoch)
+                
+            epoch_loss = 0.0
+            epoch_steps = 0
+            
+            progress_bar = tqdm.tqdm(
+                self.train_dataloader,
+                desc=f"Epoch {epoch + 1}",
+                disable=self.local_rank != 0
+            )
+            
+            for step, batch in enumerate(progress_bar):
+                # Training step
+                step_outputs = self.train_step(batch)
+                step_loss = step_outputs['loss']
+                
+                total_loss += step_loss
+                epoch_loss += step_loss
+                steps_since_log += 1
+                epoch_steps += 1
+                
+                # Gradient accumulation
+                if (step + 1) % gradient_accumulation_steps == 0:
+                    self.optimizer_step()
+                    
+                    # Logging
+                    if self.global_step % self.config['training']['logging_steps'] == 0:
+                        avg_loss = total_loss / steps_since_log
+                        current_lr = self.scheduler.get_last_lr()[0] if self.scheduler else self.config['training']['learning_rate']
+                        
+                        self.log_main(
+                            f"Step {self.global_step}: loss={avg_loss:.4f}, "
+                            f"lr={current_lr:.2e}, "
+                            f"epoch={epoch + 1}"
+                        )
+                        
+                        # Reset logging counters
+                        total_loss = 0.0
+                        steps_since_log = 0
+                        
+                    # Checkpointing
+                    if self.global_step % self.config['training']['save_steps'] == 0:
+                        checkpoint_dir = os.path.join(
+                            self.config['training']['output_dir'],
+                            f"checkpoint-{self.global_step}"
+                        )
+                        is_best = avg_loss < self.best_loss if 'avg_loss' in locals() else False
+                        if is_best:
+                            self.best_loss = avg_loss
+                            
+                        self.save_checkpoint(checkpoint_dir, is_best)
+                        
+                # Update progress bar
+                current_lr = self.scheduler.get_last_lr()[0] if self.scheduler else self.config['training']['learning_rate']
+                progress_bar.set_postfix({
+                    'loss': step_loss,
+                    'lr': current_lr
+                })
+                
+                # Check if we've reached max steps
+                if (self.config['training']['max_steps'] > 0 and 
+                    self.global_step >= self.config['training']['max_steps']):
+                    self.log_main(f"Reached max steps ({self.config['training']['max_steps']})")
+                    break
+                    
+            # End of epoch
+            avg_epoch_loss = epoch_loss / epoch_steps if epoch_steps > 0 else 0.0
+            self.log_main(f"Epoch {epoch + 1} completed. Average loss: {avg_epoch_loss:.4f}")
+            
+            # Early stopping check or max steps reached
+            if (self.config['training']['max_steps'] > 0 and 
+                self.global_step >= self.config['training']['max_steps']):
+                break
+                
+        # Final checkpoint
         if not self.is_distributed or self.local_rank == 0:
             output_dir = self.config['training']['output_dir']
-            trainer.save_model()
+            self.model.save_pretrained(output_dir)
             self.tokenizer.save_pretrained(output_dir)
             self.log_main(f"Training completed! Model saved to {output_dir}")
+    
+    def save_checkpoint(self, output_dir: str, is_best: bool = False):
+        """Save model checkpoint."""
+        if self.local_rank != 0:
+            return
+            
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Save model
+        if self.is_distributed:
+            model_to_save = self.model.module
+        else:
+            model_to_save = self.model
+            
+        model_to_save.save_pretrained(output_dir)
+        self.tokenizer.save_pretrained(output_dir)
+        
+        # Save training state
+        checkpoint = {
+            'global_step': self.global_step,
+            'epoch': self.epoch,
+            'best_loss': self.best_loss,
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
+            'config': self.config
+        }
+        
+        torch.save(checkpoint, os.path.join(output_dir, 'training_state.bin'))
+        
+        if is_best:
+            # Save as best model
+            best_dir = os.path.join(output_dir, 'best')
+            os.makedirs(best_dir, exist_ok=True)
+            model_to_save.save_pretrained(best_dir)
+            self.tokenizer.save_pretrained(best_dir)
+            
+        self.log_main(f"Checkpoint saved to {output_dir}")
 
     def test_model(self, prompt):
         """Test the fine-tuned model."""
@@ -245,4 +442,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    os.environ['UNSLOTH_RETURN_LOGITS'] = '1'
+    main()

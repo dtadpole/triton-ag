@@ -7,67 +7,53 @@ Handles loading, processing, and formatting of conversation data.
 import os
 import json
 import torch
+import traceback
 from datasets import Dataset
+from typing import List, Dict, Any, Union
 from transformers import DataCollatorForLanguageModeling
+from transformers import AutoTokenizer
 from util import logger
 
 
 class CustomDataCollatorWithMasking(DataCollatorForLanguageModeling):
     """Custom data collator that masks system, user, and function tokens."""
     
-    def __init__(self, tokenizer, mlm=False, ignore_index=-100):
-        super().__init__(tokenizer=tokenizer, mlm=mlm)
+    def __init__(self, tokenizer, mlm=False, ignore_index=-100, return_tensors="pt", pad_to_multiple_of=16):
+        super().__init__(tokenizer=tokenizer, mlm=mlm, return_tensors=return_tensors, pad_to_multiple_of=pad_to_multiple_of)
         self.ignore_index = ignore_index
         
     def torch_call(self, examples):
-        # Handle different input formats
-        if isinstance(examples[0], dict):
-            # Check if examples are already tokenized (have input_ids)
-            if "input_ids" in examples[0]:
-                # Examples are already tokenized tensors - use them directly
-                batch = self._collate_tokenized_examples(examples)
-            elif "text" in examples[0]:
-                # Examples have text field - extract and tokenize
-                texts = [example["text"] for example in examples]
-                batch = self._tokenize_and_prepare(texts)
-            else:
-                # Unknown dict format - try to use as is
-                batch = super().torch_call(examples)
-        elif isinstance(examples[0], str):
-            # Examples are raw text strings
-            batch = self._tokenize_and_prepare(examples)
-        else:
-            # Fall back to parent class
-            batch = super().torch_call(examples)
-        
+
+        batch = super().torch_call(examples).data
+
         # Apply masking to labels
-        if "labels" in batch:
-            input_ids = batch["input_ids"]
-            labels = batch["labels"].clone()
+        input_ids = batch["input_ids"]
+        labels = batch["labels"].clone()
+        
+        total_masked = 0
+        total_unmasked = 0
+        
+        # Create masks for different roles
+        for i, input_seq in enumerate(input_ids):
+            labels[i] = self._mask_non_assistant_tokens(input_seq, labels[i])
             
-            total_masked = 0
-            total_unmasked = 0
+            # Count masked vs unmasked tokens for this sequence
+            masked_count = (labels[i] == self.ignore_index).sum().item()
+            unmasked_count = (labels[i] != self.ignore_index).sum().item()
             
-            # Create masks for different roles
-            for i, input_seq in enumerate(input_ids):
-                original_labels = labels[i].clone()
-                labels[i] = self._mask_non_assistant_tokens(input_seq, labels[i])
-                
-                # Count masked vs unmasked tokens for this sequence
-                masked_count = (labels[i] == self.ignore_index).sum().item()
-                unmasked_count = (labels[i] != self.ignore_index).sum().item()
-                
-                total_masked += masked_count
-                total_unmasked += unmasked_count
-            
-            # Print masking statistics
-            total_tokens = total_masked + total_unmasked
-            if total_tokens > 0:
-                masked_pct = (total_masked / total_tokens) * 100
-                unmasked_pct = (total_unmasked / total_tokens) * 100
+            total_masked += masked_count
+            total_unmasked += unmasked_count
+        
+        # Print masking statistics
+        total_tokens = total_masked + total_unmasked
+        if total_tokens > 0:
+            masked_pct = (total_masked / total_tokens) * 100
+            unmasked_pct = (total_unmasked / total_tokens) * 100
+            # log only if unmasked percentage is less than 5%
+            if unmasked_pct < 5.0:
                 logger.info(f"Masking stats - Total: {total_tokens}, Masked: {total_masked} ({masked_pct:.1f}%), Unmasked: {total_unmasked} ({unmasked_pct:.1f}%)")
-            
-            batch["labels"] = labels
+        
+        batch["labels"] = labels
         
         return batch
     
@@ -83,68 +69,6 @@ class CustomDataCollatorWithMasking(DataCollatorForLanguageModeling):
         # Create labels from input_ids
         batch["labels"] = batch["input_ids"].clone()
         return batch
-    
-    def _collate_tokenized_examples(self, examples):
-        """Collate examples that are already tokenized."""
-        # Extract data from examples and convert to tensors if needed
-        input_ids = []
-        attention_mask = []
-        labels = []
-        
-        for ex in examples:
-            # Convert to tensor if it's a list
-            if isinstance(ex["input_ids"], list):
-                seq_input = torch.tensor(ex["input_ids"], dtype=torch.long)
-            else:
-                seq_input = ex["input_ids"].clone()
-            
-            if isinstance(ex["attention_mask"], list):
-                seq_attention = torch.tensor(ex["attention_mask"], dtype=torch.long)
-            else:
-                seq_attention = ex["attention_mask"].clone()
-            
-            # Handle labels - use input_ids if labels not present
-            if "labels" in ex:
-                if isinstance(ex["labels"], list):
-                    seq_labels = torch.tensor(ex["labels"], dtype=torch.long)
-                else:
-                    seq_labels = ex["labels"].clone()
-            else:
-                seq_labels = seq_input.clone()
-            
-            input_ids.append(seq_input)
-            attention_mask.append(seq_attention)
-            labels.append(seq_labels)
-        
-        # Pad sequences to same length
-        max_length = max(len(seq.squeeze()) for seq in input_ids)
-        
-        padded_input_ids = []
-        padded_attention_mask = []
-        padded_labels = []
-        
-        for i in range(len(input_ids)):
-            seq_input = input_ids[i].squeeze()
-            seq_attention = attention_mask[i].squeeze()
-            seq_labels = labels[i].squeeze()
-            
-            # Pad sequences
-            pad_length = max_length - len(seq_input)
-            if pad_length > 0:
-                pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
-                seq_input = torch.cat([seq_input, torch.full((pad_length,), pad_token_id, dtype=seq_input.dtype)])
-                seq_attention = torch.cat([seq_attention, torch.zeros(pad_length, dtype=seq_attention.dtype)])
-                seq_labels = torch.cat([seq_labels, torch.full((pad_length,), self.ignore_index, dtype=seq_labels.dtype)])
-            
-            padded_input_ids.append(seq_input)
-            padded_attention_mask.append(seq_attention)
-            padded_labels.append(seq_labels)
-        
-        return {
-            "input_ids": torch.stack(padded_input_ids),
-            "attention_mask": torch.stack(padded_attention_mask),
-            "labels": torch.stack(padded_labels)
-        }
     
     def _mask_non_assistant_tokens(self, input_ids, labels):
         """Mask tokens that are not assistant responses."""
@@ -277,32 +201,41 @@ class CustomDataCollatorWithMasking(DataCollatorForLanguageModeling):
         return input_ids[start_idx:start_idx + len(target_sequence)] == target_sequence
 
 
-def load_experiences(data_dir, local_rank=0):
+def load_experiences(data_dir):
     """Load and process conversation experiences."""
     experiences = []
-    if local_rank == 0:
-        logger.info(f"Loading experiences from: {data_dir}")
+    logger.info(f"Loading experiences from: {data_dir}")
     
+    idx = 0
     for root, _, files in os.walk(data_dir):
         for filename in files:
+            idx += 1
             if filename.endswith('.json'):
                 file_path = os.path.join(root, filename)
-                try:
-                    with open(file_path, 'r') as f:
-                        data = json.load(f)
-                        processed = process_conversation(data)
-                        if processed:
-                            experiences.append({"messages": processed})
-                except Exception as e:
-                    if local_rank == 0:
-                        logger.warning(f"Error processing {file_path}: {e}")
+                if "old-agent-0.1" in file_path:
+                    try:
+                        with open(file_path, 'r') as f:
+                            data = json.load(f)
+                            processed = process_old_0_1_conversation(data)
+                            if processed:
+                                experiences.append({
+                                    "functions": [],
+                                    "messages": processed
+                                })
+                    except Exception as e:
+                        logger.warning(f"Error processing [{idx}] {file_path}: {e}")
+                else:
+                    try:
+                        with open(file_path, 'r') as f:
+                            data = json.load(f)
+                            experiences.append(data)
+                    except Exception as e:
+                        logger.warning(f"Error processing [{idx}] {file_path}: {e}")
     
-    if local_rank == 0:
-        logger.info(f"Loaded {len(experiences)} conversations")
+    logger.info(f"Loaded {len(experiences)} conversations")
     return experiences
 
-
-def process_conversation(data):
+def process_old_0_1_conversation(data):
     """Process and clean conversation data."""
     processed = []
     function_name = None
@@ -342,87 +275,266 @@ def process_conversation(data):
     return processed
 
 
-def format_conversations(examples, max_length, local_rank=0, tokenizer=None):
+def format_conversation(example) -> str:
     """Format conversations for training with token length validation."""
-    texts = []
-    removed_count = 0
+    messages = example.get("messages", [])
+    functions = example.get("functions", [])
+
+    conversation = ""
+    system_message_found = False
+    prev_role = None
     
-    for messages in examples["messages"]:
-        conversation = ""
-        for message in messages:
-            role = message["role"]
-            content = message.get("content", "")
-            
-            if role == "system":
+    for message in messages:
+        role = message["role"]
+        content = message.get("content", "")
+        
+        if role == "system":
+            system_message_found = True
+            # If we have functions, incorporate them into the system message
+            if functions:
+                functions_text = "You have access to the following functions:\n\n"
+                for func in functions:
+                    if not func.get("name"):
+                        raise ValueError(f"Function name is required: {func}")
+                    functions_text += f"Function: {func.get('name', 'unknown')}\n"
+                    if 'description' in func:
+                        functions_text += f"Description: {func['description']}\n"
+                    if 'parameters' in func:
+                        functions_text += f"Parameters: {json.dumps(func['parameters'], indent=2)}\n"
+                    functions_text += "\n"
+                
+                # Combine original system content with functions
+                enhanced_content = content
+                if content and not content.endswith('\n'):
+                    enhanced_content += "\n\n"
+                elif not content:
+                    enhanced_content = ""
+                enhanced_content += functions_text.rstrip()
+                
+                conversation += f"<|im_start|>system\n{enhanced_content}<|im_end|>\n"
+            else:
                 conversation += f"<|im_start|>system\n{content}<|im_end|>\n"
-            elif role == "user":
-                conversation += f"<|im_start|>user\n{content}<|im_end|>\n"
-            elif role == "assistant":
+            prev_role = "system"
+        elif role == "user":
+            # If no system message was found but we have functions, add them at the beginning
+            if not system_message_found and functions:
+                functions_text = "You have access to the following functions:\n\n"
+                for func in functions:
+                    functions_text += f"Function: {func.get('name', 'unknown')}\n"
+                    if 'description' in func:
+                        functions_text += f"Description: {func['description']}\n"
+                    if 'parameters' in func:
+                        functions_text += f"Parameters: {json.dumps(func['parameters'], indent=2)}\n"
+                    functions_text += "\n"
+                
+                conversation = f"<|im_start|>system\n{functions_text.rstrip()}<|im_end|>\n" + conversation
+                system_message_found = True
+            
+            conversation += f"<|im_start|>user\n{content}<|im_end|>\n"
+            prev_role = "user"
+        elif role == "assistant":
+            if prev_role == "assistant":
+                # Merge with previous assistant message - remove the last <|im_end|>\n and append content
+                if conversation.endswith("<|im_end|>\n"):
+                    conversation = conversation[:-11]  # Remove "<|im_end|>\n"
+                    # Add the new content
+                    if "function_call" in message:
+                        func_call = message["function_call"]
+                        conversation += f"\n\n<function_call>\n{json.dumps(func_call)}\n</function_call>"
+                    if content:
+                        # Handle complex content structure (list of objects with text)
+                        if isinstance(content, list):
+                            for item in content:
+                                if isinstance(item, dict) and "text" in item:
+                                    conversation += "\n\n" + item["text"]
+                                elif isinstance(item, str):
+                                    conversation += "\n\n" + item
+                        else:
+                            conversation += "\n\n" + content
+                    conversation += "<|im_end|>\n"
+            else:
+                # Start new assistant message
                 conversation += f"<|im_start|>assistant\n"
                 if "function_call" in message:
                     func_call = message["function_call"]
                     conversation += f"<function_call>\n{json.dumps(func_call)}\n</function_call>"
                 if content:
-                    conversation += content
+                    # Handle complex content structure (list of objects with text)
+                    if isinstance(content, list):
+                        for item in content:
+                            if isinstance(item, dict) and "text" in item:
+                                conversation += item["text"]
+                            elif isinstance(item, str):
+                                conversation += item
+                    else:
+                        conversation += content
                 conversation += "<|im_end|>\n"
-            elif role == "function":
-                name = message.get("name", "unknown")
-                conversation += f"<|im_start|>function name={name}\n{content}<|im_end|>\n"
-        
-        # Check token length if tokenizer is provided
-        if tokenizer is not None:
-            tokens = tokenizer.encode(conversation, add_special_tokens=False)
-            sample_idx = len(texts) + 1
-            
-            if len(tokens) > max_length:
-                removed_count += 1
-                if local_rank == 0:
-                    logger.warning(f"Sample {sample_idx}: {len(tokens)} tokens - REMOVED (exceeds max_length {max_length})")
-                texts.append("")  # Add empty string instead of skipping
-                continue
-        else:
-            # Fallback: rough character-based estimate (less accurate)
-            estimated_tokens = len(conversation) // 4
-            sample_idx = len(texts) + 1
-            
-            if len(conversation) > max_length * 4:  # Rough character estimate
-                removed_count += 1
-                if local_rank == 0:
-                    logger.warning(f"Sample {sample_idx}: ~{estimated_tokens} estimated tokens - REMOVED (exceeds max_length {max_length})")
-                texts.append("")  # Add empty string instead of skipping
-                continue
-            else:
-                if local_rank == 0:
-                    logger.info(f"Sample {sample_idx}: ~{estimated_tokens} estimated tokens - KEPT")
-        
-        texts.append(conversation)
-    
-    if local_rank == 0 and removed_count > 0:
-        logger.info(f"Removed {removed_count} samples that exceeded max_length {max_length}")
-    
-    return {"text": texts}
+            prev_role = "assistant"
+        elif role == "function":
+            if not "name" in message:
+                raise ValueError(f"Function name is required: {message}")
+            name = message.get("name")
+            conversation += f"<|im_start|>function name={name}\n{content}<|im_end|>\n"
+            prev_role = "function"
+
+    return conversation
 
 
-def create_dataset(data_dir, max_length, local_rank=0, tokenizer=None):
+# this will filter out examples that are too long
+def create_dataset(experiences, tokenizer, max_length, local_rank=0):
     """Create and prepare training dataset with token length validation."""
-    experiences = load_experiences(data_dir, local_rank)
-    dataset = Dataset.from_list(experiences)
-    
-    # Format conversations and filter by token length
-    formatted_dataset = dataset.map(
-        lambda examples: format_conversations(examples, max_length, local_rank, tokenizer), 
-        batched=True
-    )
-    
-    # Filter out empty texts (samples that were removed due to length)
-    if tokenizer is not None:
-        original_len = len(formatted_dataset)
-        formatted_dataset = formatted_dataset.filter(lambda x: len(x["text"].strip()) > 0)
-        filtered_len = len(formatted_dataset)
-        
-        if local_rank == 0 and original_len != filtered_len:
-            logger.info(f"Filtered out {original_len - filtered_len} empty samples after token length validation")
-    
+    """Create and prepare training dataset with token length validation."""
+    if not tokenizer:
+        raise ValueError("Tokenizer is required")
+
+    formatted_records = []
+    for example_idx, example in enumerate(experiences):
+        try:
+            result = format_conversation(example)
+            # use tokenizer to tokenize the result
+            tokens = tokenizer.encode(result, add_special_tokens=True)
+            if len(tokens) > max_length:
+                logger.warning(f"Example [{example_idx}]: Token length {len(tokens)} exceeds max length {max_length} - skipping")
+                continue
+            if tokens is not None:
+                formatted_records.append({
+                    "input_ids": tokens,
+                    # "text": result,
+                })
+        except Exception as e:
+            if local_rank == 0:
+                # print stack trace
+                logger.warning(f"Error formatting example [{example_idx}]: {e}")
+                logger.warning(traceback.format_exc())
+            continue
+
+    formatted_dataset = Dataset.from_list(formatted_records)
     if local_rank == 0:
         logger.info(f"Created dataset with {len(formatted_dataset)} examples")
+
     return formatted_dataset 
+
+def print_masking_analysis(batch, tokenizer):
+    """Print detailed analysis of masked vs unmasked tokens in a batch."""
+    buffer = ""
+    for example_idx in range(len(batch["input_ids"])):
+        prev_masked = None
+        logger.info("=" * 50)
+        logger.info(f"EXAMPLE_IDX: [{example_idx}]")
+        logger.info("-" * 50)
+        for i in range(len(batch["input_ids"][example_idx])):
+            is_masked = batch["labels"][example_idx][i] == -100
+            if is_masked != prev_masked:
+                masked_str = f"\nEXAMPLE [{example_idx}]: {'MASKED' if prev_masked else 'UNMASKED'}\n"
+                if prev_masked is not None:
+                    if prev_masked and buffer != "":
+                        logger.info(masked_str + buffer)
+                    elif buffer != "":
+                        logger.warning(masked_str + buffer)
+                buffer = ""
+            # print token if not padding or eos
+            token_id = batch["input_ids"][example_idx][i]
+            if token_id != tokenizer.pad_token_id and token_id != tokenizer.eos_token_id:
+                # print tokenizer.decode(token_id) without new line
+                buffer += tokenizer.decode(token_id)
+            prev_masked = is_masked
+
+        if buffer != "":
+            masked_str = f"\nEXAMPLE [{example_idx}]: {'MASKED' if prev_masked else 'UNMASKED'}\n"
+            if prev_masked:
+                logger.info(masked_str + buffer)
+            else:
+                logger.warning(masked_str + buffer)
+
+        logger.info("=" * 50)
+        logger.info("DONE")
+
+if __name__ == "__main__":
+    tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen3-14B')
+    experiences = [{
+        "functions": [],
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a helpful assistant."
+            },
+            {
+                "role": "user",
+                "content": "What is today's date?"
+            },
+            {
+                "role": "assistant",
+                "content": "I will use the get_current_time function to get the current time."
+            },
+            {
+                "role": "assistant",
+                "function_call": {
+                    "name": "get_current_time",
+                    "arguments": {}
+                }
+            },
+            {
+                "role": "function",
+                "name": "get_current_time",
+                "content": "2025-06-14 10:00:00"
+            },
+            {
+                "role": "assistant",
+                "content": "Today's date is 2025-06-14."
+            }
+        ]
+    },
+    {
+        "functions": [],
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a helpful assistant."
+            },
+            {
+                "role": "user",
+                "content": "What is the weather in Tokyo?"
+            },
+            {
+                "role": "assistant",
+                "content": "I will use the get_weather function to get the weather in Tokyo."
+            },
+            {
+                "role": "assistant",
+                "function_call": {
+                    "name": "get_weather",
+                    "arguments": {
+                        "city": "Tokyo"
+                    }
+                }
+            },
+            {
+                "role": "function",
+                "name": "get_weather",
+                "content": "Tokyo's weather is sunny."
+            },
+            {
+                "role": "assistant",
+                "content": "The weather in Tokyo is sunny."
+            }
+        ]
+    }]
+    dataset = create_dataset(experiences, tokenizer, 4096, 0)
+
+    collate_fn = CustomDataCollatorWithMasking(tokenizer, mlm=False, return_tensors="pt", pad_to_multiple_of=16)
+
+    # Pass it to dataloader
+    dataloader = torch.utils.data.DataLoader(dataset=dataset, collate_fn=collate_fn, batch_size=2)
+
+    # this will end in error
+    for batch in dataloader:
+        # recursively convert batch data from Tensor to list
+        for k, v in batch.items():
+            if isinstance(v, torch.Tensor):
+                batch[k] = v.tolist()
+
+        print(json.dumps(batch, indent=4))
+
+        # print masked vs unmasked tokens
+        print_masking_analysis(batch, tokenizer)
+
