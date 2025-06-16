@@ -7,6 +7,7 @@ Handles loading, processing, and formatting of conversation data.
 import os
 import json
 import torch
+import argparse
 import traceback
 from datasets import Dataset
 from typing import List, Dict, Any, Union
@@ -498,8 +499,8 @@ def print_masking_analysis(batch, tokenizer):
         logger.info("=" * 50)
         logger.info("DONE")
 
-if __name__ == "__main__":
-    tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen3-14B')
+def test_data_util():
+    tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen3-8B')
     experiences = [{
         "functions": [],
         "messages": [
@@ -587,3 +588,35 @@ if __name__ == "__main__":
         # print masked vs unmasked tokens
         print_masking_analysis(batch, tokenizer)
 
+def process_data(args):
+    """Process and clean conversation data."""
+    experiences = load_experiences(args.data_dir)
+
+    tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen3-8B')
+    dataset = create_dataset(experiences, tokenizer, args.max_length, 0)
+
+    collate_fn = CustomDataCollatorWithMasking(tokenizer, mlm=False, return_tensors="pt", max_length=args.max_length)
+    dataloader = torch.utils.data.DataLoader(dataset=dataset, collate_fn=collate_fn, batch_size=2)
+
+    for batch in dataloader:
+        # recursively convert batch data from Tensor to list
+        for k, v in batch.items():
+            if isinstance(v, torch.Tensor):
+                batch[k] = v.tolist()
+
+        print(json.dumps(batch, indent=4))
+
+if __name__ == "__main__":
+    # argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--test", action="store_true")
+    parser.add_argument("--process", action="store_true")
+    parser.add_argument("--data_dir", type=str, default="./finetune-experiences")
+    parser.add_argument("--max_length", type=int, default=-1)
+    args = parser.parse_args()
+
+    if args.test:
+        test_data_util()
+
+    if args.process:
+        process_data(args)
