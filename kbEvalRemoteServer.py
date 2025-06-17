@@ -152,8 +152,11 @@ if __name__ == "__main__":
     hostname = socket.gethostname()
     # if hostname is not in kbEval_config["kbEvalRemoteServer"], use "one"  
     if hostname not in kbEval_config["kbEvalRemoteServer"]:
-        logger.error(f"Hostname {hostname} not found in kbEval.yaml")
-        exit(1)
+        logger.warning(f"Hostname {hostname} not found in kbEval.yaml, using 'one' as default")
+        hostname = "one"
+    # if hostname not in kbEval_config["kbEvalRemoteServer"]:
+    #     logger.error(f"Hostname {hostname} not found in kbEval.yaml")
+    #     exit(1)
 
     host = kbEval_config["kbEvalRemoteServer"][hostname]["host"]
     port = kbEval_config["kbEvalRemoteServer"][hostname]["port"]

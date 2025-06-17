@@ -1,4 +1,12 @@
 # CUDA_VISIBLE_DEVICES = ${GPU}
+ENV_VARS ?= PYTHONNOUSERSITE=1 \
+        PYTHONPATH=${PYTHONPATH}:${PWD}
+
+build_docker: Dockerfile
+	DOCKER_BUILDKIT=1 docker build --progress=plain  -t triton_ag . 
+
+env: build_docker
+	docker run -it  --gpus all --net=host  -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v ${PWD}:/app/ -w /app/ triton_ag /bin/bash
 
 .PHONY: help finetune finetune-single finetune-2gpu finetune-debug
 
@@ -17,7 +25,7 @@ mlflow:
 	mlflow server --host localhost --port 5050
 
 kbEval:
-	uv run kbEvalRemoteServer.py 
+	uv run kbEvalRemoteServer.py
 
 codeRunServer:
 	mcp dev codeRunServer.py
