@@ -9,7 +9,7 @@ from agents import (
     function_tool,
 )
 from agents.mcp import MCPServerStdio
-from agent_triton_coder import triton_coder
+from agent_old_triton_coder import triton_coder
 from agent_env_setup import env_setup
 from util import load_agent_model, init_logging, get_next_run_folder, get_run_hooks
 from logger import logger
