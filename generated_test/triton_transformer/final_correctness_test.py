@@ -1,5 +1,4 @@
 import torch
-import time
 import sys
 import os
 
@@ -113,6 +112,8 @@ def final_correctness_and_performance_test():
     
     # === PERFORMANCE TEST ===
     print("=== Performance Test ===")
+    # Using CUDA events for precise GPU timing instead of time.time()
+    # This eliminates CPU-GPU synchronization overhead and provides more accurate measurements
     
     # Warmup
     for _ in range(5):
@@ -122,22 +123,27 @@ def final_correctness_and_performance_test():
     
     torch.cuda.synchronize()
     
-    # Benchmark PyTorch
+    # Benchmark PyTorch using CUDA events for precise timing
     num_runs = 20
-    start_time = time.time()
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    
+    start_event.record()
     for _ in range(num_runs):
         with torch.no_grad():
             pytorch_output = pytorch_model(input_tensor)
+    end_event.record()
     torch.cuda.synchronize()
-    pytorch_time = (time.time() - start_time) / num_runs
+    pytorch_time = start_event.elapsed_time(end_event) / num_runs / 1000  # Convert to seconds
     
-    # Benchmark Triton
-    start_time = time.time()
+    # Benchmark Triton using CUDA events
+    start_event.record()
     for _ in range(num_runs):
         with torch.no_grad():
             triton_output = triton_model(input_tensor)
+    end_event.record()
     torch.cuda.synchronize()
-    triton_time = (time.time() - start_time) / num_runs
+    triton_time = start_event.elapsed_time(end_event) / num_runs / 1000  # Convert to seconds
     
     speedup = pytorch_time / triton_time
     
@@ -207,22 +213,26 @@ def detailed_performance_analysis():
         
         torch.cuda.synchronize()
         
-        # Benchmark
-        num_runs = 10
+        # Benchmark using CUDA events
+        num_runs = 100
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
         
-        start_time = time.time()
+        start_event.record()
         for _ in range(num_runs):
             with torch.no_grad():
                 _ = pytorch_model(input_tensor)
+        end_event.record()
         torch.cuda.synchronize()
-        pytorch_time = (time.time() - start_time) / num_runs
+        pytorch_time = start_event.elapsed_time(end_event) / num_runs / 1000  # Convert to seconds
         
-        start_time = time.time()
+        start_event.record()
         for _ in range(num_runs):
             with torch.no_grad():
                 _ = triton_model(input_tensor)
+        end_event.record()
         torch.cuda.synchronize()
-        triton_time = (time.time() - start_time) / num_runs
+        triton_time = start_event.elapsed_time(end_event) / num_runs / 1000  # Convert to seconds
         
         speedup = pytorch_time / triton_time
         
