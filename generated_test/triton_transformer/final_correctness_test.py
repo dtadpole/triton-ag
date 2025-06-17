@@ -116,7 +116,7 @@ def final_correctness_and_performance_test():
     # This eliminates CPU-GPU synchronization overhead and provides more accurate measurements
     
     # Warmup
-    for _ in range(5):
+    for _ in range(25):
         with torch.no_grad():
             _ = pytorch_model(input_tensor)
             _ = triton_model(input_tensor)
@@ -124,7 +124,7 @@ def final_correctness_and_performance_test():
     torch.cuda.synchronize()
     
     # Benchmark PyTorch using CUDA events for precise timing
-    num_runs = 20
+    num_runs = 100
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
     
@@ -206,7 +206,7 @@ def detailed_performance_analysis():
         input_tensor = torch.randn(batch_size, 32, 16, 64).to(device)
         
         # Warmup
-        for _ in range(3):
+        for _ in range(25):
             with torch.no_grad():
                 _ = pytorch_model(input_tensor)
                 _ = triton_model(input_tensor)

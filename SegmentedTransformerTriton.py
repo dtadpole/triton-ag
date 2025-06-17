@@ -4,7 +4,7 @@ import triton.language as tl
 import math
 
 # Constants from the original implementation
-BATCH_SIZE = 12 * 10
+BATCH_SIZE = 12
 D_MODEL = 64
 D_FF = D_MODEL * 4  # 256
 NUM_HEADS = 1
