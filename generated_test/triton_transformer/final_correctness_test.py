@@ -177,7 +177,7 @@ def detailed_performance_analysis():
     print("=== Detailed Performance Analysis ===\n")
     
     # Test with different batch sizes
-    batch_sizes = [1, 4, 12, 24]  # Original is 12
+    batch_sizes = [1, 4, 12, 12 * 2, 12 * 4, 12 * 8, 12 * 16, 12 * 32]  # Original is 12
     
     torch.manual_seed(42)
     init_args = get_init_inputs()

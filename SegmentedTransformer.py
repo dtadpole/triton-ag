@@ -17,8 +17,8 @@ class SegmentedLinear(nn.Module):
         out_features: Size of output features
         bias: Whether to include bias terms
         
-    Input shape: (..., num_segments, in_features)
-    Output shape: (..., num_segments, out_features)
+    Input shape: (..., num_segments, len_segment, in_features)
+    Output shape: (..., num_segments, len_segment, out_features)
     """
     
     def __init__(self, num_segments, in_features, out_features, bias=True):
@@ -157,7 +157,7 @@ class Model(nn.Module):
         
         return x
 
-BATCH_SIZE = 12
+BATCH_SIZE = 12 * 10
 D_MODEL = 64
 D_FF = D_MODEL * 4
 NUM_HEADS = 1
