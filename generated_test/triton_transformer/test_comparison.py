@@ -82,7 +82,8 @@ def compare_models():
     print(f"\nParameter count:")
     print(f"PyTorch model: {pytorch_params:,}")
     print(f"Triton model: {triton_params:,}")
-    print(f"Match: {'✅' if pytorch_params == triton_params else '❌'}")
+    print(f"Match number of parameters: {'✅' if pytorch_params == triton_params else '❌'}")
+    # use allclose to check if the parameters are close
     
     return pytorch_output, triton_output
 
@@ -155,6 +156,12 @@ def benchmark_performance():
 if __name__ == "__main__":
     try:
         pytorch_output, triton_output = compare_models()
+        # check allclose
+        if torch.allclose(pytorch_output, triton_output):
+            print(f"\n✅ PyTorch and Triton outputs match!")
+        else:
+            print(f"\n❌ PyTorch and Triton outputs do not match!")
+        
         benchmark_performance()
         print(f"\n🎉 All tests completed successfully!")
         
