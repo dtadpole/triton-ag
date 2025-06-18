@@ -58,9 +58,10 @@ class SegmentedLinear(nn.Module):
         Returns:
             Output tensor of shape (..., num_segments, len_segment, out_features)
         """
-        # Einsum: '...si,soi->...so'
+        # Einsum: '...sli,soi->...slo'
         # ... = batch dimensions (flexible)
         # s = num_segments
+        # l = segment length
         # i = in_features  
         # o = out_features
         output = torch.einsum('...sli,soi->...slo', x, self.weight)
@@ -93,7 +94,7 @@ class SegmentedMultiHeadAttention(nn.Module):
         # Combined QKV projection and split
         qkv = self.w_qkv(x)  # (batch_size, len_segment, num_segments, 3 * d_model)
         Q, K, V = qkv.chunk(3, dim=-1)  # Each: (batch_size, len_segment, num_segments, d_model)
-        
+
         # Reshape for multi-head attention
         Q = Q.view(batch_size, num_segments, len_segment, self.num_heads, self.d_k).transpose(-2, -3)  # (batch_size, num_segments, num_heads, len_segment, d_k)
         K = K.view(batch_size, num_segments, len_segment, self.num_heads, self.d_k).transpose(-2, -3)  # (batch_size, num_segments, num_heads, len_segment, d_k)
