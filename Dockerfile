@@ -1,7 +1,7 @@
-ARG WORK_DIR=none 
+ARG WORK_DIR=none
 FROM pytorch/pytorch:2.1.1-cuda12.1-cudnn8-devel
 
-RUN apt update && apt install -y less nano git  
+RUN apt update && apt install -y less nano git
 
 # Install stable packages first for better caching
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -49,7 +49,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install \
-    mlflow 
+    mlflow
 
 # The installer requires curl (and certificates) to download the release archive
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates

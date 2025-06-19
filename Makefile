@@ -2,16 +2,17 @@
 ENV_VARS ?= PYTHONNOUSERSITE=1 \
         PYTHONPATH=${PYTHONPATH}:${PWD}
 
-build_docker: Dockerfile
-	DOCKER_BUILDKIT=1 docker build --progress=plain  -t triton_ag . 
-
-env: build_docker
-	docker run -it  --gpus all --net=host  -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v ${PWD}:/app/ -w /app/ triton_ag /bin/bash
+## docker build is blocked by proxy errors, no software update/installation can be done within docker
+# build_docker: Dockerfile
+# 	HTTPS_PROXY=fwdproxy:8080 docker build --network=host --progress=plain  -t triton_ag .
+# Download from google drive link: https://drive.google.com/file/d/1QAQkJ-7AKGEMy9cUkHRU8QZHY2XSrgxz/view?usp=sharing
 
 .PHONY: help finetune finetune-single finetune-2gpu finetune-debug
 
 help:
 	@echo "Available targets:"
+	@echo "  env       	     - enter into dock container"
+	@echo "  dev_setup       - Set up dev environment for devserver"
 	@echo "  finetune        - Run data parallel fine-tuning on 4 GPUs"
 	@echo "  finetune-single - Run single GPU fine-tuning"
 	@echo "  finetune-2gpu   - Run data parallel fine-tuning on 2 GPUs"
@@ -21,8 +22,18 @@ help:
 	@echo "  kbEval          - Run knowledge base evaluation server"
 	@echo "  codeRunServer   - Run code execution server"
 
+env:
+	docker run -it  --gpus all --net=host -p 8081:8081 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ triton_ag /bin/bash
+
+vllm_env:
+	docker run -it  --gpus all --net=host -p 8081:8081 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ triton_ag /bin/bash
+
+dev_setup:
+	npm config set proxy http://fwdproxy:8080
+	npm config set https-proxy http://fwdproxy:8080
+
 mlflow:
-	mlflow server --host localhost --port 5050
+	mlflow server --host localhost --port 5051
 
 kbEval:
 	uv run kbEvalRemoteServer.py
@@ -95,3 +106,13 @@ llama.cpp-server-qwen3-32b:
 	--top-p 0.95 \
 	--min-p 0.05 \
 	--host 0.0.0.0
+
+vllm_mistral_7b_dev:
+	docker run --gpus all \
+	--network=host \
+    -v /data/users/jingbo25/huggingface:/root/.cache/huggingface \
+    --env "HUGGING_FACE_HUB_TOKEN=<secret>" \
+    -p 8005:8005 \
+    --ipc=host \
+    vllm/vllm-openai:latest \
+    --model mistralai/Mistral-7B-v0.1

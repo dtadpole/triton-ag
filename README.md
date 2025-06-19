@@ -3,7 +3,19 @@
 ## Setup Environment
 
 ```bash
+## devserver specific: install nvidia-container-toolkit
+## When the devserver don't have nvidia-container-toolkit installed, install it with the following commands:
+sudo dnf install -y nvidia-container-toolkit
+sudo mkdir /etc/cdi
+sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+
+## Devserver use podman, and the docker is only a mirror of podman.
+## The main challenge of using dev server is the proxy configuration and IPv6 only network.
+## 1. Download the docker tar from the google drive https://drive.google.com/file/d/1QAQkJ-7AKGEMy9cUkHRU8QZHY2XSrgxz/view?usp=sharing
+## 2. Run docker load -i triton_ag.tar
+
 make env
+make dev_setup
 ```
 
 ## Prepare API key for LLM access
@@ -28,7 +40,7 @@ use agentl.yaml to add and/or configure agents.
 Run Observability Service on another terminal or tmux session
 
 ```bash
-make env 
+make env
 make mlflow
 ```
 
@@ -54,4 +66,3 @@ python agent_kernel_coder.py
 ```
 
 This will create a new working directory under `_run_{ddd}` and generate kernel implementation.
-
