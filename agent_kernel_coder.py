@@ -345,6 +345,13 @@ if __name__ == "__main__":
         "--task",
         type=str,
         default="./kernel_bench/level1/1_Square_matrix_multiplication_.py",
+        # default="./kernel_bench/level1/2_Standard_matrix_multiplication_.py",
+        # default="./kernel_bench/level1/3_Batch_matrix_multiplication_.py",
+        # default="./kernel_bench/level1/4_Matrix_vector_multiplication_.py",
+        # default="./kernel_bench/level1/5_Matrix_scalar_multiplication_.py",
+        # default="./kernel_bench/level1/6_Matmul_with_large_K_dimension_.py",
+        # default="./kernel_bench/level1/7_Matmul_with_small_K_dimension_.py",
+        # default="./SegmentedTransformer.py"
     )
     args = parser.parse_args()
 
