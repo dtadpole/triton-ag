@@ -2,32 +2,33 @@
 
 # Model Configuration
 model:
-  name: "Qwen/Qwen3-14B"
-  max_seq_length: 81920
+  name: "Qwen/Qwen3-8B"
+  # name: "unsloth/Qwen3-8B-unsloth-bnb-4bit"
+  max_seq_length: 32768
   dtype: null  # Auto-detection
   load_in_4bit: true
 
 # Training Configuration
 training:
   # Core training parameters
-  num_train_epochs: 1
+  num_train_epochs: 2
   learning_rate: 0.00003 # 3e-5
   max_steps: -1  # Set to -1 for full epochs
   warmup_steps: 5
   
   # Batch settings
-  per_device_batch_size: 4
+  per_device_batch_size: 1
   gradient_accumulation_steps: 1
   
   # Optimization
   optim: "paged_adamw_8bit"
   weight_decay: 0.05
   lr_scheduler_type: "cosine"
-  max_grad_norm: 0.5  # Gradient clipping
+  max_grad_norm: 0.75  # Gradient clipping
   
   # Logging and saving
   logging_steps: 1
-  save_steps: 10
+  save_steps: 50
   save_total_limit: 3
   output_dir: "../qwen3-unsloth-finetuned"
   
@@ -37,8 +38,8 @@ training:
 
 # LoRA Configuration
 lora:
-  r: 32
-  alpha: 32
+  r: 64
+  alpha: 64
   dropout: 0.05
   target_modules:
     - "q_proj"
