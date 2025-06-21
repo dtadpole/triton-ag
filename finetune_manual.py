@@ -1089,7 +1089,7 @@ def main():
     parser.add_argument(
         "--upload-to-hf",
         action="store_true",
-        default=False,
+        default=True,
         help="Upload model to Hugging Face Hub after training"
     )
     parser.add_argument(
