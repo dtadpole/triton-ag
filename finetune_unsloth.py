@@ -142,6 +142,13 @@ class OptimizedUnslothFineTuner:
         optimal_workers = min(4, max(0, cpu_count // 2))
         self.config['training']['num_workers'] = optimal_workers
         
+        # Check if this is an AWQ model and adjust precision settings
+        model_name = self.config['model']['name']
+        if 'AWQ' in model_name.upper() or 'awq' in model_name.lower():
+            if self.local_rank == 0:
+                logger.info("AWQ quantized model detected - configuring for float16 precision")
+            self.config.setdefault('training', {})['use_awq_precision'] = True
+        
         if self.local_rank == 0:
             logger.info("Configuration auto-optimization complete")
     
@@ -239,6 +246,19 @@ class OptimizedUnslothFineTuner:
         # Optimize training arguments
         num_workers = training_config.get('num_workers', 0)
         
+        # Determine precision settings based on model type
+        use_awq_precision = training_config.get('use_awq_precision', False)
+        if use_awq_precision:
+            # AWQ models require fp16
+            use_fp16 = True
+            use_bf16 = False
+            if self.local_rank == 0:
+                logger.info("Using fp16 precision for AWQ model")
+        else:
+            # Regular precision logic
+            use_fp16 = not torch.cuda.get_device_capability()[0] >= 8
+            use_bf16 = torch.cuda.get_device_capability()[0] >= 8
+        
         # Setup training arguments with optimizations
         training_args = TrainingArguments(
             output_dir=str(output_dir),
@@ -258,8 +278,8 @@ class OptimizedUnslothFineTuner:
             seed=training_config.get('seed', 3407),
             dataloader_pin_memory=True,
             dataloader_num_workers=num_workers,
-            fp16=not torch.cuda.get_device_capability()[0] >= 8,  # Use fp16 for older GPUs
-            bf16=torch.cuda.get_device_capability()[0] >= 8,      # Use bf16 for newer GPUs
+            fp16=use_fp16,  # Use determined fp16 setting
+            bf16=use_bf16,  # Use determined bf16 setting
             group_by_length=True,
             ddp_find_unused_parameters=False,
             report_to=None,  # Disable wandb/tensorboard
@@ -525,8 +545,13 @@ This model was fine-tuned on processed conversation experiences for improved per
             logger.info("Testing fine-tuned model...")
             
             try:
-                # Enable fast inference
-                FastLanguageModel.for_inference(self.model)
+                # Enable fast inference - handle quantized models
+                try:
+                    FastLanguageModel.for_inference(self.model)
+                except Exception as e:
+                    logger.warning(f"Fast inference mode failed, using regular mode: {e}")
+                    # For quantized models, we might need to use regular mode
+                    self.model.eval()
                 
                 # Format prompt in chat format
                 messages = [
@@ -545,16 +570,41 @@ This model was fine-tuned on processed conversation experiences for improved per
                 inputs = self.tokenizer(formatted_prompt, return_tensors="pt").to(self.device)
                 
                 with torch.no_grad():
-                    outputs = self.model.generate(
-                        **inputs,
-                        max_new_tokens=max_length,
-                        use_cache=True,
-                        temperature=0.7,
-                        top_p=0.9,
-                        do_sample=True,
-                        pad_token_id=self.tokenizer.eos_token_id,
-                        eos_token_id=self.tokenizer.eos_token_id,
-                    )
+                    try:
+                        # Try with unsloth's fast generation first
+                        outputs = self.model.generate(
+                            **inputs,
+                            max_new_tokens=max_length,
+                            use_cache=True,
+                            temperature=0.7,
+                            top_p=0.9,
+                            do_sample=True,
+                            pad_token_id=self.tokenizer.eos_token_id,
+                            eos_token_id=self.tokenizer.eos_token_id,
+                        )
+                    except Exception as gen_e:
+                        logger.warning(f"Fast generation failed, trying alternative approach: {gen_e}")
+                        # Fallback to more basic generation without some optimization parameters
+                        try:
+                            outputs = self.model.generate(
+                                input_ids=inputs['input_ids'],
+                                attention_mask=inputs.get('attention_mask'),
+                                max_new_tokens=max_length,
+                                temperature=0.7,
+                                do_sample=True,
+                                use_cache=False,  # Disable cache for quantized models
+                                pad_token_id=self.tokenizer.eos_token_id if self.tokenizer.eos_token_id else self.tokenizer.pad_token_id
+                            )
+                        except Exception as gen_e2:
+                            logger.warning(f"Alternative generation also failed, trying minimal approach: {gen_e2}")
+                            # Last resort: minimal generation parameters
+                            outputs = self.model.generate(
+                                inputs['input_ids'],
+                                max_new_tokens=min(max_length, 256),  # Limit tokens
+                                do_sample=False,  # Use greedy decoding
+                                use_cache=False,
+                                pad_token_id=self.tokenizer.eos_token_id if self.tokenizer.eos_token_id else self.tokenizer.pad_token_id
+                            )
                 
                 # Decode response
                 response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
@@ -563,6 +613,8 @@ This model was fine-tuned on processed conversation experiences for improved per
                 
             except Exception as e:
                 logger.error(f"Error during model testing: {e}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
     
     def run_full_pipeline(self):
         """Run the complete optimized fine-tuning pipeline."""
