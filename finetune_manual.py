@@ -1126,8 +1126,8 @@ def main():
         trainer.config['huggingface']['upload'] = True
         if args.hf_repo_user and args.hf_repo_model_name:
             # find model name from config, extract the model size, from the last part of the model name
-            model_size = trainer.config['model']['name'].split('-')[-1]
-            model_tag = f"{args.hf_repo_model_name}-{model_size}"
+            model_size = trainer.config['model']['name'].split('-')[1:]
+            model_tag = f"{args.hf_repo_model_name}-{'-'.join(model_size)}"
             time_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
             trainer.config['huggingface']['repo_name'] = f"{args.hf_repo_user}/{model_tag}_{time_tag}"
             trainer.config['huggingface']['create_model_card'] = args.hf_create_model_card
