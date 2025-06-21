@@ -6,6 +6,7 @@ Enhanced with memory management, auto-tuning, and performance optimizations.
 
 import os
 import sys
+from datetime import datetime
 import yaml
 import torch
 import time
@@ -322,11 +323,13 @@ class OptimizedUnslothFineTuner:
     
     def save_model(self, output_path: Optional[str] = None):
         """Save the fine-tuned model with optimizations."""
+        time_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
         if output_path is None:
-            output_path = self.config['training']['output_dir']
+            output_path = os.path.join(self.config['training']['output_dir'], self.config['model']['name'], time_tag)
         
         output_path = Path(output_path)
         output_path.mkdir(parents=True, exist_ok=True)
+        self.output_path = output_path
         
         if self.local_rank == 0:
             logger.info(f"Saving model to {output_path}")
@@ -358,9 +361,9 @@ class OptimizedUnslothFineTuner:
         if not upload_config.get('upload', False):
             logger.info("Hugging Face upload is disabled")
             return
-            
+        
         if model_path is None:
-            model_path = self.config['training']['output_dir']
+            model_path = self.output_path
         
         if repo_name is None:
             repo_name = upload_config.get('repo_name')
@@ -623,12 +626,26 @@ def main():
     parser.add_argument(
         "--upload-to-hf",
         action="store_true",
+        default=True,
         help="Upload model to Hugging Face Hub after training"
     )
     parser.add_argument(
-        "--hf-repo-name",
+        "--hf-repo-user",
         type=str,
-        help="Hugging Face repository name (e.g., 'username/model-name')"
+        default="dtadpole",
+        help="Hugging Face repository user name"
+    )
+    parser.add_argument(
+        "--hf-repo-model-name",
+        type=str,
+        default="KernelCoder",
+        help="Hugging Face repository model name (e.g., 'KernelCoder')"
+    )
+    parser.add_argument(
+        "--hf-create-model-card",
+        action="store_true",
+        default=True,
+        help="Create a model card for the uploaded model"
     )
     
     args = parser.parse_args()
@@ -646,10 +663,13 @@ def main():
     if args.upload_to_hf:
         finetuner.config.setdefault('huggingface', {})
         finetuner.config['huggingface']['upload'] = True
-        
-    if args.hf_repo_name:
-        finetuner.config.setdefault('huggingface', {})
-        finetuner.config['huggingface']['repo_name'] = args.hf_repo_name
+        if args.hf_repo_user and args.hf_repo_model_name:
+            # find model name from config, extract the model size, from the last part of the model name
+            model_size = finetuner.config['model']['name'].split('-')[-1]
+            model_tag = f"{args.hf_repo_model_name}-{model_size}"
+            time_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
+            finetuner.config['huggingface']['repo_name'] = f"{args.hf_repo_user}/{model_tag}_{time_tag}"
+            finetuner.config['huggingface']['create_model_card'] = args.hf_create_model_card
     
     if args.memory_report and torch.cuda.is_available():
         logger.info(f"GPU: {torch.cuda.get_device_name()}")

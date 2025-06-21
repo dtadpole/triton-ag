@@ -1,11 +1,9 @@
-    # Simplified Qwen Fine-tuning Configuration
-
 # Model Configuration
 model:
   name: "Qwen/Qwen3-4B"
   # max_seq_length: 32768
-  # max_seq_length: 16384
-  max_seq_length: 8192
+  max_seq_length: 16384
+  # max_seq_length: 8192
   dtype: null  # Auto-detection
   load_in_4bit: true
 
@@ -18,9 +16,9 @@ gpu:
 training:
   # Core training parameters
   num_train_epochs: 2
-  learning_rate: 0.00003 # 3e-5
+  learning_rate: 0.00005 # 3e-5
   max_steps: -1  # Set to -1 for full epochs
-  warmup_steps: 5
+  warmup_steps: 10
   
   # Batch settings
   per_device_batch_size: 1
@@ -36,7 +34,7 @@ training:
   logging_steps: 1
   save_steps: 100
   save_total_limit: 3
-  output_dir: "../qwen3-unsloth-finetuned"
+  output_dir: "../finetune_model_output"
   
   # System settings
   seed: 3407
@@ -82,16 +80,7 @@ fsdp:
 test:
   default_prompt: "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWhat is machine learning?<|im_end|>\n<|im_start|>assistant\n"
   generation:
-    max_new_tokens: 512
+    max_new_tokens: 1024
     use_cache: true
     temperature: 0.7
     do_sample: true
-
-# Hugging Face Configuration
-huggingface:
-  upload: false  # Set to true to enable upload
-  repo_name: "dtadpole/qwen3-finetuned-4b"  # e.g., "your-username/qwen3-4b-triton-ag"
-  private: false  # Set to true for private repository
-  token: null  # HF token (leave null to use HF_TOKEN environment variable)
-  commit_message: "Fine-tuned Qwen3-4B model with experiences"
-  create_model_card: true  # Automatically create model card
