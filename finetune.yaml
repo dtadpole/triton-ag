@@ -1,12 +1,18 @@
-# Simplified Qwen Fine-tuning Configuration
+    # Simplified Qwen Fine-tuning Configuration
 
 # Model Configuration
 model:
-  name: "Qwen/Qwen3-8B"
-  # name: "unsloth/Qwen3-8B-unsloth-bnb-4bit"
-  max_seq_length: 16384
+  name: "Qwen/Qwen3-4B"
+  # max_seq_length: 32768
+  # max_seq_length: 16384
+  max_seq_length: 8192
   dtype: null  # Auto-detection
   load_in_4bit: true
+
+# GPU Configuration
+gpu:
+  single_gpu: false
+  data_parallel: true
 
 # Training Configuration
 training:
@@ -28,7 +34,7 @@ training:
   
   # Logging and saving
   logging_steps: 1
-  save_steps: 50
+  save_steps: 100
   save_total_limit: 3
   output_dir: "../qwen3-unsloth-finetuned"
   
@@ -80,3 +86,12 @@ test:
     use_cache: true
     temperature: 0.7
     do_sample: true
+
+# Hugging Face Configuration
+huggingface:
+  upload: false  # Set to true to enable upload
+  repo_name: "dtadpole/qwen3-finetuned-4b"  # e.g., "your-username/qwen3-4b-triton-ag"
+  private: false  # Set to true for private repository
+  token: null  # HF token (leave null to use HF_TOKEN environment variable)
+  commit_message: "Fine-tuned Qwen3-4B model with experiences"
+  create_model_card: true  # Automatically create model card
