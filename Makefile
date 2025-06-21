@@ -1,6 +1,7 @@
 # CUDA_VISIBLE_DEVICES = ${GPU}
 ENV_VARS ?= PYTHONNOUSERSITE=1 \
         PYTHONPATH=${PYTHONPATH}:${PWD}
+META_PROXY := https_proxy=http://fwdproxy:8080 http_proxy=http://fwdproxy:8080 ftp_proxy=http://fwdproxy:8080 http_no_proxy='\''\'\'''\''.facebook.com|.tfbnw.net|*.fb.com'\''\'\'
 
 ## docker build is blocked by proxy errors, no software update/installation can be done within docker
 # build_docker: Dockerfile
@@ -22,21 +23,20 @@ help:
 	@echo "  kbEval          - Run knowledge base evaluation server"
 	@echo "  codeRunServer   - Run code execution server"
 
+build_docker: Dockerfile
+	$(META_PROXY) docker build --network=host --progress=plain  -t triton_ag .
+
 env:
-	docker run -it  --gpus all --net=host -p 8081:8081 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ triton_ag /bin/bash
+	docker run -it  --gpus all --net=host -p 8081:8081 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/triton_ag /bin/bash
 
 vllm_env:
-	docker run -it  --gpus all --net=host -p 8081:8081 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ triton_ag /bin/bash
-
-dev_setup:
-	npm config set proxy http://fwdproxy:8080
-	npm config set https-proxy http://fwdproxy:8080
+	docker run -it  --gpus all --net=host -p 8081:8081 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/triton_ag /bin/bash
 
 mlflow:
 	mlflow server --host localhost --port 5051
 
 kbEval:
-	uv run kbEvalRemoteServer.py
+	python kbEvalRemoteServer.py
 
 codeRunServer:
 	mcp dev codeRunServer.py

@@ -9,10 +9,18 @@ sudo dnf install -y nvidia-container-toolkit
 sudo mkdir /etc/cdi
 sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
 
+#Check the proxy configuration, follow through all those steps if it's not working.
+https://www.internalfb.com/wiki/Traffic/Proxygen_Services/ForwardProxy/Forward_Proxy_User/Devservers/#it-s-not-working-how-do
+
 ## Devserver use podman, and the docker is only a mirror of podman.
 ## The main challenge of using dev server is the proxy configuration and IPv6 only network.
+## Proxy setup
+## https://www.internalfb.com/wiki/Traffic/Proxygen_Services/ForwardProxy/Forward_Proxy_User/Devservers/
+## Docker setup
+## https://www.internalfb.com/wiki/Users/emilian/Docker_containers_on_a_devserver/
 ## 1. Download the docker tar from the google drive https://drive.google.com/file/d/1QAQkJ-7AKGEMy9cUkHRU8QZHY2XSrgxz/view?usp=sharing
 ## 2. Run docker load -i triton_ag.tar
+# Run the following commands to build the docker environment
 
 make env
 make dev_setup
@@ -62,6 +70,8 @@ Note that our own version of KernelBench has increased dimension sizes for simpl
 ## Run Agent Kernel Coder
 
 ```bash
+make env
+make dev_setup
 python agent_kernel_coder.py
 ```
 
