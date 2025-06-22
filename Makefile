@@ -1,12 +1,9 @@
 # CUDA_VISIBLE_DEVICES = ${GPU}
 ENV_VARS ?= PYTHONNOUSERSITE=1 \
         PYTHONPATH=${PYTHONPATH}:${PWD}
+HOST=$(shell hostname)
+IS_DEVSERVER=$(shell hostname | grep -E -c "dev.*\.facebook\.com")
 META_PROXY := https_proxy=http://fwdproxy:8080 http_proxy=http://fwdproxy:8080 ftp_proxy=http://fwdproxy:8080 http_no_proxy='\''\'\'''\''.facebook.com|.tfbnw.net|*.fb.com'\''\'\'
-
-## docker build is blocked by proxy errors, no software update/installation can be done within docker
-# build_docker: Dockerfile
-# 	HTTPS_PROXY=fwdproxy:8080 docker build --network=host --progress=plain  -t triton_ag .
-# Download from google drive link: https://drive.google.com/file/d/1QAQkJ-7AKGEMy9cUkHRU8QZHY2XSrgxz/view?usp=sharing
 
 .PHONY: help finetune finetune-single finetune-2gpu finetune-debug
 
@@ -23,11 +20,19 @@ help:
 	@echo "  kbEval          - Run knowledge base evaluation server"
 	@echo "  codeRunServer   - Run code execution server"
 
+host_check:
+	@echo "Current hostname is "${HOST}
+	@echo "Is it meta devserver "${IS_DEVSERVER}
+
 build_docker: Dockerfile
+ifeq (${IS_DEVSERVER}, 1)
 	$(META_PROXY) docker build --network=host --progress=plain  -t triton_ag .
+else
+	docker build --network=host --progress=plain  -t triton_ag .
+endif
 
 env:
-	docker run -it  --gpus all --net=host -p 8081:8081 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/triton_ag /bin/bash
+	docker run -it  --gpus all --net=host -p 8081:8081 -p 8082:8082 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/triton_ag /bin/bash
 
 vllm_env:
 	docker run -it  --gpus all --net=host -p 8081:8081 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/triton_ag /bin/bash
@@ -66,6 +71,12 @@ vllm-qwen3-8b:
 
 vllm-qwen3-32b:
 	vllm serve unsloth/Qwen3-32B-bnb-4bit \
+	--max_model_len 40960 \
+	--enable-auto-tool-choice \
+	--tool-call-parser hermes
+
+vllm-qwen3-32b_devserver:
+	vllm serve Qwen/Qwen3-32B \
 	--max_model_len 40960 \
 	--enable-auto-tool-choice \
 	--tool-call-parser hermes
@@ -111,12 +122,6 @@ llama.cpp-server-qwen3-32b:
 	--min-p 0.05 \
 	--host 0.0.0.0
 
-vllm_mistral_7b_dev:
-	docker run --gpus all \
-	--network=host \
-    -v /data/users/jingbo25/huggingface:/root/.cache/huggingface \
-    --env "HUGGING_FACE_HUB_TOKEN=<secret>" \
-    -p 8005:8005 \
-    --ipc=host \
-    vllm/vllm-openai:latest \
-    --model mistralai/Mistral-7B-v0.1
+jupyter:
+	echo ${ENV_VARS}
+	env ${ENV_VARS} jupyter notebook --allow-root --port 8082 --ip 0.0.0.0 --NotebookApp.token='' --NotebookApp.password=''
