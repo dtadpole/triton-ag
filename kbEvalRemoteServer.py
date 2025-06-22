@@ -60,6 +60,69 @@ async def stats():
         "pending_requests": request_counter,
     }
 
+
+@app.post("/kb_eval_ref")
+async def kb_eval_ref(
+    model_tag: str = Body(...),
+    task_tag: str = Body(...),
+    time_tag: str = Body(...),
+    reference_code: str = Body(...),
+) -> KernelExecResult:
+    global request_counter, request_counter_lock, devices
+
+    try:
+        async with request_counter_lock:
+            request_counter += 1
+
+        # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}/{eval_tag}/{time_tag}
+        temp_dir = os.path.join(KB_EVAL_DIR, model_tag, task_tag, time_tag)
+        os.makedirs(temp_dir, exist_ok=True)
+
+        reference_file_path = os.path.join(temp_dir, f"reference_code.py")
+        with open(reference_file_path, "w") as f:
+            f.write(reference_code)
+
+        # pre-compile the reference code
+        command = f"python kbEvalCli.py --wd {temp_dir} --model_tag {model_tag} --task_tag {task_tag} --time_tag {time_tag} --reference_code {reference_file_path} --measure_reference --device-list {','.join([str(device) for device in devices])}"
+        process = await asyncio.create_subprocess_shell(
+            command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=os.environ.copy()
+        )
+
+        logger.info(f"[KB Eval] [reference] START ====================")
+        logger.info(f"[KB Eval] [reference] command: {command}")
+
+       # Create tasks to read stdout and stderr concurrently
+        stdout_task = asyncio.create_task(read_stream(process.stdout, "reference", is_error=False))
+        stderr_task = asyncio.create_task(read_stream(process.stderr, "reference", is_error=True))
+        
+        # Wait for the process to complete
+        return_code = await process.wait()
+        
+        # Wait for all output to be processed
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        if process.returncode != 0:
+            logger.error(f"[KB Eval] [reference] return code: {process.returncode}")
+        else:
+            logger.info(f"[KB Eval] [reference] return code: {process.returncode}")
+ 
+        logger.info(f"[KB Eval] [reference] END ====================")
+
+        # read the result from {temp_dir}/kbeval_{eval_tag}.json
+        result_json_path = os.path.join(temp_dir, f"reference_kbeval.json")
+        with open(result_json_path, "r") as f:
+            result_text = f.read()
+
+        result = KernelExecResult.model_validate_json(result_text)
+
+        return result
+    finally:
+        async with request_counter_lock:
+            request_counter -= 1 
+            if request_counter < 0:
+                logger.error(f"Request counter is negative: {request_counter}, resetting to 0")
+                request_counter = 0
+
+
 @app.post("/kb_eval")
 async def kb_eval(
     model_tag: str = Body(...),
@@ -119,12 +182,6 @@ async def kb_eval(
         else:
             logger.info(f"[KB Eval] [{eval_tag}] return code: {process.returncode}")
  
-        # stdout, stderr = await process.communicate()
-        # read line by line and print
-        # for line in stdout.decode().splitlines():
-        #     logger.info(f"[KB Eval] [{eval_tag}] output: {line}")
-        # for line in stderr.decode().splitlines():
-        #     logger.error(f"[KB Eval] [{eval_tag}] error: {line}")
         logger.info(f"[KB Eval] [{eval_tag}] END ====================")
 
         # read the result from {temp_dir}/kbeval_{eval_tag}.json

@@ -402,16 +402,15 @@ if __name__ == "__main__":
     temp_dir = os.path.join(KB_EVAL_DIR, args.model_tag, args.task_tag, time_tag if args.time_tag == "auto" else args.time_tag, args.eval_tag)
     os.makedirs(temp_dir, exist_ok=True)
 
-    # read from file
-    reference_model_src = open(os.path.join(args.wd, args.reference_code), "r").read()
-    generated_model_src = open(os.path.join(args.wd, args.generated_code), "r").read()
-
     devices = args.device_list.split(",")
     # select a random device from devices
     device = torch.device(int(devices[random.randint(0, len(devices) - 1)]))
 
     result = None
     exit_code = 0
+
+    # read reference code from file
+    reference_model_src = open(os.path.join(args.wd, args.reference_code), "r").read()
 
     # if measure_reference is True, evaluate the reference code only
     if args.measure_reference:
@@ -441,7 +440,12 @@ if __name__ == "__main__":
             if not args.measure_both:
                 exit(exit_code)
 
-    # if measure_reference is False, evaluate the custom kernel against the reference code
+
+    # we are here if we need to measure generated code, evaluate the custom kernel against the reference code
+
+    # read generated code from file
+    generated_model_src = open(os.path.join(args.wd, args.generated_code), "r").read()
+
     try:
         result = compile_and_eval_kernel(
             model_tag=args.model_tag,
