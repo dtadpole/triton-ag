@@ -22,7 +22,9 @@ help:
 	@echo "  codeRunServer   - Run code execution server"
 
 mlflow:
-	mlflow server --host localhost --port 5050
+	# mlflow server --host localhost --port 5050
+	mlflow server --host localhost --port 5050 --backend-store-uri sqlite:///mlflow.sqlite
+
 
 kbEval:
 	uv run kbEvalRemoteServer.py
