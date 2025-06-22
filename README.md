@@ -18,12 +18,12 @@ https://www.internalfb.com/wiki/Traffic/Proxygen_Services/ForwardProxy/Forward_P
 ## https://www.internalfb.com/wiki/Traffic/Proxygen_Services/ForwardProxy/Forward_Proxy_User/Devservers/
 ## Docker setup
 ## https://www.internalfb.com/wiki/Users/emilian/Docker_containers_on_a_devserver/
-## 1. Download the docker tar from the google drive https://drive.google.com/file/d/1QAQkJ-7AKGEMy9cUkHRU8QZHY2XSrgxz/view?usp=sharing
-## 2. Run docker load -i triton_ag.tar
-# Run the following commands to build the docker environment
 
+## After setting up proxy and docker on devserver, build the docker image using the following commands:
+make build_docker
+
+## start a docker container with all the required dependencies
 make env
-make dev_setup
 ```
 
 ## Prepare API key for LLM access
@@ -64,15 +64,15 @@ Clone the KernelBench git repo under ${HOME} to access various KernelBench test 
 ```bash
 cd ${HOME}
 git clone git@github.com:dtadpole/KernelBench.git
+## Copy the level 1-4 folders in KernelBench/KernelBench into kernel_bench/ folder in this repo.
 ```
 Note that our own version of KernelBench has increased dimension sizes for simple kernels [level 1, 19-87], to increas run time to be meaningfully higher than just the kernel launch time (4-8 us).
 
-## Run Agent Kernel Coder
+## Run Agent Kernel Coder For Demo Purpose
 
 ```bash
 make env
-make dev_setup
-python agent_kernel_coder.py
+python agent_kernel_coder.py -p deepseek -m deepseek-chat
 ```
 
 This will create a new working directory under `_run_{ddd}` and generate kernel implementation.

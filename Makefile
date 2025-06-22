@@ -9,8 +9,8 @@ META_PROXY := https_proxy=http://fwdproxy:8080 http_proxy=http://fwdproxy:8080 f
 
 help:
 	@echo "Available targets:"
+	@echo "  build_docker    - build docker image"
 	@echo "  env       	     - enter into dock container"
-	@echo "  dev_setup       - Set up dev environment for devserver"
 	@echo "  finetune        - Run data parallel fine-tuning on 4 GPUs"
 	@echo "  finetune-single - Run single GPU fine-tuning"
 	@echo "  finetune-2gpu   - Run data parallel fine-tuning on 2 GPUs"
