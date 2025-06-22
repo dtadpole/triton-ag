@@ -1,6 +1,10 @@
 import os
+from typing import Any, Dict, Optional
 import yaml
+import json
 import dspy
+from dspy.utils.callback import BaseCallback
+from util import logger
 
 def load_lm(provider: str, model: str) -> dspy.LM:
     with open("dspy_model.yaml", "r") as f:
@@ -47,7 +51,8 @@ def load_lm(provider: str, model: str) -> dspy.LM:
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
-    # lm.set_model_config(**model_config["settings"])
+    logger.info(f"Loaded model: [provider={provider}], [model_name={model_name}], [api_base={api_base}], [temperature={temperature}], [max_tokens={max_tokens}]")
+    # return the model
     return lm
 
 instructions_cache = {}
@@ -67,3 +72,29 @@ def load_instructions_for_module(module_name: str, yaml_file: str = "dspy_instru
         raise ValueError(f"Module {module_name} not found in {yaml_file}")
     instructions = instructions_cache[module_name]
     return instructions
+
+class DSPyToolCallback(BaseCallback):
+    def __init__(self):
+        self._lookup = {}
+
+    def on_tool_start(self, call_id: str, instance: Any, inputs: Dict[str, Any]):
+        """A handler triggered when a tool is called.
+        Args:
+            call_id: A unique identifier for the call. Can be used to connect start/end handlers.
+            instance: The Tool instance.
+            inputs: The inputs to the Tool's __call__ method. Each arguments is stored as
+                a key-value pair in a dictionary.
+        """
+        self._lookup[call_id] = instance.name
+        logger.info(f"Tool [{instance.name}] [{call_id}] called with inputs {inputs}")
+
+    def on_tool_end(self, call_id: str, outputs: Optional[Dict[str, Any]], exception: Optional[Exception] = None):
+        """A handler triggered after a tool is executed.
+
+        Args:
+            call_id: A unique identifier for the call. Can be used to connect start/end handlers.
+            outputs: The outputs of the Tool's __call__ method. If the method is interrupted by
+                an exception, this will be None.
+            exception: If an exception is raised during the execution, it will be stored here.
+        """
+        logger.info(f"Tool [{self._lookup[call_id]}] [{call_id}] called with outputs {json.dumps(outputs)}")
