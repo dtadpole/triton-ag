@@ -16,9 +16,19 @@ https://www.internalfb.com/wiki/Traffic/Proxygen_Services/ForwardProxy/Forward_P
 ## The main challenge of using dev server is the proxy configuration and IPv6 only network.
 ## Proxy setup
 ## https://www.internalfb.com/wiki/Traffic/Proxygen_Services/ForwardProxy/Forward_Proxy_User/Devservers/
+## !!!! Follow the link above to install ttls_fwdproxy
+## Add the following export into ~/.bashrc
+export https_proxy=http://fwdproxy:8080
+export http_proxy=http://fwdproxy:8080
+export ftp_proxy=http://fwdproxy:8080
+export http_no_proxy='\''\'\'''\''.facebook.com|.tfbnw.net|*.fb.com'\''\'\'
 ## Docker setup
+## Install podman and docker. In meta, docker is a simulator of podman.
 ## https://www.internalfb.com/wiki/Users/emilian/Docker_containers_on_a_devserver/
 
+## clone the repo to devserver
+git clone https://github.com/dtadpole/triton-ag
+cd triton-ag
 ## After setting up proxy and docker on devserver, build the docker image using the following commands:
 make build_docker
 
