@@ -114,7 +114,6 @@ class CUDARolloutPlanner(dspy.Module):
         self.cuda_iterative_coder = CUDAIterativeCoder(lm, current_wd, model_tag, task_tag, time_tag, dspy_tools)
 
     async def forward(self, reference_code: str) -> tuple[KernelExecResult, str, KernelExecResult]:
-
         # write reference code to the run folder
         reference_filename = os.path.join(self.current_wd, "reference_code.py")
         with open(reference_filename, "w") as f:
@@ -122,11 +121,37 @@ class CUDARolloutPlanner(dspy.Module):
 
         # run the reference measurement
         reference_result = await self.reference_measurement.forward(reference_filename)
+        # start num_rollout tasks in parallel
+        tasks = []
+        for rollout_idx in range(self.num_rollout):
+            tasks.append(self._run_rollout(rollout_idx+1, reference_filename))
+        results = await asyncio.gather(*tasks)
 
         best_filename: str = None
         best_result: KernelExecResult = None
-        for i in range(self.num_iter):
-            eval_tag = f"r01_i{i+1:02d}"
+        for result in results:
+            if result[1].compiled and result[1].correctness and result[1].runtime > 0:
+                if best_result is None or result[1].runtime < best_result.runtime:
+                    best_filename = result[0]
+                    best_result = result[1]
+
+        if best_filename is not None:
+            with open(best_filename, "r") as f:
+                best_code = f.read()
+        else:
+            best_code = ""
+
+        return reference_result, best_code, best_result
+
+    async def _run_rollout(self, rollout_id: int, reference_filename: str) -> tuple[str, KernelExecResult]:
+        """
+        Run the rollout for the given reference filename.
+        """
+        best_filename: str = None
+        best_result: KernelExecResult = None
+
+        for iter_idx in range(self.num_iter):
+            eval_tag = f"r{rollout_id:02d}_i{iter_idx+1:02d}"
             generated_filename, generated_result = await self.cuda_iterative_coder.forward(
                 eval_tag,
                 reference_filename,
@@ -139,14 +164,7 @@ class CUDARolloutPlanner(dspy.Module):
                     best_filename = generated_filename
                     best_result = generated_result
 
-        if best_filename is not None:
-            with open(best_filename, "r") as f:
-                best_code = f.read()
-        else:
-            best_code = ""
-
-        return reference_result, best_code, best_result
-
+        return best_filename, best_result
 
 
 async def run(lm: dspy.LM, tags: dict, args: argparse.Namespace):
@@ -227,7 +245,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-p", "--provider", type=str, default="deepseek")
     parser.add_argument("-m", "--model", type=str, default="deepseek-chat")
-    parser.add_argument("-n", "--num_rollout", type=int, default=1)
+    parser.add_argument("-r", "--num_rollout", type=int, default=1)
     parser.add_argument("-i", "--num_iter", type=int, default=4)
     parser.add_argument("-t", "--task",
         type=str,
@@ -248,7 +266,9 @@ def main():
     tags = {
         "model_tag": f"{args.provider}/{args.model}",
         "task_tag": args.task,
-        "time_tag": datetime.now().strftime("%Y%m%d_%H%M%S")
+        "time_tag": datetime.now().strftime("%Y%m%d_%H%M%S"),
+        "num_rollout": args.num_rollout,
+        "num_iter": args.num_iter
     }
 
     # Run the async function after setting up the language model
