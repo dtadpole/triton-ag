@@ -4,30 +4,28 @@ CUDAIterativeCoder:
 
     If a previous version of generated CUDA code is provided (with previous evaluation result), you need to improve the performance of the generated CUDA code.
 
-    You need to use the file system tools provided to you to write the generated CUDA code to local file, or to edit the existing file.  You need to pass the filename for the generated code to evaluate the correctness and performance of the generated code using the `kb_eval_iteration` tool.
+    You need to use the file system tools provided to you to write the generated CUDA code to local file, or to edit the existing file.  You need to pass the filename of the generated code to evaluate the correctness and performance of the generated code using the `kb_eval_iteration` tool.
 
     When generating code, always follow these instructions:
-    - Write full generated kernel in a single file as {current_wd}/`eval_tag`_cuda_kernel.py. Generate a new file for each iteration.  Keep improving performance of the kernel code.
+    - Write full generated kernel in a single file as {current_wd}/{eval_tag}_cuda_kernel.py. Generate a new file for each iteration.  Keep improving performance of the kernel code.
     - Replace pytorch operators in the given module with raw CUDA kernels, optimizing for performance on NVIDIA architecture.
     - Use torch.utils.cpp_extension.load_inline and name your optimized output module ModelNew.
     - You're NOT allowed to use torch.nn (except for Parameter, containers, and init).
     - The input and output have to be on CUDA device. Your answer must be the complete new module (no testing code, no other code): it will be evaluated and you will be given feedback on its correctness and speedup so you can keep iterating to maximize the speedup.
 
-    Did you encounter error when running `kb_eval_iteration` validation?
-    Based on the error information, what's your next action?
+    Did you encounter error when running `kb_eval_iteration` validation? Based on the error information, what's your next action?
 
     Choose the most efficient path forward:
     1. Do you understand the error? Can you fix the error easily?
     2. If not sure why the error happened, can you create debug test cases to check each intermediate result step by step, and fix the code at each individual step?
-    3. If you have passed the intermediate test cases, verify using the `kb_eval_iteration` tool.  If success, summarize the changes in a few sentences, and use `kb_upload_iteration` tool to upload the result.
-    4. If you tried multiple times (e.g. more than 5 times) but still failed, record the error, stop the task, and upload the error information using `kb_upload_iteration` tool.
+    3. If you have passed the intermediate test cases, verify using the `kb_eval_iteration` tool.  If the code both compiles and passes the correctness test, summarize the changes in a few sentences, and use `kb_upload_iteration` tool to upload the result.
+    4. If you tried multiple times (e.g. more than 5 times) but still failed to compile or pass the correctness test, record the error, stop the task, and upload the error information using `kb_upload_iteration` tool.
 
     Be concise in your reasoning (think concisely), select the appropriate tool or action.
 
 
   examples:
-    - eval_tag: r01_i01
-      reference_code: |
+    - reference_code: |
         import torch
         import torch.nn as nn
 
@@ -49,8 +47,6 @@ CUDAIterativeCoder:
         def get_init_inputs():
             return []  # No special initialization inputs needed
 
-      prev_generated_code: null
-      prev_iteration_result: null
       generated_code: |
         import torch.nn as nn
         from torch.utils.cpp_extension import load_inline
@@ -102,19 +98,3 @@ CUDAIterativeCoder:
 
             def forward(self, a, b):
                 return self.elementwise_add.elementwise_add_cuda(a, b)
-
-      eval_result: |
-        compiled: true,
-        correctness: true,
-        metadata:
-            hardware: "NVIDIA GeForce RTX 4090"
-            device: "cuda:4"
-        runtime: 0.321,
-        runtime_stats:
-            mean: 0.321,
-            std: 0.00144,
-            min: 0.318,
-            max: 0.327,
-            num_trials: 50,
-            hardware: "NVIDIA GeForce RTX 4090",
-            device: "cuda:4"

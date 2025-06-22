@@ -117,11 +117,11 @@ async def kb_eval_reference(
         response_json = json.loads(response.text)
         if "metadata" not in response_json:
             response_json["metadata"] = {}
-        response_json["metadata"] = {
+        response_json["metadata"] = response_json["metadata"] | {
             "model_tag": model_tag,
             "task_tag": task_tag,
             "time_tag": time_tag,
-        } | response_json["metadata"]
+        }
         with open(f"{current_wd}/kbeval_reference_{time_tag}.result.json", "w") as f:
             f.write(json.dumps(response_json, indent=4))
         logger.info(f"Response from remote server: {json.dumps(response_json, indent=4)}")
@@ -188,12 +188,12 @@ async def kb_eval_iteration(
         response_json = json.loads(response.text)
         if "metadata" not in response_json:
             response_json["metadata"] = {}
-        response_json["metadata"] = {
+        response_json["metadata"] = response_json["metadata"] | {
             "model_tag": model_tag,
             "task_tag": task_tag,
             "eval_tag": eval_tag,
             "time_tag": time_tag,
-        } | response_json["metadata"]
+        }
         with open(f"{current_wd}/kbeval_{eval_tag}_{time_tag}.result.json", "w") as f:
             f.write(json.dumps(response_json, indent=4))
         logger.info(f"Response from remote server: {json.dumps(response_json, indent=4)}")

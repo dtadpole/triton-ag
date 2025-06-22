@@ -29,7 +29,7 @@ class ReferenceMeasurement(dspy.Module):
         self.time_tag = time_tag
         self.dspy_tools = dspy_tools
         # initialize the react agent
-        self.react = dspy.ReAct("user_request, current_wd, model_tag, task_tag, time_tag, reference_filename -> eval_result: KernelExecResult", tools=self.dspy_tools)
+        self.react = dspy.ReAct("user_request, current_wd, model_tag, task_tag, time_tag, reference_filename -> reference_result: KernelExecResult", tools=self.dspy_tools)
 
     async def forward(self, reference_filename: str) -> KernelExecResult:
         # run the react agent
@@ -41,12 +41,12 @@ class ReferenceMeasurement(dspy.Module):
             time_tag=self.time_tag,
             reference_filename=os.path.join(self.current_wd, reference_filename)
         )
-        logger.info(json.dumps(result.get("eval_result", {}).model_dump(), indent=4))
+        logger.info(f"[reference] {json.dumps(result.get("reference_result", {}).model_dump(), indent=4)}")
         # logger.info(f"result: {result}")
         # logger.info(json.dumps(result.get("reasoning", {}), indent=4))
         # logger.info(json.dumps(result.get("trajectory", {}), indent=4))
         # logger.info(json.dumps(react.history, indent=4))
-        return result.get("eval_result", {})
+        return result.get("reference_result", {})
     
 
 class CUDAIterativeCoder(dspy.Module):
@@ -69,20 +69,12 @@ class CUDAIterativeCoder(dspy.Module):
             idx = 0
             for example in configs["examples"]:
                 idx += 1
-                self.custom_instruction += f"Example #{idx}:\n"
-                self.custom_instruction += "Input:\n"
-                self.custom_instruction += f"  reference_code:\n{example['reference_code']}\n"
-                if "prev_generated_code" in example:
-                    self.custom_instruction += f"prev_generated_code:\n{example['prev_generated_code']}\n"
-                if "prev_iteration_result" in example:
-                    self.custom_instruction += f"prev_iteration_result:\n{json.dumps(example['prev_iteration_result'], indent=4)}\n"
-                self.custom_instruction += "Output:\n"
-                self.custom_instruction += f"generated_code:\n{example['generated_code']}\n"
-                self.custom_instruction += "Evaluation Result:\n" 
-                self.custom_instruction += f"{json.dumps(example["eval_result"], indent=4)}\n"
+                self.custom_instruction += f"\n\nExample #{idx}:"
+                self.custom_instruction += f"\n\nInput/reference_code:\n{example['reference_code']}\n"
+                self.custom_instruction += f"\n\nOutput/generated_code:\n{example['generated_code']}\n"
 
         # initialize the signature
-        self.signature = dspy.Signature("current_wd, model_tag, task_tag, time_tag, eval_tag, reference_code, prev_generated_code, prev_iteration_result -> generated_code: str, eval_result: KernelExecResult", instructions=self.custom_instruction)
+        self.signature = dspy.Signature("current_wd: str, model_tag: str, task_tag: str, time_tag: str, eval_tag: str, reference_code: str, prev_generated_code: str, prev_iteration_result: KernelExecResult -> generated_code: str, generated_result: KernelExecResult", instructions=self.custom_instruction)
         # initialize the react agent
         self.react = dspy.ReAct(self.signature, tools=self.dspy_tools)
 
@@ -95,15 +87,68 @@ class CUDAIterativeCoder(dspy.Module):
             time_tag=self.time_tag,
             eval_tag=eval_tag,
             reference_code=reference_code,
-            prev_generated_code=prev_generated_code,
+            prev_generated_code=None, # prev_generated_code,
             prev_iteration_result=prev_iteration_result,
         )
-        logger.info(result.get("generated_code", ""))
-        logger.info(json.dumps(result.get("eval_result", {}).model_dump(), indent=4))
-        return result.get("generated_code", ""), result.get("eval_result", {})
+        # logger.info(result.get("generated_code", ""))
+        logger.info(f"[{eval_tag}] {json.dumps(result.get("generated_result", {}).model_dump(), indent=4)}")
+        return result.get("generated_code", ""), result.get("generated_result", {})
 
 
-async def run(lm: dspy.LM):
+class CUDARolloutPlanner(dspy.Module):
+    """CUDARolloutPlanner"""
+    
+    def __init__(self, lm: dspy.LM, num_rollout: int, num_iter: int, current_wd: str, model_tag: str, task_tag: str, time_tag: str, dspy_tools: list[dspy.Tool]):
+        super().__init__()
+        self.lm = lm
+        self.num_rollout = num_rollout
+        self.num_iter = num_iter
+        self.current_wd = current_wd
+        self.model_tag = model_tag
+        self.task_tag = task_tag
+        self.time_tag = time_tag
+        self.dspy_tools = dspy_tools
+
+        self.reference_measurement = ReferenceMeasurement(lm, current_wd, model_tag, task_tag, time_tag, dspy_tools)
+
+        self.cuda_iterative_coder = CUDAIterativeCoder(lm, current_wd, model_tag, task_tag, time_tag, dspy_tools)
+
+    async def forward(self, reference_code: str) -> tuple[KernelExecResult, str, KernelExecResult]:
+
+        # write reference code to the run folder
+        reference_filename = os.path.join(self.current_wd, "reference_code.py")
+        with open(reference_filename, "w") as f:
+            f.write(reference_code)
+
+        # run the reference measurement
+        reference_result = await self.reference_measurement.forward(reference_filename)
+
+        best_generated_code: str = None
+        best_generated_result: KernelExecResult = None
+
+        prev_generated_code: str = None
+        prev_generated_result: KernelExecResult = None
+        for i in range(self.num_iter):
+            eval_tag = f"r01_i{i+1:02d}"
+            generated_code, generated_result = await self.cuda_iterative_coder.forward(
+                eval_tag,
+                reference_filename,
+                prev_generated_code=prev_generated_code,
+                prev_iteration_result=prev_generated_result
+            )
+            prev_generated_code = generated_code
+            prev_generated_result = generated_result
+
+            if generated_result.compiled and generated_result.correctness and generated_result.runtime > 0:
+                if best_generated_result is None or generated_result.runtime < best_generated_result.runtime:
+                    best_generated_code = generated_code
+                    best_generated_result = generated_result
+
+        return reference_result, best_generated_code, best_generated_result
+
+
+
+async def run(lm: dspy.LM, args: argparse.Namespace):
 
     # get the next run folder
     run_folder = get_next_run_folder()
@@ -161,27 +206,30 @@ async def run(lm: dspy.LM):
             model_tag = "deepseek/deepseek-chat"
             task_tag = "level1/1_Square_matrix_multiplication_"
             time_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
-            reference_filename = os.path.join(os.getcwd(), "kernel_bench", "level1", "1_Square_matrix_multiplication_.py")
 
-            # copy reference code to the run folder
-            shutil.copy(reference_filename, os.path.join(run_folder, "reference_code.py"))
-            # update reference_filename to the run folder
-            reference_filename = os.path.join(run_folder, "reference_code.py")
+            # read reference code from the original file
+            original_reference_filename = os.path.join(os.getcwd(), "kernel_bench", "level1", "1_Square_matrix_multiplication_.py")
+            with open(original_reference_filename, "r") as f:
+                reference_code = f.read()
 
-            # run the react agent
-            reference_measurement = ReferenceMeasurement(lm, current_wd, model_tag, task_tag, time_tag, dspy_tools)
-            reference_result = await reference_measurement.forward(reference_filename)
+            # initialize the rollout planner
+            rollout_planner = CUDARolloutPlanner(lm, num_rollout=args.num_rollout, num_iter=args.num_iter, current_wd=current_wd, model_tag=model_tag, task_tag=task_tag, time_tag=time_tag, dspy_tools=dspy_tools)
 
-            # run the iteration module
-            eval_tag = "r01_i01"
-            iteration_module = CUDAIterativeCoder(lm, current_wd, model_tag, task_tag, time_tag, dspy_tools)
-            generated_code, eval_result = await iteration_module.forward(eval_tag, reference_filename, prev_generated_code=None, prev_iteration_result=None)
+            # run the rollout planner
+            rollout_result = await rollout_planner(reference_code)
+            logger.info(json.dumps(rollout_result.get("reference_result", {}), indent=4))
+            logger.info(json.dumps(rollout_result.get("best_generated_code", ""), indent=4))
+            logger.info(json.dumps(rollout_result.get("best_generated_result", {}), indent=4))
+
+
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-p", "--provider", type=str, default="deepseek")
     parser.add_argument("-m", "--model", type=str, default="deepseek-chat")
+    parser.add_argument("-n", "--num_rollout", type=int, default=1)
+    parser.add_argument("-i", "--num_iter", type=int, default=4)
     args = parser.parse_args()
 
     mlflow.set_tracking_uri("http://127.0.0.1:5050")
@@ -193,7 +241,7 @@ def main():
     logger.info(f"Loaded model: {lm.model}")
 
     # Run the async function after setting up the language model
-    asyncio.run(run(lm))
+    asyncio.run(run(lm, args))
 
 if __name__ == "__main__":
     main()
