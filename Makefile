@@ -49,19 +49,19 @@ codeRunServer:
 # Fine-tuning targets
 finetune:
 	@echo "Starting data parallel fine-tuning on 4 GPUs..."
-	bash -c "source .venv/bin/activate && CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29500 finetune_unsloth.py"
+	bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29500 finetune_unsloth.py"
 
 finetune-manual:
 	@echo "Starting data parallel fine-tuning on 4 GPUs..."
-	bash -c "source .venv/bin/activate && CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29500 finetune_manual.py"
+	bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29500 finetune_manual.py"
 
 finetune-single:
 	@echo "Starting single GPU fine-tuning..."
-	bash -c "source .venv/bin/activate && CUDA_VISIBLE_DEVICES=1 python finetune_unsloth.py"
+	bash -c "CUDA_VISIBLE_DEVICES=1 python finetune_unsloth.py"
 
 finetune-2gpu:
 	@echo "Starting data parallel fine-tuning on 2 GPUs..."
-	bash -c "source .venv/bin/activate && CUDA_VISIBLE_DEVICES=2,3 torchrun --nproc_per_node=2 --master_port=29500 finetune_unsloth.py"
+	bash -c "CUDA_VISIBLE_DEVICES=2,3 torchrun --nproc_per_node=2 --master_port=29500 finetune_unsloth.py"
 
 vllm-qwen3-8b:
 	vllm serve unsloth/DeepSeek-R1-0528-Qwen3-8B-bnb-4bit \

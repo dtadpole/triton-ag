@@ -1,20 +1,24 @@
-# Simplified Qwen Fine-tuning Configuration
-
 # Model Configuration
 model:
-  name: "Qwen/Qwen3-8B"
-  # name: "unsloth/Qwen3-8B-unsloth-bnb-4bit"
-  max_seq_length: 32768
+  name: "Qwen/Qwen3-4B-AWQ"
+  # max_seq_length: 32768
+  # max_seq_length: 16384
+  max_seq_length: 8192
   dtype: null  # Auto-detection
-  load_in_4bit: true
+  load_in_4bit: false
+
+# GPU Configuration
+gpu:
+  single_gpu: false
+  data_parallel: true
 
 # Training Configuration
 training:
   # Core training parameters
-  num_train_epochs: 2
+  num_train_epochs: 1
   learning_rate: 0.00003 # 3e-5
   max_steps: -1  # Set to -1 for full epochs
-  warmup_steps: 5
+  warmup_steps: 10
   
   # Batch settings
   per_device_batch_size: 1
@@ -28,9 +32,9 @@ training:
   
   # Logging and saving
   logging_steps: 1
-  save_steps: 50
+  save_steps: 100
   save_total_limit: 3
-  output_dir: "../qwen3-unsloth-finetuned"
+  output_dir: "../finetune_model_output"
   
   # System settings
   seed: 3407
@@ -53,9 +57,30 @@ lora:
 
 # Data Configuration  
 data:
-  local_dir: "finetune_experiences"
+  processed_dir: "finetune_processed_experiences"
+  
+  # Data collator settings
+  collator:
+    pad_to_multiple_of: 8
+  
+  # DataLoader settings
+  dataloader:
+    shuffle: true
+    num_workers: 4
+    pin_memory: true
+    drop_last: true
 
-# GPU Configuration
-gpu:
-  single_gpu: false  # Enable multi-GPU for data parallel training
-  data_parallel: true  # Use data parallel training
+# FSDP Configuration
+fsdp:
+  sharding_strategy: "FULL_SHARD"  # Options: FULL_SHARD, SHARD_GRAD_OP, NO_SHARD, HYBRID_SHARD
+  mixed_precision: true
+  activation_checkpointing: true
+
+# Test Configuration
+test:
+  default_prompt: "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWhat is machine learning?<|im_end|>\n<|im_start|>assistant\n"
+  generation:
+    max_new_tokens: 1024
+    use_cache: true
+    temperature: 0.7
+    do_sample: true

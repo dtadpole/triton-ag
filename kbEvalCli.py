@@ -12,19 +12,77 @@ from util import logger
 import random
 from filelock import FileLock, Timeout
 
-# def eval_kernel_against_ref(
-#     original_model_src: str,
-#     custom_model_src: str,
-#     seed_num: int = 42,
-#     num_correct_trials: int = 1,
-#     num_perf_trials: int = 10,
-#     verbose: bool = False,
-#     measure_performance: bool = False,
-#     build_dir: os.PathLike = None,
-#     device: torch.device = torch.cuda.current_device() if torch.cuda.is_available() else None, # have to run on GPU
-# ) -> KernelExecResult:
-
 KB_EVAL_DIR = os.path.expanduser("~/.kbeval")
+
+def eval_kernel_reference(
+    model_tag: str,
+    task_tag: str,
+    time_tag: str,
+    reference_code: str,
+    device: torch.device,
+    args: argparse.Namespace,
+    seed_num: int = 42,
+    num_perf_trials: int = 50,
+) -> KernelExecResult:
+    """
+    Evaluate the reference code against the original model
+    """
+    eval_key = f"{model_tag}_{task_tag}_{time_tag}"
+
+    context = {}
+    metadata = {
+        "is_reference": True,
+        "hardware": torch.cuda.get_device_name(device=device),
+        "device": str(device),  # for debugging
+    }
+
+    try:
+        Model, get_init_inputs, get_inputs = load_original_model_and_inputs(
+            reference_code, context
+        )
+
+        init_inputs = get_init_inputs()
+        init_inputs = [
+            x.cuda(device=device) if isinstance(x, torch.Tensor) else x for x in init_inputs
+        ]
+
+        inputs = get_inputs()
+        inputs = [
+            x.cuda(device=device) if isinstance(x, torch.Tensor) else x for x in inputs
+        ]
+
+        with torch.no_grad():
+            set_seed(seed_num)  # set seed for reproducible weights
+            original_model = Model(*init_inputs)
+            assert hasattr(original_model, "forward")
+            if args.verbose:
+                logger.info(f"[KB_Eval] Original Model Loaded [{eval_key}]")
+
+            elapsed_times_ref = time_execution_with_cuda_event(
+                original_model,
+                *inputs,
+                num_trials=num_perf_trials,
+                verbose=args.verbose,
+                device=device,
+            )
+            runtime_stats = get_timing_stats(elapsed_times_ref, device=device)
+            if args.verbose:
+                logger.info(f"[KB_Eval] Performance Stats (Reference): {runtime_stats} [{eval_key}]")
+
+        return KernelExecResult(
+            compiled=True,
+            correctness=True,
+            metadata=metadata,
+            runtime=runtime_stats["mean"],
+            runtime_stats=runtime_stats,
+        )
+    
+    except Exception as e:
+        logger.warning(f"[KB_Eval] Error evaluating reference code: {e}")
+        return KernelExecResult(
+            compiled=False, correctness=False, metadata=metadata | {"reference_code_error": e}
+        )
+
 
 def compile_and_eval_kernel(
     model_tag: str,
@@ -92,7 +150,6 @@ def compile_and_eval_kernel(
                     seed_num=42,
                     verbose=args.verbose,
                     measure_performance=True,
-                    measure_performance_ref=args.measure_performance_ref,
                 )
 
             # os.remove(lock_file)
@@ -198,7 +255,6 @@ def eval_kernel_against_ref_new(
     seed_num: int = 42,
     verbose: bool = False,
     measure_performance: bool = True,
-    measure_performance_ref: bool = False,
 ) -> KernelExecResult:
 
     global eval_queue, result_queue
@@ -303,19 +359,6 @@ def eval_kernel_against_ref_new(
                     kernel_exec_result.runtime = runtime_stats["mean"]
                     kernel_exec_result.runtime_stats = runtime_stats
 
-                    if measure_performance_ref:
-                        elapsed_times_ref = time_execution_with_cuda_event(
-                            original_model,
-                            *inputs,
-                            num_trials=num_perf_trials,
-                            verbose=verbose,
-                            device=device,
-                        )
-                        runtime_stats_ref = get_timing_stats(elapsed_times_ref, device=device)
-                        if verbose:
-                            logger.info(f"[KB_Eval] Performance Stats (Reference): {runtime_stats_ref} [{eval_key}]")
-                        kernel_exec_result.metadata["reference_runtime_stats"] = runtime_stats_ref
-
             except Exception as e:
                 if verbose:
                     logger.warning(f"[KB_Eval] Error in Measuring Performance: {e} [{eval_key}]")
@@ -345,7 +388,8 @@ if __name__ == "__main__":
     parser.add_argument("--time_tag", type=str, default="auto")
     parser.add_argument("--reference_code", type=str, default="elemAddRef.py")
     parser.add_argument("--generated_code", type=str, default="elemAddCuda.py")
-    parser.add_argument("--measure_performance_ref", action="store_true")
+    parser.add_argument("--measure_reference", action="store_true")
+    parser.add_argument("--measure_both", action="store_true")
     parser.add_argument("--device-list", type=str, default="4")
     parser.add_argument("--max-jobs", type=int, default=12)
     parser.add_argument("--verbose", action="store_true")
@@ -358,16 +402,50 @@ if __name__ == "__main__":
     temp_dir = os.path.join(KB_EVAL_DIR, args.model_tag, args.task_tag, time_tag if args.time_tag == "auto" else args.time_tag, args.eval_tag)
     os.makedirs(temp_dir, exist_ok=True)
 
-    # read from file
-    reference_model_src = open(os.path.join(args.wd, args.reference_code), "r").read()
-    generated_model_src = open(os.path.join(args.wd, args.generated_code), "r").read()
-
     devices = args.device_list.split(",")
     # select a random device from devices
     device = torch.device(int(devices[random.randint(0, len(devices) - 1)]))
 
     result = None
     exit_code = 0
+
+    # read reference code from file
+    reference_model_src = open(os.path.join(args.wd, args.reference_code), "r").read()
+
+    # if measure_reference is True, evaluate the reference code only
+    if args.measure_reference:
+        try:
+            result = eval_kernel_reference(
+                model_tag=args.model_tag,
+                task_tag=args.task_tag,
+                time_tag=args.time_tag,
+                reference_code=reference_model_src,
+                device=device,
+                args=args,
+            )
+        except Exception as exception:
+            exit_code = 1
+            exception_traceback_str = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
+            logger.error(exception_traceback_str)
+            result = KernelExecResult(
+                compiled=False, correctness=False, metadata={
+                    'processing_error': exception_traceback_str
+                }
+            )
+        finally:
+            # write to file (no eval_tag in the filepath)
+            with open(os.path.join(temp_dir, "..", f"reference_kbeval.json"), "w") as f:
+                f.write(json.dumps(result.model_dump(), indent=4))
+            logger.info(f"Reference code evaluation result: {json.dumps(result.model_dump(), indent=4)}")
+            if not args.measure_both:
+                exit(exit_code)
+
+
+    # we are here if we need to measure generated code, evaluate the custom kernel against the reference code
+
+    # read generated code from file
+    generated_model_src = open(os.path.join(args.wd, args.generated_code), "r").read()
+
     try:
         result = compile_and_eval_kernel(
             model_tag=args.model_tag,

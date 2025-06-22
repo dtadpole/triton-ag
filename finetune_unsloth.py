@@ -6,6 +6,7 @@ Enhanced with memory management, auto-tuning, and performance optimizations.
 
 import os
 import sys
+from datetime import datetime
 import yaml
 import torch
 import time
@@ -23,7 +24,8 @@ import torch.distributed as dist
 
 # Import local utilities
 from util import logger
-from data_util import load_experiences, create_dataset, CustomDataCollatorWithMasking
+from data_util import ExperienceDataset, SimpleDataCollator
+from huggingface_hub import HfApi, create_repo
 
 
 class OptimizedUnslothFineTuner:
@@ -140,6 +142,13 @@ class OptimizedUnslothFineTuner:
         optimal_workers = min(4, max(0, cpu_count // 2))
         self.config['training']['num_workers'] = optimal_workers
         
+        # Check if this is an AWQ model and adjust precision settings
+        model_name = self.config['model']['name']
+        if 'AWQ' in model_name.upper() or 'awq' in model_name.lower():
+            if self.local_rank == 0:
+                logger.info("AWQ quantized model detected - configuring for float16 precision")
+            self.config.setdefault('training', {})['use_awq_precision'] = True
+        
         if self.local_rank == 0:
             logger.info("Configuration auto-optimization complete")
     
@@ -201,20 +210,16 @@ class OptimizedUnslothFineTuner:
     
     def setup_dataset(self):
         """Setup training dataset with optimizations."""
-        # Load experiences from local directory
-        data_dir = self.config['data']['local_dir']
+        # Load experiences from processed directory
+        data_dir = self.config['data']['processed_dir']
         if self.local_rank == 0:
             logger.info(f"Loading experiences from: {data_dir}")
         
         try:
-            experiences = load_experiences(data_dir)
-            
-            # Create dataset with memory-aware filtering
-            self.dataset = create_dataset(
-                experiences, 
-                self.tokenizer,
-                self.config['model']['max_seq_length'],
-                self.local_rank
+            # Create dataset using data_util
+            self.dataset = ExperienceDataset(
+                data_dir=data_dir,
+                max_length=self.config['model']['max_seq_length']
             )
             
             if self.local_rank == 0:
@@ -233,17 +238,26 @@ class OptimizedUnslothFineTuner:
         output_dir.mkdir(parents=True, exist_ok=True)
         
         # Setup data collator with optimizations
-        data_collator = CustomDataCollatorWithMasking(
+        data_collator = SimpleDataCollator(
             tokenizer=self.tokenizer,
-            mlm=False,
-            ignore_index=-100,
-            max_length=self.config['model']['max_seq_length'],
-            pad_to_multiple_of=8,
-            use_dynamic_padding=True
+            pad_to_multiple_of=8
         )
         
         # Optimize training arguments
         num_workers = training_config.get('num_workers', 0)
+        
+        # Determine precision settings based on model type
+        use_awq_precision = training_config.get('use_awq_precision', False)
+        if use_awq_precision:
+            # AWQ models require fp16
+            use_fp16 = True
+            use_bf16 = False
+            if self.local_rank == 0:
+                logger.info("Using fp16 precision for AWQ model")
+        else:
+            # Regular precision logic
+            use_fp16 = not torch.cuda.get_device_capability()[0] >= 8
+            use_bf16 = torch.cuda.get_device_capability()[0] >= 8
         
         # Setup training arguments with optimizations
         training_args = TrainingArguments(
@@ -264,8 +278,8 @@ class OptimizedUnslothFineTuner:
             seed=training_config.get('seed', 3407),
             dataloader_pin_memory=True,
             dataloader_num_workers=num_workers,
-            fp16=not torch.cuda.get_device_capability()[0] >= 8,  # Use fp16 for older GPUs
-            bf16=torch.cuda.get_device_capability()[0] >= 8,      # Use bf16 for newer GPUs
+            fp16=use_fp16,  # Use determined fp16 setting
+            bf16=use_bf16,  # Use determined bf16 setting
             group_by_length=True,
             ddp_find_unused_parameters=False,
             report_to=None,  # Disable wandb/tensorboard
@@ -329,11 +343,13 @@ class OptimizedUnslothFineTuner:
     
     def save_model(self, output_path: Optional[str] = None):
         """Save the fine-tuned model with optimizations."""
+        time_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
         if output_path is None:
-            output_path = self.config['training']['output_dir']
+            output_path = os.path.join(self.config['training']['output_dir'], self.config['model']['name'], time_tag)
         
         output_path = Path(output_path)
         output_path.mkdir(parents=True, exist_ok=True)
+        self.output_path = output_path
         
         if self.local_rank == 0:
             logger.info(f"Saving model to {output_path}")
@@ -355,14 +371,187 @@ class OptimizedUnslothFineTuner:
             logger.error(f"Error saving model: {e}")
             raise
     
+    def upload_to_huggingface(self, model_path: Optional[str] = None, repo_name: str = None):
+        """Upload the fine-tuned model to Hugging Face Hub."""
+        if self.local_rank != 0:
+            return  # Only upload from rank 0
+            
+        # Get configuration for HF upload
+        upload_config = self.config.get('huggingface', {})
+        if not upload_config.get('upload', False):
+            logger.info("Hugging Face upload is disabled")
+            return
+        
+        if model_path is None:
+            model_path = self.output_path
+        
+        if repo_name is None:
+            repo_name = upload_config.get('repo_name')
+            
+        if not repo_name:
+            logger.error("No Hugging Face repository name specified")
+            return
+            
+        model_path = Path(model_path)
+        
+        try:
+            logger.info(f"Uploading model to Hugging Face: {repo_name}")
+            
+            # Initialize HF API
+            api = HfApi()
+            
+            # Create repository if it doesn't exist
+            try:
+                create_repo(
+                    repo_id=repo_name,
+                    token=upload_config.get('token'),
+                    private=upload_config.get('private', False),
+                    exist_ok=True
+                )
+                logger.info(f"Repository {repo_name} is ready")
+            except Exception as e:
+                logger.warning(f"Repository creation/check failed: {e}")
+            
+            # Upload all files in the model directory
+            api.upload_folder(
+                folder_path=str(model_path),
+                repo_id=repo_name,
+                token=upload_config.get('token'),
+                commit_message=f"Upload fine-tuned model - {upload_config.get('commit_message', 'Fine-tuned model')}",
+                ignore_patterns=["*.git*", "__pycache__", "*.pyc"]
+            )
+            
+            logger.info(f"Successfully uploaded model to https://huggingface.co/{repo_name}")
+            
+            # Create a model card if specified
+            if upload_config.get('create_model_card', True):
+                self._create_model_card(api, repo_name, upload_config)
+                
+        except Exception as e:
+            logger.error(f"Error uploading to Hugging Face: {e}")
+            logger.error("Make sure you have:")
+            logger.error("1. Set your HF_TOKEN environment variable or specify token in config")
+            logger.error("2. Have write access to the repository")
+            logger.error("3. Installed huggingface_hub: pip install huggingface_hub")
+    
+    def _create_model_card(self, api: HfApi, repo_name: str, upload_config: dict):
+        """Create a model card for the uploaded model."""
+        try:
+            model_card_content = f"""---
+library_name: peft
+base_model: {self.config['model']['name']}
+language:
+- en
+license: apache-2.0
+tags:
+- generated_from_trainer
+- triton-ag
+- unsloth
+- lora
+---
+
+# {repo_name}
+
+This model is a fine-tuned version of [{self.config['model']['name']}](https://huggingface.co/{self.config['model']['name']}) using Unsloth and LoRA.
+
+## Model Details
+
+- **Base Model:** {self.config['model']['name']}
+- **Fine-tuning Method:** LoRA (Low-Rank Adaptation)
+- **Max Sequence Length:** {self.config['model']['max_seq_length']}
+- **Training Examples:** {len(self.dataset) if hasattr(self, 'dataset') else 'N/A'}
+- **LoRA Rank:** {self.config['lora']['r']}
+- **LoRA Alpha:** {self.config['lora']['alpha']}
+
+## Training Configuration
+
+- **Epochs:** {self.config['training']['num_train_epochs']}
+- **Learning Rate:** {self.config['training']['learning_rate']}
+- **Batch Size:** {self.config['training']['per_device_batch_size']}
+- **Gradient Accumulation Steps:** {self.config['training']['gradient_accumulation_steps']}
+
+## Usage
+
+```python
+from unsloth import FastLanguageModel
+import torch
+
+# Load model
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name="{repo_name}",
+    max_seq_length={self.config['model']['max_seq_length']},
+    dtype=None,
+    load_in_4bit=True,
+)
+
+# Enable inference mode
+FastLanguageModel.for_inference(model)
+
+# Format your prompt
+messages = [
+    {{"role": "system", "content": "You are a helpful assistant."}},
+    {{"role": "user", "content": "Your question here"}}
+]
+
+formatted_prompt = tokenizer.apply_chat_template(
+    messages, 
+    tokenize=False, 
+    add_generation_prompt=True
+)
+
+# Generate
+inputs = tokenizer(formatted_prompt, return_tensors="pt")
+outputs = model.generate(**inputs, max_new_tokens=256, temperature=0.7)
+response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+print(response)
+```
+
+## Training Data
+
+This model was fine-tuned on processed conversation experiences for improved performance on specific tasks.
+
+## Limitations
+
+- This is a LoRA adapter that requires the base model to function
+- Performance may vary depending on the specific use case
+- The model inherits any limitations from the base model
+
+## Framework Versions
+
+- Unsloth: 2025.6.1
+- Transformers: 4.52.4
+- PyTorch: 2.7.0
+- PEFT: Latest
+
+"""
+            
+            # Upload model card
+            api.upload_file(
+                path_or_fileobj=model_card_content.encode(),
+                path_in_repo="README.md",
+                repo_id=repo_name,
+                token=upload_config.get('token'),
+                commit_message="Add model card"
+            )
+            
+            logger.info("Model card created successfully")
+            
+        except Exception as e:
+            logger.warning(f"Failed to create model card: {e}")
+    
     def test_model(self, prompt: str = "What is machine learning?", max_length: int = 256):
         """Test the fine-tuned model with optimizations."""
         if self.local_rank == 0:
             logger.info("Testing fine-tuned model...")
             
             try:
-                # Enable fast inference
-                FastLanguageModel.for_inference(self.model)
+                # Enable fast inference - handle quantized models
+                try:
+                    FastLanguageModel.for_inference(self.model)
+                except Exception as e:
+                    logger.warning(f"Fast inference mode failed, using regular mode: {e}")
+                    # For quantized models, we might need to use regular mode
+                    self.model.eval()
                 
                 # Format prompt in chat format
                 messages = [
@@ -381,16 +570,41 @@ class OptimizedUnslothFineTuner:
                 inputs = self.tokenizer(formatted_prompt, return_tensors="pt").to(self.device)
                 
                 with torch.no_grad():
-                    outputs = self.model.generate(
-                        **inputs,
-                        max_new_tokens=max_length,
-                        use_cache=True,
-                        temperature=0.7,
-                        top_p=0.9,
-                        do_sample=True,
-                        pad_token_id=self.tokenizer.eos_token_id,
-                        eos_token_id=self.tokenizer.eos_token_id,
-                    )
+                    try:
+                        # Try with unsloth's fast generation first
+                        outputs = self.model.generate(
+                            **inputs,
+                            max_new_tokens=max_length,
+                            use_cache=True,
+                            temperature=0.7,
+                            top_p=0.9,
+                            do_sample=True,
+                            pad_token_id=self.tokenizer.eos_token_id,
+                            eos_token_id=self.tokenizer.eos_token_id,
+                        )
+                    except Exception as gen_e:
+                        logger.warning(f"Fast generation failed, trying alternative approach: {gen_e}")
+                        # Fallback to more basic generation without some optimization parameters
+                        try:
+                            outputs = self.model.generate(
+                                input_ids=inputs['input_ids'],
+                                attention_mask=inputs.get('attention_mask'),
+                                max_new_tokens=max_length,
+                                temperature=0.7,
+                                do_sample=True,
+                                use_cache=False,  # Disable cache for quantized models
+                                pad_token_id=self.tokenizer.eos_token_id if self.tokenizer.eos_token_id else self.tokenizer.pad_token_id
+                            )
+                        except Exception as gen_e2:
+                            logger.warning(f"Alternative generation also failed, trying minimal approach: {gen_e2}")
+                            # Last resort: minimal generation parameters
+                            outputs = self.model.generate(
+                                inputs['input_ids'],
+                                max_new_tokens=min(max_length, 256),  # Limit tokens
+                                do_sample=False,  # Use greedy decoding
+                                use_cache=False,
+                                pad_token_id=self.tokenizer.eos_token_id if self.tokenizer.eos_token_id else self.tokenizer.pad_token_id
+                            )
                 
                 # Decode response
                 response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
@@ -399,6 +613,8 @@ class OptimizedUnslothFineTuner:
                 
             except Exception as e:
                 logger.error(f"Error during model testing: {e}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
     
     def run_full_pipeline(self):
         """Run the complete optimized fine-tuning pipeline."""
@@ -413,6 +629,9 @@ class OptimizedUnslothFineTuner:
             
             # Save model
             self.save_model()
+            
+            # Upload to Hugging Face (if configured)
+            self.upload_to_huggingface()
             
             # Test the model
             if self.local_rank == 0:
@@ -456,6 +675,30 @@ def main():
         action="store_true",
         help="Show detailed memory usage report"
     )
+    parser.add_argument(
+        "--upload-to-hf",
+        action="store_true",
+        default=True,
+        help="Upload model to Hugging Face Hub after training"
+    )
+    parser.add_argument(
+        "--hf-repo-user",
+        type=str,
+        default="dtadpole",
+        help="Hugging Face repository user name"
+    )
+    parser.add_argument(
+        "--hf-repo-model-name",
+        type=str,
+        default="KernelCoder",
+        help="Hugging Face repository model name (e.g., 'KernelCoder')"
+    )
+    parser.add_argument(
+        "--hf-create-model-card",
+        action="store_true",
+        default=True,
+        help="Create a model card for the uploaded model"
+    )
     
     args = parser.parse_args()
     
@@ -467,6 +710,18 @@ def main():
     
     # Initialize fine-tuner
     finetuner = OptimizedUnslothFineTuner(config_path=args.config)
+    
+    # Override HF settings from command line arguments
+    if args.upload_to_hf:
+        finetuner.config.setdefault('huggingface', {})
+        finetuner.config['huggingface']['upload'] = True
+        if args.hf_repo_user and args.hf_repo_model_name:
+            # find model name from config, extract the model size, from the last part of the model name
+            model_size = finetuner.config['model']['name'].split('-')[1:]
+            model_tag = f"{args.hf_repo_model_name}-{'-'.join(model_size)}"
+            time_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
+            finetuner.config['huggingface']['repo_name'] = f"{args.hf_repo_user}/{model_tag}_{time_tag}"
+            finetuner.config['huggingface']['create_model_card'] = args.hf_create_model_card
     
     if args.memory_report and torch.cuda.is_available():
         logger.info(f"GPU: {torch.cuda.get_device_name()}")
