@@ -17,6 +17,8 @@ AGENT_NAME = "DSPy_KernelCoder"
 AGENT_SHORT_NAME = "KC"
 AGENT_VERSION = "0.1"
 
+REACT_MAX_ITERS = 15
+
 # define a DSPy module for reference measurement
 class ReferenceMeasurement(dspy.Module):
     """Reference Measurement"""
@@ -30,7 +32,7 @@ class ReferenceMeasurement(dspy.Module):
         self.time_tag = time_tag
         self.dspy_tools = dspy_tools
         # initialize the react agent
-        self.react = dspy.ReAct("user_request: str, current_wd: str, model_tag: str, task_tag: str, time_tag: str, reference_filename: str -> reference_result: KernelExecResult", tools=self.dspy_tools)
+        self.react = dspy.ReAct("user_request: str, current_wd: str, model_tag: str, task_tag: str, time_tag: str, reference_filename: str -> reference_result: KernelExecResult", tools=self.dspy_tools, max_iters=REACT_MAX_ITERS)
 
     async def forward(self, reference_filename: str) -> KernelExecResult:
         # run the react agent
@@ -79,7 +81,7 @@ class CUDAIterativeCoder(dspy.Module):
         # initialize the signature
         self.signature = dspy.Signature("current_wd: str, model_tag: str, task_tag: str, time_tag: str, eval_tag: str, reference_filename: str, reference_runtime: float, prev_best_filename: str, prev_best_result: KernelExecResult -> generated_filename: str, result: KernelExecResult", instructions=self.custom_instruction)
         # initialize the react agent
-        self.react = dspy.ReAct(self.signature, tools=self.dspy_tools)
+        self.react = dspy.ReAct(self.signature, tools=self.dspy_tools, max_iters=REACT_MAX_ITERS)
 
     async def forward(self, reference_filename: str, reference_runtime: float, prev_best_filename: str = None, prev_best_result: KernelExecResult = None) -> tuple[str, str]:
         # run the react agent
