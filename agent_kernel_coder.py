@@ -1,21 +1,20 @@
-import os
-from datetime import datetime
-import traceback
-from typing import Union
-import asyncio
 import argparse
-from agents import (
-    Agent,
-    Runner,
-    RunConfig,
-    trace,
-    function_tool,
-    RunResult,
-    Tool,
-)
+import asyncio
+import os
+import traceback
+from datetime import datetime
+from typing import Union
+
+from agents import Agent, function_tool, RunConfig, Runner, RunResult, Tool, trace
 from agents.mcp import MCPServerStdio
-from util import load_agent_model, init_logging, get_next_run_folder, get_run_hooks, log_result_items
 from logger import logger
+from util import (
+    get_next_run_folder,
+    get_run_hooks,
+    init_logging,
+    load_agent_model,
+    log_result_items,
+)
 
 
 AGENT_NAME = "kernel_coder"
@@ -62,12 +61,12 @@ Start the next iteration if and only if the current iteration has completed, ens
 
 Task: {task}
 
-model_tag: `{model_tag}` 
+model_tag: `{model_tag}`
 task_tag: `{task_tag}`
 time_tag: `{time_tag}`
 rollout_id: `{rollout_id}`
 
-eval_tag: the `eval_tag` is `rollout_id + iteration_number`. iteration number starts from 1 and increases by 1 for each iteration. e.g. 
+eval_tag: the `eval_tag` is `rollout_id + iteration_number`. iteration number starts from 1 and increases by 1 for each iteration. e.g.
 -- for iteration 1, your eval_tag is '{rollout_id}_i01'
 -- for iteration 3, your eval_tag is '{rollout_id}_i03'
 -- for iteration 10, your eval_tag is '{rollout_id}_i10'
@@ -159,24 +158,36 @@ class ModelNew(nn.Module):
         return self.elementwise_add.elementwise_add_cuda(a, b)
 '''
 
+
 # this is the main function that will be called by the Runner
-async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, None] = None, model_name: Union[str, None] = None, rollout_id: int = 1):
+async def run_kernel_coder(
+    workspace_dir: str,
+    task: str,
+    provider: Union[str, None] = None,
+    model_name: Union[str, None] = None,
+    rollout_id: int = 1,
+):
 
     logger.info(f"Running [{AGENT_NAME}] [{workspace_dir}] with task: {task}")
 
-    model, model_settings, run_config, model_config = load_agent_model(AGENT_NAME, provider, model_name)
+    model, model_settings, run_config, model_config = load_agent_model(
+        AGENT_NAME, provider, model_name
+    )
 
-    MODEL_TAG = os.path.join(AGENT_NAME,
-                             f"{provider or model_config['provider']}",
-                             f"{model_name or model_config['model']}")
+    MODEL_TAG = os.path.join(
+        AGENT_NAME,
+        f"{provider or model_config['provider']}",
+        f"{model_name or model_config['model']}",
+    )
 
-    TASK_TAG = os.path.join(os.path.basename(os.path.dirname(task)),
-                            os.path.basename(task))
-
+    TASK_TAG = os.path.join(
+        os.path.basename(os.path.dirname(task)), os.path.basename(task)
+    )
+    print("start checkpoint_server")
     checkpoint_server = MCPServerStdio(
         params={
-            "command": "uv",
-            "args": ["run", "--with", "mcp", "mcp", "run", "checkpointServer.py"],
+            "command": "python",
+            "args": ["checkpointServer.py"],
         },
         client_session_timeout_seconds=10,
     )
@@ -194,7 +205,7 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
             },
         )
         logger.info(result)
-
+        print("start file_server")
         file_server = MCPServerStdio(
             params={
                 "command": "npx",
@@ -216,22 +227,24 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
         #     },
         #     client_session_timeout_seconds=120,
         # )
+        print("start kb_eval_iteration_server")
         kb_eval_iteration_server = MCPServerStdio(
             params={
-                "command": "uv",
-                "args": ["run", "--with", "mcp", "mcp", "run", "kbEvalMCPServer.py"],
+                "command": "python",
+                "args": ["kbEvalMCPServer.py"],
             },
             client_session_timeout_seconds=480,
         )
-        async with file_server as fs, kb_eval_iteration_server as kbs: #, sequential_thinking_server as sqs:
+        async with file_server as fs, kb_eval_iteration_server as kbs:  # , sequential_thinking_server as sqs:
             try:
+                print("define agent")
                 kernel_bench = Agent(
                     model=model,
                     name="kernel_bench",
                     instructions=KERNEL_CODER_SYSTEM_PROMPT.format(
                         workspace_dir=workspace_dir
                     ),
-                    mcp_servers=[fs, kbs, ckpts], #, sqs],
+                    mcp_servers=[fs, kbs, ckpts],  # , sqs],
                 )
                 prompt = KERNEL_CODER_NEXT_PROMPT.format(
                     task="""Implement CUDA Kernel (forward pass only) for the given PyTorch code in
@@ -249,22 +262,34 @@ async def run_kernel_coder(workspace_dir: str, task: str, provider: Union[str, N
                 run_hooks = get_run_hooks()
 
                 with trace("Kernel Coder"):
+                    print("start runner")
                     result = await Runner.run(
                         kernel_bench,
                         input=prompt,
-                        max_turns=run_config['max_turns'] if 'max_turns' in run_config else 50,
+                        max_turns=(
+                            run_config["max_turns"] if "max_turns" in run_config else 50
+                        ),
                         hooks=run_hooks,
                         run_config=RunConfig(
                             model_settings=model_settings,
                         ),
                     )
                     # collect a list of all the tools
-                    tools = [tool for tool in kernel_bench.tools if isinstance(tool, Tool)]
+                    tools = [
+                        tool for tool in kernel_bench.tools if isinstance(tool, Tool)
+                    ]
                     for mcp_server in kernel_bench.mcp_servers:
                         for tool in mcp_server._tools_list:
                             tools.append(tool)
                     # log result items
-                    log_result_items(tools, result, f"{AGENT_NAME}_r{rollout_id:02d}", MODEL_TAG, TASK_TAG, workspace_dir)
+                    log_result_items(
+                        tools,
+                        result,
+                        f"{AGENT_NAME}_r{rollout_id:02d}",
+                        MODEL_TAG,
+                        TASK_TAG,
+                        workspace_dir,
+                    )
                     logger.info(result.final_output)
                     return result.final_output
             except Exception as e:
@@ -289,22 +314,26 @@ async def main(args):
         workspace_dir = get_next_run_folder()
         logger.info(f"Working directory: {workspace_dir}")
 
-    print('='*50)
+    print("=" * 50)
     print(f"Running [{AGENT_NAME}] [{workspace_dir}] with task: {args.task}")
-    print('='*50)
+    print("=" * 50)
 
     tasks = []
     for rollout_id in range(1, args.total_rollouts + 1):
-        tasks.append(run_kernel_coder(workspace_dir,
-                                      args.task,
-                                      args.provider,
-                                      args.model_name,
-                                      rollout_id=rollout_id))
+        tasks.append(
+            run_kernel_coder(
+                workspace_dir,
+                args.task,
+                args.provider,
+                args.model_name,
+                rollout_id=rollout_id,
+            )
+        )
     await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
-        # argparse
+    # argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--workspace-dir", type=str, default="")
     parser.add_argument("-p", "--provider", type=str, default=None)
