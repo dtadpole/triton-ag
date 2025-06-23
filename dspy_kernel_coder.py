@@ -4,6 +4,7 @@ import os
 import shutil
 from datetime import datetime
 import asyncio
+import traceback
 import argparse
 from dspy_util import load_lm, load_instructions_for_module, DSPyToolCallback
 from util import logger, get_next_run_folder
@@ -74,11 +75,11 @@ class CUDAIterativeCoder(dspy.Module):
                 self.custom_instruction += f"\n\nOutput/generated_code:\n{example['generated_code']}\n"
 
         # initialize the signature
-        self.signature = dspy.Signature("current_wd: str, model_tag: str, task_tag: str, time_tag: str, eval_tag: str, reference_filename: str, prev_best_filename: str, prev_best_result: KernelExecResult -> generated_filename: str, generated_result: KernelExecResult", instructions=self.custom_instruction)
+        self.signature = dspy.Signature("current_wd: str, model_tag: str, task_tag: str, time_tag: str, eval_tag: str, reference_filename: str, prev_best_filename: str, prev_best_result: KernelExecResult -> generated_filename: str, result: KernelExecResult", instructions=self.custom_instruction)
         # initialize the react agent
         self.react = dspy.ReAct(self.signature, tools=self.dspy_tools)
 
-    async def forward(self, eval_tag: str, reference_filename: str, prev_best_filename: str = None, prev_best_result: KernelExecResult = None) -> tuple[str, KernelExecResult]:
+    async def forward(self, eval_tag: str, reference_filename: str, prev_best_filename: str = None, prev_best_result: KernelExecResult = None) -> tuple[str, str]:
         # run the react agent
         result = await self.react.acall(
             current_wd=self.current_wd,
@@ -91,8 +92,8 @@ class CUDAIterativeCoder(dspy.Module):
             prev_best_result=prev_best_result,
         )
         # logger.info(result.get("generated_filename", ""))
-        logger.info(f"[{eval_tag}] {json.dumps(result.get("generated_result", {}).model_dump(), indent=4)}")
-        return result.get("generated_filename", ""), result.get("generated_result", {})
+        logger.info(f"[{eval_tag}] {json.dumps(result.get("result", {}).model_dump(), indent=4)}")
+        return result.get("generated_filename", ""), result.get("result", {})
 
 
 class CUDARolloutPlanner(dspy.Module):
@@ -129,11 +130,13 @@ class CUDARolloutPlanner(dspy.Module):
 
         best_filename: str = None
         best_result: KernelExecResult = None
+        best_eval_tag: str = None
         for result in results:
-            if result[1].compiled and result[1].correctness and result[1].runtime > 0:
+            if result[1] is not None and result[1].compiled and result[1].correctness and result[1].runtime > 0:
                 if best_result is None or result[1].runtime < best_result.runtime:
                     best_filename = result[0]
                     best_result = result[1]
+                    best_eval_tag = result[2]
 
         if best_filename is not None:
             with open(best_filename, "r") as f:
@@ -141,30 +144,47 @@ class CUDARolloutPlanner(dspy.Module):
         else:
             best_code = ""
 
-        return reference_result, best_code, best_result
+        return reference_result, best_code, best_result, best_eval_tag
 
-    async def _run_rollout(self, rollout_id: int, reference_filename: str) -> tuple[str, KernelExecResult]:
+    async def _run_rollout(self, rollout_id: int, reference_filename: str) -> tuple[str, KernelExecResult, str]:
         """
         Run the rollout for the given reference filename.
         """
         best_filename: str = None
         best_result: KernelExecResult = None
+        best_eval_tag: str = None
 
         for iter_idx in range(self.num_iter):
             eval_tag = f"r{rollout_id:02d}_i{iter_idx+1:02d}"
-            generated_filename, generated_result = await self.cuda_iterative_coder.forward(
-                eval_tag,
-                reference_filename,
-                prev_best_filename=best_filename,
-                prev_best_result=best_result
-            )
+            success = False
+            try_count = 0
+            while not success and try_count < 3:
+                try_count += 1
+                try:
+                    generated_filename, generated_result = await self.cuda_iterative_coder.forward(
+                        eval_tag,
+                        reference_filename,
+                        prev_best_filename=best_filename,
+                        prev_best_result=best_result
+                    )
+                    success = True
+                except Exception as e:
+                    logger.error(f"Error in _run_rollout [{eval_tag}]: {e}")
+                    logger.error(traceback.format_exc())
+                    continue
+            # if the code generation failed, raise an exception
+            if not success:
+                logger.error(f"Failed to generate code for [{eval_tag}] after {try_count} tries")
+                raise Exception(f"Failed to generate code for [{eval_tag}] after {try_count} tries")
+
             # check if the generated code is better than the best result
             if generated_result.compiled and generated_result.correctness and generated_result.runtime > 0:
                 if best_result is None or generated_result.runtime < best_result.runtime:
                     best_filename = generated_filename
                     best_result = generated_result
+                    best_eval_tag = eval_tag
 
-        return best_filename, best_result
+        return best_filename, best_result, best_eval_tag
 
 
 async def run(lm: dspy.LM, tags: dict, args: argparse.Namespace):
@@ -237,8 +257,9 @@ async def run(lm: dspy.LM, tags: dict, args: argparse.Namespace):
             # run the rollout planner
             rollout_result = await rollout_planner(reference_code)
             logger.info(f"[{tags['model_tag']}] [{tags['task_tag']}] [{tags['time_tag']}] [reference] {json.dumps(rollout_result[0].model_dump(), indent=4)}")
-            logger.info(f"[{tags['model_tag']}] [{tags['task_tag']}] [{tags['time_tag']}] [best_code] {rollout_result[1]}")
-            logger.info(f"[{tags['model_tag']}] [{tags['task_tag']}] [{tags['time_tag']}] [best_result] {json.dumps(rollout_result[2].model_dump(), indent=4)}")
+            logger.info(f"[{tags['model_tag']}] [{tags['task_tag']}] [{tags['time_tag']}] [{rollout_result[3]}] {rollout_result[1]}")
+            logger.info(f"[{tags['model_tag']}] [{tags['task_tag']}] [{tags['time_tag']}] [{rollout_result[3]}] {json.dumps(rollout_result[2].model_dump(), indent=4)}")
+            logger.info(f"[{run_folder}]") # log the run folder
 
 
 def main():
