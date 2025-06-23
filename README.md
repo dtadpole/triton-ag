@@ -7,7 +7,10 @@
 ## When the devserver don't have nvidia-container-toolkit installed, install it with the following commands:
 
 # Add Proxy settings for Meta's devserver (P1848880359) to your ~/.bashrc and then run below commands
-source ~/.bashrc
+# source ~/.bashrc
+
+## To prune docker images, sometime docker build fails with proxy related error which is due to caching
+# docker builder prune
 
 sudo dnf install -y nvidia-container-toolkit
 sudo mkdir /etc/cdi
@@ -93,7 +96,7 @@ Note that our own version of KernelBench has increased dimension sizes for simpl
 
 ```bash
 make env
-with-proxy python agent_kernel_coder.py -p deepseek -m deepseek-chat
+python agent_kernel_coder.py -p deepseek -m deepseek-chat
 ```
 
 This will create a new working directory under `_run_{ddd}` and generate kernel implementation.
