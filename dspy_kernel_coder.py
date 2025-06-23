@@ -50,16 +50,18 @@ class ReferenceMeasurement(dspy.Module):
         return result.get("reference_result", {})
     
 
+
 class CUDAIterativeCoder(dspy.Module):
     """CUDA Iteration Coder"""
 
-    def __init__(self, lm: dspy.LM, current_wd: str, model_tag: str, task_tag: str, time_tag: str, dspy_tools: list[dspy.Tool]):
+    def __init__(self, lm: dspy.LM, current_wd: str, model_tag: str, task_tag: str, time_tag: str, eval_tag: str, dspy_tools: list[dspy.Tool]):
         super().__init__()
         self.lm = lm
         self.current_wd = current_wd
         self.model_tag = model_tag
         self.task_tag = task_tag
         self.time_tag = time_tag
+        self.eval_tag = eval_tag
         self.dspy_tools = dspy_tools
         
         configs = load_instructions_for_module("CUDAIterativeCoder")
@@ -75,24 +77,25 @@ class CUDAIterativeCoder(dspy.Module):
                 self.custom_instruction += f"\n\nOutput/generated_code:\n{example['generated_code']}\n"
 
         # initialize the signature
-        self.signature = dspy.Signature("current_wd: str, model_tag: str, task_tag: str, time_tag: str, eval_tag: str, reference_filename: str, prev_best_filename: str, prev_best_result: KernelExecResult -> generated_filename: str, result: KernelExecResult", instructions=self.custom_instruction)
+        self.signature = dspy.Signature("current_wd: str, model_tag: str, task_tag: str, time_tag: str, eval_tag: str, reference_filename: str, reference_runtime: float, prev_best_filename: str, prev_best_result: KernelExecResult -> generated_filename: str, result: KernelExecResult", instructions=self.custom_instruction)
         # initialize the react agent
         self.react = dspy.ReAct(self.signature, tools=self.dspy_tools)
 
-    async def forward(self, eval_tag: str, reference_filename: str, prev_best_filename: str = None, prev_best_result: KernelExecResult = None) -> tuple[str, str]:
+    async def forward(self, reference_filename: str, reference_runtime: float, prev_best_filename: str = None, prev_best_result: KernelExecResult = None) -> tuple[str, str]:
         # run the react agent
         result = await self.react.acall(
             current_wd=self.current_wd,
             model_tag=self.model_tag,
             task_tag=self.task_tag,
             time_tag=self.time_tag,
-            eval_tag=eval_tag,
+            eval_tag=self.eval_tag,
             reference_filename=reference_filename,
+            reference_runtime=reference_runtime,
             prev_best_filename=prev_best_filename,
             prev_best_result=prev_best_result,
         )
         # logger.info(result.get("generated_filename", ""))
-        logger.info(f"[{eval_tag}] {json.dumps(result.get("result", {}).model_dump(), indent=4)}")
+        logger.info(f"[{self.eval_tag}] {json.dumps(result.get("result", {}).model_dump(), indent=4)}")
         return result.get("generated_filename", ""), result.get("result", {})
 
 
@@ -112,7 +115,7 @@ class CUDARolloutPlanner(dspy.Module):
 
         self.reference_measurement = ReferenceMeasurement(lm, current_wd, model_tag, task_tag, time_tag, dspy_tools)
 
-        self.cuda_iterative_coder = CUDAIterativeCoder(lm, current_wd, model_tag, task_tag, time_tag, dspy_tools)
+        # self.cuda_iterative_coder = CUDAIterativeCoder(lm, current_wd, model_tag, task_tag, time_tag, dspy_tools)
 
     async def forward(self, reference_code: str) -> tuple[KernelExecResult, str, KernelExecResult]:
         # write reference code to the run folder
@@ -122,10 +125,11 @@ class CUDARolloutPlanner(dspy.Module):
 
         # run the reference measurement
         reference_result = await self.reference_measurement.forward(reference_filename)
+        reference_runtime = reference_result.runtime
         # start num_rollout tasks in parallel
         tasks = []
         for rollout_idx in range(self.num_rollout):
-            tasks.append(self._run_rollout(rollout_idx+1, reference_filename))
+            tasks.append(self._run_rollout(rollout_idx+1, reference_filename, reference_runtime))
         results = await asyncio.gather(*tasks)
 
         best_filename: str = None
@@ -146,7 +150,7 @@ class CUDARolloutPlanner(dspy.Module):
 
         return reference_result, best_code, best_result, best_eval_tag
 
-    async def _run_rollout(self, rollout_id: int, reference_filename: str) -> tuple[str, KernelExecResult, str]:
+    async def _run_rollout(self, rollout_id: int, reference_filename: str, reference_runtime: float) -> tuple[str, KernelExecResult, str]:
         """
         Run the rollout for the given reference filename.
         """
@@ -156,14 +160,15 @@ class CUDARolloutPlanner(dspy.Module):
 
         for iter_idx in range(self.num_iter):
             eval_tag = f"r{rollout_id:02d}_i{iter_idx+1:02d}"
+            cuda_iterative_coder = CUDAIterativeCoder(self.lm, self.current_wd, self.model_tag, self.task_tag, self.time_tag, eval_tag, self.dspy_tools)
             success = False
             try_count = 0
             while not success and try_count < 3:
                 try_count += 1
                 try:
-                    generated_filename, generated_result = await self.cuda_iterative_coder.forward(
-                        eval_tag,
+                    generated_filename, generated_result = await cuda_iterative_coder.forward(
                         reference_filename,
+                        reference_runtime,
                         prev_best_filename=best_filename,
                         prev_best_result=best_result
                     )
