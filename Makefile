@@ -75,10 +75,11 @@ vllm-qwen3-32b:
 	--enable-auto-tool-choice \
 	--tool-call-parser hermes
 
-vllm-qwen3-32b_devserver:
+vllm-qwen3-32b-devserver:
 	vllm serve Qwen/Qwen3-32B \
 	--max_model_len 40960 \
 	--enable-auto-tool-choice \
+	--tensor-parallel-size 4 \
 	--tool-call-parser hermes
 
 sglang-qwen3-8b:

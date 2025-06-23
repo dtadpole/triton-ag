@@ -29,6 +29,13 @@ export http_no_proxy='\''\'\'''\''.facebook.com|.tfbnw.net|*.fb.com'\''\'\'
 ## clone the repo to devserver
 git clone https://github.com/dtadpole/triton-ag
 cd triton-ag
+
+## Manifold: Meta's version of s3
+## The manifold bucket for this project: llm_models/tree/huggingface/
+## Basic commands https://www.internalfb.com/wiki/Manifold/Getting_Started/Manifold_CLI/
+## It only works on the meta devserver !!!!
+manifold ls llm_models/tree/huggingface/hub/
+
 ## After setting up proxy and docker on devserver, build the docker image using the following commands:
 make build_docker
 
