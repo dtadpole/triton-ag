@@ -67,6 +67,7 @@ RUN apt-get -o APT::Sandbox::User=root update && apt-get -o APT::Sandbox::User=r
 
 # # Run the installer then remove it
 # RUN sh /uv-installer.sh && rm /uv-installer.sh
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Ensure the installed binary is on the `PATH`
 ENV PATH="/root/.local/bin/:$PATH"

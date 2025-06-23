@@ -5,6 +5,10 @@
 ```bash
 ## devserver specific: install nvidia-container-toolkit
 ## When the devserver don't have nvidia-container-toolkit installed, install it with the following commands:
+
+# Add Proxy settings for Meta's devserver (P1848880359) to your ~/.bashrc and then run below commands
+source ~/.bashrc
+
 sudo dnf install -y nvidia-container-toolkit
 sudo mkdir /etc/cdi
 sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
@@ -53,7 +57,7 @@ e.g.
 -- for Claude, store your API key in file ${HOME}/.keys/anthropic.api.key
 -- for Deepseek, store your API key in file ${HOME}/.keys/deepseek.api.key
 -- for Gemini, store your API key in file ${HOME}/.keys/gemini.api.key
--- for OpenAI, store your API key in file ${HOME}/.keys/gemini.api.key
+-- for OpenAI, store your API key in file ${HOME}/.keys/openai.api.key
 
 use model.yaml to add and/or configure models.
 
@@ -89,7 +93,7 @@ Note that our own version of KernelBench has increased dimension sizes for simpl
 
 ```bash
 make env
-python agent_kernel_coder.py -p deepseek -m deepseek-chat
+with-proxy python agent_kernel_coder.py -p deepseek -m deepseek-chat
 ```
 
 This will create a new working directory under `_run_{ddd}` and generate kernel implementation.
