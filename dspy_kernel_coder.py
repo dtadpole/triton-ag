@@ -261,9 +261,12 @@ async def run(lm: dspy.LM, tags: dict, args: argparse.Namespace):
 
             # run the rollout planner
             rollout_result = await rollout_planner(reference_code)
-            logger.info(f"[{tags['model_tag']}] [{tags['task_tag']}] [{tags['time_tag']}] [reference] {json.dumps(rollout_result[0].model_dump(), indent=4)}")
-            logger.info(f"[{tags['model_tag']}] [{tags['task_tag']}] [{tags['time_tag']}] [{rollout_result[3]}] {rollout_result[1]}")
-            logger.info(f"[{tags['model_tag']}] [{tags['task_tag']}] [{tags['time_tag']}] [{rollout_result[3]}] {json.dumps(rollout_result[2].model_dump(), indent=4)}")
+            if rollout_result[0] is not None:
+                logger.info(f"[{tags['model_tag']}] [{tags['task_tag']}] [{tags['time_tag']}] [reference] {json.dumps(rollout_result[0].model_dump(), indent=4)}")
+            if rollout_result[1] is not None:
+                logger.info(f"[{tags['model_tag']}] [{tags['task_tag']}] [{tags['time_tag']}] [{rollout_result[3]}] {rollout_result[1]}")
+            if rollout_result[2] is not None:
+                logger.info(f"[{tags['model_tag']}] [{tags['task_tag']}] [{tags['time_tag']}] [{rollout_result[3]}] {json.dumps(rollout_result[2].model_dump(), indent=4)}")
             logger.info(f"[{run_folder}]") # log the run folder
 
 
