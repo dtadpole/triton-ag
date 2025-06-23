@@ -38,7 +38,8 @@ vllm_env:
 	docker run -it  --gpus all --net=host -p 8081:8081 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/triton_ag /bin/bash
 
 mlflow:
-	mlflow server --host localhost --port 5051
+	# mlflow server --host localhost --port 5051
+	mlflow server --host localhost --port 5051 --backend-store-uri sqlite:///mlflow.sqlite
 
 kbEval:
 	python kbEvalRemoteServer.py
