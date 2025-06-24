@@ -1,9 +1,13 @@
-ENV https_proxy="http://fwdproxy:8080"
-ENV http_proxy="http://fwdproxy:8080"
-
-ARG WORK_DIR=none
 FROM pytorch/pytorch:2.1.1-cuda12.1-cudnn8-devel
+ARG WORK_DIR=none
+ARG HTTP_PROXY="http://fwdproxy:8080"
+ARG HTTPS_PROXY="http://fwdproxy:8080"
 
+
+RUN echo 'APT::Sandbox::User "root";' | tee -a /etc/apt/apt.conf.d/10sandbox
+
+
+# add -o APT::Sandbox::User=root for proxy to work
 RUN apt-get -o APT::Sandbox::User=root update && apt-get -o APT::Sandbox::User=root install -y less nano git
 
 # Install stable packages first for better caching
@@ -54,14 +58,18 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install \
     mlflow
 
+
+# RUN echo 'APT::Sandbox::User "root";' | tee -a /etc/apt/apt.conf.d/10sandbox
 # The installer requires curl (and certificates) to download the release archive
 RUN apt-get -o APT::Sandbox::User=root update && apt-get -o APT::Sandbox::User=root install -y --no-install-recommends curl ca-certificates
+
 
 # Download the latest installer
 # ADD https://astral.sh/uv/install.sh /uv-installer.sh
 
 # # Run the installer then remove it
 # RUN sh /uv-installer.sh && rm /uv-installer.sh
+
 
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
@@ -78,3 +86,10 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.5/install.sh | b
     ln -s "$NVM_DIR/versions/node/$(nvm version)/bin/node" /usr/local/bin/node && \
     ln -s "$NVM_DIR/versions/node/$(nvm version)/bin/npm" /usr/local/bin/npm && \
     ln -s "$NVM_DIR/versions/node/$(nvm version)/bin/npx" /usr/local/bin/npx
+
+    RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install \
+    vllm
+
+RUN npm config set proxy http://fwdproxy:8080
+RUN npm config set https-proxy http://fwdproxy:8080

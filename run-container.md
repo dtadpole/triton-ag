@@ -36,6 +36,12 @@ python3 -m sglang.launch_server \
         --tp-size 4 \
         --reasoning-parser qwen3 \
 
+
+/root/run.sh /root/.venv/bin/python3 -m sglang.launch_server --model-path Qwen/Qwen3-4B-AWQ     --lora-paths my_adapter=dtadpole/KernelCoder-4B-AWQ_20250621-160317 --max-loras-per-batch 1 --lora-backend triton --disable-radix-cache --context-length 32768 --host 0.0.0.0 --port 8081 --tool-call-parser qwen25 --dp 1
+
+
+/root/run.sh /root/.venv/bin/python3 -m sglang.launch_server --model-path Qwen/Qwen3-32B-AWQ     --lora-paths my_adapter=dtadpole/KernelCoder-32B-AWQ_20250621-161329 --max-loras-per-batch 1 --lora-backend triton --disable-radix-cache --context-length 32768 --host 0.0.0.0 --port 8081 --tool-call-parser qwen25 --dp 1
+
 ========================================
 
 docker ps
@@ -64,23 +70,7 @@ sh cuda_12.9.0_575.51.03_linux.run
 rm cuda_12.9.0_575.51.03_linux.run
 
 
-python -m vllm.entrypoints.openai.api_server \
-  --model unsloth/Qwen3-32B-bnb-4bit \
-  --host 0.0.0.0 \
-  --port 8091 \
-  --dtype bfloat16 \
-  --trust-remote-code \
-  --quantization bitsandbytes \
-  --load-format bitsandbytes \
-  --max-model-len 40960 \
-  --gpu-memory-utilization 0.9 \
-  --pipeline-parallel-size 4 \
-  --data-parallel-size 1 \
-  --tensor-parallel-size 1 \
-  --enable-auto-tool-choice \
-  --tool-call-parser hermes \
-  --reasoning-parser qwen3 \
-  --disable-log-requests
+/root/.venv/bin/python3 -m vllm.entrypoints.openai.api_server  --model Qwen/Qwen3-4B --enable-lora --lora-modules my_adapter=dtadpole/KernelCoder-4B_20250621-071556 --max-lora-rank 64 --host 0.0.0.0  --port 8091  --dtype bfloat16  --trust-remote-code  --quantization bitsandbytes  --load-format bitsandbytes  --max-model-len 32768  --gpu-memory-utilization 0.9  --pipeline-parallel-size 1  --data-parallel-size 1  --tensor-parallel-size 1 --enable-auto-tool-choice  --tool-call-parser hermes  --reasoning-parser qwen3  --disable-log-requests
 
 
 ========================================

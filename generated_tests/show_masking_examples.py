@@ -5,7 +5,7 @@ Script to show actual examples of masked vs non-masked tokens with real words.
 
 import yaml
 from unsloth import FastLanguageModel
-from data_util import create_dataset, CustomDataCollatorWithMasking
+from data_processor import create_dataset, CustomDataCollatorWithMasking
 from util import logger
 import torch
 

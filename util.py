@@ -24,6 +24,13 @@ from logger import logger
 from pydantic.json_schema import to_jsonable_python
 
 
+def is_devserver() -> bool:
+    import socket
+
+    hostname = socket.gethostname()
+    return "facebook.com" in hostname
+
+
 def init_logging(agent_name: str):
     # enable_verbose_stdout_logging()
     # stdout_logger = logging.getLogger("agents")
@@ -115,13 +122,18 @@ def load_model(provider: str, model: str):
         model_settings = ModelSettings()
 
     # add proxy server if running on devserver
-    client = AsyncOpenAI(
-        api_key=api_key,
-        base_url=base_url,
-        http_client=httpx.AsyncClient(proxy=httpx.Proxy("http://fwdproxy:8080")),
-        timeout=60,
-        max_retries=3,
-    )
+    if is_devserver():
+        client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            http_client=httpx.AsyncClient(proxy=httpx.Proxy("http://fwdproxy:8080")),
+            timeout=60,
+            max_retries=3,
+        )
+    else:
+        client = AsyncOpenAI(
+            api_key=api_key, base_url=base_url, timeout=60, max_retries=3
+        )
 
     model = OpenAIChatCompletionsModel(
         model=model_name,

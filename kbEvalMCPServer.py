@@ -81,6 +81,143 @@ def upload_recap_to_s3(current_wd: str,
         logger.error(traceback.format_exc())
         return f"Error pushing to s3: {e}"
 
+@server.tool(
+    name="kb_eval_reference",
+    description="Run kernel bench evaluation for the reference code",
+)
+async def kb_eval_reference(
+    current_wd: str = Field(..., description="The current working directory"),
+    model_tag: str = Field(..., description="The tag of the model"),
+    task_tag: str = Field(..., description="The tag of the task"),
+    time_tag: str = Field(..., description="The tag of the time"),
+    reference_code_filename: str = Field(..., description="The filename of the reference code"),
+) -> KernelExecResult:
+    try:
+        if not is_subfolder(parent_folder=os.getcwd(), child_folder=current_wd):
+            raise ValueError(
+                f"Working directory {current_wd} is not a subfolder of cwd {os.getcwd()}"
+            )
+
+        # read reference code
+        with open(os.path.join(current_wd, reference_code_filename), "r") as f:
+            reference_code = f.read()
+        # connect to remote server
+        server_url = pick_server()
+
+        # send request to remote server
+        # logger.info(f"Sending request to remote server {server_url}")
+        response = requests.post(f"{server_url}/kb_eval_ref", data=json.dumps({
+            "model_tag": model_tag,
+            "task_tag": task_tag,
+            "time_tag": time_tag,
+            "reference_code": reference_code,
+        }), headers={"Content-Type": "application/json"})
+
+        # write response to file
+        response_json = json.loads(response.text)
+        if "metadata" not in response_json:
+            response_json["metadata"] = {}
+        response_json["metadata"] = response_json["metadata"] | {
+            "model_tag": model_tag,
+            "task_tag": task_tag,
+            "time_tag": time_tag,
+        }
+        with open(f"{current_wd}/kbeval_reference_{time_tag}.result.json", "w") as f:
+            f.write(json.dumps(response_json, indent=4))
+        logger.info(f"Response from remote server: {json.dumps(response_json, indent=4)}")
+
+        # upload recap to s3
+        upload_recap_to_s3(current_wd,
+                             model_tag,
+                             task_tag,
+                             "reference",
+                             time_tag,
+                             response_json,
+                             reference_code,
+                             "",
+                             recap="Benchmark the reference code")
+        
+        return KernelExecResult.model_validate_json(json.dumps(response_json))
+    
+    except Exception as e:
+        logger.error(f"Error in kb_eval: {e}")
+        logger.error(traceback.format_exc())
+        raise e
+
+@server.tool(
+    name="kb_eval_dspy",
+    description="Run kernel bench evaluation and return the evaluation result",
+)
+async def kb_eval_dspy(
+    rationale: str = Field(..., description="The rationale for the generated code"),
+    current_wd: str = Field(..., description="The current working directory"),
+    model_tag: str = Field(..., description="The tag of the model"),
+    task_tag: str = Field(..., description="The tag of the task"),
+    time_tag: str = Field(..., description="The tag of the time"),
+    eval_tag: str = Field(..., description="The tag of the iteration"),
+    reference_code_filename: str = Field(..., description="The filename of the reference code"),
+    generated_code_filename: str = Field(..., description="The filename of the generated code"),
+) -> KernelExecResult:
+    try:
+        if not is_subfolder(parent_folder=os.getcwd(), child_folder=current_wd):
+            raise ValueError(
+                f"Working directory {current_wd} is not a subfolder of cwd {os.getcwd()}"
+            )
+
+        # read reference code
+        with open(os.path.join(current_wd, reference_code_filename), "r") as f:
+            reference_code = f.read()
+        # read generated code
+        with open(os.path.join(current_wd, generated_code_filename), "r") as f:
+            generated_code = f.read()
+
+        # connect to remote server
+        server_url = pick_server()
+
+        # send request to remote server
+        # logger.info(f"Sending request to remote server {server_url}")
+        response = requests.post(f"{server_url}/kb_eval", data=json.dumps({
+            "model_tag": model_tag,
+            "task_tag": task_tag,
+            "eval_tag": eval_tag,
+            "time_tag": time_tag,
+            "reference_code": reference_code,
+            "generated_code": generated_code,
+        }), headers={"Content-Type": "application/json"})
+
+        # write response to file
+        response_json = json.loads(response.text)
+        if "metadata" not in response_json:
+            response_json["metadata"] = {}
+        response_json["metadata"] = response_json["metadata"] | {
+            "model_tag": model_tag,
+            "task_tag": task_tag,
+            "eval_tag": eval_tag,
+            "time_tag": time_tag,
+        }
+        result_filename = f"{current_wd}/kbeval_{eval_tag}_{time_tag}.result.json"
+        with open(result_filename, "w") as f:
+            f.write(json.dumps(response_json, indent=4))
+        logger.info(f"Response from remote server: {json.dumps(response_json, indent=4)}")
+
+        # upload recap to s3
+        upload_recap_to_s3(current_wd,
+                             model_tag,
+                             task_tag,
+                             eval_tag,
+                             time_tag,
+                             response_json,
+                             reference_code,
+                             generated_code,
+                             recap=rationale)
+        
+        return KernelExecResult.model_validate_json(json.dumps(response_json))
+    
+    except Exception as e:
+        logger.error(f"Error in kb_eval_dspy: {e}")
+        logger.error(traceback.format_exc())
+        raise e
+
 
 @server.tool(
     name="kb_eval_iteration",
@@ -126,12 +263,12 @@ async def kb_eval_iteration(
         response_json = json.loads(response.text)
         if "metadata" not in response_json:
             response_json["metadata"] = {}
-        response_json["metadata"] = {
+        response_json["metadata"] = response_json["metadata"] | {
             "model_tag": model_tag,
             "task_tag": task_tag,
             "eval_tag": eval_tag,
             "time_tag": time_tag,
-        } | response_json["metadata"]
+        }
         with open(f"{current_wd}/kbeval_{eval_tag}_{time_tag}.result.json", "w") as f:
             f.write(json.dumps(response_json, indent=4))
         logger.info(f"Response from remote server: {json.dumps(response_json, indent=4)}")

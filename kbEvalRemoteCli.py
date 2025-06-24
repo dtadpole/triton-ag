@@ -29,6 +29,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval_tag", type=str, default="eval_tag")
     parser.add_argument("--reference_code", type=str, default="elemAddRef.py")
     parser.add_argument("--generated_code", type=str, default="elemAddCuda.py")
+    parser.add_argument("--measure_reference", action="store_true")
     args = parser.parse_args()
 
     # read from file
@@ -37,14 +38,23 @@ if __name__ == "__main__":
 
     # connect to FastAPI server
     server_url = "http://localhost:5678"
-    response = requests.post(f"{server_url}/kb_eval", data=json.dumps({
-        "model_tag": args.model_tag,
-        "task_tag": args.task_tag,
-        "eval_tag": args.eval_tag,
-        "time_tag": datetime.now().strftime("%Y%m%d_%H%M%S"),
-        "reference_code": reference_model_src,
-        "generated_code": generated_model_src,
-    }), headers={"Content-Type": "application/json"})
+    if args.measure_reference:
+        response = requests.post(f"{server_url}/kb_eval_ref", data=json.dumps({
+            "model_tag": args.model_tag,
+            "task_tag": args.task_tag,
+            "time_tag": datetime.now().strftime("%Y%m%d_%H%M%S"),
+            "reference_code": reference_model_src,
+        }), headers={"Content-Type": "application/json"})
+        print(json.dumps(response.json(), indent=4))
+    else:
+        response = requests.post(f"{server_url}/kb_eval", data=json.dumps({
+            "model_tag": args.model_tag,
+            "task_tag": args.task_tag,
+            "eval_tag": args.eval_tag,
+            "time_tag": datetime.now().strftime("%Y%m%d_%H%M%S"),
+            "reference_code": reference_model_src,
+            "generated_code": generated_model_src,
+        }), headers={"Content-Type": "application/json"})
+        print(json.dumps(response.json(), indent=4))
 
-    print(json.dumps(response.json(), indent=4))
     
