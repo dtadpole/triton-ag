@@ -1,21 +1,20 @@
-import os
-import asyncio
 import argparse
+import asyncio
+import os
 from typing import Union
-from agents import (
-    Agent,
-    Runner,
-    RunConfig,
-    trace,
-    function_tool,
-    RunResult,
-)
+
+from agents import Agent, function_tool, RunConfig, Runner, RunResult, trace
 from agents.mcp import MCPServerStdio
-from util import load_agent_model, init_logging, get_next_run_folder, get_run_hooks, log_result_items
 from logger import logger
 from pydantic import Field
 from pydantic.json_schema import to_jsonable_python
-
+from util import (
+    get_next_run_folder,
+    get_run_hooks,
+    init_logging,
+    load_agent_model,
+    log_result_items,
+)
 
 
 AGENT_NAME = "triton_coder"
@@ -78,50 +77,76 @@ async def triton_coder(
 
 
 # this is the main function that will be called by the Runner
-async def run_triton_coder(workspace_dir: str, task: str, provider: Union[str, None] = None, model_name: Union[str, None] = None):
+async def run_triton_coder(
+    workspace_dir: str,
+    task: str,
+    provider: Union[str, None] = None,
+    model_name: Union[str, None] = None,
+):
 
     logger.info(f"Running [{AGENT_NAME}] [{workspace_dir}] with task: {task}")
 
-    model, model_settings, run_config, model_config = load_agent_model(AGENT_NAME, provider, model_name)
+    model, model_settings, run_config, model_config = load_agent_model(
+        AGENT_NAME, provider, model_name
+    )
 
-    TASK_NAME = os.path.join(AGENT_NAME, 
-                             os.path.basename(os.path.dirname(task)),
-                             os.path.basename(task))
+    TASK_NAME = os.path.join(
+        AGENT_NAME, os.path.basename(os.path.dirname(task)), os.path.basename(task)
+    )
 
-    MODEL_TAG = f"{provider or model_config['provider']}_{model_name or model_config['model']}"
+    TASK_TAG = os.path.join(
+        os.path.basename(os.path.dirname(task)), os.path.basename(task)
+    )
 
+    MODEL_TAG = (
+        f"{provider or model_config['provider']}_{model_name or model_config['model']}"
+    )
+
+    print("start checkpoint_server")
     checkpoint_server = MCPServerStdio(
         params={
-            "command": "uv",
-            "args": ["run", "--with", "mcp", "mcp", "run", "checkpointServer.py"],
-        }
+            "command": "python",
+            "args": ["checkpointServer.py"],
+        },
+        client_session_timeout_seconds=10,
     )
-    async with checkpoint_server as cs:
-        result = await cs.call_tool(
+    async with checkpoint_server as ckpts:
+        result = await ckpts.call_tool(
             tool_name="init_workspace_folder",
             arguments={
                 "workspace_folder": workspace_dir,
-                "include_verifier": True,
+                "reference_pytorch_code": task,
+                "environ_vars": {
+                    "provider": provider,
+                    "model_name": model_name,
+                },
+                "include_verifier": False,
             },
         )
         logger.info(result)
 
+        current_path = os.path.join(workspace_dir, "current")
+        os.makedirs(current_path, exist_ok=True)
         file_server = MCPServerStdio(
             params={
                 "command": "npx",
                 "args": [
                     "-y",
                     "@modelcontextprotocol/server-filesystem",
-                    os.path.join(workspace_dir, "current"),
+                    current_path,
                 ],
             }
         )
         code_run_server = MCPServerStdio(
+            # params={
+            #     "command": "uv",
+            #     "args": ["run", "--with", "mcp", "mcp", "run", "codeRunServer.py"],
+            # },
             params={
-                "command": "uv",
-                "args": ["run", "--with", "mcp", "mcp", "run", "codeRunServer.py"],
+                "command": "python",
+                "args": ["codeRunServer.py"],
             },
-            client_session_timeout_seconds=120,
+            client_session_timeout_seconds=480,
         )
         async with file_server as fs, code_run_server as crs:
             try:
@@ -131,7 +156,7 @@ async def run_triton_coder(workspace_dir: str, task: str, provider: Union[str, N
                     instructions=TRITON_CODER_SYSTEM_PROMPT.format(
                         workspace_dir=workspace_dir
                     ),
-                    mcp_servers=[fs, cs, crs],
+                    mcp_servers=[fs, ckpts, crs],
                 )
                 prompt = TRITON_CODER_NEXT_PROMPT.format(
                     task=task, workspace_dir=workspace_dir
@@ -143,13 +168,30 @@ async def run_triton_coder(workspace_dir: str, task: str, provider: Union[str, N
                     result = await Runner.run(
                         triton_coder,
                         input=prompt,
-                        max_turns=run_config['max_turns'] if 'max_turns' in run_config else 50,
+                        max_turns=(
+                            run_config["max_turns"] if "max_turns" in run_config else 50
+                        ),
                         hooks=run_hooks,
                         run_config=RunConfig(
                             model_settings=model_settings,
                         ),
                     )
-                    log_result_items(result, TASK_NAME, MODEL_TAG, workspace_dir)
+                    # collect a list of all the tools
+                    tools = [
+                        tool for tool in triton_coder.tools if isinstance(tool, Tool)
+                    ]
+                    for mcp_server in triton_coder.mcp_servers:
+                        for tool in mcp_server._tools_list:
+                            tools.append(tool)
+                    # log result items
+                    log_result_items(
+                        tools,
+                        result,
+                        f"{AGENT_NAME}",
+                        MODEL_TAG,
+                        TASK_TAG,
+                        workspace_dir,
+                    )
                     logger.info(result.final_output)
                     return result.final_output
             except Exception as e:
@@ -157,8 +199,6 @@ async def run_triton_coder(workspace_dir: str, task: str, provider: Union[str, N
                 return f"Error running Triton Coder: {e}"
             finally:
                 logger.info(f"Agent [{AGENT_NAME}] completed!")
-
-
 
 
 if __name__ == "__main__":
@@ -184,4 +224,6 @@ if __name__ == "__main__":
         workspace_dir = get_next_run_folder()
         logger.info(f"Working directory: {workspace_dir}")
 
-    asyncio.run(run_triton_coder(workspace_dir, args.input, args.provider, args.model_name))
+    asyncio.run(
+        run_triton_coder(workspace_dir, args.input, args.provider, args.model_name)
+    )
