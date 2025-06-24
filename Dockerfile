@@ -6,6 +6,7 @@ ARG HTTPS_PROXY="http://fwdproxy:8080"
 
 RUN echo 'APT::Sandbox::User "root";' | tee -a /etc/apt/apt.conf.d/10sandbox
 
+
 # add -o APT::Sandbox::User=root for proxy to work
 RUN apt-get -o APT::Sandbox::User=root update && apt-get -o APT::Sandbox::User=root install -y less nano git
 
@@ -62,11 +63,14 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # The installer requires curl (and certificates) to download the release archive
 RUN apt-get -o APT::Sandbox::User=root update && apt-get -o APT::Sandbox::User=root install -y --no-install-recommends curl ca-certificates
 
-# # Download the latest installer
+
+# Download the latest installer
 # ADD https://astral.sh/uv/install.sh /uv-installer.sh
 
 # # Run the installer then remove it
 # RUN sh /uv-installer.sh && rm /uv-installer.sh
+
+
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Ensure the installed binary is on the `PATH`
