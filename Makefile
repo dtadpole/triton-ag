@@ -22,7 +22,7 @@ help:
 
 host_check:
 	@echo "Current hostname is "${HOST}
-	@echo "Is it meta devserver "${IS_DEVSERVER}
+	@echo "Is it meta devserver 1:yes; 0:no ?  Ans: "${IS_DEVSERVER}
 
 build_docker: Dockerfile
 ifeq (${IS_DEVSERVER}, 1)
@@ -35,7 +35,7 @@ env:
 	docker run -it  --gpus all --net=host -p 8081:8081 -p 8082:8082 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/triton_ag /bin/bash
 
 vllm_env:
-	docker run -it  --gpus all --net=host -p 8081:8081 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/triton_ag /bin/bash
+	docker run -it  --gpus all --net=host -p 8081:8081 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/triton_ag /bin/bash
 
 mlflow:
 	# mlflow server --host localhost --port 5051
@@ -77,11 +77,33 @@ vllm-qwen3-32b:
 	--tool-call-parser hermes
 
 vllm-qwen3-32b-devserver:
-	vllm serve Qwen/Qwen3-32B \
+	CUDA_VISIBLE_DEVICES=2,5 vllm serve unsloth/Qwen3-32B \
 	--max_model_len 40960 \
 	--enable-auto-tool-choice \
-	--tensor-parallel-size 4 \
-	--tool-call-parser hermes
+	--tool-call-parser hermes \
+	--tensor-parallel-size 2 \
+	--dtype bfloat16 \
+	--host "::" \
+	--port 8086
+
+vllm-qwen3-14b-devserver:
+	CUDA_VISIBLE_DEVICES=2,5 vllm serve unsloth/Qwen3-14B \
+	--max_model_len 40960 \
+	--enable-auto-tool-choice \
+	--tool-call-parser hermes \
+	--tensor-parallel-size 2 \
+	--host "::" \
+	--port 8086
+
+vllm-qwen25-7b-devserver:
+	CUDA_VISIBLE_DEVICES=2,5 vllm serve unsloth/Qwen2.5-7B \
+	--max_model_len 40960 \
+	--enable-auto-tool-choice \
+	--tool-call-parser hermes \
+	--tensor-parallel-size 2 \
+	--host "::" \
+	--port 8086
+
 
 sglang-qwen3-8b:
 	sglang serve qwen/qwen3-8b-instruct \

@@ -122,7 +122,7 @@ def load_model(provider: str, model: str):
         model_settings = ModelSettings()
 
     # add proxy server if running on devserver
-    if is_devserver():
+    if is_devserver() and api_key.lower().strip() != "empty":
         client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
@@ -134,7 +134,6 @@ def load_model(provider: str, model: str):
         client = AsyncOpenAI(
             api_key=api_key, base_url=base_url, timeout=60, max_retries=3
         )
-
     model = OpenAIChatCompletionsModel(
         model=model_name,
         openai_client=client,

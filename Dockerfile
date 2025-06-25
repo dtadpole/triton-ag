@@ -89,7 +89,7 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.5/install.sh | b
 
     RUN --mount=type=cache,target=/root/.cache/pip \
     pip install \
-    vllm
+    vllm==0.8.5
 
 RUN npm config set proxy http://fwdproxy:8080
 RUN npm config set https-proxy http://fwdproxy:8080
