@@ -582,18 +582,15 @@ async def run_triton_coder(
                 ],
             }
         )
-        code_run_server = MCPServerStdio(
-            # params={
-            #     "command": "uv",
-            #     "args": ["run", "--with", "mcp", "mcp", "run", "codeRunServer.py"],
-            # },
+        print("start kb_eval_iteration_server")
+        kb_eval_iteration_server = MCPServerStdio(
             params={
                 "command": "python",
-                "args": ["codeRunServer.py"],
+                "args": ["kbEvalMCPServer.py"],
             },
             client_session_timeout_seconds=480,
         )
-        async with file_server as fs, code_run_server as crs:
+        async with file_server as fs, kb_eval_iteration_server as kbs:
             try:
                 triton_coder = Agent(
                     model=model,
@@ -601,7 +598,7 @@ async def run_triton_coder(
                     instructions=TRITON_CODER_SYSTEM_PROMPT.format(
                         workspace_dir=workspace_dir
                     ),
-                    mcp_servers=[fs, ckpts, crs],
+                    mcp_servers=[fs, ckpts, kbs],
                 )
 
                 prompt = TRITON_CODER_NEXT_PROMPT.format(
