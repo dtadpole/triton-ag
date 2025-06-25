@@ -97,3 +97,15 @@ with-proxy python agent_kernel_coder.py -p deepseek -m deepseek-chat
 ```
 
 This will create a new working directory under `_run_{ddd}` and generate kernel implementation.
+
+
+## How to host your own LLM service on devserver
+# create an empty API key
+echo "EMPTY" >> ${HOME}/.keys/local.api.key
+# Download the huggingface model to your devserver D76999058
+# Save the model to a folder under /data/users/${USER}/huggingface/hub
+# start local LLM server
+make vllm-qwen3-32b-devserver
+# Follow the same flow the same as with provider's API
+# start local agent kernel coder
+python agent_kernel_coder.py -p cmgdev -m qwen-3-32b

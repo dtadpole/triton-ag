@@ -77,12 +77,33 @@ vllm-qwen3-32b:
 	--tool-call-parser hermes
 
 vllm-qwen3-32b-devserver:
-	vllm serve unsloth/Qwen3-32B-bnb-4bit \
+	CUDA_VISIBLE_DEVICES=2,5 vllm serve unsloth/Qwen3-32B \
 	--max_model_len 40960 \
 	--enable-auto-tool-choice \
 	--tool-call-parser hermes \
-	--host "0:0:0:0:0:0:0:0" \
-	--port 8085
+	--tensor-parallel-size 2 \
+	--dtype bfloat16 \
+	--host "::" \
+	--port 8086
+
+vllm-qwen3-14b-devserver:
+	CUDA_VISIBLE_DEVICES=2,5 vllm serve unsloth/Qwen3-14B \
+	--max_model_len 40960 \
+	--enable-auto-tool-choice \
+	--tool-call-parser hermes \
+	--tensor-parallel-size 2 \
+	--host "::" \
+	--port 8086
+
+vllm-qwen25-7b-devserver:
+	CUDA_VISIBLE_DEVICES=2,5 vllm serve unsloth/Qwen2.5-7B \
+	--max_model_len 40960 \
+	--enable-auto-tool-choice \
+	--tool-call-parser hermes \
+	--tensor-parallel-size 2 \
+	--host "::" \
+	--port 8086
+
 
 sglang-qwen3-8b:
 	sglang serve qwen/qwen3-8b-instruct \
