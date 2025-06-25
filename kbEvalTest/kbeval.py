@@ -2,17 +2,18 @@
 Helpers for Evaluations
 """
 
+import json
+import os, subprocess
+import random
+import sys
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
+
+import numpy as np
 import requests
 import torch
 import torch.nn as nn
-import os, subprocess
 from pydantic import BaseModel
-import numpy as np
-import random
-import json
-from contextlib import redirect_stdout, redirect_stderr
-from io import StringIO
-import sys
 
 from . import utils
 
@@ -128,6 +129,8 @@ def load_custom_model(
         ) + model_custom_src
 
     try:
+        print("*" * 20, f"model_custom_src: {model_custom_src}\n")
+        print("*" * 20, f"context: {context}\n")
         compile(model_custom_src, "<string>", "exec")
         exec(model_custom_src, context)
         # DANGER: need to delete refernece from global namespace
@@ -170,6 +173,7 @@ def graceful_eval_cleanup(curr_context: dict, device: torch.device):
 
     # _cleanup_cuda_extensions() # SIMON NOTE: is this necessary?
 
+
 def build_compile_cache_legacy(
     custom_model_src: str,
     verbose: bool = False,
@@ -203,11 +207,12 @@ def build_compile_cache_legacy(
         if verbose:
             print(f"[Compilation] Compilation Successful, saved cache at: {build_dir}")
     except Exception as e:
-        print(f"[Compilation] Failed to compile custom CUDA kernel. Unable to cache, \nError: {e}")
+        print(
+            f"[Compilation] Failed to compile custom CUDA kernel. Unable to cache, \nError: {e}"
+        )
         return False, stdout_buffer.getvalue(), str(e)
-    
-    return True, stdout_buffer.getvalue(), None
 
+    return True, stdout_buffer.getvalue(), None
 
 
 def build_compile_cache(
@@ -243,16 +248,16 @@ def build_compile_cache(
         if verbose:
             print(f"[Compilation] Compilation Successful, saved cache at: {build_dir}")
     except Exception as e:
-        print(f"[Compilation] Failed to compile custom CUDA kernel. Unable to cache, \nError: {e}")
+        print(
+            f"[Compilation] Failed to compile custom CUDA kernel. Unable to cache, \nError: {e}"
+        )
         return False, stdout_buffer.getvalue(), str(e)
 
     return True, stdout_buffer.getvalue(), None
 
 
 def build_compile_cache_with_capturing(
-    custom_model_src: str,
-    verbose: bool = False,
-    build_dir: os.PathLike = None
+    custom_model_src: str, verbose: bool = False, build_dir: os.PathLike = None
 ) -> tuple[int, str, str]:
     """
     Write a temporary python file to compile the custom model on CPU
@@ -274,22 +279,21 @@ def build_compile_cache_with_capturing(
         f.write(custom_model_src)
 
     # Execute the temporary Python file and capture output
-    process = subprocess.Popen(['python', tmp], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen(
+        ["python", tmp], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
     stdout, stderr = process.communicate()
     returncode = process.returncode
 
     # Clean up temporary file
     os.remove(tmp)
 
-
     if verbose:
         print("[CPU Precompile] return code: ", returncode)
-        print("[CPU Precompile] stdout: \n", stdout.decode('utf-8'))
-        print("[CPU Precompile] stderr: \n", stderr.decode('utf-8')) 
+        print("[CPU Precompile] stdout: \n", stdout.decode("utf-8"))
+        print("[CPU Precompile] stderr: \n", stderr.decode("utf-8"))
 
-    return returncode, stdout.decode('utf-8'), stderr.decode('utf-8')
-
-
+    return returncode, stdout.decode("utf-8"), stderr.decode("utf-8")
 
 
 def eval_kernel_against_ref(
@@ -302,7 +306,9 @@ def eval_kernel_against_ref(
     measure_performance: bool = False,
     measure_performance_ref: bool = False,
     build_dir: os.PathLike = None,
-    device: torch.device = torch.cuda.current_device() if torch.cuda.is_available() else None, # have to run on GPU
+    device: torch.device = (
+        torch.cuda.current_device() if torch.cuda.is_available() else None
+    ),  # have to run on GPU
 ) -> KernelExecResult:
     """
     Evaluate the custom kernel against the original model
@@ -460,10 +466,16 @@ def eval_kernel_against_ref(
                         verbose=verbose,
                         device=device,
                     )
-                    runtime_stats_ref = get_timing_stats(elapsed_times_ref, device=device)
+                    runtime_stats_ref = get_timing_stats(
+                        elapsed_times_ref, device=device
+                    )
                     if verbose:
-                        print(f"[Eval] Performance Stats (Reference): {runtime_stats_ref}")
-                    kernel_exec_result.metadata["reference_runtime_stats"] = runtime_stats_ref
+                        print(
+                            f"[Eval] Performance Stats (Reference): {runtime_stats_ref}"
+                        )
+                    kernel_exec_result.metadata["reference_runtime_stats"] = (
+                        runtime_stats_ref
+                    )
 
         except Exception as e:
             if verbose:
@@ -650,7 +662,7 @@ def run_and_check_correctness(
 
                 # metadata = register_and_format_exception(
                 #     "runtime_error", e, metadata, truncate=True
-                #)
+                # )
                 metadata["runtime_error"] = e
                 return KernelExecResult(
                     compiled=True, correctness=False, metadata=metadata
@@ -699,11 +711,13 @@ def check_metadata_serializable(metadata: dict):
 
     return metadata
 
+
 def check_metadata_serializable_all_types(metadata: dict):
     """
     Ensure metadata is JSON serializable,
     if not, convert non-serializable values to strings recursively
     """
+
     def convert_to_serializable(obj):
         if isinstance(obj, dict):
             return {k: convert_to_serializable(v) for k, v in obj.items()}
@@ -775,4 +789,3 @@ def get_timing_stats(elapsed_times: list[float], device: torch.device = None) ->
         stats["device"] = str(device)  # for debugging
 
     return stats
-

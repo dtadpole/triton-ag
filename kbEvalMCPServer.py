@@ -282,6 +282,7 @@ async def kb_eval_iteration(
             raise ValueError(
                 f"Working directory {current_wd} is not a subfolder of cwd {os.getcwd()}"
             )
+        logger.info(f"Running kb_eval_iteration: {model_tag}, {task_tag}, {eval_tag}")
 
         # read reference code
         with open(os.path.join(current_wd, reference_code_filename), "r") as f:

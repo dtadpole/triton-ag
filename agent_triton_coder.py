@@ -95,7 +95,7 @@ Based on the error information, what's your next action?
 Choose the most efficient path forward:
 1. Do you understand the error? Can you fix the error easily?
 2. If not sure why the error happened, can you create debug test cases to check each intermediate result step by step, and fix the code at each individual step?
-3. If you have passed the intermediate test cases, verify using the `kb_eval_iteration_triton` tool.  If you tried multiple times but still failed, record the error, upload the error information using `kb_upload_iteration_triton` tool, and continue to the next iteration.
+3. If you have passed the intermediate test cases, verify using the `kb_eval_iteration_triton` tool.  If you tried multiple times but still failed, record the error, upload the error information using `kb_upload_iteration` tool, and continue to the next iteration.
 4. Keep improving performance of the kernel code with more iterations, up to and including iteration {max_iterations}.
 5. Stop the task after you have reached the maximum iterations allowed, do not exceed maximum iterations of `{max_iterations}`.
 6. Immediately stop if you have exceeded maximum iterations of `{max_iterations}`.
