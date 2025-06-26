@@ -676,6 +676,27 @@ if __name__ == "__main__":
                 build_directory=temp_dir,
                 args=args,
             )
+
+            # recursively check if there is any Exception in the metadata, and if so, print the exception and stack trace, and replace the Exception with the exception traceback string
+            def check_exception_in_metadata(metadata):
+                for key, value in metadata.items():
+                    if isinstance(value, Exception):
+                        exception_traceback_str = "".join(
+                            traceback.format_exception(
+                                type(value), value, value.__traceback__
+                            )
+                        )
+                        logger.warning(exception_traceback_str)
+                        metadata[key] = exception_traceback_str
+                    elif isinstance(value, dict):
+                        check_exception_in_metadata(value)
+                return
+
+            check_exception_in_metadata(result.metadata)
+
+            logger.info(
+                f"Evaluation result: {json.dumps(result.model_dump(), indent=4)}"
+            )
         except Exception as e:
             exit_code = 1
             exception = e
@@ -699,7 +720,7 @@ if __name__ == "__main__":
         finally:
             # write to file
             with open(os.path.join(temp_dir, f"{args.eval_tag}_kbeval.json"), "w") as f:
-                f.write(json.dumps(str(result), indent=4))
+                f.write(json.dumps(result.model_dump(), indent=4))
 
             exit(exit_code)
     else:
