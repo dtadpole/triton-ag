@@ -1,18 +1,30 @@
 import argparse
+import asyncio
+import json
+import os
+import random
 import sys
 import time
 import traceback
-from kbEvalTest.kbeval import KernelExecResult, eval_kernel_against_ref, graceful_eval_cleanup, run_and_check_correctness, time_execution_with_cuda_event, get_timing_stats, load_original_model_and_inputs, load_custom_model, set_seed
-import torch
-import asyncio
-import os
-import json
 from datetime import datetime
-from util import logger
-import random
+
+import torch
 from filelock import FileLock, Timeout
+from kbEvalTest.kbeval import (
+    eval_kernel_against_ref,
+    get_timing_stats,
+    graceful_eval_cleanup,
+    KernelExecResult,
+    load_custom_model,
+    load_original_model_and_inputs,
+    run_and_check_correctness,
+    set_seed,
+    time_execution_with_cuda_event,
+)
+from util import logger
 
 KB_EVAL_DIR = os.path.expanduser("~/.kbeval")
+
 
 def eval_kernel_reference(
     model_tag: str,
@@ -43,7 +55,8 @@ def eval_kernel_reference(
 
         init_inputs = get_init_inputs()
         init_inputs = [
-            x.cuda(device=device) if isinstance(x, torch.Tensor) else x for x in init_inputs
+            x.cuda(device=device) if isinstance(x, torch.Tensor) else x
+            for x in init_inputs
         ]
 
         inputs = get_inputs()
@@ -67,7 +80,9 @@ def eval_kernel_reference(
             )
             runtime_stats = get_timing_stats(elapsed_times_ref, device=device)
             if args.verbose:
-                logger.info(f"[KB_Eval] Performance Stats (Reference): {runtime_stats} [{eval_key}]")
+                logger.info(
+                    f"[KB_Eval] Performance Stats (Reference): {runtime_stats} [{eval_key}]"
+                )
 
         return KernelExecResult(
             compiled=True,
@@ -76,11 +91,13 @@ def eval_kernel_reference(
             runtime=runtime_stats["mean"],
             runtime_stats=runtime_stats,
         )
-    
+
     except Exception as e:
         logger.warning(f"[KB_Eval] Error evaluating reference code: {e}")
         return KernelExecResult(
-            compiled=False, correctness=False, metadata=metadata | {"reference_code_error": e}
+            compiled=False,
+            correctness=False,
+            metadata=metadata | {"reference_code_error": e},
         )
 
 
@@ -97,15 +114,17 @@ def compile_and_eval_kernel(
 ) -> KernelExecResult:
 
     try:
-        Model, get_init_inputs, get_inputs, ModelNew, metadata, context = compile_kernel_new(
-            model_tag,
-            task_tag,
-            eval_tag,
-            time_tag,
-            reference_code,
-            generated_code,
-            build_directory=build_directory,
-            verbose=args.verbose,
+        Model, get_init_inputs, get_inputs, ModelNew, metadata, context = (
+            compile_kernel_new(
+                model_tag,
+                task_tag,
+                eval_tag,
+                time_tag,
+                reference_code,
+                generated_code,
+                build_directory=build_directory,
+                verbose=args.verbose,
+            )
         )
     except Exception as e:
         logger.warning(f"[KB_Eval] Error compiling kernel: {e}")
@@ -125,7 +144,7 @@ def compile_and_eval_kernel(
     lock = FileLock(lock_file)
     while True:
         try:
-            with lock.acquire(timeout=1):
+            with lock.acquire(timeout=2):
                 logger.warning(f"[KB_Eval] Acquired lock {lock_file} [{eval_key}]")
 
                 # verify lock is working by sleeping randome between 10 and 20 seconds
@@ -155,9 +174,11 @@ def compile_and_eval_kernel(
             # os.remove(lock_file)
             logger.warning(f"[KB_Eval] Released lock {lock_file} [{eval_key}]")
             return result
-        
+
         except Timeout:
-            logger.info(f"[KB_Eval] Waiting for lock to be released {lock_file} [{eval_key}]")
+            logger.info(
+                f"[KB_Eval] Waiting for lock to be released {lock_file} [{eval_key}]"
+            )
             continue
         except Exception as e:
             logger.warning(f"[KB_Eval] Error acquiring lock: {e} [{eval_key}]")
@@ -173,8 +194,11 @@ def compile_and_eval_kernel(
                 lock_modified_time = os.path.getmtime(lock_file)
                 # if modified time is more than 1.5 minutes, delete lock file
                 if lock_modified_time < os.path.getmtime(lock_file) - 90:
-                    logger.error(f"[KB_Eval] Lock file {lock_file} is older than 1.5 minutes, deleting... [{eval_key}]")
+                    logger.error(
+                        f"[KB_Eval] Lock file {lock_file} is older than 1.5 minutes, deleting... [{eval_key}]"
+                    )
                     os.remove(lock_file)
+
 
 def compile_kernel_new(
     model_tag: str,
@@ -185,7 +209,9 @@ def compile_kernel_new(
     custom_model_src: str,
     build_directory: str = None,
     verbose: bool = False,
-) -> tuple[torch.nn.Module, callable, callable, torch.nn.Module, dict, dict]: # Model, get_init_inputs, get_inputs, ModelNew, metadata, context
+) -> tuple[
+    torch.nn.Module, callable, callable, torch.nn.Module, dict, dict
+]:  # Model, get_init_inputs, get_inputs, ModelNew, metadata, context
     """
     Evaluate the custom kernel against the original model
 
@@ -211,7 +237,9 @@ def compile_kernel_new(
     try:
         os.environ["TORCH_USE_CUDA_DSA"] = "1"  # compile with device side assertion
         # add hash for later to distinguish between multi-turn kernels
-        ModelNew = load_custom_model(custom_model_src, context, build_directory=build_directory)
+        ModelNew = load_custom_model(
+            custom_model_src, context, build_directory=build_directory
+        )
         # torch.cuda.synchronize(device=device)  # not sure if this is too much
     except Exception as e:
         logger.warning(
@@ -222,7 +250,9 @@ def compile_kernel_new(
         if "lock" in str(e) or "No such file or directory" in str(e):
             # this is a lock file error, likely due to concurrent compilation
             # this does not necessarily mean the compilation failed, but we should retry
-            logger.warning(f"[KB_Eval] Lock file error during compilation, Please retry. Error: {e} [{eval_key}]")
+            logger.warning(
+                f"[KB_Eval] Lock file error during compilation, Please retry. Error: {e} [{eval_key}]"
+            )
             graceful_eval_cleanup(context, device=None)
             raise e
         else:
@@ -240,6 +270,7 @@ def compile_kernel_new(
 
     return Model, get_init_inputs, get_inputs, ModelNew, metadata, context
 
+
 def eval_kernel_against_ref_new(
     model_tag: str,
     task_tag: str,
@@ -251,7 +282,7 @@ def eval_kernel_against_ref_new(
     ModelNew: torch.nn.Module,
     metadata: dict,
     context: dict,
-    device: torch.device, # have to run on GPU
+    device: torch.device,  # have to run on GPU
     seed_num: int = 42,
     verbose: bool = False,
     measure_performance: bool = True,
@@ -269,7 +300,8 @@ def eval_kernel_against_ref_new(
         set_seed(seed_num)  # set seed for reproducible input
         init_inputs = get_init_inputs()
         init_inputs = [
-            x.cuda(device=device) if isinstance(x, torch.Tensor) else x for x in init_inputs
+            x.cuda(device=device) if isinstance(x, torch.Tensor) else x
+            for x in init_inputs
         ]
 
         with torch.no_grad():
@@ -279,11 +311,12 @@ def eval_kernel_against_ref_new(
             if verbose:
                 logger.info(f"[KB_Eval] Original Model Loaded [{eval_key}]")
         if verbose:
-            logger.info(f"[KB_Eval] Loading and Compiling New Model with Custom CUDA Kernel [{eval_key}]")
+            logger.info(
+                f"[KB_Eval] Loading and Compiling New Model with Custom CUDA Kernel [{eval_key}]"
+            )
 
         metadata["hardware"] = torch.cuda.get_device_name(device=device)
         metadata["device"] = str(device)  # for debugging
-
 
         # at this point we passed compilation
         try:
@@ -293,7 +326,9 @@ def eval_kernel_against_ref_new(
                 assert hasattr(custom_model, "forward")
                 torch.cuda.synchronize(device=device)
             if verbose:
-                logger.info(f"[KB_Eval] New Model with Custom CUDA Kernel Loaded [{eval_key}]")
+                logger.info(
+                    f"[KB_Eval] New Model with Custom CUDA Kernel Loaded [{eval_key}]"
+                )
         except RuntimeError as e:
             logger.warning(
                 f"[KB_Eval] Failed to load custom CUDA kernel; Compiled but not able to run, count as runtime error. \nError: {e} [{eval_key}]"
@@ -333,7 +368,9 @@ def eval_kernel_against_ref_new(
             try:
                 if kernel_exec_result and kernel_exec_result.correctness:
                     if verbose:
-                        logger.info(f"[KB_Eval] Measuring Performance as Sample is Correct [{eval_key}]")
+                        logger.info(
+                            f"[KB_Eval] Measuring Performance as Sample is Correct [{eval_key}]"
+                        )
 
                     torch.cuda.synchronize(device=device)
                     set_seed(seed_num)
@@ -355,13 +392,17 @@ def eval_kernel_against_ref_new(
                     runtime_stats = get_timing_stats(elapsed_times, device=device)
 
                     if verbose:
-                        logger.info(f"[KB_Eval] Performance Stats: {runtime_stats} [{eval_key}]")
+                        logger.info(
+                            f"[KB_Eval] Performance Stats: {runtime_stats} [{eval_key}]"
+                        )
                     kernel_exec_result.runtime = runtime_stats["mean"]
                     kernel_exec_result.runtime_stats = runtime_stats
 
             except Exception as e:
                 if verbose:
-                    logger.warning(f"[KB_Eval] Error in Measuring Performance: {e} [{eval_key}]")
+                    logger.warning(
+                        f"[KB_Eval] Error in Measuring Performance: {e} [{eval_key}]"
+                    )
                 kernel_exec_result.metadata["error_during_performance"] = e
 
         logger.info(f"[KB_Eval] Result: {kernel_exec_result.model_dump()} [{eval_key}]")
@@ -372,7 +413,9 @@ def eval_kernel_against_ref_new(
         logger.warning(f"[KB_Eval] Error in Evaluating Kernel: {e} [{eval_key}]")
         logger.warning(traceback.format_exc())
         return KernelExecResult(
-            compiled=False, correctness=False, metadata=metadata | {"evaluation_error": e}
+            compiled=False,
+            correctness=False,
+            metadata=metadata | {"evaluation_error": e},
         )
     finally:
         # clean up
@@ -390,7 +433,7 @@ if __name__ == "__main__":
     parser.add_argument("--generated_code", type=str, default="elemAddCuda.py")
     parser.add_argument("--measure_reference", action="store_true")
     parser.add_argument("--measure_both", action="store_true")
-    parser.add_argument("--device-list", type=str, default="4")
+    parser.add_argument("--device_list", type=str, default="0,1")
     parser.add_argument("--max-jobs", type=int, default=12)
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
@@ -399,12 +442,19 @@ if __name__ == "__main__":
 
     # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}/{time_tag}
     time_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
-    temp_dir = os.path.join(KB_EVAL_DIR, args.model_tag, args.task_tag, time_tag if args.time_tag == "auto" else args.time_tag, args.eval_tag)
+    temp_dir = os.path.join(
+        KB_EVAL_DIR,
+        args.model_tag,
+        args.task_tag,
+        time_tag if args.time_tag == "auto" else args.time_tag,
+        args.eval_tag,
+    )
     os.makedirs(temp_dir, exist_ok=True)
 
     devices = args.device_list.split(",")
-    # select a random device from devices
-    device = torch.device(int(devices[random.randint(0, len(devices) - 1)]))
+    # select the device from devices randomly
+    print("There are {} devices available".format(len(devices)))
+    device = torch.device(int(devices[random.randint(0, len(devices))]))
 
     result = None
     exit_code = 0
@@ -425,21 +475,26 @@ if __name__ == "__main__":
             )
         except Exception as exception:
             exit_code = 1
-            exception_traceback_str = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
+            exception_traceback_str = "".join(
+                traceback.format_exception(
+                    type(exception), exception, exception.__traceback__
+                )
+            )
             logger.error(exception_traceback_str)
             result = KernelExecResult(
-                compiled=False, correctness=False, metadata={
-                    'processing_error': exception_traceback_str
-                }
+                compiled=False,
+                correctness=False,
+                metadata={"processing_error": exception_traceback_str},
             )
         finally:
             # write to file (no eval_tag in the filepath)
             with open(os.path.join(temp_dir, "..", f"reference_kbeval.json"), "w") as f:
                 f.write(json.dumps(result.model_dump(), indent=4))
-            logger.info(f"Reference code evaluation result: {json.dumps(result.model_dump(), indent=4)}")
+            logger.info(
+                f"Reference code evaluation result: {json.dumps(result.model_dump(), indent=4)}"
+            )
             if not args.measure_both:
                 exit(exit_code)
-
 
     # we are here if we need to measure generated code, evaluate the custom kernel against the reference code
 
@@ -463,7 +518,11 @@ if __name__ == "__main__":
         def check_exception_in_metadata(metadata):
             for key, value in metadata.items():
                 if isinstance(value, Exception):
-                    exception_traceback_str = "".join(traceback.format_exception(type(value), value, value.__traceback__))
+                    exception_traceback_str = "".join(
+                        traceback.format_exception(
+                            type(value), value, value.__traceback__
+                        )
+                    )
                     logger.warning(exception_traceback_str)
                     metadata[key] = exception_traceback_str
                 elif isinstance(value, dict):
@@ -473,22 +532,26 @@ if __name__ == "__main__":
         check_exception_in_metadata(result.metadata)
 
         logger.info(f"Evaluation result: {json.dumps(result.model_dump(), indent=4)}")
-    
+
     except Exception as e:
         exit_code = 1
         exception = e
-        exception_traceback_str = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
+        exception_traceback_str = "".join(
+            traceback.format_exception(
+                type(exception), exception, exception.__traceback__
+            )
+        )
         logger.error(exception_traceback_str)
 
         # generate a result with empty metadata
         if result is None:
             result = KernelExecResult(
-                compiled=False, correctness=False, metadata={
-                    'processing_error': exception_traceback_str
-                }
+                compiled=False,
+                correctness=False,
+                metadata={"processing_error": exception_traceback_str},
             )
         else:
-            result.metadata['processing_error'] = exception_traceback_str
+            result.metadata["processing_error"] = exception_traceback_str
 
     finally:
         # write to file

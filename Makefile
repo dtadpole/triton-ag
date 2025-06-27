@@ -88,7 +88,7 @@ vllm-qwen3-32b-devserver:
 
 vllm-qwen3-14b-devserver:
 	CUDA_VISIBLE_DEVICES=2,5 vllm serve unsloth/Qwen3-14B \
-	--max_model_len 40960 \
+	--rope-scaling '{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' --max-model-len 131072 \
 	--enable-auto-tool-choice \
 	--tool-call-parser hermes \
 	--tensor-parallel-size 2 \
@@ -103,7 +103,6 @@ vllm-qwen25-7b-devserver:
 	--tensor-parallel-size 2 \
 	--host "::" \
 	--port 8086
-
 
 sglang-qwen3-8b:
 	sglang serve qwen/qwen3-8b-instruct \
