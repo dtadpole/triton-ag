@@ -133,7 +133,7 @@ class SGLangClient:
                     generate_url,
                     json=payload,
                     headers={"Content-Type": "application/json"},
-                    timeout=120
+                    timeout=600
                 )
                 response.raise_for_status()
                 
@@ -163,19 +163,26 @@ class SGLangClient:
     
     def get_system_prompt(self) -> str:
         """Get system prompt from configuration."""
-        prompts_config = self.config.get('sglang', {}).get('prompts', {})
-        return prompts_config.get('system_prompt', 'You are a helpful assistant.')
+        prompts_config = self.config.get('prompts', {})
+        reference_code = self.get_example_reference_code()
+        generated_code = self.get_example_generated_code()
+        return prompts_config.get('system_prompt', 'You are a helpful assistant.').format(reference_code=reference_code, generated_code=generated_code)
     
     def get_user_prompt(self, source_code: str) -> str:
         """Get user prompt from configuration with source code substituted."""
-        prompts_config = self.config.get('sglang', {}).get('prompts', {})
+        prompts_config = self.config.get('prompts', {})
         user_prompt_template = prompts_config.get('user_prompt', 'Analyze this code: {source_code}')
         return user_prompt_template.format(source_code=source_code)
     
-    def get_example_source_code(self) -> str:
-        """Get example source code from configuration."""
-        prompts_config = self.config.get('sglang', {}).get('prompts', {})
-        return prompts_config.get('example_source_code', 'print("Hello, World!")')
+    def get_example_reference_code(self) -> str:
+        """Get example reference code from configuration."""
+        prompts_config = self.config.get('prompts', {}).get('examples', {})
+        return prompts_config.get('reference_code', '')
+
+    def get_example_generated_code(self) -> str:
+        """Get example generated code from configuration."""
+        prompts_config = self.config.get('prompts', {}).get('examples', {})
+        return prompts_config.get('generated_code', '')
 
     async def health_check(self) -> bool:
         """Check if SGLang server is healthy."""
@@ -253,14 +260,22 @@ async def process_file_task(queue: asyncio.Queue, client: SGLangClient, input_ba
             # Get prompts for conversation
             system_prompt = client.get_system_prompt()
             user_prompt = client.get_user_prompt(source_code)
+
+            # convert system_prompt and user_prompt to chatml syntax with <|im_start|> and <|im_end|>
+            system_prompt_chatml = f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+            user_prompt_chatml = f"<|im_start|>user\n{user_prompt}<|im_end|>\n"
+            assistant_start_chatml = "<|im_start|>assistant\n"
+
+            # combine the prompts into a single string
+            prompt = f"{system_prompt_chatml}\n{user_prompt_chatml}\n{assistant_start_chatml}"
             
             # Generate response using SGLang
-            result = await client.generate(prompt=user_prompt)
+            result = await client.generate(prompt=prompt)
             
             assistant_response = result.get('text', '')
             all_input_logprobs = result.get('input_logprobs', [])
             all_output_logprobs = result.get('output_logprobs', [])
-            
+
             # Create output directory for this file
             relative_dir = Path(input_relative_filepath).parent
             output_file_dir = output_base_dir / relative_dir
@@ -286,7 +301,10 @@ async def process_file_task(queue: asyncio.Queue, client: SGLangClient, input_ba
                     "time_tag": time_tag,
                     "source_file": str(input_relative_filepath),
                     "server_url": client.base_url,
-                    "model": client.config.get('sglang', {}).get('generation', {}).get('model', 'default')
+                    "model": client.config.get('sglang', {}).get('generation', {}).get('model', 'default'),
+                    "total_input_tokens": len(all_input_logprobs) if all_input_logprobs else 0,
+                    "total_output_tokens": len(all_output_logprobs) if all_output_logprobs else 0,
+                    "total_tokens": (len(all_input_logprobs) if all_input_logprobs else 0) + (len(all_output_logprobs) if all_output_logprobs else 0)
                 }
             }
             
@@ -316,11 +334,28 @@ async def process_file_task(queue: asyncio.Queue, client: SGLangClient, input_ba
                 async with aiofiles.open(logprobs_file, 'w', encoding='utf-8') as f:
                     await f.write(json.dumps(logprobs_data, indent=2, ensure_ascii=False))
             
+            # extract the main section without the <think> and </think> tags
+            assistant_response_no_think = assistant_response.split("<think>")[1].split("</think>")[0]
+            # extract generated code from the assistant response
+            generated_code = assistant_response_no_think.split("```python")[1].split("```")[0]
+            # extract brief explanation from the assistant response
+            brief_explanation = assistant_response_no_think.split("```text")[1].split("```")[0]
+
+            # save the generated code and brief explanation to a file
+            with open(os.path.join(full_output_path, "generated_code.py"), "w", encoding="utf-8") as f:
+                f.write(generated_code)
+            with open(os.path.join(full_output_path, "brief_explanation.txt"), "w", encoding="utf-8") as f:
+                f.write(brief_explanation)
+            
+
             processed_count += 1
             print(f"Task {task_id}: ✅ Saved {input_relative_filepath} -> {output_file_dir}")
             
         except Exception as e:
             print(f"Task {task_id}: ❌ Error processing {input_relative_filepath}: {e}")
+            # print exception with traceback
+            import traceback
+            print(traceback.format_exc())
 
 
 async def main():
@@ -331,7 +366,7 @@ async def main():
         "--input-dir", 
         type=str, 
         # required=True,
-        default="./verifier", 
+        default="./kernel_bench/level1", 
         help="Directory to recursively search for .py files"
     )
     parser.add_argument(
@@ -343,7 +378,7 @@ async def main():
     parser.add_argument(
         "--num-tasks", 
         type=int, 
-        default=4,
+        default=8,
         help="Number of concurrent async tasks to run"
     )
 
