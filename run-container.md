@@ -21,17 +21,31 @@ wget https://developer.download.nvidia.com/compute/cuda/12.9.0/local_installers/
 sh cuda_12.9.0_575.51.03_linux.run
 rm cuda_12.9.0_575.51.03_linux.run
 
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
+export CUDA_LAUNCH_BLOCKING=1
+
+/root/run.sh /root/.venv/bin/python3 -m sglang.launch_server --model-path Qwen/Qwen3-8B-AWQ --context-length 8192 --host 0.0.0.0 --port 8081 --tool-call-parser qwen25 --dp 1 --max-prefill-tokens 2048 --max-total-tokens 8192
+
+ --mem-fraction-static 0.7 --max-running-requests 32 
+
+
+--mem-fraction-static 0.7  # Default is often 0.9
+--max-running-requests 32  # Reduce concurrent requests
+
+--max-prefill-tokens 2048  # Reduce from default
+--max-total-tokens 4096    # Limit total sequence length
+
 python3 -m sglang.launch_server \
-        --model-path unsloth/Qwen3-32B-bnb-4bit \
-        --context-length 40960 \
+        --model-path Qwen/Qwen3-32B-AWQ \
+        --context-length 32768 \
         --host 0.0.0.0 \
         --port 8081 \
         --tool-call-parser qwen25 \
-        --quantization bitsandbytes \
-        --load-format bitsandbytes \
-        --pp 4 \
+        --pp 1 \
         --dp 1
 
+        --quantization bitsandbytes \
+        --load-format bitsandbytes \
 
         --tp-size 4 \
         --reasoning-parser qwen3 \

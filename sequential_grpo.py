@@ -53,24 +53,21 @@ class SequentialGRPOTrainer:
     Phase 2: Compute group advantages and train with gradient accumulation
     """
     
-    def __init__(self, config_path="finetune.yaml"):
-        # Load configuration
-        with open(config_path, 'r') as f:
+    def __init__(self, grpo_config_path="sequential_grpo.yaml"):
+        # Load GRPO configuration
+        with open(grpo_config_path, 'r') as f:
+            grpo_full_config = yaml.safe_load(f)
+        
+        # Load base training configuration
+        finetune_config_path = grpo_full_config.get('finetune_config', 'finetune.yaml')
+        with open(finetune_config_path, 'r') as f:
             self.config = yaml.safe_load(f)
         
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.max_seq_length = self.config['model']['max_seq_length']
         
-        # GRPO-specific configuration
-        self.grpo_config = {
-            'num_generations_per_prompt': 8,  # Reduced from 16 for memory efficiency
-            'reward_weight': 1.0,
-            'temperature': 1.0,
-            'max_new_tokens': 512,
-            'generation_batch_size': 1,  # Process one generation at a time
-            'clip_epsilon_lower': 0.2,  # Lower clipping parameter [1-ε_lower, ...]
-            'clip_epsilon_upper': 0.4,  # Upper clipping parameter [..., 1+ε_upper] (DAPO-style)
-        }
+        # Extract only the essential GRPO configuration
+        self.grpo_config = grpo_full_config.get('grpo', {})
         
         # Training state
         self.model = None
@@ -83,7 +80,9 @@ class SequentialGRPOTrainer:
         # Generation storage
         self.generation_results: List[GenerationResult] = []
         
-        logger.info("Sequential GRPO Trainer initialized")
+        logger.info("Sequential GRPO Trainer initialized with config from {}".format(grpo_config_path))
+    
+
     
     def setup_model_and_tokenizer(self):
         """Initialize model and tokenizer using Unsloth."""
@@ -226,9 +225,12 @@ class SequentialGRPOTrainer:
             # Generate completion
             generated = self.model.generate(
                 prompt_tensor,
-                max_new_tokens=self.grpo_config['max_new_tokens'],
-                temperature=self.grpo_config['temperature'],
+                max_new_tokens=self.grpo_config.get('max_new_tokens', 512),
+                temperature=self.grpo_config.get('temperature', 1.0),
                 do_sample=True,
+                top_k=50,
+                top_p=0.95,
+                repetition_penalty=1.0,
                 pad_token_id=self.tokenizer.pad_token_id,
                 return_dict_in_generate=True,
                 output_scores=True
@@ -251,14 +253,11 @@ class SequentialGRPOTrainer:
     def compute_reward(self, prompt_tokens: List[int], completion_tokens: List[int]) -> float:
         """
         Compute reward for a prompt-completion pair.
-        This is a placeholder - implement your actual reward function here.
+        Uses simple length-based reward - replace with your actual reward function.
         """
-        # Placeholder reward function - replace with your actual reward model
-        # For now, use length-based reward as example
         completion_length = len(completion_tokens)
         
         # Simple heuristic: reward longer, coherent completions
-        # You should replace this with your actual reward model
         base_reward = min(completion_length / 100.0, 1.0)  # Normalize by length
         
         # Add some randomness to simulate actual reward model
@@ -281,7 +280,7 @@ class SequentialGRPOTrainer:
             prompt_tokens = self.extract_prompt_from_batch(batch, batch_idx)
             
             # Generate multiple completions for this prompt
-            for gen_id in range(self.grpo_config['num_generations_per_prompt']):
+            for gen_id in range(self.grpo_config.get('num_generations_per_prompt', 8)):
                 try:
                     # Generate single completion
                     completion_tokens, log_probs = self.generate_completion(prompt_tokens)
@@ -368,7 +367,7 @@ class SequentialGRPOTrainer:
         
         # GRPO clipping parameters (DAPO-style asymmetric clipping)
         clip_epsilon_lower = self.grpo_config.get('clip_epsilon_lower', 0.2)
-        clip_epsilon_upper = self.grpo_config.get('clip_epsilon_upper', 0.4)
+        clip_epsilon_upper = self.grpo_config.get('clip_epsilon_upper', 0.3)
         
         # Group results by prompt for advantage lookup
         prompt_groups = {}
@@ -456,8 +455,8 @@ class SequentialGRPOTrainer:
         # Optimizer step after processing all generations
         if num_processed > 0:
             # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 
-                                         self.config['training']['max_grad_norm'])
+            max_grad_norm = self.config['training'].get('max_grad_norm', 1.0)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
             
             self.optimizer.step()
             self.scheduler.step()
@@ -484,6 +483,9 @@ class SequentialGRPOTrainer:
         
         # Phase 2: Train with advantages
         loss = self.phase2_train_with_advantages(generation_results, advantages)
+        
+        # Final memory cleanup
+        torch.cuda.empty_cache()
         
         return loss
     
@@ -524,11 +526,13 @@ class SequentialGRPOTrainer:
                 })
                 
                 # Logging
-                if self.global_step % training_config['logging_steps'] == 0:
+                logging_steps = training_config.get('logging_steps', 10)
+                if self.global_step % logging_steps == 0:
                     logger.info(f"Step {self.global_step}: loss = {step_loss:.4f}")
                 
                 # Save checkpoint
-                if self.global_step % training_config['save_steps'] == 0:
+                save_steps = training_config.get('save_steps', 500)
+                if self.global_step % save_steps == 0:
                     self.save_checkpoint()
                 
                 # Check max steps
@@ -594,28 +598,21 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="Sequential GRPO Training")
-    parser.add_argument("--config", default="finetune.yaml", 
-                       help="Path to configuration file")
-    parser.add_argument("--num_generations", type=int, default=8,
-                       help="Number of generations per prompt")
-    parser.add_argument("--reward_weight", type=float, default=1.0,
-                       help="Weight for reward in GRPO loss")
-    parser.add_argument("--clip_epsilon_lower", type=float, default=0.2,
-                       help="Lower clipping parameter for probability ratio [1-ε_lower, ...]")
-    parser.add_argument("--clip_epsilon_upper", type=float, default=0.4,
-                       help="Upper clipping parameter for probability ratio [..., 1+ε_upper] (DAPO-style)")
-
+    parser.add_argument("--config", default="sequential_grpo.yaml", 
+                       help="Path to GRPO configuration file")
     
     args = parser.parse_args()
     
     # Create trainer
-    trainer = SequentialGRPOTrainer(config_path=args.config)
+    trainer = SequentialGRPOTrainer(grpo_config_path=args.config)
     
-    # Override GRPO config from args
-    trainer.grpo_config['num_generations_per_prompt'] = args.num_generations
-    trainer.grpo_config['reward_weight'] = args.reward_weight
-    trainer.grpo_config['clip_epsilon_lower'] = args.clip_epsilon_lower
-    trainer.grpo_config['clip_epsilon_upper'] = args.clip_epsilon_upper
+    # Log configuration
+    logger.info("GRPO Configuration:")
+    logger.info(f"  num_generations_per_prompt: {trainer.grpo_config.get('num_generations_per_prompt', 8)}")
+    logger.info(f"  temperature: {trainer.grpo_config.get('temperature', 1.0)}")
+    logger.info(f"  max_new_tokens: {trainer.grpo_config.get('max_new_tokens', 512)}")
+    logger.info(f"  clip_epsilon_lower: {trainer.grpo_config.get('clip_epsilon_lower', 0.2)}")
+    logger.info(f"  clip_epsilon_upper: {trainer.grpo_config.get('clip_epsilon_upper', 0.3)}")
     
     # Run training
     trainer.run()
