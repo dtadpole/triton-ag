@@ -22,7 +22,7 @@ def eval_kernel_reference(
     device: torch.device,
     args: argparse.Namespace,
     seed_num: int = 42,
-    num_perf_trials: int = 50,
+    num_perf_trials: int = 100,
 ) -> KernelExecResult:
     """
     Evaluate the reference code against the original model
@@ -262,8 +262,8 @@ def eval_kernel_against_ref_new(
     eval_key = f"{model_tag}_{task_tag}_{eval_tag}_{time_tag}"
     logger.info(f"[KB_Eval] Started on device {device} [{eval_key}]")
 
-    num_correct_trials: int = 2
-    num_perf_trials: int = 50
+    num_correct_trials: int = 3
+    num_perf_trials: int = 100
 
     try:
         set_seed(seed_num)  # set seed for reproducible input

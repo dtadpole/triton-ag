@@ -1,18 +1,34 @@
-import yaml
 import json
-from string import Template
-import os
-from typing import Union
-from agents import AsyncOpenAI, OpenAIChatCompletionsModel, ModelSettings, RunHooks
-import boto3
-import mlflow
-from datetime import datetime
 import logging
+import os
+from datetime import datetime
+from string import Template
+from typing import Union
+
+import boto3
+import httpx
+import mlflow
+import yaml
+from agents import (
+    AsyncOpenAI,
+    MessageOutputItem,
+    ModelSettings,
+    OpenAIChatCompletionsModel,
+    RunHooks,
+    RunResult,
+    ToolCallItem,
+    ToolCallOutputItem,
+)
+from agents.tool import Tool
 from logger import logger
 from pydantic.json_schema import to_jsonable_python
-from agents import MessageOutputItem, ToolCallItem, ToolCallOutputItem
-from agents import RunResult
-from agents.tool import Tool
+
+
+def is_devserver() -> bool:
+    import socket
+
+    hostname = socket.gethostname()
+    return "facebook.com" in hostname
 
 
 def init_logging(agent_name: str):
@@ -22,7 +38,7 @@ def init_logging(agent_name: str):
     # stdout_logger.addHandler(logging.StreamHandler())
 
     mlflow.openai.autolog()
-    mlflow.set_tracking_uri("http://localhost:5050")
+    mlflow.set_tracking_uri("http://localhost:5051")
     mlflow.set_experiment(f"Agent [{agent_name}]")
 
     # weave.init("openai-agents")
@@ -66,6 +82,7 @@ def get_next_run_folder():
 #    folder = os.path.join(os.getcwd(), f"_run_{i:03d}")
 #    return folder
 
+
 def load_model(provider: str, model: str):
     # read model.yaml
     with open("model.yaml", "r") as f:
@@ -104,18 +121,30 @@ def load_model(provider: str, model: str):
     else:
         model_settings = ModelSettings()
 
-    model = OpenAIChatCompletionsModel(
-        model=model_name,
-        openai_client=AsyncOpenAI(
+    # add proxy server if running on devserver
+    if is_devserver() and api_key.lower().strip() != "empty":
+        client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
-        ),
+            http_client=httpx.AsyncClient(proxy=httpx.Proxy("http://fwdproxy:8080")),
+            timeout=60,
+            max_retries=3,
+        )
+    else:
+        client = AsyncOpenAI(
+            api_key=api_key, base_url=base_url, timeout=60, max_retries=3
+        )
+    model = OpenAIChatCompletionsModel(
+        model=model_name,
+        openai_client=client,
     )
 
     return model, model_settings
 
 
-def load_agent_model(agent_name: str, provider: Union[str, None] = None, model: Union[str, None] = None):
+def load_agent_model(
+    agent_name: str, provider: Union[str, None] = None, model: Union[str, None] = None
+):
     # read from agent.yaml
     with open("agent.yaml", "r") as f:
         agent_yaml = yaml.safe_load(f)
@@ -134,7 +163,9 @@ def load_agent_model(agent_name: str, provider: Union[str, None] = None, model: 
     if "run_config" not in agent_yaml[agent_name]:
         raise ValueError(f"Run config not found in agent.yaml for agent {agent_name}")
 
-    model, model_settings = load_model(provider or model_config["provider"], model or model_config["model"])
+    model, model_settings = load_model(
+        provider or model_config["provider"], model or model_config["model"]
+    )
     run_config = agent_yaml[agent_name]["run_config"]
 
     return model, model_settings, run_config, model_config
@@ -157,7 +188,14 @@ def get_run_hooks():
     return run_hooks
 
 
-def log_result_items(tools: list[Tool], result: RunResult, name_tag: str, model_tag: str, task_tag: str, folder: str):
+def log_result_items(
+    tools: list[Tool],
+    result: RunResult,
+    name_tag: str,
+    model_tag: str,
+    task_tag: str,
+    folder: str,
+):
     if not result.new_items:
         raise ValueError("No items to log")
 
@@ -226,7 +264,11 @@ def log_result_items(tools: list[Tool], result: RunResult, name_tag: str, model_
             # final json item
             json_item = {
                 "role": "function",
-                "name": function_calls[call_id].name if call_id and call_id in function_calls else None,
+                "name": (
+                    function_calls[call_id].name
+                    if call_id and call_id in function_calls
+                    else None
+                ),
                 "content": output,
             }
             messages.append(json_item)
@@ -245,7 +287,11 @@ def log_result_items(tools: list[Tool], result: RunResult, name_tag: str, model_
     try:
         s3_client = boto3.client("s3")
         datetime_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        s3_client.put_object(Bucket="agent-xyz", Key=f"agent/{model_tag}/{task_tag}/{name_tag}_{datetime_str}.json", Body=json_output)
+        s3_client.put_object(
+            Bucket="agent-xyz",
+            Key=f"agent/{model_tag}/{task_tag}/{name_tag}_{datetime_str}.json",
+            Body=json_output,
+        )
     except Exception as e:
         logger.error(f"Error pushing to s3: {e}")
 
