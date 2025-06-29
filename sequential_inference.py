@@ -22,17 +22,15 @@ import httpx
 import traceback
 from transformers import AutoTokenizer
 from datetime import datetime
-from typing import Dict, List, Optional, Generator
-from openai import OpenAI
+from typing import Dict, List, Optional
 from pathlib import Path
-
 
 class VLLMClient:
     """Client for vLLM OpenAI-compatible API using synchronous generation with logprobs support."""
     
     def __init__(
         self,
-        client_type: str = "default",
+        client_type: str = "vllm",
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
@@ -222,10 +220,113 @@ class VLLMClient:
             return ['default']
 
 
-
-async def process_file_task(queue: asyncio.Queue, client: VLLMClient, input_base_dir: Path, output_base_dir: Path, time_tag: str, task_id: int):
+async def _process_inference_task(
+    client: VLLMClient,
+    file_path: Path,
+    gen_id: int,
+    input_base_dir: Path,
+    output_base_dir: Path,
+    time_tag: str,
+    task_id: int
+) -> bool:
     """
-    Process files from the queue using the given client.
+    Process a single inference task for a file.
+    
+    Args:
+        client: VLLMClient instance
+        file_path: Path to the input Python file
+        gen_id: Generation ID for this task
+        input_base_dir: Base directory for input files
+        output_base_dir: Base directory for output files
+        time_tag: Timestamp tag for output files
+        task_id: Task identifier for logging
+        
+    Returns:
+        bool: True if successful, False if failed
+    """
+    # Read the Python file
+    async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
+        source_code = await f.read()
+    
+    # Get relative path for output structure
+    relative_path = file_path.relative_to(input_base_dir)
+    output_sub_dir = output_base_dir / relative_path / f"{gen_id:02d}"
+    output_sub_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create conversation
+    system_prompt = client.get_system_prompt()
+    user_prompt = client.get_user_prompt(source_code)
+    
+    # Generate response
+    start_time = time.time()
+    result = await client.generate(source_code)
+    generation_time = time.time() - start_time
+    
+    generated_text = result.get('text', '')
+
+    print(f"🔍 [Task {task_id}] Generated [{f'{len(result.get('tokens', [])):04d}'} tokens] [{len(generated_text)} characters] in [{generation_time:.2f}s]")
+
+    # save response to a file
+    response_file = output_sub_dir / f"response.txt"
+    with open(response_file, 'w') as f:
+        f.write(generated_text)
+    
+    # Create conversation data
+    conversation = {
+        "messages": [
+            {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
+                "role": "user",
+                "content": user_prompt
+            },
+            {
+                "role": "assistant",
+                "content": generated_text
+            }
+        ],
+        "metadata": {
+            "client_type": client.client_type,
+            "model": client.model,
+            "input_file": str(relative_path),
+            "generation_time": generation_time,
+            "num_tokens": len(result.get('tokens', [])),
+            "time_tag": time_tag,
+            "task_id": task_id
+        }
+    }
+    
+    # Save conversation file
+    conversation_file = output_sub_dir / f"conversation.json"
+    async with aiofiles.open(conversation_file, 'w', encoding='utf-8') as f:
+        await f.write(json.dumps(conversation, indent=2, ensure_ascii=False))
+
+    # remove <think> and </think> from the generated text
+    generated_text_no_think = generated_text.replace("<think>", "").replace("</think>", "")
+
+    # extract the generated code from the generated text
+    generated_code = generated_text_no_think.split("```python")[1].split("```")[0]
+    # save the generated code to a file
+    generated_code_file = output_sub_dir / f"generated_code.py"
+    with open(generated_code_file, 'w') as f:
+        f.write(generated_code)
+
+    # extract brief explanation from the generated text
+    brief_explaination = generated_text_no_think.split("```text")[1].split("```")[0]
+    # save the brief explaination to a file
+    brief_explaination_file = output_sub_dir / f"brief_explaination.txt"
+    with open(brief_explaination_file, 'w') as f:
+        f.write(brief_explaination)
+
+    print(f"✅ [Task {task_id}] Saved [{f'{gen_id:02d}'}]: {generated_code_file}")
+    return True
+
+
+async def inference_task(queue: asyncio.Queue, client: VLLMClient, input_base_dir: Path, output_base_dir: Path, time_tag: str, task_id: int):
+    """
+    Run inference task for a file.
     
     Args:
         queue: Queue containing file paths to process
@@ -255,92 +356,27 @@ async def process_file_task(queue: asyncio.Queue, client: VLLMClient, input_base
             while retry_count < max_retries:
                 retry_count += 1
                 try:
-                    # Read the Python file
-                    async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
-                        source_code = await f.read()
+                    # Process the inference task
+                    success = await _process_inference_task(
+                        client=client,
+                        file_path=file_path,
+                        gen_id=gen_id,
+                        input_base_dir=input_base_dir,
+                        output_base_dir=output_base_dir,
+                        time_tag=time_tag,
+                        task_id=task_id
+                    )
                     
-                    # Get relative path for output structure
-                    relative_path = file_path.relative_to(input_base_dir)
-                    output_sub_dir = output_base_dir / relative_path / f"{gen_id:02d}"
-                    output_sub_dir.mkdir(parents=True, exist_ok=True)
-                    
-                    # Create conversation
-                    system_prompt = client.get_system_prompt()
-                    user_prompt = client.get_user_prompt(source_code)
-                    
-                    # Generate response
-                    start_time = time.time()
-                    result = await client.generate(source_code)
-                    generation_time = time.time() - start_time
-                    
-                    generated_text = result.get('text', '')
-
-                    print(f"🔍 [Task {task_id}] Generated [{f'{len(result.get('tokens', [])):04d}'} tokens] [{len(generated_text)} characters] in {generation_time:.2f}s")
-
-                    # save response to a file
-                    response_file = output_sub_dir / f"response.txt"
-                    with open(response_file, 'w') as f:
-                        f.write(generated_text)
-                    
-                    # Create conversation data
-                    conversation = {
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": system_prompt
-                            },
-                            {
-                                "role": "user",
-                                "content": user_prompt
-                            },
-                            {
-                                "role": "assistant",
-                                "content": generated_text
-                            }
-                        ],
-                        "metadata": {
-                            "client_type": client.client_type,
-                            "model": client.model,
-                            "input_file": str(relative_path),
-                            "generation_time": generation_time,
-                            "num_tokens": len(result.get('tokens', [])),
-                            "time_tag": time_tag,
-                            "task_id": task_id
-                        }
-                    }
-                    
-                    # Save conversation file
-                    conversation_file = output_sub_dir / f"conversation.json"
-                    async with aiofiles.open(conversation_file, 'w', encoding='utf-8') as f:
-                        await f.write(json.dumps(conversation, indent=2, ensure_ascii=False))
-
-                    # remove <think> and </think> from the generated text
-                    generated_text_no_think = generated_text.replace("<think>", "").replace("</think>", "")
-
-                    # extract the generated code from the generated text
-                    generated_code = generated_text_no_think.split("```python")[1].split("```")[0]
-                    # save the generated code to a file
-                    generated_code_file = output_sub_dir / f"generated_code.py"
-                    with open(generated_code_file, 'w') as f:
-                        f.write(generated_code)
-
-                    # extract brief explanation from the generated text
-                    brief_explaination = generated_text_no_think.split("```text")[1].split("```")[0]
-                    # save the brief explaination to a file
-                    brief_explaination_file = output_sub_dir / f"brief_explaination.txt"
-                    with open(brief_explaination_file, 'w') as f:
-                        f.write(brief_explaination)
-
-                    print(f"✅ [Task {task_id}] Saved [{f'{gen_id:02d}'}]: {generated_code_file}")
-                    # we are successful, break the retry loop
-                    break
+                    if success:
+                        # we are successful, break the retry loop
+                        break
                     
                 except Exception as e:
                     # add warning emoji to beginning of the line
                     if retry_count >= max_retries:
                         print(f"❌ [Task {task_id}] Error generating [{f'{gen_id:02d}'}] for {file_path}: {e}", f"[{retry_count}/{max_retries}]")
                     else:
-                        print(f"⚠️ [Task {task_id}] Error generating [{f'{gen_id:02d}'}] for {file_path}: {e}", f"[{retry_count}/{max_retries}]")
+                        print(f"⚠️  [Task {task_id}] Error generating [{f'{gen_id:02d}'}] for {file_path}: {e}", f"[{retry_count}/{max_retries}]")
                     print(traceback.format_exc())
                 
         except asyncio.TimeoutError:
@@ -368,6 +404,7 @@ async def main():
     parser.add_argument("--epoch-id", type=int, default=1, help="Epoch ID to process")
     parser.add_argument("--bucket-size", type=int, default=10, help="Number of files to process in each bucket")
     parser.add_argument("--bucket-id", type=int, default=1, help="Bucket ID to process")
+    parser.add_argument("--bucket-seed", type=int, default=42, help="Seed for random number generator")
     
     args = parser.parse_args()
     
@@ -376,7 +413,7 @@ async def main():
     
     # Set up directories
     input_dir = Path(args.input_dir)
-    output_dir = Path(args.output_dir + "_" + f"{args.epoch_id:03d}" + "_" + f"{args.bucket_id:02d}" + "_" + time_tag)
+    output_dir = Path(args.output_dir + "_" + f"{args.epoch_id:03d}" + "_" + f"{args.bucket_id:02d}" + "_" + f"{args.bucket_seed:02d}" + "_" + time_tag)
     output_dir.mkdir(parents=True, exist_ok=True)
     
     if not input_dir.exists():
@@ -386,7 +423,7 @@ async def main():
     # Find all Python files recursively
     python_files = list(input_dir.rglob("*.py"))
     # sort the python files by md5 of filepath
-    python_files.sort(key=lambda x: hashlib.md5(str(str(x) + str(args.epoch_id)).encode('utf-8')).hexdigest())
+    python_files.sort(key=lambda x: hashlib.md5(str(str(x) + str(args.epoch_id) + str(args.bucket_seed)).encode('utf-8')).hexdigest())
     # split the python files into buckets
     bucket_files = [python_files[i:i + args.bucket_size] for i in range(0, len(python_files), args.bucket_size)]
     # get the bucket
@@ -444,7 +481,7 @@ async def main():
     tasks = []
     for task_id in range(args.num_tasks):
         task = asyncio.create_task(
-            process_file_task(queue, client, input_dir, output_dir, time_tag, task_id+1)
+            inference_task(queue, client, input_dir, output_dir, time_tag, task_id+1)
         )
         tasks.append(task)
     
