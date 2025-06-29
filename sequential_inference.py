@@ -59,6 +59,7 @@ class VLLMClient:
         
         # Set defaults from config
         self.model = model or self.config.get(self.client_type, {}).get('generation', {}).get('model', 'default')
+        self.tokenizer = self.config.get(self.client_type, {}).get('generation', {}).get('tokenizer', self.model)
         self.base_url = base_url or common_config.get('base_url', 'http://localhost:8000/v1')
 
         # Set up API key
@@ -126,7 +127,7 @@ class VLLMClient:
         temperature = temperature if temperature is not None else generation_config.get('temperature', 0.7)
         max_tokens = max_tokens or generation_config.get('max_tokens', 1024)
 
-        tokenizer = AutoTokenizer.from_pretrained(self.model)
+        tokenizer = AutoTokenizer.from_pretrained(self.tokenizer)
         
         # Use vLLM's OpenAI-compatible completions API
         completions_url = f"{self.base_url}/completions"
@@ -135,7 +136,7 @@ class VLLMClient:
         user_prompt = self.get_user_prompt(source_code)
 
         # format prompt with chatml format
-        prompt = f"<|im_start|>system\n{system_prompt}\n<|im_end|>\n<|im_start|>user\n{user_prompt}\n<|im_end|>\n<|im_start|>assistant\n"
+        prompt = f"<|im_start|>system\n{system_prompt}\n<|im_end|>\n<|im_start|>user\n{user_prompt}\n<|im_end|>\n<|im_start|>assistant\nLet me solve this step by step.\n<think>"
         
         try:
             generated_text = ""
@@ -326,9 +327,9 @@ async def _process_inference_task(
         await f.write(json.dumps(conversation, indent=2, ensure_ascii=False))
 
     # remove the content between first <think> and the last </think> from the generated text
-    first_think_idx = generated_text.find("<think>")
+    # first_think_idx = generated_text.find("<think>")
     last_think_idx = generated_text.rfind("</think>")
-    generated_text_no_think = generated_text[:first_think_idx] + generated_text[last_think_idx+len("</think>"):] if first_think_idx != -1 and last_think_idx != -1 else generated_text
+    generated_text_no_think = generated_text[last_think_idx+len("</think>"):] if last_think_idx != -1 else generated_text
 
     # extract the generated code from the generated text
     generated_code = generated_text_no_think.split("```python")[1].split("```")[0]
@@ -653,7 +654,7 @@ async def main():
     parser.add_argument("--output-dir", type=str, default="./_output", help="Output directory for results")
     parser.add_argument("--num-tasks", type=int, default=8, help="Number of concurrent processing tasks")
     parser.add_argument("--num-generations", type=int, default=8, help="Number of generations to perform for each file")
-    parser.add_argument("--client", type=str, default="vllm", help="Client type to use (vllm, runpod, sglang)")
+    parser.add_argument("--client", type=str, default="deepseek", help="Client type to use (vllm, runpod, sglang, deepseek)")
     parser.add_argument("--streaming", action="store_true", default=True, help="Use streaming mode")
     parser.add_argument("--epoch-id", type=int, default=1, help="Epoch ID to process")
     parser.add_argument("--bucket-size", type=int, default=10, help="Number of files to process in each bucket")
