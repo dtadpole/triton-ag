@@ -2,7 +2,7 @@ import argparse
 import sys
 import time
 import traceback
-from kbEvalTest.kbeval import KernelExecResult, eval_kernel_against_ref, graceful_eval_cleanup, run_and_check_correctness, time_execution_with_cuda_event, get_timing_stats, load_original_model_and_inputs, load_custom_model, set_seed
+from kbEvalTest.kbeval import KernelExecResult, graceful_eval_cleanup, run_and_check_correctness, time_execution_with_cuda_event, get_timing_stats, load_original_model_and_inputs, load_custom_model, set_seed
 import torch
 import asyncio
 import os
@@ -50,10 +50,12 @@ def eval_kernel_reference(
         inputs = [
             x.cuda(device=device) if isinstance(x, torch.Tensor) else x for x in inputs
         ]
+        
 
         with torch.no_grad():
             set_seed(seed_num)  # set seed for reproducible weights
             original_model = Model(*init_inputs)
+            original_model = original_model.cuda(device=device)
             assert hasattr(original_model, "forward")
             if args.verbose:
                 logger.info(f"[KB_Eval] Original Model Loaded [{eval_key}]")
@@ -79,6 +81,7 @@ def eval_kernel_reference(
     
     except Exception as e:
         logger.warning(f"[KB_Eval] Error evaluating reference code: {e}")
+        logger.warning(traceback.format_exc())
         return KernelExecResult(
             compiled=False, correctness=False, metadata=metadata | {"reference_code_error": e}
         )
@@ -386,7 +389,9 @@ if __name__ == "__main__":
     parser.add_argument("--task_tag", type=str, default="task_tag")
     parser.add_argument("--eval_tag", type=str, default="eval_tag")
     parser.add_argument("--time_tag", type=str, default="auto")
-    parser.add_argument("--reference_code", type=str, default="elemAddRef.py")
+    parser.add_argument("--reference_code", type=str,
+                        # default="/home/centos/.kbeval/Qwen/Qwen3-8B-FP8/86_conv_depthwise_separable_2D/20250629_050843/reference_code.py")
+                        default="elemAddRef.py")
     parser.add_argument("--generated_code", type=str, default="elemAddCuda.py")
     parser.add_argument("--measure_reference", action="store_true")
     parser.add_argument("--measure_both", action="store_true")
@@ -410,7 +415,10 @@ if __name__ == "__main__":
     exit_code = 0
 
     # read reference code from file
-    reference_model_src = open(os.path.join(args.wd, args.reference_code), "r").read()
+    if args.reference_code.startswith("/"):
+        reference_model_src = open(args.reference_code, "r").read()
+    else:
+        reference_model_src = open(os.path.join(args.wd, args.reference_code), "r").read()
 
     # if measure_reference is True, evaluate the reference code only
     if args.measure_reference:
@@ -444,7 +452,10 @@ if __name__ == "__main__":
     # we are here if we need to measure generated code, evaluate the custom kernel against the reference code
 
     # read generated code from file
-    generated_model_src = open(os.path.join(args.wd, args.generated_code), "r").read()
+    if args.generated_code.startswith("/"):
+        generated_model_src = open(args.generated_code, "r").read()
+    else:
+        generated_model_src = open(os.path.join(args.wd, args.generated_code), "r").read()
 
     try:
         result = compile_and_eval_kernel(

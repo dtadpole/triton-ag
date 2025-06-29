@@ -1,11 +1,12 @@
-from mcp.server.fastmcp import FastMCP
 import asyncio
-from dataclasses import dataclass
-from pydantic import Field
-from datetime import datetime
-import os
 import json
+import os
 import shutil
+from dataclasses import dataclass
+from datetime import datetime
+
+from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 from util import is_subfolder
 
 server = FastMCP("checkpoint")
@@ -19,17 +20,14 @@ async def init_workspace_folder(
     workspace_folder: str = Field(
         ..., description="The workspace directory for checkpointing"
     ),
-    reference_pytorch_code: str = Field(
-        ..., description="The reference PyTorch code"
-    ),
-    environ_vars: dict = Field(
-        {}, description="Environment variables to set"
-    ),
+    reference_pytorch_code: str = Field(..., description="The reference PyTorch code"),
+    environ_vars: dict = Field({}, description="Environment variables to set"),
     include_verifier: bool = Field(
         False, description="Whether to include the verifier folder"
     ),
 ):
     try:
+        print("init_workspace_folder")
         if not is_subfolder(parent_folder=os.getcwd(), child_folder=workspace_folder):
             raise ValueError(
                 f"Workspace folder {workspace_folder} is not a subfolder of cwd {os.getcwd()}"
