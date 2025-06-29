@@ -45,7 +45,7 @@ from datasets import load_dataset, Dataset
 
 # Load and prep dataset
 SYSTEM_PROMPT = """
-Respond in the following format, be concise and to the point with your reasoning:
+Respond in the following format:
 <reasoning>
 ...
 </reasoning>
