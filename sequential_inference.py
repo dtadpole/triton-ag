@@ -299,9 +299,11 @@ async def process_file_task(queue: asyncio.Queue, client: VLLMClient, input_base
                             }
                         ],
                         "metadata": {
-                            "client_type": client_type,
+                            "client_type": client.client_type,
+                            "model": client.model,
                             "input_file": str(relative_path),
                             "generation_time": generation_time,
+                            "num_tokens": len(result.get('tokens', [])),
                             "time_tag": time_tag,
                             "task_id": task_id
                         }
