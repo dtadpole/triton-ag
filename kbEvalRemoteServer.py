@@ -9,11 +9,32 @@ from datetime import datetime
 import concurrent.futures
 import boto3
 import torch
-from fastapi import FastAPI, Body
+from fastapi import FastAPI, Body, HTTPException, Header, Depends
 from pydantic import BaseModel, Field
 
 from kbEvalTest.kbeval import KernelExecResult, set_seed, graceful_eval_cleanup, run_and_check_correctness, time_execution_with_cuda_event, get_timing_stats, load_original_model_and_inputs, load_custom_model
 from logger import logger
+
+KB_EVAL_TOKEN = None
+
+# Authentication function
+def verify_token(authorization: str = Header(None)):
+    """Simple token verification"""
+    expected_token = KB_EVAL_TOKEN
+    if not expected_token:
+        raise HTTPException(status_code=500, detail="Server authentication not configured")
+    
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header missing")
+    
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid authorization format. Use 'Bearer <token>'")
+    
+    token = authorization[7:].strip()  # Remove "Bearer " prefix, and strip whitespace
+    if token != expected_token:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    
+    return True
 
 
 async def get_with_timeout(queue, timeout):
@@ -67,6 +88,7 @@ async def kb_eval_ref(
     task_tag: str = Body(...),
     time_tag: str = Body(...),
     reference_code: str = Body(...),
+    authenticated: bool = Depends(verify_token)
 ) -> KernelExecResult:
     global request_counter, request_counter_lock, devices
 
@@ -133,6 +155,7 @@ async def kb_eval(
     time_tag: str = Body(...),
     reference_code: str = Body(...),
     generated_code: str = Body(...),
+    authenticated: bool = Depends(verify_token)
 ) -> KernelExecResult:
     global request_counter, request_counter_lock, devices
 
@@ -207,6 +230,8 @@ if __name__ == "__main__":
     with open("kbEval.yaml", "r") as f:
         kbEval_config = yaml.load(f, Loader=yaml.FullLoader)
 
+    #########################################################
+    # get hostname and host, port from kbEval.yaml
     import socket
     hostname = socket.gethostname()
     # if hostname is not in kbEval_config["kbEvalRemoteServer"], use "one"  
@@ -220,8 +245,25 @@ if __name__ == "__main__":
     host = kbEval_config["kbEvalRemoteServer"][hostname]["host"]
     port = kbEval_config["kbEvalRemoteServer"][hostname]["port"]
 
+    # get devices from kbEval_config["kbEvalRemoteServer"][hostname]["devices"]
     devices = [int(d) for d in kbEval_config["kbEvalRemoteServer"][hostname]["devices"]]
     logger.info(f"Running on [{hostname}:{port}] with devices: {devices}")
+
+    #########################################################
+    # get api_key from kbEval_config["kbEvalRemoteServer"]["common"]["api_key"]
+    if "common" not in kbEval_config["kbEvalRemoteServer"]:
+        logger.error("[kbEvalRemoteServer] [common] not found in kbEval.yaml")
+        exit(1)
+    if "api_key" not in kbEval_config["kbEvalRemoteServer"]["common"]:
+        logger.error(f"[kbEvalRemoteServer] [api_key] not found in kbEval.yaml [{kbEval_config['kbEvalRemoteServer']['common']}]")
+        exit(1)
+    api_key_filepath = kbEval_config["kbEvalRemoteServer"]["common"]["api_key"]
+    # read file from api_key, replace ${HOME} with os.path.expanduser("~") in api_key_filepath
+    api_key_filepath = api_key_filepath.replace("${HOME}", os.path.expanduser("~"))
+    with open(api_key_filepath, "r") as f:
+        KB_EVAL_TOKEN = f.read().strip()
+        logger.info(f"[kbEvalRemoteServer] KB_EVAL_TOKEN loaded from [{api_key_filepath}]")
+    #########################################################
 
     import uvicorn
     server = uvicorn.Server(uvicorn.Config(app, host=host, port=port))
