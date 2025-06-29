@@ -92,7 +92,7 @@ async def kb_eval_ref(
 ) -> KernelExecResult:
     global request_counter, request_counter_lock, devices
 
-    logger.info(f"kb_eval_ref: {model_tag}, {task_tag}, {time_tag}, {reference_code}")
+    # logger.info(f"kb_eval_ref: {model_tag}, {task_tag}, {time_tag}, {reference_code}")
 
     try:
         async with request_counter_lock:
