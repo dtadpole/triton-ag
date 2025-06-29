@@ -5,6 +5,7 @@ from transformers import TrainerCallback
 from datetime import datetime
 import torch
 
+max_prompt_length = 256
 max_seq_length = 1024 # Can increase for longer reasoning traces
 lora_rank = 32 # Larger rank = smarter, but slower
 
@@ -132,7 +133,6 @@ def xmlcount_reward_func(completions, **kwargs) -> list[float]:
     contents = [completion[0]["content"] for completion in completions]
     return [count_xml(c) for c in contents]
 
-max_prompt_length = 256
 
 from trl import GRPOConfig, GRPOTrainer
 training_args = GRPOConfig(
