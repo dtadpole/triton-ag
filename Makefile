@@ -44,6 +44,15 @@ mlflow:
 kbEval:
 	python kbEvalRemoteServer.py
 
+kbEvalLocal1:
+	python kbEvalRemoteServer.py --local_host --port 5678 --device 5
+
+kbEvalLocal2:
+	python kbEvalRemoteServer.py --local_host --port 5677 --device 6
+
+kbEvalLocal3:
+	python kbEvalRemoteServer.py --local_host --port 5676 --device 7
+
 codeRunServer:
 	mcp dev codeRunServer.py
 
@@ -77,17 +86,16 @@ vllm-qwen3-32b:
 	--tool-call-parser hermes
 
 vllm-qwen3-32b-devserver:
-	CUDA_VISIBLE_DEVICES=2,5 vllm serve unsloth/Qwen3-32B \
-	--max_model_len 40960 \
+	CUDA_VISIBLE_DEVICES=2 vllm serve Qwen/Qwen3-32B-AWQ \
+	--max-model-len 40960 \
 	--enable-auto-tool-choice \
 	--tool-call-parser hermes \
-	--tensor-parallel-size 2 \
 	--dtype bfloat16 \
 	--host "::" \
 	--port 8086
 
 vllm-qwen3-14b-devserver:
-	CUDA_VISIBLE_DEVICES=2,5 vllm serve unsloth/Qwen3-14B \
+	CUDA_VISIBLE_DEVICES=2,5 vllm serve Qwen/Qwen3-14B \
 	--rope-scaling '{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' --max-model-len 131072 \
 	--enable-auto-tool-choice \
 	--tool-call-parser hermes \
@@ -144,6 +152,8 @@ llama.cpp-server-qwen3-32b:
 	--top-p 0.95 \
 	--min-p 0.05 \
 	--host 0.0.0.0
+
+
 
 jupyter:
 	echo ${ENV_VARS}

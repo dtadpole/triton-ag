@@ -453,8 +453,10 @@ if __name__ == "__main__":
 
     devices = args.device_list.split(",")
     # select the device from devices randomly
+    # better strategy is to select the onlocked device
     print("There are {} devices available".format(len(devices)))
-    device = torch.device(int(devices[random.randint(0, len(devices))]))
+    device = torch.device(int(devices[random.randint(0, len(devices) - 1)]))
+    logger.info(f"Using device {device} for evaluation")
 
     result = None
     exit_code = 0
