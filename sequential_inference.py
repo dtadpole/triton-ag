@@ -129,9 +129,6 @@ class VLLMClient:
 
         tokenizer = AutoTokenizer.from_pretrained(self.tokenizer)
         
-        # Use vLLM's OpenAI-compatible completions API
-        completions_url = f"{self.base_url}/completions"
-        
         system_prompt = self.get_system_prompt()
         user_prompt = self.get_user_prompt(source_code)
 
@@ -216,7 +213,7 @@ class VLLMClient:
         try:
             # Try a simple generation request
             result = await self.generate("Hello", max_tokens=1)
-            return bool(result.get('text', '').strip())  # If we get any text response, server is healthy
+            return bool(result.get('text', ''))  # If we get any text response, server is healthy
         except Exception as e:
             print(f"❌ Health check failed: {e}")
             return False
@@ -654,7 +651,7 @@ async def main():
     parser.add_argument("--output-dir", type=str, default="./_output", help="Output directory for results")
     parser.add_argument("--num-tasks", type=int, default=8, help="Number of concurrent processing tasks")
     parser.add_argument("--num-generations", type=int, default=8, help="Number of generations to perform for each file")
-    parser.add_argument("--client", type=str, default="deepseek", help="Client type to use (vllm, runpod, sglang, deepseek)")
+    parser.add_argument("--client", type=str, default="vllm", help="Client type to use (vllm, runpod, sglang, deepseek, fireworks)")
     parser.add_argument("--streaming", action="store_true", default=True, help="Use streaming mode")
     parser.add_argument("--epoch-id", type=int, default=1, help="Epoch ID to process")
     parser.add_argument("--bucket-size", type=int, default=10, help="Number of files to process in each bucket")

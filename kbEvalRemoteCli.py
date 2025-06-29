@@ -7,6 +7,8 @@ from kbEvalTest.kbeval import eval_kernel_against_ref
 import os
 import json
 from datetime import datetime
+import yaml
+from util import logger
 
 # def eval_kernel_against_ref(
 #     original_model_src: str,
@@ -20,6 +22,7 @@ from datetime import datetime
 #     device: torch.device = torch.cuda.current_device() if torch.cuda.is_available() else None, # have to run on GPU
 # ) -> KernelExecResult:
 
+KB_EVAL_TOKEN = None
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -36,15 +39,33 @@ if __name__ == "__main__":
     reference_model_src = open(os.path.join(args.wd, args.reference_code), "r").read()
     generated_model_src = open(os.path.join(args.wd, args.generated_code), "r").read()
 
+    # get server_url from kbEval.yaml
+    with open("kbEval.yaml", "r") as f:
+        kbEval_config = yaml.load(f, Loader=yaml.FullLoader)
+
+    if "kbEvalClient" not in kbEval_config:
+        logger.error("[kbEvalRemoteCli] [kbEvalClient] not found in kbEval.yaml")
+        exit(1)
+    if "servers" not in kbEval_config["kbEvalClient"]:
+        logger.error("[kbEvalRemoteCli] [kbEvalClient] [servers] not found in kbEval.yaml")
+        exit(1)
+    kbEval_client_config = kbEval_config["kbEvalClient"]["servers"][0]
+    server_url = kbEval_client_config["url"]
+    api_key_filepath = kbEval_client_config["api_key"]
+    # read file from api_key, replace ${HOME} with os.path.expanduser("~") in api_key_filepath
+    api_key_filepath = api_key_filepath.replace("${HOME}", os.path.expanduser("~"))
+    with open(api_key_filepath, "r") as f:
+        KB_EVAL_TOKEN = f.read().strip()
+        logger.info(f"[kbEvalRemoteCli] KB_EVAL_TOKEN loaded from [{api_key_filepath}]")
+
     # connect to FastAPI server
-    server_url = "http://localhost:5678"
     if args.measure_reference:
         response = requests.post(f"{server_url}/kb_eval_ref", data=json.dumps({
             "model_tag": args.model_tag,
             "task_tag": args.task_tag,
             "time_tag": datetime.now().strftime("%Y%m%d_%H%M%S"),
             "reference_code": reference_model_src,
-        }), headers={"Content-Type": "application/json"})
+        }), headers={"Content-Type": "application/json", "Authorization": f"Bearer {KB_EVAL_TOKEN}"})
         print(json.dumps(response.json(), indent=4))
     else:
         response = requests.post(f"{server_url}/kb_eval", data=json.dumps({
@@ -54,7 +75,7 @@ if __name__ == "__main__":
             "time_tag": datetime.now().strftime("%Y%m%d_%H%M%S"),
             "reference_code": reference_model_src,
             "generated_code": generated_model_src,
-        }), headers={"Content-Type": "application/json"})
+        }), headers={"Content-Type": "application/json", "Authorization": f"Bearer {KB_EVAL_TOKEN}"})
         print(json.dumps(response.json(), indent=4))
 
     
