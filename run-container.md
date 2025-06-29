@@ -103,16 +103,18 @@ rm cuda_12.9.0_575.51.03_linux.run
 
 ### This is super fast (AWQ)
 
-/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-14B-AWQ --host 0.0.0.0  --port 8091 --max-model-len 16384 --max-num-batched-tokens 2048 --max-num-seqs 16 --gpu-memory-utilization 0.75 --pipeline-parallel-size 1 --data-parallel-size 1 --tensor-parallel-size 1 --enable-auto-tool-choice --tool-call-parser hermes --disable-log-requests
+/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-14B-AWQ --host 0.0.0.0  --port 8091 --max-model-len 14336 --max-num-batched-tokens 2048 --max-num-seqs 16 --gpu-memory-utilization 0.75 --pipeline-parallel-size 1 --data-parallel-size 1 --tensor-parallel-size 1 --enable-auto-tool-choice --tool-call-parser hermes --disable-log-requests
 
 ### This is ideal setup (FP8) ###
 
-/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-8B-FP8 --host 0.0.0.0  --port 8091 --max-model-len 16384 --max-num-batched-tokens 2048 --max-num-seqs 32 --gpu-memory-utilization 0.75 --pipeline-parallel-size 1 --data-parallel-size 1 --tensor-parallel-size 1 --enable-auto-tool-choice --tool-call-parser hermes --disable-log-requests
+/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-8B-FP8 --host 0.0.0.0  --port 8091 --max-model-len 16384 --max-num-batched-tokens 2048 --max-num-seqs 32 --gpu-memory-utilization 0.75 --pipeline-parallel-size 1 --data-parallel-size 4 --tensor-parallel-size 1 --enable-auto-tool-choice --tool-call-parser hermes --disable-log-requests
 
-/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-14B-FP8 --host 0.0.0.0  --port 8091 --max-model-len 16384 --max-num-batched-tokens 2048 --max-num-seqs 32 --gpu-memory-utilization 0.75 --pipeline-parallel-size 1 --data-parallel-size 1 --tensor-parallel-size 1 --enable-auto-tool-choice --tool-call-parser hermes --disable-log-requests
+/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-14B-FP8 --host 0.0.0.0  --port 8091 --max-model-len 16384 --max-num-batched-tokens 2048 --max-num-seqs 32 --gpu-memory-utilization 0.8 --pipeline-parallel-size 1 --data-parallel-size 4 --tensor-parallel-size 1 --enable-auto-tool-choice --tool-call-parser hermes --disable-log-requests
+
+/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-32B-FP8 --host 0.0.0.0  --port 8091 --max-model-len 16384 --max-num-batched-tokens 2048 --max-num-seqs 32 --gpu-memory-utilization 0.8 --pipeline-parallel-size 1 --data-parallel-size 4 --tensor-parallel-size 1 --enable-auto-tool-choice --tool-call-parser hermes --disable-log-requests
 
 # This is too slow 
-/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-14B --host 0.0.0.0  --port 8091 --quantization bitsandbytes  --load-format bitsandbytes --max-model-len 16384 --max-num-batched-tokens 2048 --max-num-seqs 16 --gpu-memory-utilization 0.9 --pipeline-parallel-size 1 --data-parallel-size 1 --tensor-parallel-size 1 --enable-auto-tool-choice --tool-call-parser hermes --disable-log-requests
+/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-14B --host 0.0.0.0  --port 8091 --quantization bitsandbytes  --load-format bitsandbytes --max-model-len 14336 --max-num-batched-tokens 2048 --max-num-seqs 16 --gpu-memory-utilization 0.75 --pipeline-parallel-size 1 --data-parallel-size 1 --tensor-parallel-size 1 --enable-auto-tool-choice --tool-call-parser hermes --disable-log-requests
 
 # This is too slow
 

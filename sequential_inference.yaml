@@ -6,9 +6,9 @@ vllm:
     api_key: "${HOME}/.keys/local.api.key"
 
   generation:
-    model: "Qwen/Qwen3-8B-FP8"
+    model: "Qwen/Qwen3-14B-FP8"
     temperature: 0.6
-    max_tokens: 14336
+    max_tokens: 12288
 
 sglang:
   common:
@@ -19,8 +19,60 @@ sglang:
     model: "Qwen/Qwen3-14B-FP8"
     temperature: 0.6
     max_tokens: 14336
-    
-  
+
+runpod:
+  common:
+    base_url: "https://zcbfu39pp5jxrg-8091.proxy.runpod.net/v1"
+    # base_url: "https://65tarp87hz8quy-8091.proxy.runpod.net/v1"
+    api_key: "${HOME}/.keys/local.api.key"
+
+  generation:
+    model: "Qwen/Qwen3-32B"
+    temperature: 0.6
+    # max_tokens: 12288
+    max_tokens: 14336
+
+
+deepinfra:
+  common:
+    api_key: ${HOME}/.keys/deepinfra.api.key
+    base_url: https://api.deepinfra.com/v1/openai
+
+  generation:
+    # model: Qwen/Qwen3-14B
+    model: Qwen/Qwen3-32B
+    # model: Qwen/Qwen3-235B-A22B
+    temperature: 0.6
+    max_tokens: 14336
+
+deepseek:
+  common:
+    api_key: ${HOME}/.keys/deepseek.api.key
+    base_url: https://api.deepseek.com/v1
+
+  generation:
+    model: deepseek-reasoner
+    tokenizer: deepseek-ai/DeepSeek-R1-0528
+    temperature: 0.6
+    max_tokens: 14336
+
+fireworks:
+  common:
+    api_key: ${HOME}/.keys/fireworks.api.key
+    base_url: https://api.fireworks.ai/inference/v1
+
+  generation:
+    # model: accounts/fireworks/models/deepseek-r1-0528
+    model: accounts/fireworks/models/deepseek-v3-0324
+    # tokenizer: deepseek-ai/DeepSeek-R1-0528
+    tokenizer: deepseek-ai/DeepSeek-V3-0324
+    temperature: 0.6
+    max_tokens: 14336
+
+
+kbEval:
+  base_url: http://10.12.0.204:5678
+
 prompts:
   # System and user prompts
   system_prompt: |
@@ -44,6 +96,13 @@ prompts:
     {generated_code}
     ```
 
+    You shall provide a brief explanation of why the code is best optimized for performance. Add the reasoning using the following format:
+
+    ```text
+    ...
+    ```
+
+
   # User prompt template with substitutable source code parameter
   user_prompt: |
     Following is the reference source code of a PyTorch model, write the complete new module (no testing code, no other code): it will be evaluated and you will be given feedback on its correctness and performance.
@@ -52,15 +111,13 @@ prompts:
     {source_code}
     ```
 
-    Provide a brief explanation of why you believe the code you generated is best optimized for performance.
+    Provide a brief reasoning why you believe the code you generated is best optimized for performance. Add the explanation with the following format:
 
-    Add the brief explanation using the following format:
     ```text
     ...
     ```
 
     Be concise with your thinking, and don't be too verbose.
-
     
   
   examples:
