@@ -20,6 +20,7 @@ import hashlib
 import glob
 import httpx
 import traceback
+from openai import AsyncOpenAI
 from transformers import AutoTokenizer
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -28,8 +29,11 @@ from pathlib import Path
 import requests
 import yaml
 
+# Global configuration flags
+STREAMING = True   # Set to True for streaming API, False for non-streaming single response
+
 class VLLMClient:
-    """Client for vLLM OpenAI-compatible API using synchronous generation with logprobs support."""
+    """Client for vLLM OpenAI-compatible API using OpenAI client for streaming or non-streaming generation."""
     
     def __init__(
         self,
@@ -67,6 +71,20 @@ class VLLMClient:
                     self.api_key = f.read().strip()
             except FileNotFoundError:
                 self.api_key = "dummy_key"  # vLLM often doesn't require real auth
+        else:
+            self.api_key = api_key
+        
+        # Create OpenAI client for vLLM
+        self.openai_client = AsyncOpenAI(
+            base_url=self.base_url,
+            api_key=self.api_key,
+        )
+        
+        # Print generation mode info
+        if STREAMING:
+            print("🚀 Using STREAMING mode with OpenAI client")
+        else:
+            print("📄 Using NON-STREAMING mode with OpenAI client")
         
     def _load_config(self, config_file: str) -> Dict:
         """Load configuration from YAML file."""
@@ -91,17 +109,16 @@ class VLLMClient:
         **kwargs
     ):
         """
-        Generate text with asynchronous streaming response using vLLM's OpenAI-compatible API.
+        Generate text using vLLM's OpenAI-compatible API with streaming or non-streaming mode.
         
         Args:
             source_code: Input source code
-            model: Model name to use
             temperature: Sampling temperature
             max_tokens: Maximum tokens to generate
             **kwargs: Additional parameters
             
         Returns:
-            Dict with 'text' data
+            Dict with 'text' and 'tokens' data
         """
         # Get defaults from config
         generation_config = self.config.get(self.client_type, {}).get('generation', {})
@@ -119,79 +136,54 @@ class VLLMClient:
         # format prompt with chatml format
         prompt = f"<|im_start|>system\n{system_prompt}\n<|im_end|>\n<|im_start|>user\n{user_prompt}\n<|im_end|>\n<|im_start|>assistant\n"
         
-        payload = {
-            "model": self.model,
-            "prompt": prompt,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "top_k": kwargs.get('top_k', 40),
-            "top_p": kwargs.get('top_p', 1.0),
-            "stream": True,  # Enable streaming
-            "echo": False,  # We don't need to echo the prompt in output
-        }
-        
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
-            "Accept": "text/event-stream"
-        }
-        
         try:
-            async with httpx.AsyncClient() as client:
-                async with client.stream(
-                    "POST",
-                    completions_url,
-                    json=payload,
-                    headers=headers,
+            generated_text = ""
+            
+            if STREAMING:
+                # STREAMING MODE: Real-time token streaming using OpenAI client
+                stream = await self.openai_client.completions.create(
+                    model=self.model,
+                    prompt=prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_p=kwargs.get('top_p', 1.0),
+                    stream=True,
                     timeout=600
-                ) as response:
-                    response.raise_for_status()
-                    
-                    generated_text = ""
-                    
-                    # Process streaming response
-                    async for line in response.aiter_lines():
-                        line = line.strip()
-                        
-                        # Skip empty lines and comments
-                        if not line or line.startswith(':'):
-                            continue
+                )
+                
+                # Process streaming response
+                async for chunk in stream:
+                    if chunk.choices:
+                        choice = chunk.choices[0]
+                        if choice.text:
+                            generated_text += choice.text
                             
-                        # Parse SSE format
-                        if line.startswith('data: '):
-                            data_str = line[6:]  # Remove 'data: ' prefix
-                            
-                            # Check for end of stream
-                            if data_str == '[DONE]':
-                                break
-                                
-                            try:
-                                # Parse JSON data
-                                chunk_data = json.loads(data_str)
-                                
-                                # Extract text from streaming response
-                                choices = chunk_data.get('choices', [])
-                                if choices:
-                                    choice = choices[0]
-                                    delta_text = choice.get('text', '')
-                                    if delta_text:
-                                        generated_text += delta_text
-                                        
-                            except json.JSONDecodeError:
-                                # Skip malformed JSON chunks
-                                continue
+            else:
+                # NON-STREAMING MODE: Single response using OpenAI client
+                response = await self.openai_client.completions.create(
+                    model=self.model,
+                    prompt=prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_p=kwargs.get('top_p', 1.0),
+                    stream=False,
+                    timeout=600
+                )
+                
+                # Extract text from response
+                if response.choices:
+                    choice = response.choices[0]
+                    generated_text = choice.text or ""
 
             # tokenize the generated text
-            tokens = tokenizer.encode(generated_text)
+            tokens = tokenizer.encode(generated_text) if generated_text else []
             
             return {'text': generated_text, 'tokens': tokens}
                             
         except Exception as e:
-            print(f"Error during vLLM streaming generation: {e}")
+            mode = "streaming" if STREAMING else "non-streaming"
+            print(f"Error during vLLM {mode} generation with OpenAI client: {e}")
             traceback.print_exc()
-            if hasattr(e, 'response'):
-                print(f"Response status: {e.response.status_code}")
-                print(f"Response body: {e.response.text}")
             raise
     
     def get_system_prompt(self) -> str:
@@ -343,7 +335,7 @@ async def _process_inference_task(
         f.write(generated_code)
 
     # extract brief explanation from the generated text
-    brief_explaination = generated_text_no_think.split("```text")[1].split("```")[0]
+    brief_explaination = generated_text_no_think.split("```explanation")[1].split("```")[0]
     # save the brief explaination to a file
     brief_explaination_file = output_sub_dir / f"brief_explaination.txt"
     with open(brief_explaination_file, 'w') as f:
@@ -498,8 +490,6 @@ async def _process_evaluation_task(
             "generated_code": generated_code
         }
         
-        print(f"🔍 [Task {task_id}] Evaluating [{f'{gen_id:02d}'}]: {task_name}")
-        
         # Call the evaluation server
         start_time = time.time()
         result = await kb_eval_client.call_kb_eval_server(eval_params)
@@ -627,7 +617,8 @@ async def inference_and_eval_task(queue: asyncio.Queue, inference_client: VLLMCl
             print(traceback.format_exc())
             break
     
-    print(f"✅ [Task {task_id}] completed")
+    # circle emoji to beginning of the line
+    print(f"🔄 [Task {task_id}] completed")
 
 
 
@@ -660,12 +651,16 @@ async def main():
     parser.add_argument("--num-tasks", type=int, default=8, help="Number of concurrent processing tasks")
     parser.add_argument("--num-generations", type=int, default=8, help="Number of generations to perform for each file")
     parser.add_argument("--client", type=str, default="vllm", help="Client type to use (vllm, runpod, sglang)")
+    parser.add_argument("--streaming", action="store_true", default=True, help="Use streaming mode")
     parser.add_argument("--epoch-id", type=int, default=1, help="Epoch ID to process")
     parser.add_argument("--bucket-size", type=int, default=10, help="Number of files to process in each bucket")
     parser.add_argument("--bucket-id", type=int, default=1, help="Bucket ID to process")
     parser.add_argument("--bucket-seed", type=int, default=42, help="Seed for random number generator")
     
     args = parser.parse_args()
+
+    global STREAMING
+    STREAMING = args.streaming
     
     # Create timestamp for this run
     time_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
