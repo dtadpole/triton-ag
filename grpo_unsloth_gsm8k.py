@@ -1,12 +1,17 @@
+from unsloth import FastLanguageModel
 import wandb
 from trl import GRPOConfig, GRPOTrainer
-# from transformers import TrainerCallback
+from transformers import TrainerCallback
 from datetime import datetime
-from unsloth import FastLanguageModel
 import torch
 
-max_seq_length = 2048 # Can increase for longer reasoning traces
+max_seq_length = 1024 # Can increase for longer reasoning traces
 lora_rank = 32 # Larger rank = smarter, but slower
+
+batch_size = 8
+accumulation_steps = 2
+
+num_generations = 8
 
 # model_name = "Qwen/Qwen3-4B"
 model_name = "meta-llama/meta-Llama-3.1-8B-Instruct"
@@ -20,7 +25,7 @@ model, tokenizer = FastLanguageModel.from_pretrained(
     load_in_4bit = True, # False for LoRA 16bit
     fast_inference = True, # Enable vLLM fast inference
     max_lora_rank = lora_rank,
-    gpu_memory_utilization = 0.6, # Reduce if out of memory
+    gpu_memory_utilization = 0.4, # Reduce if out of memory
 )
 
 model = FastLanguageModel.get_peft_model(
@@ -139,20 +144,21 @@ training_args = GRPOConfig(
     lr_scheduler_type = "cosine",
     optim = "paged_adamw_8bit",
     logging_steps = 1,
-    per_device_train_batch_size = 1,
-    gradient_accumulation_steps = 4, # Increase to 4 for smoother training
-    num_generations = 6, # Decrease if out of memory
+    per_device_train_batch_size = batch_size,
+    gradient_accumulation_steps = accumulation_steps, # Increase to 4 for smoother training
+    num_generations = num_generations, # Decrease if out of memory
     max_prompt_length = max_prompt_length,
     max_completion_length = max_seq_length - max_prompt_length,
     # num_train_epochs = 1, # Set to 1 for a full training run
     max_steps = 250,
     save_steps = 10,
     max_grad_norm = 0.1,
+    loss_type="dr_grpo",
+    beta = 0.0,
     report_to = "wandb", # Can use Weights & Biases
     output_dir = "outputs_grpo_gsm8k",
 )
 
-"""
 class WandbChartCallback(TrainerCallback):
     def on_train_begin(self, args, state, control, **kwargs):
         # Define metrics and their step relationship
@@ -170,15 +176,24 @@ class WandbChartCallback(TrainerCallback):
             for key, value in logs.items():
                 if isinstance(value, (int, float)):
                     if key.startswith('train'):
-                        chart_data[f"training/{key}"] = float(value)
+                        update_key = key[len('train/'):]
+                        chart_data[f"training/{update_key}"] = float(value)
                     elif key.startswith('eval'):
-                        chart_data[f"eval/{key}"] = float(value)
+                        update_key = key[len('eval/'):]
+                        chart_data[f"eval/{update_key}"] = float(value)
+                    elif key.startswith('rewards/'):
+                        # remove the first # of characters that are 'rewards/'
+                        update_key = key[len('rewards/'):]
+                        chart_data[f"rewards/{update_key}"] = float(value)
+                    elif key.startswith('completions/'):
+                        # remove the first # of characters that are 'completions/'
+                        update_key = key[len('completions/'):]
+                        chart_data[f"completions/{update_key}"] = float(value)
                     else:
                         chart_data[f"metrics/{key}"] = float(value)
             
             wandb.log(chart_data)
             print(f"Step {state.global_step}: Logged {len(chart_data)} metrics")
-"""
 
 wandb.init(
     project="grpo-gsm8k",
@@ -202,6 +217,6 @@ trainer = GRPOTrainer(
     ],
     args = training_args,
     train_dataset = dataset,
-    # callbacks=[WandbChartCallback()]
+    callbacks=[WandbChartCallback()]
 )
 trainer.train()
