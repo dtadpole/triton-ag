@@ -1,12 +1,17 @@
 import wandb
+from trl import GRPOConfig, GRPOTrainer
+# from transformers import TrainerCallback
 from datetime import datetime
 from unsloth import FastLanguageModel
 import torch
+
 max_seq_length = 2048 # Can increase for longer reasoning traces
 lora_rank = 32 # Larger rank = smarter, but slower
 
+# model_name = "Qwen/Qwen3-4B"
+model_name = "meta-llama/meta-Llama-3.1-8B-Instruct"
+
 time_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
-model_name = "Qwen/Qwen3-8B"
 
 model, tokenizer = FastLanguageModel.from_pretrained(
     # model_name = "meta-llama/meta-Llama-3.1-8B-Instruct",
@@ -35,7 +40,7 @@ from datasets import load_dataset, Dataset
 
 # Load and prep dataset
 SYSTEM_PROMPT = """
-Respond in the following format:
+Respond in the following format, be concise and to the point with your reasoning:
 <reasoning>
 ...
 </reasoning>
@@ -136,20 +141,48 @@ training_args = GRPOConfig(
     logging_steps = 1,
     per_device_train_batch_size = 1,
     gradient_accumulation_steps = 4, # Increase to 4 for smoother training
-    num_generations = 8, # Decrease if out of memory
+    num_generations = 6, # Decrease if out of memory
     max_prompt_length = max_prompt_length,
     max_completion_length = max_seq_length - max_prompt_length,
     # num_train_epochs = 1, # Set to 1 for a full training run
     max_steps = 250,
     save_steps = 10,
     max_grad_norm = 0.1,
-    report_to = "none", # Can use Weights & Biases
+    report_to = "wandb", # Can use Weights & Biases
     output_dir = "outputs_grpo_gsm8k",
 )
 
+"""
+class WandbChartCallback(TrainerCallback):
+    def on_train_begin(self, args, state, control, **kwargs):
+        # Define metrics and their step relationship
+        if wandb.run:
+            wandb.define_metric("global_step")
+            wandb.define_metric("training/*", step_metric="global_step")
+            wandb.define_metric("eval/*", step_metric="global_step")
+            print("W&B charts configured")
+    
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if logs and wandb.run:
+            # Prepare metrics for charting
+            chart_data = {"global_step": state.global_step}
+            
+            for key, value in logs.items():
+                if isinstance(value, (int, float)):
+                    if key.startswith('train'):
+                        chart_data[f"training/{key}"] = float(value)
+                    elif key.startswith('eval'):
+                        chart_data[f"eval/{key}"] = float(value)
+                    else:
+                        chart_data[f"metrics/{key}"] = float(value)
+            
+            wandb.log(chart_data)
+            print(f"Step {state.global_step}: Logged {len(chart_data)} metrics")
+"""
+
 wandb.init(
-    project="grpo-training-gsm8k",
-    name=f"grpo-training-gsm8k-{time_tag}",
+    project="grpo-gsm8k",
+    name=f"gsm8k-{time_tag}",
     tags=["grpo"],
     config={
         "model_name": model_name,
@@ -169,6 +202,6 @@ trainer = GRPOTrainer(
     ],
     args = training_args,
     train_dataset = dataset,
+    # callbacks=[WandbChartCallback()]
 )
 trainer.train()
-
