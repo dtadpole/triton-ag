@@ -8,6 +8,7 @@ Supports synchronous text generation.
 """
 
 import os
+import re
 import yaml
 import time
 import json
@@ -324,8 +325,10 @@ async def _process_inference_task(
     async with aiofiles.open(conversation_file, 'w', encoding='utf-8') as f:
         await f.write(json.dumps(conversation, indent=2, ensure_ascii=False))
 
-    # remove <think> and </think> from the generated text
-    generated_text_no_think = generated_text.replace("<think>", "").replace("</think>", "")
+    # remove the content between first <think> and the last </think> from the generated text
+    first_think_idx = generated_text.find("<think>")
+    last_think_idx = generated_text.rfind("</think>")
+    generated_text_no_think = generated_text[:first_think_idx] + generated_text[last_think_idx+len("</think>"):] if first_think_idx != -1 and last_think_idx != -1 else generated_text
 
     # extract the generated code from the generated text
     generated_code = generated_text_no_think.split("```python")[1].split("```")[0]
@@ -335,7 +338,7 @@ async def _process_inference_task(
         f.write(generated_code)
 
     # extract brief explanation from the generated text
-    brief_explaination = generated_text_no_think.split("```explanation")[1].split("```")[0]
+    brief_explaination = generated_text_no_think.split("```text")[1].split("```")[0]
     # save the brief explaination to a file
     brief_explaination_file = output_sub_dir / f"brief_explaination.txt"
     with open(brief_explaination_file, 'w') as f:
