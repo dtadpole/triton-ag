@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-SGLang and vLLM Generate API Client
-===================================
+vLLM Generate API Client
+========================
 
-Client code that uses SGLang's or vLLM's generate API to get results from given prompts.
-Supports synchronous text generation with log probability capture.
+Client code that uses vLLM's generate API to get results from given prompts.
+Supports synchronous text generation.
 """
 
 import os
@@ -20,8 +20,9 @@ import hashlib
 import glob
 import httpx
 import traceback
+from transformers import AutoTokenizer
 from datetime import datetime
-from typing import Dict, List, Union, Optional, Generator
+from typing import Dict, List, Optional, Generator
 from openai import OpenAI
 from pathlib import Path
 
@@ -31,8 +32,10 @@ class VLLMClient:
     
     def __init__(
         self,
+        client_type: str = "default",
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
+        model: Optional[str] = None,
         config_file: str = "sequential_inference.yaml",
     ):
         """
@@ -45,27 +48,24 @@ class VLLMClient:
         """
         # Load configuration from file
         self.config = self._load_config(config_file)
-        common_config = self.config.get('vllm', {}).get('common', {})
+        self.client_type = client_type
+        common_config = self.config.get(self.client_type, {}).get('common', {})
         
         # Set defaults from config
-        base_url = base_url or common_config.get('base_url', 'http://localhost:8000/v1')
-        
+        self.model = model or self.config.get(self.client_type, {}).get('generation', {}).get('model', 'default')
+        self.base_url = base_url or common_config.get('base_url', 'http://localhost:8000/v1')
+
         # Set up API key
         if api_key is None:
-            api_key = os.environ.get("VLLM_API_KEY")
-            if api_key is None:
-                # Try to load from config or default location
-                api_key_path = common_config.get('api_key', "${HOME}/.keys/local.api.key")
-                if api_key_path.startswith('${HOME}/'):
-                    api_key_path = os.path.expanduser(api_key_path.replace('${HOME}', '~'))
-                try:
-                    with open(api_key_path, 'r') as f:
-                        api_key = f.read().strip()
-                except FileNotFoundError:
-                    api_key = "dummy_key"  # vLLM often doesn't require real auth
-        
-        self.base_url = base_url
-        self.api_key = api_key
+            # Try to load from config or default location
+            api_key_path = common_config.get('api_key', "${HOME}/.keys/local.api.key")
+            if api_key_path.startswith('${HOME}/'):
+                api_key_path = os.path.expanduser(api_key_path.replace('${HOME}', '~'))
+            try:
+                with open(api_key_path, 'r') as f:
+                    self.api_key = f.read().strip()
+            except FileNotFoundError:
+                self.api_key = "dummy_key"  # vLLM often doesn't require real auth
         
     def _load_config(self, config_file: str) -> Dict:
         """Load configuration from YAML file."""
@@ -79,16 +79,14 @@ class VLLMClient:
                 config = yaml.safe_load(f)
                 return config or {}
         else:
-            print(f"Warning: Config file {config_file} not found")
+            print(f"⚠️ Warning: Config file {config_file} not found")
             return {}
     
     async def generate(
         self,
         source_code: str,
-        model: Optional[str] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-        logprobs: Optional[int] = None,
         **kwargs
     ):
         """
@@ -99,18 +97,17 @@ class VLLMClient:
             model: Model name to use
             temperature: Sampling temperature
             max_tokens: Maximum tokens to generate
-            logprobs: Number of log probabilities to return for each token
             **kwargs: Additional parameters
             
         Returns:
-            Dict with 'text' and logprobs data
+            Dict with 'text' data
         """
         # Get defaults from config
-        generation_config = self.config.get('vllm', {}).get('generation', {})
-        model = model or generation_config.get('model', 'default')
+        generation_config = self.config.get(self.client_type, {}).get('generation', {})
         temperature = temperature if temperature is not None else generation_config.get('temperature', 0.7)
         max_tokens = max_tokens or generation_config.get('max_tokens', 1024)
-        logprobs_enabled = generation_config.get('logprobs', True)
+
+        tokenizer = AutoTokenizer.from_pretrained(self.model)
         
         # Use vLLM's OpenAI-compatible completions API
         completions_url = f"{self.base_url}/completions"
@@ -122,7 +119,7 @@ class VLLMClient:
         prompt = f"<|im_start|>system\n{system_prompt}\n<|im_end|>\n<|im_start|>user\n{user_prompt}\n<|im_end|>\n<|im_start|>assistant\n"
         
         payload = {
-            "model": model,
+            "model": self.model,
             "prompt": prompt,
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -130,11 +127,6 @@ class VLLMClient:
             "stream": False,
             "echo": False,  # We don't need to echo the prompt in output
         }
-        
-        # Add logprobs if requested - vLLM supports both prompt_logprobs and logprobs
-        if logprobs_enabled:
-            payload["logprobs"] = 1  # Need at least 1 to get logprobs
-            payload["prompt_logprobs"] = 1  # Need at least 1 to get prompt logprobs
         
         headers = {
             "Content-Type": "application/json",
@@ -154,69 +146,18 @@ class VLLMClient:
                 # Parse response
                 data = response.json()
             
-            # Extract text and logprobs from OpenAI-style response
+            # Extract text from OpenAI-style response
             choices = data.get('choices', [])
             if not choices:
-                return {'text': '', 'input_logprobs': [], 'output_logprobs': []}
+                return {'text': ''}
             
             choice = choices[0]
             generated_text = choice.get('text', '')
+
+            # tokenize the generated text
+            tokens = tokenizer.encode(generated_text)
             
-            result = {
-                'text': generated_text,
-                'input_logprobs': [],
-                'output_logprobs': []
-            }
-            
-            # Extract logprobs if available
-            logprobs_data = choice.get('logprobs')
-            if logprobs_data:
-                # Output token logprobs
-                if 'tokens' in logprobs_data and 'token_logprobs' in logprobs_data:
-                    tokens = logprobs_data['tokens']
-                    token_logprobs = logprobs_data['token_logprobs']
-                    top_logprobs = logprobs_data.get('top_logprobs', [])
-                    
-                    output_logprobs = []
-                    for i, (token, logprob) in enumerate(zip(tokens, token_logprobs)):
-                        if logprob is not None:  # Skip None values
-                            entry = {
-                                'token': token,
-                                'logprob': logprob
-                            }
-                            output_logprobs.append(entry)
-                    result['output_logprobs'] = output_logprobs
-            
-            # Extract prompt logprobs (vLLM returns this at choice level, not in logprobs object)
-            prompt_logprobs = choice.get('prompt_logprobs')
-            if prompt_logprobs and isinstance(prompt_logprobs, list):
-                input_logprobs = []
-                for entry in prompt_logprobs:
-                    if entry is not None and isinstance(entry, dict):
-                        # vLLM format: dict with token_id as keys
-                        if entry:
-                            # Find the token with the highest rank (lowest rank number = most likely)
-                            # or just take the first one as the chosen token
-                            chosen_token_id = None
-                            chosen_info = None
-                            best_rank = float('inf')
-                            
-                            for token_id, token_info in entry.items():
-                                if isinstance(token_info, dict):
-                                    rank = token_info.get('rank', float('inf'))
-                                    if rank < best_rank:
-                                        best_rank = rank
-                                        chosen_token_id = token_id
-                                        chosen_info = token_info
-                            
-                            if chosen_info:
-                                input_logprobs.append({
-                                    'token': chosen_info.get('decoded_token', chosen_token_id),
-                                    'logprob': chosen_info.get('logprob', 0.0)
-                                })
-                result['input_logprobs'] = input_logprobs
-                        
-            return result
+            return {'text': generated_text, 'tokens': tokens}
                             
         except Exception as e:
             print(f"Error during vLLM generation: {e}")
@@ -281,209 +222,19 @@ class VLLMClient:
             return ['default']
 
 
-class SGLangClient:
-    """Client for SGLang generate API using synchronous generation."""
-    
-    def __init__(
-        self,
-        base_url: Optional[str] = None,
-        api_key: Optional[str] = None,
-        config_file: str = "sequential_inference.yaml",
-    ):
-        """
-        Initialize SGLang client.
-        
-        Args:
-            base_url: SGLang server base URL (loaded from config if None)
-            api_key: API key for authentication
-            config_file: Path to YAML config file with server settings
-        """
-        # Load configuration from file
-        self.config = self._load_config(config_file)
-        common_config = self.config.get('sglang', {}).get('common', {})
-        
-        # Set defaults from config
-        base_url = base_url or common_config.get('base_url', 'http://localhost:8081/v1')
-        
-        # Set up API key
-        if api_key is None:
-            api_key = os.environ.get("SGLANG_API_KEY")
-            if api_key is None:
-                # Try to load from config or default location
-                api_key_path = common_config.get('api_key', "${HOME}/.keys/local.api.key")
-                if api_key_path.startswith('${HOME}/'):
-                    api_key_path = os.path.expanduser(api_key_path.replace('${HOME}', '~'))
-                try:
-                    with open(api_key_path, 'r') as f:
-                        api_key = f.read().strip()
-                except FileNotFoundError:
-                    api_key = "dummy_key"  # SGLang often doesn't require real auth
-        
-        self.base_url = base_url
-        
-    def _load_config(self, config_file: str) -> Dict:
-        """Load configuration from YAML file."""
-        config_path = Path(config_file)
-        if not config_path.exists():
-            # Try relative to script directory
-            config_path = Path(__file__).parent / config_file
-        
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                config = yaml.safe_load(f)
-                return config or {}
-        else:
-            print(f"Warning: Config file {config_file} not found")
-            return {}
-    
-    async def generate(
-        self,
-        source_code: str = "",
-        model: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        logprobs: Optional[int] = None,
-        **kwargs
-    ):
-        """
-        Generate text with asynchronous response.
-        
-        Args:
-            source_code: Input source code
-            model: Model name to use
-            temperature: Sampling temperature
-            max_tokens: Maximum tokens to generate
-            logprobs: Number of log probabilities to return for each token
-            **kwargs: Additional parameters
-            
-        Returns:
-            Dict with 'text' and logprobs data
-        """
-        # Get defaults from config
-        generation_config = self.config.get('sglang', {}).get('generation', {})
-        model = model or generation_config.get('model', 'default')
-        temperature = temperature if temperature is not None else generation_config.get('temperature', 0.7)
-        max_tokens = max_tokens or generation_config.get('max_tokens', 1024)
-        logprobs = logprobs if logprobs is not None else generation_config.get('logprobs', 0)
-        
-        # Use SGLang's native generate API
-        generate_url = self.base_url.replace('/v1', '') + '/generate'
 
-        system_prompt = self.get_system_prompt()
-        user_prompt = self.get_user_prompt(source_code)
-
-        # format prompt with chatml format
-        prompt = f"<|im_start|>system\n{system_prompt}\n<|im_end|>\n<|im_start|>user\n{user_prompt}\n<|im_end|>\n<|im_start|>assistant\n"
-        
-        payload = {
-            "text": prompt,
-            "sampling_params": {
-                "temperature": temperature,
-                "max_new_tokens": max_tokens,
-                "top_k": kwargs.get('top_k', 40),
-                "top_p": kwargs.get('top_p', 1.0),
-            },
-            "stream": False
-        }
-        
-        # Add logprobs if requested
-        if logprobs and logprobs > 0:
-            payload["return_logprob"] = True
-            payload["logprob_start_len"] = 0
-        
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    generate_url,
-                    json=payload,
-                    headers={"Content-Type": "application/json"},
-                    timeout=600,
-                )
-                response.raise_for_status()
-                
-                # Parse response
-                data = response.json()
-            
-            result = {
-                'text': data.get('text', ''),
-                'meta_info': data.get('meta_info', {})
-            }
-            
-            # Extract logprobs if available
-            if 'meta_info' in data:
-                meta_info = data['meta_info']
-                
-                if 'input_token_logprobs' in meta_info:
-                    result['input_logprobs'] = meta_info['input_token_logprobs']
-                
-                if 'output_token_logprobs' in meta_info:
-                    result['output_logprobs'] = meta_info['output_token_logprobs']
-            
-            return result
-                            
-        except Exception as e:
-            print(f"Error during generation: {e}")
-            raise
-    
-    def get_system_prompt(self) -> str:
-        """Get system prompt from configuration."""
-        prompts_config = self.config.get('prompts', {})
-        reference_code = self.get_example_reference_code()
-        generated_code = self.get_example_generated_code()
-        return prompts_config.get('system_prompt', 'You are a helpful assistant.').format(reference_code=reference_code, generated_code=generated_code)
-    
-    def get_user_prompt(self, source_code: str) -> str:
-        """Get user prompt from configuration with source code substituted."""
-        prompts_config = self.config.get('prompts', {})
-        user_prompt_template = prompts_config.get('user_prompt', 'Analyze this code: {source_code}')
-        return user_prompt_template.format(source_code=source_code)
-    
-    def get_example_reference_code(self) -> str:
-        """Get example reference code from configuration."""
-        prompts_config = self.config.get('prompts', {}).get('examples', {})
-        return prompts_config.get('reference_code', '')
-
-    def get_example_generated_code(self) -> str:
-        """Get example generated code from configuration."""
-        prompts_config = self.config.get('prompts', {}).get('examples', {})
-        return prompts_config.get('generated_code', '')
-
-    async def health_check(self) -> bool:
-        """Check if SGLang server is healthy."""
-        try:
-            # Try a simple generation request using SGLang's native API
-            result = await self.generate("Hello", max_tokens=1)
-            return bool(result.get('text'))  # If we get any text response, server is healthy
-        except Exception:
-            return False
-    
-    def get_models(self) -> List[str]:
-        """Get available models from the server."""
-        try:
-            # Use SGLang's native API to get models
-            models_url = self.base_url.replace('/v1', '') + '/get_model_info'
-            response = requests.get(models_url, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            return [data.get('model_path', 'default')]
-        except Exception as e:
-            print(f"Error getting models: {e}")
-            return ["default"]
-
-
-async def process_file_task(queue: asyncio.Queue, client: Union[SGLangClient, VLLMClient], input_base_dir: Path, output_base_dir: Path, time_tag: str, task_id: int):
+async def process_file_task(queue: asyncio.Queue, client: VLLMClient, input_base_dir: Path, output_base_dir: Path, time_tag: str, task_id: int):
     """
     Process files from the queue using the given client.
     
     Args:
         queue: Queue containing file paths to process
-        client: Either SGLangClient or VLLMClient instance
+        client: VLLMClient instance
         input_base_dir: Base directory for input files
         output_base_dir: Base directory for output files
         time_tag: Timestamp tag for output files
         task_id: Unique task identifier
     """
-    client_type = "vLLM" if isinstance(client, VLLMClient) else "SGLang"
 
     while True:
         try:
@@ -499,8 +250,9 @@ async def process_file_task(queue: asyncio.Queue, client: Union[SGLangClient, VL
             # add info emoji to beginning of the line
             print(f"🔍 [Task {task_id}] Processing [{f'{gen_id:02d}'}]: {file_path}")
 
-            retry_count = 0   
-            while retry_count < 3:
+            retry_count = 0
+            max_retries = 3
+            while retry_count < max_retries:
                 retry_count += 1
                 try:
                     # Read the Python file
@@ -522,12 +274,8 @@ async def process_file_task(queue: asyncio.Queue, client: Union[SGLangClient, VL
                     generation_time = time.time() - start_time
                     
                     generated_text = result.get('text', '')
-                    input_logprobs = result.get('input_logprobs', [])
-                    output_logprobs = result.get('output_logprobs', [])
-                    
-                    token_count = len(input_logprobs) + len(output_logprobs)
 
-                    print(f"🔍 [Task {task_id}] Generated [{f'{token_count:04d}'} tokens] [{len(generated_text)} characters] in {generation_time:.2f}s")
+                    print(f"🔍 [Task {task_id}] Generated [{f'{len(result.get('tokens', [])):04d}'} tokens] [{len(generated_text)} characters] in {generation_time:.2f}s")
 
                     # save response to a file
                     response_file = output_sub_dir / f"response.txt"
@@ -555,9 +303,7 @@ async def process_file_task(queue: asyncio.Queue, client: Union[SGLangClient, VL
                             "input_file": str(relative_path),
                             "generation_time": generation_time,
                             "time_tag": time_tag,
-                            "task_id": task_id,
-                            "input_tokens_count": len(input_logprobs),
-                            "output_tokens_count": len(output_logprobs)
+                            "task_id": task_id
                         }
                     }
                     
@@ -565,26 +311,6 @@ async def process_file_task(queue: asyncio.Queue, client: Union[SGLangClient, VL
                     conversation_file = output_sub_dir / f"conversation.json"
                     async with aiofiles.open(conversation_file, 'w', encoding='utf-8') as f:
                         await f.write(json.dumps(conversation, indent=2, ensure_ascii=False))
-                    
-                    # Create and save logprobs data
-                    logprobs_data = {
-                        "input_logprobs": input_logprobs,
-                        "output_logprobs": output_logprobs,
-                        "metadata": {
-                            "client_type": client_type,
-                            "input_file": str(relative_path),
-                            "generation_time": generation_time,
-                            "time_tag": time_tag,
-                            "task_id": task_id,
-                            "input_tokens_count": len(input_logprobs),
-                            "output_tokens_count": len(output_logprobs)
-                        }
-                    }
-                    
-                    # Save logprobs file
-                    logprobs_file = output_sub_dir / f"logprobs.json"
-                    async with aiofiles.open(logprobs_file, 'w', encoding='utf-8') as f:
-                        await f.write(json.dumps(logprobs_data, indent=2, ensure_ascii=False))
 
                     # remove <think> and </think> from the generated text
                     generated_text_no_think = generated_text.replace("<think>", "").replace("</think>", "")
@@ -604,18 +330,24 @@ async def process_file_task(queue: asyncio.Queue, client: Union[SGLangClient, VL
                         f.write(brief_explaination)
 
                     print(f"✅ [Task {task_id}] Saved [{f'{gen_id:02d}'}]: {generated_code_file}")
+                    # we are successful, break the retry loop
+                    break
                     
                 except Exception as e:
-                    print(f"[Task {task_id}] Error generating [{f'{gen_id:02d}'}] for {file_path}: {e}")
+                    # add warning emoji to beginning of the line
+                    if retry_count >= max_retries:
+                        print(f"❌ [Task {task_id}] Error generating [{f'{gen_id:02d}'}] for {file_path}: {e}", f"[{retry_count}/{max_retries}]")
+                    else:
+                        print(f"⚠️ [Task {task_id}] Error generating [{f'{gen_id:02d}'}] for {file_path}: {e}", f"[{retry_count}/{max_retries}]")
                     print(traceback.format_exc())
                 
         except asyncio.TimeoutError:
             # Timeout waiting for queue item, check if queue is empty
             if queue.empty():
-                print(f"[Task {task_id}] Queue is empty, terminating for {file_path}")
+                print(f"❌ [Task {task_id}] Queue is empty, terminating for {file_path}")
                 break
         except Exception as e:
-            print(f"[Task {task_id}] Unexpected error: {e}")
+            print(f"❌ [Task {task_id}] Unexpected error: {e}")
             print(traceback.format_exc())
             break
     
@@ -629,8 +361,8 @@ async def main():
     parser.add_argument("--output-dir", type=str, default="./_output", help="Output directory for results")
     parser.add_argument("--num-tasks", type=int, default=8, help="Number of concurrent processing tasks")
     parser.add_argument("--num-generations", type=int, default=8, help="Number of generations to perform for each file")
-    parser.add_argument("--client", type=str, default="vllm", choices=["sglang", "vllm"], 
-                       help="Client type to use (sglang or vllm)")
+    parser.add_argument("--client", type=str, default="vllm", choices=["vllm"], 
+                       help="Client type to use (vllm)")
     parser.add_argument("--epoch-id", type=int, default=1, help="Epoch ID to process")
     parser.add_argument("--bucket-size", type=int, default=10, help="Number of files to process in each bucket")
     parser.add_argument("--bucket-id", type=int, default=1, help="Bucket ID to process")
@@ -665,7 +397,7 @@ async def main():
     # add info emoji to beginning of the line
     print(f"🔍 Found {len(bucket_files)} Python files to process")
     print(f"🔍 Output directory: [{output_dir}]")
-    print(f"🔍 Using {args.client} client with {args.num_tasks} concurrent tasks")
+    print(f"🔍 Using vLLM client with {args.num_tasks} concurrent tasks")
 
     # for each file in bucket_files, write file content to relevant path
     for file_path in bucket_files:
@@ -679,13 +411,9 @@ async def main():
         with open(output_file, 'w') as f:
             f.write(file_path.read_text())
 
-    # Create client based on selection
-    if args.client == "vllm":
-        client = VLLMClient(config_file="sequential_inference.yaml")
-        print("Created vLLM client")
-    else:
-        client = SGLangClient(config_file="sequential_inference.yaml")
-        print("Created SGLang client")
+    # Create vLLM client
+    client = VLLMClient(config_file="sequential_inference.yaml")
+    print("Created vLLM client")
     
     # Test client connection
     print("Testing client connection...")
