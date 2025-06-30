@@ -173,7 +173,7 @@ async def kb_eval_reference_code(model_tag: str, task_tag: str, time_tag: str, r
             await asyncio.sleep(1)
             if retry_count >= max_retries:
                 logger.error(f"❌ [{model_tag}] [{task_tag}] [{time_tag}] Error evaluating reference code: {e}")
-                traceback.print_exc()
+                traceback.print_exception(type(e), e, e.__traceback__)
                 break
     return None
 
@@ -203,7 +203,7 @@ async def kb_eval_generated_code(model_tag: str, task_tag: str, time_tag: str, e
             await asyncio.sleep(1)
             if retry_count >= max_retries:
                 logger.error(f"❌ [{model_tag}] [{task_tag}] [{time_tag}] [{eval_tag}] Error evaluating generated code: {e}")
-                traceback.print_exc()
+                traceback.print_exception(type(e), e, e.__traceback__)
                 raise e
 
 async def _eval_reference_task(reference_eval_cache: dict, model_tag: str, task_tag: str, time_tag: str, reference_code: str):
@@ -211,6 +211,8 @@ async def _eval_reference_task(reference_eval_cache: dict, model_tag: str, task_
 
 async def _eval_generated_task(result_dict: dict, model_tag: str, task_tag: str, time_tag: str, eval_tag: str, reference_code: str, generated_code: str):
     if not generated_code:
+        # add warning emoji
+        logger.warning(f"⚠️ [{model_tag}] [{task_tag}] [{time_tag}] [{eval_tag}] has no generated code")
         result_dict[f'{task_tag}_{eval_tag}'] = {
             'compiled': False,
             'correctness': False,
@@ -233,16 +235,17 @@ async def _eval_generated_task(result_dict: dict, model_tag: str, task_tag: str,
 async def async_kb_eval_reward_func(prompts, completions, reference_codes, task_tags, **kwargs) -> list[float]:
     global reference_eval_cache
 
-    logger.info(f"🔍 [{model_tag}] [{time_tag}] [prompts] [{[prompt[0]['content'][:100] for prompt in prompts[:2]]}]") # log first 2 rows of each prompt[0]['content'], and 100 characters each
-    logger.info(f"🔍 [{model_tag}] [{time_tag}] [completions] [{[completion[0]['content'][:100] for completion in completions[:2]]}]") # log first 2 rows of each completion[0]['content'], and 100 characters each
-    logger.info(f"🔍 [{model_tag}] [{time_tag}] [reference_codes] [{[ref_code[:100] for ref_code in reference_codes[:2]]}") # log first 2 rows of reference_codes, and 100 characters each
-    logger.info(f"🔍 [{model_tag}] [{time_tag}] [task_tags] [{task_tags}]") # log all the task_tags (this is a short string, let's log them all)
+    logger.info(f"🔍 [{model_tag}] [{time_tag}] [prompts] [{len(prompts)}] [{[prompt[0]['content'][:100] for prompt in prompts[:2]]}]") # log first 2 rows of each prompt[0]['content'], and 100 characters each
+    logger.info(f"🔍 [{model_tag}] [{time_tag}] [completions] [{len(completions)}] [{[completion[0]['content'][:100] for completion in completions[:2]]}]") # log first 2 rows of each completion[0]['content'], and 100 characters each
+    logger.info(f"🔍 [{model_tag}] [{time_tag}] [reference_codes] [{len(reference_codes)}] [{[ref_code[:100] for ref_code in reference_codes[:2]]}") # log first 2 rows of reference_codes, and 100 characters each
+    logger.info(f"🔍 [{model_tag}] [{time_tag}] [task_tags] [{len(task_tags)}] [{task_tags}]") # log all the task_tags (this is a short string, let's log them all)
 
     reference_eval_local_keys = {}
     reference_eval_tasks = []
     for task_tag, reference_code in zip(task_tags, reference_codes):
         if task_tag not in reference_eval_cache and task_tag not in reference_eval_local_keys:
             reference_eval_local_keys[task_tag] = True # this will remove duplicate reference eval tasks
+            # logger.info(f"🔍 [{model_tag}] [{time_tag}] [{task_tag}] added to reference eval tasks")
             ref_eval_task = asyncio.create_task(_eval_reference_task(reference_eval_cache, model_tag, task_tag, time_tag, reference_code))
             reference_eval_tasks.append(ref_eval_task)
     # wait for all reference eval tasks to complete
@@ -256,13 +259,14 @@ async def async_kb_eval_reward_func(prompts, completions, reference_codes, task_
     explanations = [extract_xml_explanation(r) for r in responses]
 
     # create a list of evaluation tasks
-    eval_tasks = []
+    generated_evals = []
     result_dict = {}
     for eval_id, (task_tag, reference_code, generated_code, explanation) in enumerate(zip(task_tags, reference_codes, generated_codes, explanations)):
         eval_tag = f"r{eval_id+1:02d}"
-        eval_tasks.append(asyncio.create_task(_eval_generated_task(result_dict, model_tag, task_tag, time_tag, eval_tag, reference_code, generated_code)))
+        # logger.info(f"🔍 [{model_tag}] [{task_tag}] [{time_tag}] [{eval_tag}] added to generated evals")
+        generated_evals.append(asyncio.create_task(_eval_generated_task(result_dict, model_tag, task_tag, time_tag, eval_tag, reference_code, generated_code)))
     # invoke eval tasks
-    await asyncio.gather(*eval_tasks)
+    await asyncio.gather(*generated_evals)
 
     scores = []
     log_results = {}

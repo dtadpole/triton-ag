@@ -305,6 +305,7 @@ def eval_kernel_against_ref_new(
         with torch.no_grad():
             set_seed(seed_num)  # set seed for reproducible weights
             original_model = Model(*init_inputs)
+            original_model = original_model.cuda(device=device)
             assert hasattr(original_model, "forward")
             if verbose:
                 logger.info(f"[KB_Eval] Original Model Loaded [{eval_key}]")
@@ -320,6 +321,7 @@ def eval_kernel_against_ref_new(
             with torch.no_grad():
                 set_seed(seed_num)  # set seed for reproducible weights
                 custom_model = ModelNew(*init_inputs)
+                custom_model = custom_model.cuda(device=device)
                 assert hasattr(custom_model, "forward")
                 torch.cuda.synchronize(device=device)
             if verbose:
@@ -502,7 +504,7 @@ if __name__ == "__main__":
             for key, value in metadata.items():
                 if isinstance(value, Exception):
                     exception_traceback_str = "".join(traceback.format_exception(type(value), value, value.__traceback__))
-                    traceback.print_exc()
+                    traceback.print_exception(type(value), value, value.__traceback__)
                     metadata[key] = exception_traceback_str
                 elif isinstance(value, dict):
                     check_exception_in_metadata(value)
