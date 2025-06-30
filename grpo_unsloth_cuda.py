@@ -45,7 +45,7 @@ model, tokenizer = FastLanguageModel.from_pretrained(
     load_in_4bit = True, # False for LoRA 16bit
     fast_inference = True, # Enable vLLM fast inference
     max_lora_rank = lora_rank,
-    gpu_memory_utilization = 0.5, # Reduce if out of memory
+    gpu_memory_utilization = 0.4, # Reduce if out of memory
 )
 
 model = FastLanguageModel.get_peft_model(
@@ -128,17 +128,6 @@ def extract_xml_code(text: str) -> str:
     code = code.split("<code>")[-1]
     code = code.split("</code>")[0]
     return code.strip()
-
-def extract_xml_explanation(text: str) -> str:
-    if "</think>" not in text:
-        return ""
-    # extract after the last </think>
-    after_think = text.split("</think>")[-1]
-    if "<explanation>" not in after_think or "</explanation>" not in after_think:
-        return ""
-    explanation = after_think.split("<explanation>")[-1]
-    explanation = explanation.split("</explanation>")[0]
-    return explanation.strip()
 
 def get_kb_eval_configs(config_file="grpo_unsloth_cuda.yaml") -> tuple[str, str]: # base_url, api_key
     config = _load_config(config_file)
@@ -254,14 +243,12 @@ async def async_kb_eval_reward_func(prompts, completions, reference_codes, task_
     reference_evals = [reference_eval_cache[task_tag] for task_tag in task_tags]
 
     responses = [completion[0]['content'] for completion in completions]
-    # thoughts = [extract_xml_think(r) for r in responses]
     generated_codes = [extract_xml_code(r) for r in responses]
-    explanations = [extract_xml_explanation(r) for r in responses]
 
     # create a list of evaluation tasks
     generated_evals = []
     result_dict = {}
-    for eval_id, (task_tag, reference_code, generated_code, explanation) in enumerate(zip(task_tags, reference_codes, generated_codes, explanations)):
+    for eval_id, (task_tag, reference_code, generated_code) in enumerate(zip(task_tags, reference_codes, generated_codes)):
         eval_tag = f"r{eval_id+1:02d}"
         # logger.info(f"🔍 [{model_tag}] [{task_tag}] [{time_tag}] [{eval_tag}] added to generated evals")
         generated_evals.append(asyncio.create_task(_eval_generated_task(result_dict, model_tag, task_tag, time_tag, eval_tag, reference_code, generated_code)))
@@ -270,7 +257,7 @@ async def async_kb_eval_reward_func(prompts, completions, reference_codes, task_
 
     scores = []
     log_results = {}
-    for eval_id, (task_tag, generated_code, explanation, reference_eval) in enumerate(zip(task_tags, generated_codes, explanations, reference_evals)):
+    for eval_id, (task_tag, generated_code, reference_eval) in enumerate(zip(task_tags, generated_codes, reference_evals)):
         eval_tag = f"r{eval_id+1:02d}"
         score = 0.0
         speed_up = 0.0
@@ -313,14 +300,14 @@ def kb_eval_reward_func(prompts, completions, reference_codes, task_tags, **kwar
 
 def strict_format_reward_func(completions, **kwargs) -> list[float]:
     """Reward function that checks if the completion has a specific format."""
-    pattern = r"^<think>.*?</think>\n<code>.*?</code>\n<explanation>.*?</explanation>$"
+    pattern = r"^<think>.*?</think>\n<code>.*?</code>$"
     responses = [completion[0]["content"].strip() for completion in completions]
     matches = [re.match(pattern, r) for r in responses]
     return [0.3 if match else 0.0 for match in matches]
 
 def soft_format_reward_func(completions, **kwargs) -> list[float]:
     """Reward function that checks if the completion has a specific format."""
-    pattern = r"<think>.*?</think>\n<code>.*?</code>\n<explanation>.*?</explanation>"
+    pattern = r"<think>.*?</think>\n<code>.*?</code>"
     responses = [completion[0]["content"].strip() for completion in completions]
     matches = [re.match(pattern, r) for r in responses]
     return [0.3 if match else 0.0 for match in matches]
@@ -335,12 +322,6 @@ def count_xml(text) -> float:
         count += 0.05
     if text.count("\n</code>\n") == 1:
         count += 0.05
-    if text.count("\n<explanation>\n") == 1:
-        count += 0.05
-        count -= len(text.split("\n</explanation>\n")[-1])*0.001
-    if text.count("\n</explanation>") == 1:
-        count += 0.05
-        count -= (len(text.split("\n</explanation>")[-1]) - 1)*0.001
     return count
 
 def xmlcount_reward_func(completions, **kwargs) -> list[float]:
