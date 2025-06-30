@@ -369,7 +369,7 @@ training_args = GRPOConfig(
     delta = 1.8,         # two-sided confidence interval
     beta = 0.0,          # no kl-divergence
     report_to = "wandb", # Can use Weights & Biases
-    output_dir = f"outputs_{time_tag}",
+    output_dir = f"/root/.cache/huggingface/outputs_kb_{time_tag}",
     run_name = f"{model_name}_{time_tag}",
 )
 

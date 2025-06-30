@@ -165,7 +165,8 @@ training_args = GRPOConfig(
     loss_type="dr_grpo",
     beta = 0.0,
     report_to = "wandb", # Can use Weights & Biases
-    output_dir = "outputs_grpo_gsm8k",
+    output_dir = f"/root/.cache/huggingface/outputs_gsm8k_{time_tag}",
+    run_name = f"{model_name}_{time_tag}",
 )
 
 class WandbChartCallback(TrainerCallback):
