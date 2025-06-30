@@ -1,5 +1,7 @@
 from unsloth import FastLanguageModel
 import wandb
+import json
+from logger import logger
 from trl import GRPOConfig, GRPOTrainer
 from transformers import TrainerCallback
 from datetime import datetime
@@ -90,6 +92,9 @@ dataset = get_gsm8k_questions()
 
 # Reward functions
 def correctness_reward_func(prompts, completions, answer, **kwargs) -> list[float]:
+    logger.info(f"[correctness_reward_func] called with [prompts] {json.dumps(prompts, indent=4)}")
+    logger.info(f"[correctness_reward_func] called with [completions] {json.dumps(completions, indent=4)}")
+    logger.info(f"[correctness_reward_func] called with [answer] {json.dumps(answer, indent=4)}")
     responses = [completion[0]['content'] for completion in completions]
     q = prompts[0][-1]['content']
     extracted_responses = [extract_xml_answer(r) for r in responses]
@@ -97,12 +102,14 @@ def correctness_reward_func(prompts, completions, answer, **kwargs) -> list[floa
     return [2.0 if r == a else 0.0 for r, a in zip(extracted_responses, answer)]
 
 def int_reward_func(completions, **kwargs) -> list[float]:
+    logger.info(f"[int_reward_func] called with [completions] {json.dumps(completions, indent=4)}")
     responses = [completion[0]['content'] for completion in completions]
     extracted_responses = [extract_xml_answer(r) for r in responses]
     return [0.5 if r.isdigit() else 0.0 for r in extracted_responses]
 
 def strict_format_reward_func(completions, **kwargs) -> list[float]:
     """Reward function that checks if the completion has a specific format."""
+    logger.info(f"[strict_format_reward_func] called with [completions] {json.dumps(completions, indent=4)}")
     pattern = r"^<reasoning>\n.*?\n</reasoning>\n<answer>\n.*?\n</answer>\n$"
     responses = [completion[0]["content"] for completion in completions]
     matches = [re.match(pattern, r) for r in responses]
@@ -110,6 +117,7 @@ def strict_format_reward_func(completions, **kwargs) -> list[float]:
 
 def soft_format_reward_func(completions, **kwargs) -> list[float]:
     """Reward function that checks if the completion has a specific format."""
+    logger.info(f"[soft_format_reward_func] called with [completions] {json.dumps(completions, indent=4)}")
     pattern = r"<reasoning>.*?</reasoning>\s*<answer>.*?</answer>"
     responses = [completion[0]["content"] for completion in completions]
     matches = [re.match(pattern, r) for r in responses]
@@ -130,6 +138,7 @@ def count_xml(text) -> float:
     return count
 
 def xmlcount_reward_func(completions, **kwargs) -> list[float]:
+    logger.info(f"[xmlcount_reward_func] called with [completions] {json.dumps(completions, indent=4)}")
     contents = [completion[0]["content"] for completion in completions]
     return [count_xml(c) for c in contents]
 
@@ -212,8 +221,8 @@ trainer = GRPOTrainer(
         xmlcount_reward_func,
         soft_format_reward_func,
         strict_format_reward_func,
-        int_reward_func,
         correctness_reward_func,
+        int_reward_func,
     ],
     args = training_args,
     train_dataset = dataset,
