@@ -27,10 +27,9 @@ accumulation_steps = 1
 
 num_generations = 8
 
-
+model_name = "Qwen/Qwen3-4B"
 # model_name = "Qwen/Qwen3-8B"
-# model_name = "Qwen/Qwen3-32B"
-model_name = "meta-llama/meta-Llama-3.1-8B-Instruct"
+# model_name = "meta-llama/meta-Llama-3.1-8B-Instruct"
 
 model_tag = model_name
 time_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -288,7 +287,7 @@ async def async_kb_eval_reward_func(prompts, completions, reference_codes, task_
         else:
             score -= 1.0
         scores.append(score)
-        log_results[eval_tag] = {
+        log_results[f'{task_tag}_{eval_tag}'] = {
             'score': score,
             'compiled': generated_eval['compiled'],
             'correctness': generated_eval['correctness'],
@@ -298,7 +297,9 @@ async def async_kb_eval_reward_func(prompts, completions, reference_codes, task_
             'tag': '✅' if generated_eval['compiled'] and generated_eval['correctness'] else '❌',
         }
 
-    logger.info(f"🔍 [{model_tag}] [{task_tag}] [{time_tag}] {json.dumps(log_results, indent=4)}")
+    # logger.info(f"🔍 [{model_tag}] [{task_tag}] [{time_tag}] eval results:")
+    for key, value in log_results.items():
+        logger.info(f"🔍 [{model_tag}] [{task_tag}] [{time_tag}] [{key.split('_')[-1]}]: {json.dumps(value, indent=4)}")
     # return the scores
     return scores
 
