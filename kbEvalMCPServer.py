@@ -152,7 +152,7 @@ async def kb_eval_reference(
             f"Response from remote server: {json.dumps(response_json, indent=4)}"
         )
 
-        if on_devserver is False:
+        if is_devserver() is False:
             # upload recap to s3
             upload_recap_to_s3(
                 current_wd,
@@ -242,7 +242,7 @@ async def kb_eval_dspy(
             f"Response from remote server: {json.dumps(response_json, indent=4)}"
         )
 
-        if on_devserver is False:
+        if is_devserver() is False:
             # upload recap to s3
             upload_recap_to_s3(
                 current_wd,
@@ -330,7 +330,7 @@ async def kb_eval_iteration(
             f"Response from remote server: {json.dumps(response_json, indent=4)}"
         )
 
-        if on_devserver is False:
+        if is_devserver() is False:
             # upload recap to s3
             upload_recap_to_s3(
                 current_wd,
@@ -384,7 +384,7 @@ async def kb_upload_iteration(
         with open(f"{current_wd}/kbeval_{eval_tag}_{time_tag}.result.json", "r") as f:
             result = KernelExecResult.model_validate_json(f.read())
 
-        if on_devserver is False:
+        if is_devserver() is False:
             msg = upload_recap_to_s3(
                 current_wd,
                 model_tag,

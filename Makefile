@@ -153,8 +153,6 @@ llama.cpp-server-qwen3-32b:
 	--min-p 0.05 \
 	--host 0.0.0.0
 
-
-
 jupyter:
 	echo ${ENV_VARS}
 	env ${ENV_VARS} jupyter notebook --allow-root --port 8082 --ip 0.0.0.0 --NotebookApp.token='' --NotebookApp.password=''

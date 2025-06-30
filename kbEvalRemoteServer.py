@@ -113,7 +113,9 @@ async def kb_eval_ref(
             read_stream(process.stdout, "reference", is_error=False)
         )
         stderr_task = asyncio.create_task(
-            read_stream(process.stderr, "reference", is_error=True)
+            read_stream(
+                process.stderr, "reference", is_error=True
+            )  # seems taking warning message as error message
         )
 
         # Wait for the process to complete
@@ -232,6 +234,13 @@ async def kb_eval(
 
 
 if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--local_host", action="store_true")
+    parser.add_argument("--port", type=int, default=5678)
+    parser.add_argument("--device", type=int, default=0)
+    args = parser.parse_args()
+
     # read kbEval.yaml
     with open("kbEval.yaml", "r") as f:
         kbEval_config = yaml.load(f, Loader=yaml.FullLoader)
@@ -245,14 +254,17 @@ if __name__ == "__main__":
             f"Hostname {hostname} not found in kbEval.yaml, using 'one' as default"
         )
         hostname = "one"
-    # if hostname not in kbEval_config["kbEvalRemoteServer"]:
-    #     logger.error(f"Hostname {hostname} not found in kbEval.yaml")
-    #     exit(1)
+    if args.local_host:
+        host = "0.0.0.0"
+        port = args.port
+        devices = [args.device]
+    else:
+        host = kbEval_config["kbEvalRemoteServer"][hostname]["host"]
+        port = kbEval_config["kbEvalRemoteServer"][hostname]["port"]
+        devices = [
+            int(d) for d in kbEval_config["kbEvalRemoteServer"][hostname]["devices"]
+        ]
 
-    host = kbEval_config["kbEvalRemoteServer"][hostname]["host"]
-    port = kbEval_config["kbEvalRemoteServer"][hostname]["port"]
-
-    devices = [int(d) for d in kbEval_config["kbEvalRemoteServer"][hostname]["devices"]]
     logger.info(f"Running on [{hostname}:{port}] with devices: {devices}")
 
     import uvicorn
