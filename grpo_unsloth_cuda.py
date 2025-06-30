@@ -12,20 +12,22 @@ from unsloth import FastLanguageModel
 from trl import GRPOConfig, GRPOTrainer
 from datasets import load_dataset, Dataset
 from transformers import TrainerCallback
+import torch.distributed as dist
 from datetime import datetime
 from logger import logger
 import wandb
 
 EVAL_TIMEOUT = 300 # seconds
+MAX_RETRIES = 7 # 2^7 = 128 seconds
 
 max_prompt_length = 1536
-max_seq_length = 4096 # Can increase for longer reasoning traces
+max_seq_length = 3072 # Can increase for longer reasoning traces
 lora_rank = 32 # Larger rank = smarter, but slower
 
-batch_size = 8
+batch_size = 8 // 4
 accumulation_steps = 1
 
-num_generations = 8
+num_generations = 6
 
 # model_name = "Qwen/Qwen3-4B"
 # model_name = "Qwen/Qwen3-8B"
@@ -38,6 +40,24 @@ reference_eval_cache = {}
 
 time_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
 
+commented_out_distributed_training = """
+# distributed training
+def setup_distributed():
+    if dist.is_available() and os.environ.get('RANK', ''):
+        dist.init_process_group(backend="nccl", timeout=torch.distributed.default_pg_timeout)
+    if dist.is_initialized():
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        print(f"✅ Process {rank}/{world_size} ready")
+        return rank, world_size
+    else:
+        print("⚠️  Running in single process mode")
+        return 0, 1
+
+# Add this at the start of your script
+rank, world_size = setup_distributed()
+"""
+
 model, tokenizer = FastLanguageModel.from_pretrained(
     # model_name = "meta-llama/meta-Llama-3.1-8B-Instruct",
     model_name = model_name,
@@ -45,7 +65,7 @@ model, tokenizer = FastLanguageModel.from_pretrained(
     load_in_4bit = True, # False for LoRA 16bit
     fast_inference = True, # Enable vLLM fast inference
     max_lora_rank = lora_rank,
-    gpu_memory_utilization = 0.4, # Reduce if out of memory
+    gpu_memory_utilization = 0.36, # Reduce if out of memory
 )
 
 model = FastLanguageModel.get_peft_model(
@@ -139,9 +159,8 @@ def get_kb_eval_configs(config_file="grpo_unsloth_cuda.yaml") -> tuple[str, str]
     return base_url, api_key
 
 async def kb_eval_reference_code(model_tag: str, task_tag: str, time_tag: str, reference_code: str) -> dict:
-    max_retries = 3
     retry_count = 0
-    while retry_count < max_retries:
+    while retry_count < MAX_RETRIES:
         retry_count += 1
         try:
             base_url, api_key = get_kb_eval_configs()
@@ -159,17 +178,16 @@ async def kb_eval_reference_code(model_tag: str, task_tag: str, time_tag: str, r
                 )
                 return response.json()
         except Exception as e:
-            await asyncio.sleep(1)
-            if retry_count >= max_retries:
+            if retry_count >= MAX_RETRIES:
                 logger.error(f"❌ [{model_tag}] [{task_tag}] [{time_tag}] Error evaluating reference code: {e}")
                 traceback.print_exception(type(e), e, e.__traceback__)
-                break
-    return None
+                raise e
+            else:
+                await asyncio.sleep(2 ** retry_count)
 
 async def kb_eval_generated_code(model_tag: str, task_tag: str, time_tag: str, eval_tag: str, reference_code: str, generated_code: str) -> dict:
-    max_retries = 3
     retry_count = 0
-    while retry_count < max_retries:
+    while retry_count < MAX_RETRIES:
         retry_count += 1
         try:
             base_url, api_key = get_kb_eval_configs()
@@ -189,14 +207,23 @@ async def kb_eval_generated_code(model_tag: str, task_tag: str, time_tag: str, e
                 )
                 return response.json()
         except Exception as e:
-            await asyncio.sleep(1)
-            if retry_count >= max_retries:
+            if retry_count >= MAX_RETRIES:
                 logger.error(f"❌ [{model_tag}] [{task_tag}] [{time_tag}] [{eval_tag}] Error evaluating generated code: {e}")
                 traceback.print_exception(type(e), e, e.__traceback__)
                 raise e
+            else:
+                await asyncio.sleep(2 ** retry_count)
 
 async def _eval_reference_task(reference_eval_cache: dict, model_tag: str, task_tag: str, time_tag: str, reference_code: str):
-    reference_eval_cache[task_tag] = await kb_eval_reference_code(model_tag, task_tag, time_tag, reference_code)
+    try:
+        reference_eval_cache[task_tag] = await kb_eval_reference_code(model_tag, task_tag, time_tag, reference_code)
+    except Exception as e:
+        logger.warning(f"⚠️ [{model_tag}] [{task_tag}] [{time_tag}] reference eval error: {e}")
+        reference_eval_cache[task_tag] = {
+            'compiled': False,
+            'correctness': False,
+            'runtime': -1.0,
+        }
 
 async def _eval_generated_task(result_dict: dict, model_tag: str, task_tag: str, time_tag: str, eval_tag: str, reference_code: str, generated_code: str):
     if not generated_code:
@@ -322,8 +349,10 @@ def count_xml(text) -> float:
         count += 0.1
     if text.count("<code>\n") == 1:
         count += 0.1
+        # count -= len(text.split("\n</code>\n")[-1])*0.001
     if text.count("\n</code>\n") == 1:
         count += 0.1
+        # count -= (len(text.split("\n</code>")[-1]) - 1)*0.001
     return count
 
 def xmlcount_reward_func(completions, **kwargs) -> list[float]:

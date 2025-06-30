@@ -5,17 +5,14 @@ import json
 import argparse
 import asyncio
 import yaml
-from datetime import datetime
-import concurrent.futures
-import boto3
-import torch
 from fastapi import FastAPI, Body, HTTPException, Header, Depends
-from pydantic import BaseModel, Field
-
-from kbEvalTest.kbeval import KernelExecResult, set_seed, graceful_eval_cleanup, run_and_check_correctness, time_execution_with_cuda_event, get_timing_stats, load_original_model_and_inputs, load_custom_model
+from kbEvalTest.kbeval import KernelExecResult
 from logger import logger
 
 KB_EVAL_TOKEN = None
+
+CURR_ERROR_COUNT = 0
+MAX_ERROR_COUNT = 50
 
 # Authentication function
 def verify_token(authorization: str = Header(None)):
@@ -139,6 +136,20 @@ async def kb_eval_ref(
         result = KernelExecResult.model_validate_json(result_text)
 
         return result
+    
+    except Exception as e:
+        global CURR_ERROR_COUNT
+        CURR_ERROR_COUNT += 1
+        result = KernelExecResult(
+            compiled=False,
+            correctness=False,
+            metadata={
+                "processing_error": str(e),
+            },
+            runtime=-1.0,
+        )
+        return result
+
     finally:
         async with request_counter_lock:
             request_counter -= 1 
@@ -217,6 +228,17 @@ async def kb_eval(
         result = KernelExecResult.model_validate_json(result_text)
 
         return result
+
+    except Exception as e:
+        global CURR_ERROR_COUNT
+        CURR_ERROR_COUNT += 1
+        result = KernelExecResult(
+            compiled=False,
+            correctness=False,
+            runtime=-1.0,
+        )
+        return result
+
     finally:
         async with request_counter_lock:
             request_counter -= 1 
@@ -225,7 +247,24 @@ async def kb_eval(
                 request_counter = 0
 
 
-if __name__ == "__main__":
+async def _check_total_error_count():
+    global CURR_ERROR_COUNT, MAX_ERROR_COUNT
+    check_interval = 3 # seconds
+    counter = 0
+    print_interval = 10
+    while True:
+        try:
+            counter += 1
+            if CURR_ERROR_COUNT > MAX_ERROR_COUNT:
+                logger.error(f"❌ Total error count is greater than {MAX_ERROR_COUNT}, exiting")
+                exit(1)
+            elif CURR_ERROR_COUNT > 0 and counter % print_interval == 0:
+                logger.warning(f"⚠️ Total error count is {CURR_ERROR_COUNT}, continuing...")
+        finally:
+            await asyncio.sleep(check_interval)
+
+
+async def main():
     #read kbEval.yaml
     with open("kbEval.yaml", "r") as f:
         kbEval_config = yaml.load(f, Loader=yaml.FullLoader)
@@ -267,4 +306,15 @@ if __name__ == "__main__":
 
     import uvicorn
     server = uvicorn.Server(uvicorn.Config(app, host=host, port=port))
-    asyncio.run(server.serve())
+
+    # run server and check total error count in parallel
+    # need running event loop to run the tasks
+    tasks = [
+        asyncio.create_task(_check_total_error_count()),
+        asyncio.create_task(server.serve()),
+    ]
+    await asyncio.gather(*tasks)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

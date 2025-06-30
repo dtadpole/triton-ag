@@ -42,7 +42,7 @@ mlflow:
 	mlflow server --host localhost --port 5051 --backend-store-uri sqlite:///mlflow.sqlite
 
 kbEval:
-	python kbEvalRemoteServer.py
+	while true; do python kbEvalRemoteServer.py; sleep 1; done
 
 codeRunServer:
 	mcp dev codeRunServer.py
