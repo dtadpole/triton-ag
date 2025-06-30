@@ -222,6 +222,7 @@ async def _eval_reference_task(reference_eval_cache: dict, model_tag: str, task_
         reference_eval_cache[task_tag] = {
             'compiled': False,
             'correctness': False,
+            'metadata': {'processing_error': str(e)},
             'runtime': -1.0,
         }
 
@@ -232,6 +233,7 @@ async def _eval_generated_task(result_dict: dict, model_tag: str, task_tag: str,
         result_dict[f'{task_tag}_{eval_tag}'] = {
             'compiled': False,
             'correctness': False,
+            'metadata': {'processing_error': 'no generated code'},
             'runtime': -1.0,
         }
         return

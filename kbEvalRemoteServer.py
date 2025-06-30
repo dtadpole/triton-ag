@@ -14,6 +14,17 @@ KB_EVAL_TOKEN = None
 CURR_ERROR_COUNT = 0
 MAX_ERROR_COUNT = 50
 
+KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
+
+# Create app
+app = FastAPI()
+
+request_counter = 0
+request_counter_lock = asyncio.Lock()
+
+DEVICES = []
+
+
 # Authentication function
 def verify_token(authorization: str = Header(None)):
     """Simple token verification"""
@@ -55,17 +66,6 @@ async def read_stream(stream, prefix: str, is_error: bool = False):
             logger.info(f"[{prefix}] {output}")
 
 
-KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
-
-# Create app
-app = FastAPI()
-
-request_counter = 0
-request_counter_lock = asyncio.Lock()
-
-devices = []
-
-
 async def get_pending_task_count():
     all_tasks = asyncio.all_tasks()
     return len(set(all_tasks))
@@ -74,7 +74,7 @@ async def get_pending_task_count():
 async def stats():
     global request_counter
     return {
-        "num_devices": len(devices),
+        "num_devices": len(DEVICES),
         "pending_requests": request_counter,
     }
 
@@ -87,7 +87,7 @@ async def kb_eval_ref(
     reference_code: str = Body(...),
     authenticated: bool = Depends(verify_token)
 ) -> KernelExecResult:
-    global request_counter, request_counter_lock, devices
+    global request_counter, request_counter_lock, DEVICES
 
     # logger.info(f"kb_eval_ref: {model_tag}, {task_tag}, {time_tag}, {reference_code}")
 
@@ -104,7 +104,7 @@ async def kb_eval_ref(
             f.write(reference_code)
 
         # pre-compile the reference code
-        command = f"python kbEvalCli.py --wd {temp_dir} --model_tag {model_tag} --task_tag {task_tag} --time_tag {time_tag} --reference_code {reference_file_path} --measure_reference --device-list {','.join([str(device) for device in devices])}"
+        command = f"python kbEvalCli.py --wd {temp_dir} --model_tag {model_tag} --task_tag {task_tag} --time_tag {time_tag} --reference_code {reference_file_path} --measure_reference --device-list {','.join([str(device) for device in DEVICES])}"
         process = await asyncio.create_subprocess_shell(
             command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=os.environ.copy()
         )
@@ -168,7 +168,7 @@ async def kb_eval(
     generated_code: str = Body(...),
     authenticated: bool = Depends(verify_token)
 ) -> KernelExecResult:
-    global request_counter, request_counter_lock, devices
+    global request_counter, request_counter_lock, DEVICES
 
     try:
         async with request_counter_lock:
@@ -196,7 +196,7 @@ async def kb_eval(
         # parser.add_argument("--generated_code", type=str, default="elemAddCuda.py")
 
         # pre-compile the generated code
-        command = f"python kbEvalCli.py --wd {temp_dir} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --time_tag {time_tag} --reference_code {reference_file_path} --generated_code {generated_file_path} --device-list {','.join([str(device) for device in devices])}"
+        command = f"python kbEvalCli.py --wd {temp_dir} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --time_tag {time_tag} --reference_code {reference_file_path} --generated_code {generated_file_path} --device-list {','.join([str(device) for device in DEVICES])}"
         process = await asyncio.create_subprocess_shell(
             command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=os.environ.copy()
         )
@@ -285,8 +285,9 @@ async def main():
     port = kbEval_config["kbEvalRemoteServer"][hostname]["port"]
 
     # get devices from kbEval_config["kbEvalRemoteServer"][hostname]["devices"]
-    devices = [int(d) for d in kbEval_config["kbEvalRemoteServer"][hostname]["devices"]]
-    logger.info(f"Running on [{hostname}:{port}] with devices: {devices}")
+    global DEVICES
+    DEVICES = [int(d) for d in kbEval_config["kbEvalRemoteServer"][hostname]["devices"]]
+    logger.info(f"Running on [{hostname}:{port}] with devices: {DEVICES}")
 
     #########################################################
     # get api_key from kbEval_config["kbEvalRemoteServer"]["common"]["api_key"]
@@ -300,6 +301,7 @@ async def main():
     # read file from api_key, replace ${HOME} with os.path.expanduser("~") in api_key_filepath
     api_key_filepath = api_key_filepath.replace("${HOME}", os.path.expanduser("~"))
     with open(api_key_filepath, "r") as f:
+        global KB_EVAL_TOKEN
         KB_EVAL_TOKEN = f.read().strip()
         logger.info(f"[kbEvalRemoteServer] KB_EVAL_TOKEN loaded from [{api_key_filepath}]")
     #########################################################
