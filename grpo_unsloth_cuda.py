@@ -18,7 +18,7 @@ import wandb
 
 EVAL_TIMEOUT = 300 # seconds
 
-max_prompt_length = 1024
+max_prompt_length = 1536
 max_seq_length = 4096 # Can increase for longer reasoning traces
 lora_rank = 32 # Larger rank = smarter, but slower
 
@@ -27,9 +27,9 @@ accumulation_steps = 1
 
 num_generations = 8
 
-model_name = "Qwen/Qwen3-4B"
+# model_name = "Qwen/Qwen3-4B"
 # model_name = "Qwen/Qwen3-8B"
-# model_name = "meta-llama/meta-Llama-3.1-8B-Instruct"
+model_name = "meta-llama/meta-Llama-3.1-8B-Instruct"
 
 model_tag = model_name
 time_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -302,40 +302,43 @@ def strict_format_reward_func(completions, **kwargs) -> list[float]:
     """Reward function that checks if the completion has a specific format."""
     pattern = r"^<think>.*?</think>\n<code>.*?</code>$"
     responses = [completion[0]["content"].strip() for completion in completions]
-    matches = [re.match(pattern, r) for r in responses]
+    matches = [re.match(pattern, r, re.DOTALL) for r in responses]
+    logger.info(f"🔍 [{model_tag}] [{time_tag}] [strict_format_reward_func] [{len(matches)}] [{[match for match in matches]}]")
     return [0.3 if match else 0.0 for match in matches]
 
 def soft_format_reward_func(completions, **kwargs) -> list[float]:
     """Reward function that checks if the completion has a specific format."""
     pattern = r"<think>.*?</think>\n<code>.*?</code>"
     responses = [completion[0]["content"].strip() for completion in completions]
-    matches = [re.match(pattern, r) for r in responses]
+    matches = [re.match(pattern, r, re.DOTALL) for r in responses]
+    logger.info(f"🔍 [{model_tag}] [{time_tag}] [soft_format_reward_func] [{len(matches)}] [{[match for match in matches]}]")
     return [0.3 if match else 0.0 for match in matches]
 
 def count_xml(text) -> float:
     count = 0.0
     if text.count("<think>\n") == 1:
-        count += 0.05
+        count += 0.1
     if text.count("\n</think>\n") == 1:
-        count += 0.05
+        count += 0.1
     if text.count("<code>\n") == 1:
-        count += 0.05
+        count += 0.1
     if text.count("\n</code>\n") == 1:
-        count += 0.05
+        count += 0.1
     return count
 
 def xmlcount_reward_func(completions, **kwargs) -> list[float]:
-    contents = [completion[0]["content"] for completion in completions]
-    return [count_xml(c) for c in contents]
+    count_rewards = [count_xml(completion[0]["content"]) for completion in completions]
+    logger.info(f"🔍 [{model_tag}] [{time_tag}] [xmlcount_reward_func] [{len(count_rewards)}] [{[reward for reward in count_rewards]}]")
+    return count_rewards
 
 
 from trl import GRPOConfig, GRPOTrainer
 training_args = GRPOConfig(
-    learning_rate = 3e-5,
+    learning_rate = 1e-5,
     adam_beta1 = 0.9,
     adam_beta2 = 0.99,
     weight_decay = 0.1,
-    warmup_ratio = 0.03,
+    warmup_ratio = 0.01,
     lr_scheduler_type = "cosine",
     optim = "paged_adamw_8bit",
     logging_steps = 1,
@@ -345,9 +348,9 @@ training_args = GRPOConfig(
     max_prompt_length = max_prompt_length,
     max_completion_length = max_seq_length - max_prompt_length,
     # num_train_epochs = 1, # Set to 1 for a full training run
-    max_steps = 1000,
-    save_steps = 10,
-    max_grad_norm = 0.3,
+    max_steps = 100 * 50,
+    save_steps = 20,
+    max_grad_norm = 0.1,
     loss_type="dr_grpo", # token-level loss
     epsilon=0.2,         # clip lower
     epsilon_high=0.28,   # clip higher
@@ -356,6 +359,13 @@ training_args = GRPOConfig(
     report_to = "wandb", # Can use Weights & Biases
     output_dir = f"/root/.cache/huggingface/outputs_kb_{time_tag}",
     run_name = f"{model_name}_{time_tag}",
+    generation_kwargs={
+        "temperature": 0.7,
+        "repetition_penalty": 1.05,
+        "top_k": 40,
+        "top_p": 1.0,
+        "min_p": 0.0,
+    },
 )
 
 class WandbChartCallback(TrainerCallback):
