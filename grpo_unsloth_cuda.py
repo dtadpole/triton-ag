@@ -410,8 +410,8 @@ class WandbChartCallback(TrainerCallback):
             print(f"Step {state.global_step}: Logged {len(chart_data)} metrics")
 
 wandb.init(
-    project="grpo-gsm8k",
-    name=f"gsm8k-{time_tag}",
+    project="grpo-kb",
+    name=f"kb-{time_tag}",
     tags=["grpo"],
     config={
         "model_name": model_name,
