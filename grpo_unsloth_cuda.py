@@ -294,12 +294,12 @@ async def async_kb_eval_reward_func(prompts, completions, reference_codes, task_
             'runtime': generated_eval['runtime'],
             'ref_runtime': reference_eval['runtime'],
             'speed_up': speed_up,
-            'tag': '✅' if generated_eval['compiled'] and generated_eval['correctness'] else '❌',
         }
 
     # logger.info(f"🔍 [{model_tag}] [{task_tag}] [{time_tag}] eval results:")
     for key, value in log_results.items():
-        logger.info(f"🔍 [{model_tag}] [{task_tag}] [{time_tag}] [{key.split('_')[-1]}]: {json.dumps(value, indent=4)}")
+        emoji = '✅' if value['compiled'] and value['correctness'] else '❌'
+        logger.info(f"{emoji} [{model_tag}] [{task_tag}] [{time_tag}] [{key.split('_')[-1]}]: {json.dumps(value)}")
     # return the scores
     return scores
 
