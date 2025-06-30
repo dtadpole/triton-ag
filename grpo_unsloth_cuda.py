@@ -12,7 +12,7 @@ from unsloth import FastLanguageModel
 from trl import GRPOConfig, GRPOTrainer
 from datasets import load_dataset, Dataset
 from transformers import TrainerCallback
-import torch.distributed as dist
+# import torch.distributed as dist
 from datetime import datetime
 from logger import logger
 import wandb
@@ -21,13 +21,13 @@ EVAL_TIMEOUT = 300 # seconds
 MAX_RETRIES = 7 # 2^7 = 128 seconds
 
 max_prompt_length = 1536
-max_seq_length = 3072 # Can increase for longer reasoning traces
+max_seq_length = 4096 # Can increase for longer reasoning traces
 lora_rank = 32 # Larger rank = smarter, but slower
 
-batch_size = 8 // 4
+batch_size = 8
 accumulation_steps = 1
 
-num_generations = 6
+num_generations = 8
 
 # model_name = "Qwen/Qwen3-4B"
 # model_name = "Qwen/Qwen3-8B"
@@ -40,7 +40,7 @@ reference_eval_cache = {}
 
 time_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
 
-commented_out_distributed_training = """
+"""
 # distributed training
 def setup_distributed():
     if dist.is_available() and os.environ.get('RANK', ''):
