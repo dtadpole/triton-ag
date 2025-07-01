@@ -21,17 +21,49 @@ wget https://developer.download.nvidia.com/compute/cuda/12.9.0/local_installers/
 sh cuda_12.9.0_575.51.03_linux.run
 rm cuda_12.9.0_575.51.03_linux.run
 
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
+export CUDA_LAUNCH_BLOCKING=1
+
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+
+# this is optimal, but will require hours to quantize model as AWQ
+
+/root/run.sh /root/.venv/bin/python3 -m sglang.launch_server --model-path Qwen/Qwen3-14B-AWQ --host 0.0.0.0 --port 8081 --tool-call-parser qwen25  --context-length 16384 --max-prefill-tokens 2048 --max-total-tokens 57344 --max-running-requests 32 --dp 4
+
+### this is ideal setup (FP8) ###
+
+/root/run.sh /root/.venv/bin/python3 -m sglang.launch_server --model-path Qwen/Qwen3-8B-FP8 --host 0.0.0.0 --port 8081 --tool-call-parser qwen25  --context-length 16384 --max-prefill-tokens 2048 --max-total-tokens 65536 --max-running-requests 32 --dp 4
+
+/root/run.sh /root/.venv/bin/python3 -m sglang.launch_server --model-path Qwen/Qwen3-14B-FP8 --host 0.0.0.0 --port 8081 --tool-call-parser qwen25  --context-length 16384 --max-prefill-tokens 2048 --max-total-tokens 20480 --max-running-requests 32 --dp 4
+
+# below is not working for Qwen3
+
+/root/run.sh /root/.venv/bin/python3 -m sglang.launch_server --model-path Qwen/Qwen3-14B --quantization bitsandbytes --load-format bitsandbytes --host 0.0.0.0 --port 8081 --tool-call-parser qwen25  --context-length 16384 --max-prefill-tokens 2048 --max-total-tokens 65536 --max-running-requests 32 --dp 1
+
+
+ --mem-fraction-static 0.7 --max-running-requests 32 
+
+--quantization bitsandbytes --load-format bitsandbytes
+
+
+
+--mem-fraction-static 0.7  # Default is often 0.9
+--max-running-requests 32  # Reduce concurrent requests
+
+--max-prefill-tokens 2048  # Reduce from default
+--max-total-tokens 4096    # Limit total sequence length
+
 python3 -m sglang.launch_server \
-        --model-path unsloth/Qwen3-32B-bnb-4bit \
-        --context-length 40960 \
+        --model-path Qwen/Qwen3-32B-AWQ \
+        --context-length 32768 \
         --host 0.0.0.0 \
         --port 8081 \
         --tool-call-parser qwen25 \
-        --quantization bitsandbytes \
-        --load-format bitsandbytes \
-        --pp 4 \
+        --pp 1 \
         --dp 1
 
+        --quantization bitsandbytes \
+        --load-format bitsandbytes \
 
         --tp-size 4 \
         --reasoning-parser qwen3 \
@@ -69,8 +101,24 @@ wget https://developer.download.nvidia.com/compute/cuda/12.9.0/local_installers/
 sh cuda_12.9.0_575.51.03_linux.run
 rm cuda_12.9.0_575.51.03_linux.run
 
+### This is super fast (AWQ)
 
-/root/.venv/bin/python3 -m vllm.entrypoints.openai.api_server  --model Qwen/Qwen3-4B --enable-lora --lora-modules my_adapter=dtadpole/KernelCoder-4B_20250621-071556 --max-lora-rank 64 --host 0.0.0.0  --port 8091  --dtype bfloat16  --trust-remote-code  --quantization bitsandbytes  --load-format bitsandbytes  --max-model-len 32768  --gpu-memory-utilization 0.9  --pipeline-parallel-size 1  --data-parallel-size 1  --tensor-parallel-size 1 --enable-auto-tool-choice  --tool-call-parser hermes  --reasoning-parser qwen3  --disable-log-requests
+/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-14B-AWQ --host 0.0.0.0  --port 8091 --max-model-len 14336 --max-num-batched-tokens 2048 --max-num-seqs 16 --gpu-memory-utilization 0.75 --pipeline-parallel-size 1 --data-parallel-size 1 --tensor-parallel-size 1 --enable-auto-tool-choice --tool-call-parser hermes --disable-log-requests
+
+### This is ideal setup (FP8) ###
+
+/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-8B-FP8 --host 0.0.0.0  --port 8091 --max-model-len 16384 --max-num-batched-tokens 2048 --max-num-seqs 32 --gpu-memory-utilization 0.75 --pipeline-parallel-size 1 --data-parallel-size 4 --tensor-parallel-size 1 --enable-auto-tool-choice --tool-call-parser hermes --disable-log-requests
+
+/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-14B-FP8 --host 0.0.0.0  --port 8091 --max-model-len 16384 --max-num-batched-tokens 2048 --max-num-seqs 32 --gpu-memory-utilization 0.8 --pipeline-parallel-size 1 --data-parallel-size 4 --tensor-parallel-size 1 --enable-auto-tool-choice --tool-call-parser hermes --disable-log-requests
+
+/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-32B-FP8 --host 0.0.0.0  --port 8091 --max-model-len 16384 --max-num-batched-tokens 2048 --max-num-seqs 32 --gpu-memory-utilization 0.8 --pipeline-parallel-size 1 --data-parallel-size 4 --tensor-parallel-size 1 --enable-auto-tool-choice --tool-call-parser hermes --disable-log-requests
+
+# This is too slow 
+/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-14B --host 0.0.0.0  --port 8091 --quantization bitsandbytes  --load-format bitsandbytes --max-model-len 14336 --max-num-batched-tokens 2048 --max-num-seqs 16 --gpu-memory-utilization 0.75 --pipeline-parallel-size 1 --data-parallel-size 1 --tensor-parallel-size 1 --enable-auto-tool-choice --tool-call-parser hermes --disable-log-requests
+
+# This is too slow
+
+/root/.venv/bin/python3 -m vllm.entrypoints.openai.api_server  --model Qwen/Qwen3-14B --enable-lora --lora-modules my_adapter=dtadpole/KernelCoder-4B_20250621-071556 --max-lora-rank 64 --host 0.0.0.0  --port 8091  --dtype bfloat16  --trust-remote-code  --quantization bitsandbytes  --load-format bitsandbytes  --max-model-len 32768  --gpu-memory-utilization 0.9  --pipeline-parallel-size 1  --data-parallel-size 1  --tensor-parallel-size 1 --enable-auto-tool-choice  --tool-call-parser hermes  --reasoning-parser qwen3  --disable-log-requests
 
 
 ========================================

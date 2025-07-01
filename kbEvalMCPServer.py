@@ -16,41 +16,40 @@ from util import is_devserver, is_subfolder
 
 server = FastMCP("kbEval")
 
-yaml_config = yaml.load(
-    open(os.path.join(os.path.dirname(__file__), "kbEval.yaml"), "r"),
-    Loader=yaml.FullLoader,
-)
-server_stats = {}
+yaml_config = yaml.load(open(os.path.join(os.path.dirname(__file__), "kbEval.yaml"), "r"), Loader=yaml.FullLoader)
+server_stats_and_key = {}
 server_last_refresh_time = 0
+api_key_mapping = {}
 
-on_devserver = is_devserver()
-
-
-def get_server_stats():
-    global server_stats, server_last_refresh_time
+def get_server_stats_and_key():
+    global server_stats_and_key, server_last_refresh_time, api_key_mapping
     time_now = time.time()
-    if len(server_stats) == 0 or time_now - server_last_refresh_time > 10:
+    if len(server_stats_and_key) == 0 or time_now - server_last_refresh_time > 10:
         for server in yaml_config["kbEvalClient"]["servers"]:
             response = requests.get(f"{server['url']}/stats")
-            server_stats[server["url"]] = response.json()
+            # read api_key from file if not already in api_key_mapping
+            if server["api_key"] not in api_key_mapping:
+                # expand ${HOME} to os.path.expanduser("~")
+                api_key_filepath = server["api_key"].replace("${HOME}", os.path.expanduser("~"))
+                with open(api_key_filepath, "r") as f:
+                    api_key_mapping[server["api_key"]] = f.read().strip()
+            # return stats and api_key
+            server_stats_and_key[server["url"]] = {
+                "stats": response.json(),
+                "api_key": api_key_mapping[server["api_key"]],
+            }
         server_last_refresh_time = time_now
-    return server_stats
+    return server_stats_and_key
 
-
-def pick_server():
-    stats = get_server_stats()
+def pick_server_and_key():
+    stats_and_key = get_server_stats_and_key()
     min_avg_load = float("inf")
     min_avg_load_server = None
-    for server in stats:
-        if (
-            stats[server]["pending_requests"] / stats[server]["num_devices"]
-            < min_avg_load
-        ):
-            min_avg_load = (
-                stats[server]["pending_requests"] / stats[server]["num_devices"]
-            )
+    for server in stats_and_key:
+        if stats_and_key[server]["stats"]["pending_requests"] / stats_and_key[server]["stats"]["num_devices"] < min_avg_load:
+            min_avg_load = stats_and_key[server]["stats"]["pending_requests"] / stats_and_key[server]["stats"]["num_devices"]
             min_avg_load_server = server
-    return min_avg_load_server
+    return min_avg_load_server, server_stats_and_key[min_avg_load_server]["api_key"]
 
 
 def upload_recap_to_s3(
@@ -120,22 +119,16 @@ async def kb_eval_reference(
         with open(os.path.join(current_wd, reference_code_filename), "r") as f:
             reference_code = f.read()
         # connect to remote server
-        server_url = pick_server()
+        server_url, api_key = pick_server_and_key()
 
         # send request to remote server
         # logger.info(f"Sending request to remote server {server_url}")
-        response = requests.post(
-            f"{server_url}/kb_eval_ref",
-            data=json.dumps(
-                {
-                    "model_tag": model_tag,
-                    "task_tag": task_tag,
-                    "time_tag": time_tag,
-                    "reference_code": reference_code,
-                }
-            ),
-            headers={"Content-Type": "application/json"},
-        )
+        response = requests.post(f"{server_url}/kb_eval_ref", data=json.dumps({
+            "model_tag": model_tag,
+            "task_tag": task_tag,
+            "time_tag": time_tag,
+            "reference_code": reference_code,
+        }), headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"})
 
         # write response to file
         response_json = json.loads(response.text)
@@ -206,24 +199,18 @@ async def kb_eval_dspy(
             generated_code = f.read()
 
         # connect to remote server
-        server_url = pick_server()
+        server_url, api_key = pick_server_and_key()
 
         # send request to remote server
         # logger.info(f"Sending request to remote server {server_url}")
-        response = requests.post(
-            f"{server_url}/kb_eval",
-            data=json.dumps(
-                {
-                    "model_tag": model_tag,
-                    "task_tag": task_tag,
-                    "eval_tag": eval_tag,
-                    "time_tag": time_tag,
-                    "reference_code": reference_code,
-                    "generated_code": generated_code,
-                }
-            ),
-            headers={"Content-Type": "application/json"},
-        )
+        response = requests.post(f"{server_url}/kb_eval", data=json.dumps({
+            "model_tag": model_tag,
+            "task_tag": task_tag,
+            "eval_tag": eval_tag,
+            "time_tag": time_tag,
+            "reference_code": reference_code,
+            "generated_code": generated_code,
+        }), headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"})
 
         # write response to file
         response_json = json.loads(response.text)
@@ -295,24 +282,18 @@ async def kb_eval_iteration(
             generated_code = f.read()
 
         # connect to remote server
-        server_url = pick_server()
+        server_url, api_key = pick_server_and_key()
 
         # send request to remote server
         # logger.info(f"Sending request to remote server {server_url}")
-        response = requests.post(
-            f"{server_url}/kb_eval",
-            data=json.dumps(
-                {
-                    "model_tag": model_tag,
-                    "task_tag": task_tag,
-                    "eval_tag": eval_tag,
-                    "time_tag": time_tag,
-                    "reference_code": reference_code,
-                    "generated_code": generated_code,
-                }
-            ),
-            headers={"Content-Type": "application/json"},
-        )
+        response = requests.post(f"{server_url}/kb_eval", data=json.dumps({
+            "model_tag": model_tag,
+            "task_tag": task_tag,
+            "eval_tag": eval_tag,
+            "time_tag": time_tag,
+            "reference_code": reference_code,
+            "generated_code": generated_code,
+        }), headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"})
 
         # write response to file
         response_json = json.loads(response.text)

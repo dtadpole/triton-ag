@@ -6,6 +6,11 @@ import random
 import sys
 import time
 import traceback
+from kbEvalTest.kbeval import KernelExecResult, graceful_eval_cleanup, run_and_check_correctness, time_execution_with_cuda_event, get_timing_stats, load_original_model_and_inputs, load_custom_model, set_seed
+import torch
+import asyncio
+import os
+import json
 from datetime import datetime
 
 import torch
@@ -25,6 +30,7 @@ from util import logger
 
 KB_EVAL_DIR = os.path.expanduser("~/.kbeval")
 
+MAX_LOCK_AGE = 90 # seconds
 
 def eval_kernel_reference(
     model_tag: str,
@@ -53,47 +59,73 @@ def eval_kernel_reference(
             reference_code, context
         )
 
-        init_inputs = get_init_inputs()
-        init_inputs = [
-            x.cuda(device=device) if isinstance(x, torch.Tensor) else x
-            for x in init_inputs
-        ]
+        lock_file = os.path.join(KB_EVAL_DIR, f".lock_{str(device)}")
+        lock = FileLock(lock_file)
+        while True:
+            try:
+                with lock.acquire(timeout=1):
+                    logger.warning(f"[KB_Eval_Ref] Acquired lock {lock_file} [{eval_key}]")
 
-        inputs = get_inputs()
-        inputs = [
-            x.cuda(device=device) if isinstance(x, torch.Tensor) else x for x in inputs
-        ]
+                    init_inputs = get_init_inputs()
+                    init_inputs = [
+                        x.cuda(device=device) if isinstance(x, torch.Tensor) else x for x in init_inputs
+                    ]
 
-        with torch.no_grad():
-            set_seed(seed_num)  # set seed for reproducible weights
-            original_model = Model(*init_inputs)
-            assert hasattr(original_model, "forward")
-            if args.verbose:
-                logger.info(f"[KB_Eval] Original Model Loaded [{eval_key}]")
+                    inputs = get_inputs()
+                    inputs = [
+                        x.cuda(device=device) if isinstance(x, torch.Tensor) else x for x in inputs
+                    ]
 
-            elapsed_times_ref = time_execution_with_cuda_event(
-                original_model,
-                *inputs,
-                num_trials=num_perf_trials,
-                verbose=args.verbose,
-                device=device,
-            )
-            runtime_stats = get_timing_stats(elapsed_times_ref, device=device)
-            if args.verbose:
-                logger.info(
-                    f"[KB_Eval] Performance Stats (Reference): {runtime_stats} [{eval_key}]"
+                    with torch.no_grad():
+                        set_seed(seed_num)  # set seed for reproducible weights
+                        original_model = Model(*init_inputs)
+                        original_model = original_model.cuda(device=device)
+                        assert hasattr(original_model, "forward")
+                        if args.verbose:
+                            logger.info(f"[KB_Eval] Original Model Loaded [{eval_key}]")
+
+                        elapsed_times_ref = time_execution_with_cuda_event(
+                            original_model,
+                            *inputs,
+                            num_trials=num_perf_trials,
+                            verbose=args.verbose,
+                            device=device,
+                        )
+                        runtime_stats = get_timing_stats(elapsed_times_ref, device=device)
+                        if args.verbose:
+                            logger.info(f"[KB_Eval] Performance Stats (Reference): {runtime_stats} [{eval_key}]")
+
+                    return KernelExecResult(
+                        compiled=True,
+                        correctness=True,
+                        metadata=metadata,
+                        runtime=runtime_stats["mean"],
+                        runtime_stats=runtime_stats,
+                    )
+
+            except Timeout:
+                logger.info(f"[KB_Eval_Ref] Waiting for lock to be released {lock_file} [{eval_key}]")
+                continue
+            except Exception as e:
+                logger.warning(f"[KB_Eval_Ref] Error acquiring lock: {e} [{eval_key}]")
+                result = KernelExecResult(
+                    compiled=True, correctness=False, metadata={"runtime_error": e}
                 )
-
-        return KernelExecResult(
-            compiled=True,
-            correctness=True,
-            metadata=metadata,
-            runtime=runtime_stats["mean"],
-            runtime_stats=runtime_stats,
-        )
+                return result
+            finally:
+                # torch.cuda.synchronize(device=device)
+                lock.release()
+                # check lockfile modified time
+                if os.path.exists(lock_file):
+                    lock_modified_time = os.path.getmtime(lock_file)
+                    # if modified time is more than 1.5 minutes, delete lock file
+                    if lock_modified_time < os.path.getmtime(lock_file) - MAX_LOCK_AGE:
+                        logger.error(f"[KB_Eval] Lock file {lock_file} is older than 1.5 minutes, deleting... [{eval_key}]")
+                        os.remove(lock_file)
 
     except Exception as e:
         logger.warning(f"[KB_Eval] Error evaluating reference code: {e}")
+        traceback.print_exc()
         return KernelExecResult(
             compiled=False,
             correctness=False,
@@ -193,10 +225,8 @@ def compile_and_eval_kernel(
             if os.path.exists(lock_file):
                 lock_modified_time = os.path.getmtime(lock_file)
                 # if modified time is more than 1.5 minutes, delete lock file
-                if lock_modified_time < os.path.getmtime(lock_file) - 90:
-                    logger.error(
-                        f"[KB_Eval] Lock file {lock_file} is older than 1.5 minutes, deleting... [{eval_key}]"
-                    )
+                if lock_modified_time < os.path.getmtime(lock_file) - MAX_LOCK_AGE:
+                    logger.error(f"[KB_Eval] Lock file {lock_file} is older than 1.5 minutes, deleting... [{eval_key}]")
                     os.remove(lock_file)
 
 
@@ -245,7 +275,6 @@ def compile_kernel_new(
         logger.warning(
             f"[KB_Eval] Failed to compile custom CUDA kernel: Record as compilation failure. \nError: {e} [{eval_key}]"
         )
-        # TODO: add metadata for compilation error (how to we get the compilation error message?)
 
         if "lock" in str(e) or "No such file or directory" in str(e):
             # this is a lock file error, likely due to concurrent compilation
@@ -307,6 +336,7 @@ def eval_kernel_against_ref_new(
         with torch.no_grad():
             set_seed(seed_num)  # set seed for reproducible weights
             original_model = Model(*init_inputs)
+            original_model = original_model.cuda(device=device)
             assert hasattr(original_model, "forward")
             if verbose:
                 logger.info(f"[KB_Eval] Original Model Loaded [{eval_key}]")
@@ -323,6 +353,7 @@ def eval_kernel_against_ref_new(
             with torch.no_grad():
                 set_seed(seed_num)  # set seed for reproducible weights
                 custom_model = ModelNew(*init_inputs)
+                custom_model = custom_model.cuda(device=device)
                 assert hasattr(custom_model, "forward")
                 torch.cuda.synchronize(device=device)
             if verbose:
@@ -411,7 +442,7 @@ def eval_kernel_against_ref_new(
     except Exception as e:
         # print exception and stack trace
         logger.warning(f"[KB_Eval] Error in Evaluating Kernel: {e} [{eval_key}]")
-        logger.warning(traceback.format_exc())
+        traceback.print_exc()
         return KernelExecResult(
             compiled=False,
             correctness=False,
@@ -429,12 +460,14 @@ if __name__ == "__main__":
     parser.add_argument("--task_tag", type=str, default="task_tag")
     parser.add_argument("--eval_tag", type=str, default="eval_tag")
     parser.add_argument("--time_tag", type=str, default="auto")
-    parser.add_argument("--reference_code", type=str, default="elemAddRef.py")
+    parser.add_argument("--reference_code", type=str,
+                        # default="/home/centos/.kbeval/Qwen/Qwen3-8B-FP8/86_conv_depthwise_separable_2D/20250629_050843/reference_code.py")
+                        default="elemAddRef.py")
     parser.add_argument("--generated_code", type=str, default="elemAddCuda.py")
     parser.add_argument("--measure_reference", action="store_true")
     parser.add_argument("--measure_both", action="store_true")
-    parser.add_argument("--device_list", type=str, default="0,1")
-    parser.add_argument("--max-jobs", type=int, default=12)
+    parser.add_argument("--device-list", type=str, default="4")
+    parser.add_argument("--max-jobs", type=int, default=8)
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -462,7 +495,10 @@ if __name__ == "__main__":
     exit_code = 0
 
     # read reference code from file
-    reference_model_src = open(os.path.join(args.wd, args.reference_code), "r").read()
+    if args.reference_code.startswith("/"):
+        reference_model_src = open(args.reference_code, "r").read()
+    else:
+        reference_model_src = open(os.path.join(args.wd, args.reference_code), "r").read()
 
     # if measure_reference is True, evaluate the reference code only
     if args.measure_reference:
@@ -477,12 +513,8 @@ if __name__ == "__main__":
             )
         except Exception as exception:
             exit_code = 1
-            exception_traceback_str = "".join(
-                traceback.format_exception(
-                    type(exception), exception, exception.__traceback__
-                )
-            )
-            logger.error(exception_traceback_str)
+            exception_traceback_str = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
+            traceback.print_exc()
             result = KernelExecResult(
                 compiled=False,
                 correctness=False,
@@ -501,7 +533,10 @@ if __name__ == "__main__":
     # we are here if we need to measure generated code, evaluate the custom kernel against the reference code
 
     # read generated code from file
-    generated_model_src = open(os.path.join(args.wd, args.generated_code), "r").read()
+    if args.generated_code.startswith("/"):
+        generated_model_src = open(args.generated_code, "r").read()
+    else:
+        generated_model_src = open(os.path.join(args.wd, args.generated_code), "r").read()
 
     try:
         result = compile_and_eval_kernel(
@@ -520,12 +555,8 @@ if __name__ == "__main__":
         def check_exception_in_metadata(metadata):
             for key, value in metadata.items():
                 if isinstance(value, Exception):
-                    exception_traceback_str = "".join(
-                        traceback.format_exception(
-                            type(value), value, value.__traceback__
-                        )
-                    )
-                    logger.warning(exception_traceback_str)
+                    exception_traceback_str = "".join(traceback.format_exception(type(value), value, value.__traceback__))
+                    traceback.print_exception(type(value), value, value.__traceback__)
                     metadata[key] = exception_traceback_str
                 elif isinstance(value, dict):
                     check_exception_in_metadata(value)
@@ -538,12 +569,8 @@ if __name__ == "__main__":
     except Exception as e:
         exit_code = 1
         exception = e
-        exception_traceback_str = "".join(
-            traceback.format_exception(
-                type(exception), exception, exception.__traceback__
-            )
-        )
-        logger.error(exception_traceback_str)
+        exception_traceback_str = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
+        traceback.print_exc()
 
         # generate a result with empty metadata
         if result is None:
