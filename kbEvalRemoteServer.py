@@ -204,14 +204,6 @@ async def kb_eval(
         with open(generated_file_path, "w") as f:
             f.write(generated_code)
 
-        # parser.add_argument("--wd", type=str, default="./kbEvalTest")
-        # parser.add_argument("--model_tag", type=str, default="model_tag")
-        # parser.add_argument("--task_tag", type=str, default="task_tag")
-        # parser.add_argument("--eval_tag", type=str, default="eval_tag")
-        # parser.add_argument("--time_tag", type=str, default="time_tag")
-        # parser.add_argument("--reference_code", type=str, default="elemAddRef.py")
-        # parser.add_argument("--generated_code", type=str, default="elemAddCuda.py")
-
         # pre-compile the generated code
         command = f"python kbEvalCli.py --wd {temp_dir} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --time_tag {time_tag} --reference_code {reference_file_path} --generated_code {generated_file_path} --device-list {','.join([str(device) for device in DEVICES])}"
         process = await asyncio.create_subprocess_shell(
@@ -290,7 +282,8 @@ async def _check_total_error_count():
             await asyncio.sleep(check_interval)
 
 
-async def main():
+async def main(args):
+
     #read kbEval.yaml
     with open("kbEval.yaml", "r") as f:
         kbEval_config = yaml.load(f, Loader=yaml.FullLoader)
@@ -306,23 +299,18 @@ async def main():
             f"Hostname {hostname} not found in kbEval.yaml, using 'one' as default"
         )
         hostname = "one"
-    # if args.local_host:
-    #     host = "0.0.0.0"
-    #     port = args.port
-    #     devices = [args.device]
-    # else:
-    #     host = kbEval_config["kbEvalRemoteServer"][hostname]["host"]
-    #     port = kbEval_config["kbEvalRemoteServer"][hostname]["port"]
-    #     devices = [
-    #         int(d) for d in kbEval_config["kbEvalRemoteServer"][hostname]["devices"]
-    #     ]
 
-    host = kbEval_config["kbEvalRemoteServer"][hostname]["host"]
-    port = kbEval_config["kbEvalRemoteServer"][hostname]["port"]
-
-    # get devices from kbEval_config["kbEvalRemoteServer"][hostname]["devices"]
     global DEVICES
-    DEVICES = [int(d) for d in kbEval_config["kbEvalRemoteServer"][hostname]["devices"]]
+
+    if args.local_host:
+        host = "0.0.0.0"
+        port = args.port
+        DEVICES = [args.device]
+    else:
+        host = kbEval_config["kbEvalRemoteServer"][hostname]["host"]
+        port = kbEval_config["kbEvalRemoteServer"][hostname]["port"]
+        DEVICES = [int(d) for d in kbEval_config["kbEvalRemoteServer"][hostname]["devices"]]
+
     logger.info(f"Running on [{hostname}:{port}] with devices: {DEVICES}")
 
     #########################################################
@@ -356,4 +344,9 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--local_host", action="store_true")
+    parser.add_argument("--port",  type=int, default=8088)
+    parser.add_argument("--device",  type=str, default=5)
+    args = parser.parse_args()
+    asyncio.run(main(args))

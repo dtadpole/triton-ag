@@ -485,7 +485,7 @@ if __name__ == "__main__":
     os.makedirs(temp_dir, exist_ok=True)
 
     devices = args.device_list.split(",")
-    # select the device from devices randomly
+    # select the device from devices randomly (The randomness is a bit questionable, as one device got overloaded)
     # better strategy is to select the onlocked device
     print("There are {} devices available".format(len(devices)))
     device = torch.device(int(devices[random.randint(0, len(devices) - 1)]))
