@@ -12,7 +12,7 @@ from logger import logger
 KB_EVAL_TOKEN = None
 
 CURR_ERROR_COUNT = 0
-MAX_ERROR_COUNT = 50
+MAX_ERROR_COUNT = 10
 
 KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
 

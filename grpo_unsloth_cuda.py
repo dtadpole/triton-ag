@@ -349,11 +349,11 @@ def count_xml(text) -> float:
     count = 0.0
     if text.count("<think>\n") == 1:
         count += 0.1
-    if text.count("\n</think>\n") == 1:
+    if text.count("\n</think>") == 1:
         count += 0.1
     if text.count("<code>\n") == 1:
         count += 0.1
-        # count -= len(text.split("\n</code>\n")[-1])*0.001
+        # count -= len(text.split("\n</code>")[-1])*0.001
     if text.count("\n</code>") == 1:
         count += 0.1
         # count -= (len(text.split("\n</code>")[-1]) - 1)*0.001
