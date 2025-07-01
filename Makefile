@@ -45,13 +45,37 @@ kbEval:
 	while true; do python kbEvalRemoteServer.py; sleep 1; done
 
 kbEvalLocal1:
-	python kbEvalRemoteServer.py --local_host --port 5678 --device 5
+	docker run -itd  \
+	--gpus all \
+	--net=host -p 8081:8081 -p 8082:8082 \
+	-v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ \
+	-v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ \
+	--name kblocal_1 \
+	--replace \
+	localhost/triton_ag \
+	/bin/bash -c "python kbEvalRemoteServer.py --local_host --port 5678 --device 5"
 
 kbEvalLocal2:
-	python kbEvalRemoteServer.py --local_host --port 5677 --device 6
+	docker run -itd  \
+	--gpus all \
+	--net=host -p 8081:8081 -p 8082:8082 \
+	-v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ \
+	-v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ \
+	--name kblocal_2 \
+	--replace \
+	localhost/triton_ag \
+	/bin/bash -c "python kbEvalRemoteServer.py --local_host --port 5677 --device 6"
 
 kbEvalLocal3:
-	python kbEvalRemoteServer.py --local_host --port 5676 --device 7
+	docker run -itd  \
+	--gpus all \
+	--net=host -p 8081:8081 -p 8082:8082 \
+	-v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ \
+	-v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ \
+	--name kblocal_3 \
+	--replace \
+	localhost/triton_ag \
+	/bin/bash -c "python kbEvalRemoteServer.py --local_host --port 5676 --device 7"
 
 codeRunServer:
 	mcp dev codeRunServer.py
