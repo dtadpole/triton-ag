@@ -19,15 +19,17 @@ import wandb
 
 EVAL_TIMEOUT = 300 # seconds
 MAX_RETRIES = 7 # 2^7 = 128 seconds
+MAX_SPEED_UP = 2.0 # cap maximum speed up at 2x
 
 max_prompt_length = 1536
 max_seq_length = 4096 # Can increase for longer reasoning traces
-lora_rank = 32 # Larger rank = smarter, but slower
+lora_rank = 64 # Larger rank = smarter, but slower
+
+num_generations = 8
 
 batch_size = 8
 accumulation_steps = 1
-
-num_generations = 8
+learning_rate = 5e-6
 
 # model_name = "Qwen/Qwen3-4B"
 # model_name = "Qwen/Qwen3-8B"
@@ -37,8 +39,6 @@ model_tag = model_name
 time_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
 
 reference_eval_cache = {}
-
-time_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
 
 """
 # distributed training
@@ -296,16 +296,18 @@ async def async_kb_eval_reward_func(prompts, completions, reference_codes, task_
         else:
             score -= 1.0
         if generated_eval['correctness'] == True:
-            score += 0.3
+            score += 0.1
         else:
             score -= 0.5
         if generated_eval['runtime'] > 0.0:
             generated_runtime = generated_eval['runtime']
             reference_runtime = reference_eval['runtime']
             speed_up = reference_runtime / generated_runtime
-            score += speed_up * 2.0
+            if speed_up > MAX_SPEED_UP:
+                speed_up = MAX_SPEED_UP
+            score += speed_up
         else:
-            score -= 1.0
+            score -= 0.5
         scores.append(score)
         log_results[f'{task_tag}_{eval_tag}'] = {
             'score': score,
@@ -365,7 +367,7 @@ def xmlcount_reward_func(completions, **kwargs) -> list[float]:
 
 from trl import GRPOConfig, GRPOTrainer
 training_args = GRPOConfig(
-    learning_rate = 1e-5,
+    learning_rate = learning_rate,
     adam_beta1 = 0.9,
     adam_beta2 = 0.99,
     weight_decay = 0.1,
