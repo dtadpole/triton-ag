@@ -320,7 +320,7 @@ async def async_kb_eval_reward_func(prompts, completions, reference_codes, task_
 
     # logger.info(f"🔍 [{model_tag}] [{task_tag}] [{time_tag}] eval results:")
     for key, value in log_results.items():
-        emoji = '✅' if value['compiled'] and value['correctness'] else '❌'
+        emoji = '✅' if value['compiled'] and value['correctness'] else '⚠️' if value['compiled'] else '❌'
         logger.info(f"{emoji} [{model_tag}] [{task_tag}] [{time_tag}] [{key.split('_')[-1]}]: {json.dumps(value)}")
     # return the scores
     return scores
@@ -339,7 +339,7 @@ def strict_format_reward_func(completions, **kwargs) -> list[float]:
 
 def soft_format_reward_func(completions, **kwargs) -> list[float]:
     """Reward function that checks if the completion has a specific format."""
-    pattern = r"<think>.*?</think>\n<code>.*?</code>"
+    pattern = r"<think>.*?</think>.*?<code>.*?</code>"
     responses = [completion[0]["content"].strip() for completion in completions]
     matches = [re.match(pattern, r, re.DOTALL) for r in responses]
     logger.info(f"🔍 [{model_tag}] [{time_tag}] [soft_format_reward_func] [{len(matches)}] [{[match for match in matches]}]")
