@@ -51,7 +51,7 @@ class SimpleRepl:
     def execute(self, code):
         """Execute Python code and return result"""
         try:
-            response = requests.post(self.url + '/execute', json={'code': code}, headers={'Authorization': f'Bearer {self.api_key}'})
+            response = requests.post(self.url + '/repl/execute', json={'code': code}, headers={'Authorization': f'Bearer {self.api_key}'})
             response.raise_for_status()
             result = response.json()
             if result['result']:

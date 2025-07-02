@@ -50,7 +50,7 @@ def execute_code(code: str) -> tuple:
     return result, output.getvalue(), error, is_exit
 
 
-@fastapi.post("/execute")
+@fastapi.post("/repl/execute")
 async def execute(request: CodeRequest):
     """Execute Python code"""
     try:
@@ -72,7 +72,7 @@ async def execute(request: CodeRequest):
         }
 
 
-@fastapi.get("/vars")
+@fastapi.get("/repl/vars")
 def get_variables():
     """Get current variables"""
     user_vars = {k: str(v) for k, v in global_namespace.items() 
@@ -80,7 +80,7 @@ def get_variables():
     return {"variables": user_vars}
 
 
-@fastapi.post("/reset")
+@fastapi.post("/repl/reset")
 def reset():
     """Reset the global namespace"""
     global_namespace.clear()
@@ -92,7 +92,7 @@ def reset():
 # call reset
 reset()
 
-@fastapi.get("/", response_class=HTMLResponse)
+@fastapi.get("/repl", response_class=HTMLResponse)
 async def web_repl():
     """Simple web interface for the REPL"""
     return """
@@ -161,7 +161,7 @@ Type Python code below and press Execute.
             }
             
             // Send to server
-            fetch('/execute', {
+            fetch('/repl/execute', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ code: code })
@@ -198,7 +198,7 @@ Type Python code below and press Execute.
         }
 
         function showVars() {
-            fetch('/vars')
+            fetch('/repl/vars')
             .then(function(response) {
                 return response.json();
             })
@@ -219,7 +219,7 @@ Type Python code below and press Execute.
         }
         
         function resetAll() {
-            fetch('/reset', { method: 'POST' })
+            fetch('/repl/reset', { method: 'POST' })
             .then(function(response) {
                 return response.json();
             })
