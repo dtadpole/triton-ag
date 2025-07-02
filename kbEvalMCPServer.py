@@ -53,7 +53,7 @@ def pick_server_and_key():
 
 
 def upload_recap_to_s3(
-    current_wd: str,
+    workspace_dir: str,
     model_tag: str,
     task_tag: str,
     eval_tag: str,
@@ -75,7 +75,7 @@ def upload_recap_to_s3(
     }
 
     try:
-        with open(f"{current_wd}/kbeval_{eval_tag}_{time_tag}.summary.json", "w") as f:
+        with open(f"{workspace_dir}/kbeval_{eval_tag}_{time_tag}.summary.json", "w") as f:
             f.write(json.dumps(summary, indent=4))
     except Exception as e:
         logger.error(f"Error writing recap to file: {e}")
@@ -101,7 +101,7 @@ def upload_recap_to_s3(
     description="Run kernel bench evaluation for the reference code",
 )
 async def kb_eval_reference(
-    current_wd: str = Field(..., description="The current working directory"),
+    workspace_dir: str = Field(..., description="The current working directory"),
     model_tag: str = Field(..., description="The tag of the model"),
     task_tag: str = Field(..., description="The tag of the task"),
     time_tag: str = Field(..., description="The tag of the time"),
@@ -110,13 +110,13 @@ async def kb_eval_reference(
     ),
 ) -> KernelExecResult:
     try:
-        if not is_subfolder(parent_folder=os.getcwd(), child_folder=current_wd):
+        if not is_subfolder(parent_folder=os.getcwd(), child_folder=workspace_dir):
             raise ValueError(
-                f"Working directory {current_wd} is not a subfolder of cwd {os.getcwd()}"
+                f"Working directory {workspace_dir} is not a subfolder of cwd {os.getcwd()}"
             )
 
         # read reference code
-        with open(os.path.join(current_wd, reference_code_filename), "r") as f:
+        with open(os.path.join(workspace_dir, reference_code_filename), "r") as f:
             reference_code = f.read()
         # connect to remote server
         server_url, api_key = pick_server_and_key()
@@ -139,7 +139,7 @@ async def kb_eval_reference(
             "task_tag": task_tag,
             "time_tag": time_tag,
         }
-        with open(f"{current_wd}/kbeval_reference_{time_tag}.result.json", "w") as f:
+        with open(f"{workspace_dir}/kbeval_reference_{time_tag}.result.json", "w") as f:
             f.write(json.dumps(response_json, indent=4))
         logger.info(
             f"Response from remote server: {json.dumps(response_json, indent=4)}"
@@ -148,7 +148,7 @@ async def kb_eval_reference(
         if is_devserver() is False:
             # upload recap to s3
             upload_recap_to_s3(
-                current_wd,
+                workspace_dir,
                 model_tag,
                 task_tag,
                 "reference",
@@ -173,7 +173,7 @@ async def kb_eval_reference(
 )
 async def kb_eval_dspy(
     rationale: str = Field(..., description="The rationale for the generated code"),
-    current_wd: str = Field(..., description="The current working directory"),
+    workspace_dir: str = Field(..., description="The current working directory"),
     model_tag: str = Field(..., description="The tag of the model"),
     task_tag: str = Field(..., description="The tag of the task"),
     time_tag: str = Field(..., description="The tag of the time"),
@@ -186,16 +186,16 @@ async def kb_eval_dspy(
     ),
 ) -> KernelExecResult:
     try:
-        if not is_subfolder(parent_folder=os.getcwd(), child_folder=current_wd):
+        if not is_subfolder(parent_folder=os.getcwd(), child_folder=workspace_dir):
             raise ValueError(
-                f"Working directory {current_wd} is not a subfolder of cwd {os.getcwd()}"
+                f"Working directory {workspace_dir} is not a subfolder of cwd {os.getcwd()}"
             )
 
         # read reference code
-        with open(os.path.join(current_wd, reference_code_filename), "r") as f:
+        with open(os.path.join(workspace_dir, reference_code_filename), "r") as f:
             reference_code = f.read()
         # read generated code
-        with open(os.path.join(current_wd, generated_code_filename), "r") as f:
+        with open(os.path.join(workspace_dir, generated_code_filename), "r") as f:
             generated_code = f.read()
 
         # connect to remote server
@@ -222,7 +222,7 @@ async def kb_eval_dspy(
             "eval_tag": eval_tag,
             "time_tag": time_tag,
         }
-        result_filename = f"{current_wd}/kbeval_{eval_tag}_{time_tag}.result.json"
+        result_filename = f"{workspace_dir}/kbeval_{eval_tag}_{time_tag}.result.json"
         with open(result_filename, "w") as f:
             f.write(json.dumps(response_json, indent=4))
         logger.info(
@@ -232,7 +232,7 @@ async def kb_eval_dspy(
         if is_devserver() is False:
             # upload recap to s3
             upload_recap_to_s3(
-                current_wd,
+                workspace_dir,
                 model_tag,
                 task_tag,
                 eval_tag,
@@ -256,7 +256,7 @@ async def kb_eval_dspy(
     description="Run kernel bench evaluation for a specific iteration",
 )
 async def kb_eval_iteration(
-    current_wd: str = Field(..., description="The current working directory"),
+    workspace_dir: str = Field(..., description="The current working directory"),
     model_tag: str = Field(..., description="The tag of the model"),
     task_tag: str = Field(..., description="The tag of the task"),
     time_tag: str = Field(..., description="The tag of the time"),
@@ -269,16 +269,16 @@ async def kb_eval_iteration(
     ),
 ) -> KernelExecResult:
     try:
-        if not is_subfolder(parent_folder=os.getcwd(), child_folder=current_wd):
+        if not is_subfolder(parent_folder=os.getcwd(), child_folder=workspace_dir):
             raise ValueError(
-                f"Working directory {current_wd} is not a subfolder of cwd {os.getcwd()}"
+                f"Working directory {workspace_dir} is not a subfolder of cwd {os.getcwd()}"
             )
 
         # read reference code
-        with open(os.path.join(current_wd, reference_code_filename), "r") as f:
+        with open(os.path.join(workspace_dir, reference_code_filename), "r") as f:
             reference_code = f.read()
         # read generated code
-        with open(os.path.join(current_wd, generated_code_filename), "r") as f:
+        with open(os.path.join(workspace_dir, generated_code_filename), "r") as f:
             generated_code = f.read()
 
         # connect to remote server
@@ -305,7 +305,7 @@ async def kb_eval_iteration(
             "eval_tag": eval_tag,
             "time_tag": time_tag,
         }
-        with open(f"{current_wd}/kbeval_{eval_tag}_{time_tag}.result.json", "w") as f:
+        with open(f"{workspace_dir}/kbeval_{eval_tag}_{time_tag}.result.json", "w") as f:
             f.write(json.dumps(response_json, indent=4))
         logger.info(
             f"Response from remote server: {json.dumps(response_json, indent=4)}"
@@ -314,7 +314,7 @@ async def kb_eval_iteration(
         if is_devserver() is False:
             # upload recap to s3
             upload_recap_to_s3(
-                current_wd,
+                workspace_dir,
                 model_tag,
                 task_tag,
                 eval_tag,
@@ -338,7 +338,7 @@ async def kb_eval_iteration(
     description="Upload the iteration recap for a specific iteration of the kernel generation and evaluation",
 )
 async def kb_upload_iteration(
-    current_wd: str = Field(..., description="The current working directory"),
+    workspace_dir: str = Field(..., description="The current working directory"),
     model_tag: str = Field(..., description="The tag of the model"),
     task_tag: str = Field(..., description="The tag of the task"),
     time_tag: str = Field(..., description="The tag of the time"),
@@ -356,18 +356,18 @@ async def kb_upload_iteration(
         logger.info(f"Generated recap: {recap}")
 
         # read reference code
-        with open(os.path.join(current_wd, reference_code_filename), "r") as f:
+        with open(os.path.join(workspace_dir, reference_code_filename), "r") as f:
             reference_code = f.read()
         # read generated code
-        with open(os.path.join(current_wd, generated_code_filename), "r") as f:
+        with open(os.path.join(workspace_dir, generated_code_filename), "r") as f:
             generated_code = f.read()
         # read response from file
-        with open(f"{current_wd}/kbeval_{eval_tag}_{time_tag}.result.json", "r") as f:
+        with open(f"{workspace_dir}/kbeval_{eval_tag}_{time_tag}.result.json", "r") as f:
             result = KernelExecResult.model_validate_json(f.read())
 
         if is_devserver() is False:
             msg = upload_recap_to_s3(
-                current_wd,
+                workspace_dir,
                 model_tag,
                 task_tag,
                 eval_tag,
