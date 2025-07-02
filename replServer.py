@@ -73,7 +73,7 @@ async def execute(request: CodeRequest):
 
 
 @fastapi.get("/vars")
-async def get_variables():
+def get_variables():
     """Get current variables"""
     user_vars = {k: str(v) for k, v in global_namespace.items() 
                 if not k.startswith('_')}
@@ -81,12 +81,16 @@ async def get_variables():
 
 
 @fastapi.post("/reset")
-async def reset():
+def reset():
     """Reset the global namespace"""
     global_namespace.clear()
     global_namespace['reg'] = reg
+    global_namespace['vars'] = get_variables
+    global_namespace['reset'] = reset
     return {"message": "Namespace reset"}
 
+# call reset
+reset()
 
 @fastapi.get("/", response_class=HTMLResponse)
 async def web_repl():
