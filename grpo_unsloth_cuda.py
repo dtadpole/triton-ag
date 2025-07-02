@@ -294,7 +294,7 @@ async def async_kb_eval_reward_func(prompts, completions, reference_codes, task_
         if generated_eval['compiled'] == True:
             score += 0.1
         else:
-            score -= 1.0
+            score -= 0.5
         if generated_eval['correctness'] == True:
             score += 0.1
         else:
@@ -305,7 +305,7 @@ async def async_kb_eval_reward_func(prompts, completions, reference_codes, task_
             speed_up = reference_runtime / generated_runtime
             if speed_up > MAX_SPEED_UP:
                 speed_up = MAX_SPEED_UP
-            score += speed_up
+            score += speed_up * 0.5
         else:
             score -= 0.5
         scores.append(score)
@@ -347,14 +347,14 @@ def soft_format_reward_func(completions, **kwargs) -> list[float]:
 
 def count_xml(text) -> float:
     count = 0.0
-    if text.count("<think>\n") == 1:
+    if text.count("<think>") == 1:
         count += 0.1
-    if text.count("\n</think>") == 1:
+    if text.count("</think>") == 1:
         count += 0.1
-    if text.count("<code>\n") == 1:
+    if text.count("<code>") == 1:
         count += 0.1
         # count -= len(text.split("\n</code>")[-1])*0.001
-    if text.count("\n</code>") == 1:
+    if text.count("</code>") == 1:
         count += 0.1
         # count -= (len(text.split("\n</code>")[-1]) - 1)*0.001
     return count

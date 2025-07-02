@@ -14,7 +14,7 @@ from filelock import FileLock, Timeout
 
 KB_EVAL_DIR = os.path.expanduser("~/.kbeval")
 
-MAX_LOCK_AGE = 90 # seconds
+MAX_LOCK_AGE = 15 # seconds
 
 def eval_kernel_reference(
     model_tag: str,
@@ -156,7 +156,7 @@ def compile_and_eval_kernel(
     lock = FileLock(lock_file)
     while True:
         try:
-            with lock.acquire(timeout=1):
+            with lock.acquire(timeout=2):
                 logger.warning(f"[KB_Eval] Acquired lock {lock_file} [{eval_key}]")
 
                 # verify lock is working by sleeping randome between 10 and 20 seconds

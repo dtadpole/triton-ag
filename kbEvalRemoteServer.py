@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import traceback
 import json
 import argparse
@@ -13,6 +14,7 @@ KB_EVAL_TOKEN = None
 
 CURR_ERROR_COUNT = 0
 MAX_ERROR_COUNT = 10
+START_TIME = time.time()
 
 KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
 
@@ -248,13 +250,21 @@ async def kb_eval(
 
 
 async def _check_total_error_count():
-    global CURR_ERROR_COUNT, MAX_ERROR_COUNT
+    global CURR_ERROR_COUNT, MAX_ERROR_COUNT, START_TIME
+
+    print_interval = 10
     check_interval = 3 # seconds
     counter = 0
-    print_interval = 10
     while True:
         try:
             counter += 1
+            # check if elapsed time is greater than 4 hours
+            CURR_TIME = time.time()
+            ELAPSED_TIME = CURR_TIME - START_TIME
+            if ELAPSED_TIME > 4 * 3600:
+                # add an star emoji
+                logger.error(f"⭐ Elapsed time is greater than 4 hours, exiting... [parent process will restart]")
+                exit(1)
             if CURR_ERROR_COUNT > MAX_ERROR_COUNT:
                 logger.error(f"❌ Total error count is greater than {MAX_ERROR_COUNT}, exiting")
                 exit(1)

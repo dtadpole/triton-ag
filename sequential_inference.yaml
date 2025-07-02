@@ -23,25 +23,63 @@ sglang:
 runpod:
   common:
     base_url: "https://zcbfu39pp5jxrg-8091.proxy.runpod.net/v1"
-    # base_url: "https://65tarp87hz8quy-8091.proxy.runpod.net/v1"
     api_key: "${HOME}/.keys/local.api.key"
 
   generation:
-    model: "Qwen/Qwen3-32B"
+    model: "Qwen/Qwen3-32B-FP8"
     temperature: 0.6
-    # max_tokens: 12288
     max_tokens: 14336
 
+runpod-14b:
+  common:
+    base_url: "https://9y6v8lqsu1jwnv-8091.proxy.runpod.net/v1"
+    api_key: "${HOME}/.keys/local.api.key"
 
-deepinfra:
+  generation:
+    model: "Qwen/Qwen3-14B"
+    temperature: 0.6
+    max_tokens: 14336
+
+runpod-32b:
+  common:
+    # base_url: "https://qep2815967ea9v-8091.proxy.runpod.net/v1"
+    base_url: "https://4fu8z03upmnodh-8091.proxy.runpod.net/v1"
+    api_key: "${HOME}/.keys/local.api.key"
+
+  generation:
+    model: "Qwen/Qwen3-32B-FP8"
+    # model: "my_adapter"
+    # model: "dtadpole/KernelCoder-32B_20250621-013349"
+    temperature: 0.6
+    max_tokens: 14336
+
+deepinfra-14b:
   common:
     api_key: ${HOME}/.keys/deepinfra.api.key
     base_url: https://api.deepinfra.com/v1/openai
 
   generation:
-    # model: Qwen/Qwen3-14B
+    model: Qwen/Qwen3-14B
+    temperature: 0.6
+    max_tokens: 14336
+
+deepinfra-32b:
+  common:
+    api_key: ${HOME}/.keys/deepinfra.api.key
+    base_url: https://api.deepinfra.com/v1/openai
+
+  generation:
     model: Qwen/Qwen3-32B
-    # model: Qwen/Qwen3-235B-A22B
+    temperature: 0.6
+    max_tokens: 14336
+
+deepinfra-235b:
+  common:
+    api_key: ${HOME}/.keys/deepinfra.api.key
+    base_url: https://api.deepinfra.com/v1/openai
+
+  generation:
+    model: Qwen/Qwen3-235B-A22B
     temperature: 0.6
     max_tokens: 14336
 
@@ -62,16 +100,29 @@ fireworks:
     base_url: https://api.fireworks.ai/inference/v1
 
   generation:
-    # model: accounts/fireworks/models/deepseek-r1-0528
-    model: accounts/fireworks/models/deepseek-v3-0324
+    model: accounts/fireworks/models/deepseek-r1-0528
+    # model: accounts/fireworks/models/deepseek-v3-0324
     # tokenizer: deepseek-ai/DeepSeek-R1-0528
     tokenizer: deepseek-ai/DeepSeek-V3-0324
     temperature: 0.6
     max_tokens: 14336
 
+together:
+  common:
+    api_key: ${HOME}/.keys/together.api.key
+    base_url: https://api.together.xyz/v1
+
+  generation:
+    model: deepseek-ai/DeepSeek-V3
+    # model: Qwen/Qwen2.5-72B-Instruct-Turbo
+    # model: Qwen/Qwen3-235B-A22B-fp8-tput
+    temperature: 0.6
+    max_tokens: 14336
+
 
 kbEval:
-  base_url: http://10.12.0.204:5678
+  base_url: http://10.12.0.204:44456
+  api_key: ${HOME}/.keys/kbeval.api.key
 
 prompts:
   # System and user prompts
@@ -96,28 +147,15 @@ prompts:
     {generated_code}
     ```
 
-    You shall provide a brief explanation of why the code is best optimized for performance. Add the reasoning using the following format:
-
-    ```text
-    ...
-    ```
-
-
   # User prompt template with substitutable source code parameter
   user_prompt: |
-    Following is the reference source code of a PyTorch model, write the complete new module (no testing code, no other code): it will be evaluated and you will be given feedback on its correctness and performance.
+    Following is the reference source code of a PyTorch model, implement the complete new module (no testing code, no other code).
 
     ```python
     {source_code}
     ```
 
-    Provide a brief reasoning why you believe the code you generated is best optimized for performance. Add the explanation with the following format:
-
-    ```text
-    ...
-    ```
-
-    Be concise with your thinking, and don't be too verbose.
+    Be concise with your thinking.
     
   
   examples:

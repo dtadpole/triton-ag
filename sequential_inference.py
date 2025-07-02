@@ -7,6 +7,7 @@ Client code that uses vLLM's generate API to get results from given prompts.
 Supports synchronous text generation.
 """
 
+import random
 import os
 import re
 import yaml
@@ -132,52 +133,69 @@ class VLLMClient:
         system_prompt = self.get_system_prompt()
         user_prompt = self.get_user_prompt(source_code)
 
-        # format prompt with chatml format
-        prompt = f"<|im_start|>system\n{system_prompt}\n<|im_end|>\n<|im_start|>user\n{user_prompt}\n<|im_end|>\n<|im_start|>assistant\nLet me solve this step by step.\n<think>"
-        
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
+                "role": "user",
+                "content": user_prompt
+            }
+        ]
+
         try:
             generated_text = ""
+            reasoning_content = ""
             
             if STREAMING:
                 # STREAMING MODE: Real-time token streaming using OpenAI client
-                stream = await self.openai_client.completions.create(
+                stream = await self.openai_client.chat.completions.create(
                     model=self.model,
-                    prompt=prompt,
+                    messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     top_p=kwargs.get('top_p', 1.0),
                     stream=True,
-                    timeout=600
+                    timeout=600,
+                    extra_body={"top_k": 40}
                 )
                 
                 # Process streaming response
                 async for chunk in stream:
                     if chunk.choices:
                         choice = chunk.choices[0]
-                        if choice.text:
-                            generated_text += choice.text
-                            
+                        # Safely access content
+                        if hasattr(choice.delta, 'content') and choice.delta.content:
+                            generated_text += choice.delta.content
+                        # Safely access reasoning_content (only available for reasoning models like o1)
+                        if hasattr(choice.delta, 'reasoning_content') and choice.delta.reasoning_content:
+                            reasoning_content += choice.delta.reasoning_content
             else:
                 # NON-STREAMING MODE: Single response using OpenAI client
-                response = await self.openai_client.completions.create(
+                response = await self.openai_client.chat.completions.create(
                     model=self.model,
-                    prompt=prompt,
+                    messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     top_p=kwargs.get('top_p', 1.0),
                     stream=False,
-                    timeout=600
+                    timeout=600,
+                    extra_body={"top_k": 40}
                 )
                 
                 # Extract text from response
                 if response.choices:
                     choice = response.choices[0]
-                    generated_text = choice.text or ""
+                    generated_text = choice.message.content or ""
+                    # Safely access reasoning_content (only available for reasoning models like o1)
+                    reasoning_content = getattr(choice.message, 'reasoning_content', "") or ""
 
             # tokenize the generated text
             tokens = tokenizer.encode(generated_text) if generated_text else []
+            reasoning_tokens = tokenizer.encode(reasoning_content) if reasoning_content else []
             
-            return {'text': generated_text, 'tokens': tokens}
+            return {'text': generated_text, 'tokens': tokens, 'reasoning_content': reasoning_content, 'reasoning_tokens': reasoning_tokens}
                             
         except Exception as e:
             mode = "streaming" if STREAMING else "non-streaming"
@@ -212,8 +230,8 @@ class VLLMClient:
         """Check if vLLM server is healthy."""
         try:
             # Try a simple generation request
-            result = await self.generate("Hello", max_tokens=1)
-            return bool(result.get('text', ''))  # If we get any text response, server is healthy
+            result = await self.generate("Hello", max_tokens=5)
+            return bool(result.get('text', '') or result.get('reasoning_content', ''))  # If we get any text or reasoning content response, server is healthy
         except Exception as e:
             print(f"❌ Health check failed: {e}")
             return False
@@ -283,12 +301,17 @@ async def _process_inference_task(
     generation_time = time.time() - start_time
     
     generated_text = result.get('text', '')
+    reasoning_content = result.get('reasoning_content', '')
 
-    print(f"🔍 [Task {task_id}] Responded [{f'{len(result.get('tokens', [])):04d}'} tokens] [{len(generated_text)} characters] in [{generation_time:.2f}s]")
+    num_tokens = len(result.get('tokens', []))
+    num_reasoning_tokens = len(result.get('reasoning_tokens', []))
+    print(f"🔍 [Task {task_id}] Responded [{f'{num_tokens}'} tokens] [{f'{num_reasoning_tokens}'} reasoning tokens] in [{generation_time:.2f}s]")
 
     # save response to a file
     response_file = output_sub_dir / f"response.txt"
     with open(response_file, 'w') as f:
+        if reasoning_content:
+            f.write(f"<think>\n{reasoning_content}\n</think>\n")
         f.write(generated_text)
     
     # Create conversation data
@@ -304,6 +327,7 @@ async def _process_inference_task(
             },
             {
                 "role": "assistant",
+                "reasoning_content": reasoning_content,
                 "content": generated_text
             }
         ],
@@ -312,7 +336,8 @@ async def _process_inference_task(
             "model": client.model,
             "input_file": str(relative_path),
             "generation_time": generation_time,
-            "num_tokens": len(result.get('tokens', [])),
+            "num_tokens": num_tokens,
+            "num_reasoning_tokens": num_reasoning_tokens,
             "time_tag": time_tag,
             "task_id": task_id
         }
@@ -323,24 +348,36 @@ async def _process_inference_task(
     async with aiofiles.open(conversation_file, 'w', encoding='utf-8') as f:
         await f.write(json.dumps(conversation, indent=2, ensure_ascii=False))
 
-    # remove the content between first <think> and the last </think> from the generated text
-    # first_think_idx = generated_text.find("<think>")
-    last_think_idx = generated_text.rfind("</think>")
-    generated_text_no_think = generated_text[last_think_idx+len("</think>"):] if last_think_idx != -1 else generated_text
-
     # extract the generated code from the generated text
-    generated_code = generated_text_no_think.split("```python")[1].split("```")[0]
+    try:
+        # Try to extract last Python code blocks
+        if "```python" in generated_text:
+            generated_code = generated_text.split("```python")[-1].split("```")[0].strip()
+        elif "```" in generated_text:
+            # Try to extract the last code block
+            code_blocks = generated_text.split("```")
+            generated_code = code_blocks[-1].strip() if len(code_blocks) > 1 else generated_text
+        else:
+            # No code blocks found, use the entire generated text as the generated code
+            generated_code = generated_text.strip()
+            print(f"⚠️ [Task {task_id}] No code blocks found, using full response")
+    except (IndexError, AttributeError) as e:
+        print(f"⚠️ [Task {task_id}] Error extracting code: {e}, using full response")
+        generated_code = generated_text.strip()
+    
     # save the generated code to a file
     generated_code_file = output_sub_dir / f"generated_code.py"
     with open(generated_code_file, 'w') as f:
         f.write(generated_code)
 
+    """
     # extract brief explanation from the generated text
     brief_explaination = generated_text_no_think.split("```text")[1].split("```")[0]
     # save the brief explaination to a file
     brief_explaination_file = output_sub_dir / f"brief_explaination.txt"
     with open(brief_explaination_file, 'w') as f:
         f.write(brief_explaination)
+    """
 
     # use generated emoji to beginning of the line
     print(f"👏 [Task {task_id}] Generated [{f'{gen_id:02d}'}]: {generated_code_file}")
@@ -356,6 +393,11 @@ class KbEvalClient:
         # Get kbEval config from sequential_inference.yaml
         kb_eval_config = self.config.get('kbEval', {})
         self.base_url = kb_eval_config.get('base_url', 'http://localhost:5678')
+        # expand the api_key_file
+        api_key_file = kb_eval_config.get('api_key', '~/.keys/kbeval.api.key').replace("${HOME}", os.path.expanduser("~"))
+        # read the api_key from the file
+        with open(api_key_file, 'r') as f:
+            self.api_key = f.read().strip()
         
     def _load_config(self, config_file: str) -> Dict:
         """Load configuration from YAML file."""
@@ -379,7 +421,7 @@ class KbEvalClient:
                 response = await client.post(
                     f"{self.base_url}/kb_eval_ref",
                     json=eval_params,
-                    headers={"Content-Type": "application/json"},
+                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
                     timeout=300  # 5 minute timeout
                 )
                 
@@ -411,7 +453,7 @@ class KbEvalClient:
                         "reference_code": eval_params["reference_code"],
                         "generated_code": eval_params["generated_code"],
                     },
-                    headers={"Content-Type": "application/json"},
+                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
                     timeout=300  # 5 minute timeout
                 )
                 
@@ -502,7 +544,7 @@ async def _process_evaluation_task(
         correctness = result.get('correctness', False)
         runtime = result.get('runtime', -1.0)
         
-        print(f"🔍 [Task {task_id}] Evaluated [{f'{gen_id:02d}'}]: [compiled={compiled}], [correct={correctness}], [runtime={runtime:.4f}ms] in [{evaluation_time:.2f}s]")
+        # print(f"🔍 [Task {task_id}] Evaluated [{f'{gen_id:02d}'}]: [compiled={compiled}], [correct={correctness}], [runtime={runtime:.3f}ms] in [{evaluation_time:.2f}s]")
         
         # Save evaluation result
         evaluation_file = output_sub_dir / "generated_code_eval.json"
@@ -510,9 +552,9 @@ async def _process_evaluation_task(
             json.dump(result, f, indent=2, ensure_ascii=False, default=str)
         
         if compiled and correctness:
-            print(f"✅ [Task {task_id}] Evaluated Correctly [{f'{gen_id:02d}'}]: {evaluation_file}")
+            print(f"✅ [Task {task_id}] Evaluated [{f'{gen_id:02d}'}] [{generated_code_file}] [{runtime:.3f}ms] in [{evaluation_time:.1f}s]")
         else:
-            print(f"⚠️  [Task {task_id}] Evaluated Incorrectly [{f'{gen_id:02d}'}]: {evaluation_file}")
+            print(f"⚠️ [Task {task_id}] Evaluated [{f'{gen_id:02d}'}] [{generated_code_file}] [{'✅' if compiled else '❌'}compiled], [{'✅' if correctness else '❌'}correctness] in [{evaluation_time:.2f}s]")
         return True
         
     except Exception as e:
@@ -640,7 +682,7 @@ async def async_eval_reference_code(kb_eval_client: KbEvalClient, model_tag: str
     output_eval_file = output_path / f"reference_code_eval.json"
     with open(output_eval_file, 'w') as f:
         json.dump(result.model_dump(), f, indent=2)
-    print(f"✅ Reference code [{task_tag}] evaluation result: [{result.runtime}ms]")
+    print(f"✅ Reference code [{task_tag}] evaluation result: [{result.runtime:.3f}ms]")
 
     return result
 
@@ -651,43 +693,49 @@ async def main():
     parser.add_argument("--output-dir", type=str, default="./_output", help="Output directory for results")
     parser.add_argument("--num-tasks", type=int, default=8, help="Number of concurrent processing tasks")
     parser.add_argument("--num-generations", type=int, default=8, help="Number of generations to perform for each file")
-    parser.add_argument("--client", type=str, default="vllm", help="Client type to use (vllm, runpod, sglang, deepseek, fireworks)")
+    parser.add_argument("--client", type=str, default="runpod-32b", help="Client type to use (vllm, runpod, sglang, deepseek, fireworks)")
     parser.add_argument("--streaming", action="store_true", default=True, help="Use streaming mode")
     parser.add_argument("--epoch-id", type=int, default=1, help="Epoch ID to process")
     parser.add_argument("--bucket-size", type=int, default=10, help="Number of files to process in each bucket")
-    parser.add_argument("--bucket-id", type=int, default=1, help="Bucket ID to process")
+    parser.add_argument("--bucket-id", type=int, default=-1, help="Bucket ID to process")
     parser.add_argument("--bucket-seed", type=int, default=42, help="Seed for random number generator")
     
     args = parser.parse_args()
 
     global STREAMING
     STREAMING = args.streaming
-    
+
     # Create timestamp for this run
     time_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     # Set up directories
     input_dir = Path(args.input_dir)
-    output_dir = Path(args.output_dir + "_" + f"{args.epoch_id:03d}" + "_" + f"{args.bucket_id:02d}" + "_" + f"{args.bucket_seed:02d}" + "_" + time_tag)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
     if not input_dir.exists():
         print(f"Error: Input directory {input_dir} does not exist")
         return
-    
+
     # Find all Python files recursively
     python_files = list(input_dir.rglob("*.py"))
     # sort the python files by md5 of filepath
     python_files.sort(key=lambda x: hashlib.md5(str(str(x) + str(args.epoch_id) + str(args.bucket_seed)).encode('utf-8')).hexdigest())
     # split the python files into buckets
     bucket_files = [python_files[i:i + args.bucket_size] for i in range(0, len(python_files), args.bucket_size)]
-    # get the bucket
-    bucket_files = bucket_files[args.bucket_id - 1]
-    
     if not bucket_files:
         print(f"Error: No Python files found in {input_dir}")
         return
-    
+
+    # get the bucket
+    if args.bucket_id < 0:
+        args.bucket_id = random.randint(0, len(bucket_files) - 1)
+        bucket_files = bucket_files[args.bucket_id]
+    else:
+        args.bucket_id = args.bucket_id - 1
+        bucket_files = bucket_files[args.bucket_id]
+
+    # output directory
+    output_dir = Path(args.output_dir + "_" + f"{args.epoch_id:03d}" + "_" + f"{args.bucket_id:02d}" + "_" + f"{args.bucket_seed:02d}" + "_" + time_tag)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     # add info emoji to beginning of the line
     print(f"🔍 Found {len(bucket_files)} Python files to process")
     print(f"🔍 Output directory: [{output_dir}]")
@@ -770,8 +818,8 @@ async def main():
     await asyncio.gather(*tasks)
 
     metadata = {
-        "input_dir": input_dir,
-        "output_dir": output_dir,
+        "input_dir": str(input_dir),
+        "output_dir": str(output_dir),
         "time_tag": time_tag,
         "num_tasks": args.num_tasks,
         "num_generations": args.num_generations,
@@ -797,8 +845,10 @@ async def main():
 
     # upload the output directory to s3
     s3_client = boto3.client('s3')
-    s3_client.upload_file(output_dir, 'agent-xyz', f'{args.epoch_id:03d}_{args.bucket_id:02d}/{output_dir.name}')
-
+    # recursively upload folder to s3 (not a file)
+    for root, dirs, files in os.walk(output_dir):
+        for file in files:
+            s3_client.upload_file(os.path.join(root, file), 'agent-xyz', f'{args.epoch_id:03d}_{args.bucket_id:02d}/{output_dir.name}/{file}')
 
 if __name__ == "__main__":
     asyncio.run(main())
