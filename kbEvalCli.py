@@ -17,7 +17,7 @@ import random
 
 KB_EVAL_DIR = os.path.expanduser("~/.kbeval")
 
-MAX_LOCK_AGE = 60 # seconds
+MAX_LOCK_AGE = 15 # seconds
 
 class FileLock:
     def __init__(self, lock_file):
@@ -26,39 +26,59 @@ class FileLock:
         self.pid = os.getpid()
 
     def __enter__(self):
-        self.lock_fd = open(self.lock_file, 'w')
+        try:
+            self.lock_fd = open(self.lock_file, 'r+') # if open file with 'w', it will change modified timestamp even without writing to the file
+        except FileNotFoundError:
+            self.lock_fd = open(self.lock_file, 'w') # if file does not exist, open file with 'w'
         try:
             fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             # write my pid to lock file
             self.lock_fd.truncate(0)
             self.lock_fd.write(str(self.pid) + "\n")
-        except IOError as e:
-            if e.errno == errno.EAGAIN or e.errno == errno.EACCES:
-                self.lock_fd.close()
-                raise TimeoutError("Could not acquire lock")
-            raise
+            self.lock_fd.flush()
+            # os.fsync(self.lock_fd.fileno())
+        except BlockingIOError as e:
+            self.lock_fd.close()
+            raise TimeoutError("Could not acquire lock")
+        # except IOError as e:
+        #     if e.errno == errno.EAGAIN or e.errno == errno.EACCES:
+        #         self.lock_fd.close()
+        #         raise TimeoutError("Could not acquire lock")
+        #     raise
         return self
 
     def __exit__(self, type, value, traceback):
         if self.lock_fd:
-            self.lock_fd.write('[done]\n')
+            self.lock_fd.write('\n[done]\n')
             fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_UN)
             self.lock_fd.close()
 
 def cleanup_lockfile(lock_file: str):
     if os.path.exists(lock_file):
+        my_pid = os.getpid()
         lock_modified_time = os.path.getmtime(lock_file)
         with open(lock_file, 'r') as file:
-            first_line = file.readline()
-            pid = int(first_line.strip())
-            if not psutil.pid_exists(pid):
-                # if process is not running
-                logger.error(f"[KB_Eval] Lock file {lock_file} for [{pid}] is not running, deleting...")
-                os.remove(lock_file)
-            elif lock_modified_time < time.time() - MAX_LOCK_AGE:
-                # safety net: if modified time is more than MAX_LOCK_AGE, delete lock file
-                logger.error(f"[KB_Eval] Lock file {lock_file} older than [{MAX_LOCK_AGE}s], deleting...")
-                os.remove(lock_file)
+            try:
+                fcntl.flock(file.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+                first_line = file.readline().strip()
+                digits_only = ""
+                for c in first_line:
+                    if c.isdigit():
+                        digits_only += c
+                if digits_only:
+                    file_pid = int(digits_only)
+                    if my_pid != file_pid:
+                        if psutil.pid_exists(file_pid):
+                            logger.warning(f"[{my_pid}] Lock file [{lock_file}] for [pid={digits_only}] is running...")
+                        else:
+                            # if process is not running
+                            logger.error(f"[{my_pid}] Lock file [{lock_file}] [pid={digits_only}] is not running, deleting...")
+                            os.remove(lock_file)
+            except BlockingIOError:
+                if lock_modified_time < time.time() - MAX_LOCK_AGE:
+                    # safety net: if modified time is more than MAX_LOCK_AGE, delete lock file
+                    logger.error(f"[{my_pid}] Lock file [{lock_file}] older than [{MAX_LOCK_AGE}s], deleting...")
+                    os.remove(lock_file)
 
 
 def eval_kernel_reference(
@@ -93,6 +113,9 @@ def eval_kernel_reference(
             try:
                 with FileLock(lock_file):
                     logger.warning(f"[KB_Eval_Ref] Acquired lock {lock_file} [{eval_key}]")
+                
+                    # verify lock is working by sleeping randome between 10 and 20 seconds
+                    # time.sleep(random.randint(3, 5)) # verified lock is working
 
                     init_inputs = get_init_inputs()
                     init_inputs = [
@@ -198,7 +221,7 @@ def compile_and_eval_kernel(
                 logger.warning(f"[KB_Eval] Acquired lock {lock_file} [{eval_key}]")
 
                 # verify lock is working by sleeping randome between 10 and 20 seconds
-                # time.sleep(random.randint(10, 20)) # verified lock is working
+                # time.sleep(random.randint(3, 5)) # verified lock is working
 
                 # write my pid to lock file
                 with open(lock_file, "w") as f:
