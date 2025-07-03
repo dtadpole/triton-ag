@@ -1,6 +1,8 @@
 import argparse
 import sys
 import time
+import fcntl
+import errno
 import traceback
 from kbEvalTest.kbeval import KernelExecResult, graceful_eval_cleanup, run_and_check_correctness, time_execution_with_cuda_event, get_timing_stats, load_original_model_and_inputs, load_custom_model, set_seed
 import torch
@@ -10,11 +12,33 @@ import json
 from datetime import datetime
 from util import logger
 import random
-from filelock import FileLock, Timeout
+# from filelock import FileLock, Timeout
 
 KB_EVAL_DIR = os.path.expanduser("~/.kbeval")
 
 MAX_LOCK_AGE = 15 # seconds
+
+class FileLock:
+    def __init__(self, lock_file):
+        self.lock_file = lock_file
+        self.lock_fd = None
+
+    def __enter__(self):
+        self.lock_fd = open(self.lock_file, 'w')
+        try:
+            fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except IOError as e:
+            if e.errno == errno.EAGAIN or e.errno == errno.EACCES:
+                self.lock_fd.close()
+                raise TimeoutError("Could not acquire lock")
+            raise
+        return self
+
+    def __exit__(self, type, value, traceback):
+        if self.lock_fd:
+            fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_UN)
+            self.lock_fd.close()
+
 
 def eval_kernel_reference(
     model_tag: str,
@@ -44,10 +68,10 @@ def eval_kernel_reference(
         )
 
         lock_file = os.path.join(KB_EVAL_DIR, f".lock_{str(device)}")
-        lock = FileLock(lock_file)
+        # lock = FileLock(lock_file)
         while True:
             try:
-                with lock.acquire(timeout=1):
+                with FileLock(lock_file):
                     logger.warning(f"[KB_Eval_Ref] Acquired lock {lock_file} [{eval_key}]")
 
                     init_inputs = get_init_inputs()
@@ -87,8 +111,9 @@ def eval_kernel_reference(
                         runtime_stats=runtime_stats,
                     )
 
-            except Timeout:
+            except TimeoutError:
                 logger.info(f"[KB_Eval_Ref] Waiting for lock to be released {lock_file} [{eval_key}]")
+                time.sleep(2)
                 continue
             except Exception as e:
                 logger.warning(f"[KB_Eval_Ref] Error acquiring lock: {e} [{eval_key}]")
@@ -98,7 +123,7 @@ def eval_kernel_reference(
                 return result
             finally:
                 # torch.cuda.synchronize(device=device)
-                lock.release()
+                # lock.release()
                 # check lockfile modified time
                 if os.path.exists(lock_file):
                     lock_modified_time = os.path.getmtime(lock_file)
@@ -153,10 +178,11 @@ def compile_and_eval_kernel(
 
     # lock file is {HOME}/.kbeval/lock_{str(device)}
     lock_file = os.path.join(KB_EVAL_DIR, f".lock_{str(device)}")
-    lock = FileLock(lock_file)
+    # lock = FileLock(lock_file)
     while True:
         try:
-            with lock.acquire(timeout=2):
+            # with lock.acquire(timeout=2):
+            with FileLock(lock_file):
                 logger.warning(f"[KB_Eval] Acquired lock {lock_file} [{eval_key}]")
 
                 # verify lock is working by sleeping randome between 10 and 20 seconds
@@ -187,8 +213,9 @@ def compile_and_eval_kernel(
             logger.warning(f"[KB_Eval] Released lock {lock_file} [{eval_key}]")
             return result
         
-        except Timeout:
+        except TimeoutError:
             logger.info(f"[KB_Eval] Waiting for lock to be released {lock_file} [{eval_key}]")
+            time.sleep(2)
             continue
         except Exception as e:
             logger.warning(f"[KB_Eval] Error acquiring lock: {e} [{eval_key}]")
@@ -198,7 +225,7 @@ def compile_and_eval_kernel(
             return result
         finally:
             # torch.cuda.synchronize(device=device)
-            lock.release()
+            # lock.release()
             # check lockfile modified time
             if os.path.exists(lock_file):
                 lock_modified_time = os.path.getmtime(lock_file)

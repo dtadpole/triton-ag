@@ -15,6 +15,7 @@ KB_EVAL_TOKEN = None
 CURR_ERROR_COUNT = 0
 MAX_ERROR_COUNT = 10
 START_TIME = time.time()
+MAX_RUN_TIME = 1 * 3600 # restart every 1 hour
 
 KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
 
@@ -258,10 +259,10 @@ async def _check_total_error_count():
     while True:
         try:
             counter += 1
-            # check if elapsed time is greater than 4 hours
+            # check if elapsed time is greater than MAX_RUN_TIME
             CURR_TIME = time.time()
             ELAPSED_TIME = CURR_TIME - START_TIME
-            if ELAPSED_TIME > 4 * 3600:
+            if ELAPSED_TIME > MAX_RUN_TIME:
                 # add an star emoji
                 logger.error(f"⭐ Elapsed time is greater than 4 hours, exiting... [parent process will restart]")
                 exit(1)
