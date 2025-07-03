@@ -9,6 +9,7 @@ import torch
 import asyncio
 import os
 import json
+import psutil
 from datetime import datetime
 from util import logger
 import random
@@ -16,17 +17,21 @@ import random
 
 KB_EVAL_DIR = os.path.expanduser("~/.kbeval")
 
-MAX_LOCK_AGE = 15 # seconds
+MAX_LOCK_AGE = 60 # seconds
 
 class FileLock:
     def __init__(self, lock_file):
         self.lock_file = lock_file
         self.lock_fd = None
+        self.pid = os.getpid()
 
     def __enter__(self):
         self.lock_fd = open(self.lock_file, 'w')
         try:
             fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # write my pid to lock file
+            self.lock_fd.truncate(0)
+            self.lock_fd.write(str(self.pid) + "\n")
         except IOError as e:
             if e.errno == errno.EAGAIN or e.errno == errno.EACCES:
                 self.lock_fd.close()
@@ -36,8 +41,24 @@ class FileLock:
 
     def __exit__(self, type, value, traceback):
         if self.lock_fd:
+            self.lock_fd.write('[done]\n')
             fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_UN)
             self.lock_fd.close()
+
+def cleanup_lockfile(lock_file: str):
+    if os.path.exists(lock_file):
+        lock_modified_time = os.path.getmtime(lock_file)
+        with open(lock_file, 'r') as file:
+            first_line = file.readline()
+            pid = int(first_line.strip())
+            if not psutil.pid_exists(pid):
+                # if process is not running
+                logger.error(f"[KB_Eval] Lock file {lock_file} for [{pid}] is not running, deleting...")
+                os.remove(lock_file)
+            elif lock_modified_time < time.time() - MAX_LOCK_AGE:
+                # safety net: if modified time is more than MAX_LOCK_AGE, delete lock file
+                logger.error(f"[KB_Eval] Lock file {lock_file} older than [{MAX_LOCK_AGE}s], deleting...")
+                os.remove(lock_file)
 
 
 def eval_kernel_reference(
@@ -68,7 +89,6 @@ def eval_kernel_reference(
         )
 
         lock_file = os.path.join(KB_EVAL_DIR, f".lock_{str(device)}")
-        # lock = FileLock(lock_file)
         while True:
             try:
                 with FileLock(lock_file):
@@ -123,14 +143,7 @@ def eval_kernel_reference(
                 return result
             finally:
                 # torch.cuda.synchronize(device=device)
-                # lock.release()
-                # check lockfile modified time
-                if os.path.exists(lock_file):
-                    lock_modified_time = os.path.getmtime(lock_file)
-                    # if modified time is more than 1.5 minutes, delete lock file
-                    if lock_modified_time < os.path.getmtime(lock_file) - MAX_LOCK_AGE:
-                        logger.error(f"[KB_Eval] Lock file {lock_file} is older than 1.5 minutes, deleting... [{eval_key}]")
-                        os.remove(lock_file)
+                cleanup_lockfile(lock_file)
 
     except Exception as e:
         logger.warning(f"[KB_Eval] Error evaluating reference code: {e}")
@@ -178,7 +191,6 @@ def compile_and_eval_kernel(
 
     # lock file is {HOME}/.kbeval/lock_{str(device)}
     lock_file = os.path.join(KB_EVAL_DIR, f".lock_{str(device)}")
-    # lock = FileLock(lock_file)
     while True:
         try:
             # with lock.acquire(timeout=2):
@@ -209,7 +221,6 @@ def compile_and_eval_kernel(
                     measure_performance=True,
                 )
 
-            # os.remove(lock_file)
             logger.warning(f"[KB_Eval] Released lock {lock_file} [{eval_key}]")
             return result
         
@@ -225,14 +236,7 @@ def compile_and_eval_kernel(
             return result
         finally:
             # torch.cuda.synchronize(device=device)
-            # lock.release()
-            # check lockfile modified time
-            if os.path.exists(lock_file):
-                lock_modified_time = os.path.getmtime(lock_file)
-                # if modified time is more than 1.5 minutes, delete lock file
-                if lock_modified_time < os.path.getmtime(lock_file) - MAX_LOCK_AGE:
-                    logger.error(f"[KB_Eval] Lock file {lock_file} is older than 1.5 minutes, deleting... [{eval_key}]")
-                    os.remove(lock_file)
+            cleanup_lockfile(lock_file)
 
 def compile_kernel_new(
     model_tag: str,
