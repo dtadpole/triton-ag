@@ -1,4 +1,5 @@
 import os
+import re
 import httpx
 import argparse
 import asyncio
@@ -18,18 +19,15 @@ class InferenceClient:
     def __init__(
         self,
         client_type: str,
-        base_url: Optional[str] = None,
-        api_key: Optional[str] = None,
-        model_name: Optional[str] = None,
+        streaming: bool = True,
         config_file: str = "inferenceClient.yaml",
-        streaming: bool = False,
     ):
         """
         Initialize vLLM client.
         
         Args:
-            base_url: vLLM server base URL (loaded from config if None)
-            api_key: API key for authentication
+            client_type: Type of client to use (vllm, sglang, deepseek, fireworks, together)
+            streaming: Whether to use streaming mode
             config_file: Path to YAML config file with server settings
         """
         # Load configuration from file
@@ -39,24 +37,21 @@ class InferenceClient:
         common_config = self.config.get(self.client_type, {}).get('common', {})
         
         # Set defaults from config
-        self.model_name = model_name or self.config.get(self.client_type, {}).get('generation', {}).get('model', 'default')
-        # self.tokenizer = self.config.get(self.client_type, {}).get('generation', {}).get('tokenizer', self.model)
-        self.base_url = base_url or common_config.get('base_url', 'http://localhost:8000/v1')
+        self.model_tag = self.config.get(self.client_type, {}).get('generation', {}).get('model', 'default')
+        self.base_url = common_config.get('base_url', 'http://localhost:8000/v1')
 
         # Set up API key
-        if api_key is None:
-            # Try to load from config or default location
-            api_key_path = common_config.get('api_key', "${HOME}/.keys/local.api.key")
-            if api_key_path.startswith('${HOME}/'):
-                api_key_path = os.path.expanduser(api_key_path.replace('${HOME}', '~'))
-            try:
-                with open(api_key_path, 'r') as f:
-                    self.api_key = f.read().strip()
-                    logger.info(f"🔑 [InferenceClient] API key loaded from [{api_key_path}]")
-            except FileNotFoundError:
-                self.api_key = "dummy_key"  # vLLM often doesn't require real auth
-        else:
-            self.api_key = api_key
+        # Try to load from config or default location
+        api_key_path = common_config.get('api_key', "${HOME}/.keys/local.api.key")
+        if api_key_path.startswith('${HOME}/'):
+            api_key_path = os.path.expanduser(api_key_path.replace('${HOME}', '~'))
+        try:
+            with open(api_key_path, 'r') as f:
+                self.api_key = f.read().strip()
+                logger.info(f"🔑 [InferenceClient] API key loaded from [{api_key_path}]")
+        except FileNotFoundError:
+            logger.info(f"🔑 [InferenceClient] API key not found at [{api_key_path}], using [dummy_key]")
+            self.api_key = "dummy_key"  # vLLM often doesn't require real auth
         
         # Create OpenAI client for vLLM
         self.openai_client = AsyncOpenAI(
@@ -66,10 +61,10 @@ class InferenceClient:
         
         # Print generation mode info
         if self.streaming:
-            logger.info(f"🚀 [InferenceClient] Using STREAMING mode with OpenAI client [{self.model_name}]")
+            logger.info(f"🚀 [InferenceClient] Using STREAMING mode with OpenAI client [{self.model_tag}]")
         else:
             # add info magnifying glass emoji
-            logger.info(f"🔍 [InferenceClient] Using NON-STREAMING mode with OpenAI client [{self.model_name}]")
+            logger.info(f"🔍 [InferenceClient] Using NON-STREAMING mode with OpenAI client [{self.model_tag}]")
         
     def _load_config(self, config_file: str) -> Dict:
         """Load configuration from YAML file."""
@@ -118,7 +113,7 @@ class InferenceClient:
         if self.streaming:
             # STREAMING MODE: Real-time token streaming using OpenAI client
             stream = await self.openai_client.chat.completions.create(
-                model=self.model_name,
+                model=self.model_tag,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -152,7 +147,7 @@ class InferenceClient:
         else:
             # NON-STREAMING MODE: Single response using OpenAI client
             response = await self.openai_client.chat.completions.create(
-                model=self.model_name,
+                model=self.model_tag,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -167,6 +162,14 @@ class InferenceClient:
                 choice = response.choices[0]
                 return_message = choice.message.model_dump()
                 # generated_text = choice.message.content or ""
+
+        # check if return_message['content'] has <think> and </think> using regex
+        matches = re.search(r'<think>(.*?)</think>(.*?)$', return_message['content'].strip(), re.DOTALL)
+        if matches:
+            # if yes, extract the content between <think> and </think> and add it to return_message['reasoning_content']
+            # use re.DOTALL to match newline characters
+            return_message['reasoning_content'] = matches.group(1)
+            return_message['content'] = matches.group(2)
 
         return return_message
 
@@ -208,7 +211,7 @@ class InferenceClient:
             **kwargs: Additional parameters
             
         Returns:
-            Dict with 'text' and 'tokens' data
+            Dict with 'text' data
         """
         # Get defaults from config
         generation_config = self.config.get(self.client_type, {}).get('generation', {})
@@ -222,7 +225,7 @@ class InferenceClient:
         if self.streaming:
             # STREAMING MODE: Real-time token streaming using OpenAI client
             stream = await self.openai_client.completions.create(
-                model=self.model_name,
+                model=self.model_tag,
                 prompt=prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -242,7 +245,7 @@ class InferenceClient:
         else:
             # NON-STREAMING MODE: Single response using OpenAI client
             response = await self.openai_client.completions.create(
-                model=self.model_name,
+                model=self.model_tag,
                 prompt=prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -347,7 +350,7 @@ def get_example_generated_code(config: Dict) -> str:
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--client", type=str, default="deepseek", help="Client type to use (vllm, sglang, deepseek, fireworks, together)")
+    parser.add_argument("--client", type=str, default="fireworks-r1", help="Client type to use (vllm, sglang, deepseek, fireworks, together)")
     parser.add_argument("--source_code", type=str, default="level1/1_Square_matrix_multiplication_.py", help="Source code to generate")
     parser.add_argument("--api_type", type=str, default="chat", choices=["chat", "completion"], help="API type to use (chat or completion)")
     parser.add_argument("--streaming", action="store_true", help="Use streaming mode")
@@ -372,10 +375,10 @@ async def main():
     if args.api_type == "chat":
         # Use chat completion API
         result = await client.chat_completion(messages)
-        if 'content' in result:
-            logger.info(f"[InferenceClient] Chat completion [content]: {result['content']}")
         if 'reasoning_content' in result:
             logger.info(f"[InferenceClient] Chat completion [reasoning_content]: {result['reasoning_content']}")
+        if 'content' in result:
+            logger.info(f"[InferenceClient] Chat completion [content]: {result['content']}")
     else:
         # Use completion API
         prompt = f"<|im_start|>system\n{system_prompt}\n<|im_end|>\n<|im_start|>user\n{user_prompt}\n<|im_end|>\n<|im_start|>assistant\n"

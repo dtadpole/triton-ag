@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-vLLM Generate API Client
-========================
+CodeGen and Evaluation Client
+============================
 
-Client code that uses vLLM's generate API to get results from given prompts.
-Supports synchronous text generation.
+Client code that uses OpenAI Chat Completion API to get results from given prompts.
+Supports roll out on a batch of code generations and evaluations.
 """
 
 import random
@@ -19,8 +19,6 @@ import requests
 import asyncio
 import aiofiles
 import hashlib
-import glob
-import httpx
 import traceback
 from openai import AsyncOpenAI
 from transformers import AutoTokenizer
@@ -31,192 +29,42 @@ from kbEvalTest.kbeval import KernelExecResult
 from pathlib import Path
 import requests
 import yaml
+from inferenceClient import InferenceClient
+from loguru import logger
 
-# Global configuration flags
-STREAMING = True   # Set to True for streaming API, False for non-streaming single response
+STREAMING = True
 
-class VLLMClient:
-    """Client for vLLM OpenAI-compatible API using OpenAI client for streaming or non-streaming generation."""
-    
-    def __init__(
-        self,
-        client_type: str,
-        base_url: Optional[str] = None,
-        api_key: Optional[str] = None,
-        model: Optional[str] = None,
-        config_file: str = "sequential_inference.yaml",
-    ):
-        """
-        Initialize vLLM client.
-        
-        Args:
-            base_url: vLLM server base URL (loaded from config if None)
-            api_key: API key for authentication
-            config_file: Path to YAML config file with server settings
-        """
-        # Load configuration from file
-        self.config = self._load_config(config_file)
+class CodeGenEvalClient:
+    def __init__(self, config_file: str, run_tag: str, client_type: str):
+        with open(config_file, 'r') as f:
+            self.config = yaml.safe_load(f)
+        self.run_tag = run_tag
         self.client_type = client_type
-        common_config = self.config.get(self.client_type, {}).get('common', {})
-        
-        # Set defaults from config
-        self.model = model or self.config.get(self.client_type, {}).get('generation', {}).get('model', 'default')
-        self.tokenizer = self.config.get(self.client_type, {}).get('generation', {}).get('tokenizer', self.model)
-        self.base_url = base_url or common_config.get('base_url', 'http://localhost:8000/v1')
+        self.model_tag = self.config.get(client_type, {}).get('generation', {}).get('model', 'deepseek-v3')
+        self.tokenizer_name = self.config.get(client_type, {}).get('generation', {}).get('tokenizer', 'Qwen/Qwen3-8B')
+        self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
+        self.inference_client = InferenceClient(client_type=client_type, streaming=STREAMING, config_file=config_file)
+        self.kb_eval_client = KbEvalClient()
+        self.output_dir = self._get_output_dir()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Set up API key
-        if api_key is None:
-            # Try to load from config or default location
-            api_key_path = common_config.get('api_key', "${HOME}/.keys/local.api.key")
-            if api_key_path.startswith('${HOME}/'):
-                api_key_path = os.path.expanduser(api_key_path.replace('${HOME}', '~'))
-            try:
-                with open(api_key_path, 'r') as f:
-                    self.api_key = f.read().strip()
-            except FileNotFoundError:
-                self.api_key = "dummy_key"  # vLLM often doesn't require real auth
-        else:
-            self.api_key = api_key
-        
-        # Create OpenAI client for vLLM
-        self.openai_client = AsyncOpenAI(
-            base_url=self.base_url,
-            api_key=self.api_key,
-        )
-        
-        # Print generation mode info
-        if STREAMING:
-            print("🚀 Using STREAMING mode with OpenAI client")
-        else:
-            print("📄 Using NON-STREAMING mode with OpenAI client")
-        
-    def _load_config(self, config_file: str) -> Dict:
-        """Load configuration from YAML file."""
-        config_path = Path(config_file)
-        if not config_path.exists():
-            # Try relative to script directory
-            config_path = Path(__file__).parent / config_file
-        
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                config = yaml.safe_load(f)
-                return config or {}
-        else:
-            print(f"⚠️ Warning: Config file {config_file} not found")
-            return {}
-    
-    async def generate(
-        self,
-        source_code: str,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        **kwargs
-    ):
-        """
-        Generate text using vLLM's OpenAI-compatible API with streaming or non-streaming mode.
-        
-        Args:
-            source_code: Input source code
-            temperature: Sampling temperature
-            max_tokens: Maximum tokens to generate
-            **kwargs: Additional parameters
-            
-        Returns:
-            Dict with 'text' and 'tokens' data
-        """
-        # Get defaults from config
-        generation_config = self.config.get(self.client_type, {}).get('generation', {})
-        temperature = temperature if temperature is not None else generation_config.get('temperature', 0.7)
-        max_tokens = max_tokens or generation_config.get('max_tokens', 1024)
+    def _get_output_dir(self) -> Path:
+        """Get output sub directory for a task."""
+        return Path(os.path.expanduser(f"~/.inferenceCodeGenEval/{self.run_tag}/{self.client_type}/{self.model_tag}"))
 
-        tokenizer = AutoTokenizer.from_pretrained(self.tokenizer)
-        
-        system_prompt = self.get_system_prompt()
-        user_prompt = self.get_user_prompt(source_code)
-
-        messages = [
-            {
-                "role": "system",
-                "content": system_prompt
-            },
-            {
-                "role": "user",
-                "content": user_prompt
-            }
-        ]
-
-        try:
-            generated_text = ""
-            reasoning_content = ""
-            
-            if STREAMING:
-                # STREAMING MODE: Real-time token streaming using OpenAI client
-                stream = await self.openai_client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    top_p=kwargs.get('top_p', 1.0),
-                    stream=True,
-                    timeout=600,
-                    extra_body={"top_k": 40}
-                )
-                
-                # Process streaming response
-                async for chunk in stream:
-                    if chunk.choices:
-                        choice = chunk.choices[0]
-                        # Safely access content
-                        if hasattr(choice.delta, 'content') and choice.delta.content:
-                            generated_text += choice.delta.content
-                        # Safely access reasoning_content (only available for reasoning models like o1)
-                        if hasattr(choice.delta, 'reasoning_content') and choice.delta.reasoning_content:
-                            reasoning_content += choice.delta.reasoning_content
-            else:
-                # NON-STREAMING MODE: Single response using OpenAI client
-                response = await self.openai_client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    top_p=kwargs.get('top_p', 1.0),
-                    stream=False,
-                    timeout=600,
-                    extra_body={"top_k": 40}
-                )
-                
-                # Extract text from response
-                if response.choices:
-                    choice = response.choices[0]
-                    generated_text = choice.message.content or ""
-                    # Safely access reasoning_content (only available for reasoning models like o1)
-                    reasoning_content = getattr(choice.message, 'reasoning_content', "") or ""
-
-            # tokenize the generated text
-            tokens = tokenizer.encode(generated_text) if generated_text else []
-            reasoning_tokens = tokenizer.encode(reasoning_content) if reasoning_content else []
-            
-            return {'text': generated_text, 'tokens': tokens, 'reasoning_content': reasoning_content, 'reasoning_tokens': reasoning_tokens}
-                            
-        except Exception as e:
-            mode = "streaming" if STREAMING else "non-streaming"
-            print(f"Error during vLLM {mode} generation with OpenAI client: {e}")
-            traceback.print_exc()
-            raise
-    
     def get_system_prompt(self) -> str:
         """Get system prompt from configuration."""
         prompts_config = self.config.get('prompts', {})
         reference_code = self.get_example_reference_code()
         generated_code = self.get_example_generated_code()
         return prompts_config.get('system_prompt', 'You are a helpful assistant.').format(reference_code=reference_code, generated_code=generated_code)
-    
+
     def get_user_prompt(self, source_code: str) -> str:
         """Get user prompt from configuration with source code substituted."""
         prompts_config = self.config.get('prompts', {})
         user_prompt_template = prompts_config.get('user_prompt', 'Analyze this code: {source_code}')
         return user_prompt_template.format(source_code=source_code)
-    
+
     def get_example_reference_code(self) -> str:
         """Get example reference code from configuration."""
         prompts_config = self.config.get('prompts', {}).get('examples', {})
@@ -227,376 +75,272 @@ class VLLMClient:
         prompts_config = self.config.get('prompts', {}).get('examples', {})
         return prompts_config.get('generated_code', '')
 
-    async def health_check(self) -> bool:
-        """Check if vLLM server is healthy."""
-        try:
-            # Try a simple generation request
-            result = await self.generate("Hello", max_tokens=5)
-            return bool(result.get('text', '') or result.get('reasoning_content', ''))  # If we get any text or reasoning content response, server is healthy
-        except Exception as e:
-            print(f"❌ Health check failed: {e}")
-            return False
-    
-    def get_models(self) -> List[str]:
-        """Get available models from the server."""
-        try:
-            # Use vLLM's OpenAI-compatible models endpoint
-            models_url = f"{self.base_url}/models"
-            headers = {"Authorization": f"Bearer {self.api_key}"}
+    async def _process_code_gen_task(
+        self,
+        task_tag: str,
+        reference_code: str,
+        gen_id: str,
+    ) -> str:
+        """
+        Process a single inference task for a file.
+        
+        Args:
+            task_tag: Task tag for this task
+            reference_code: Reference code for this task
+            gen_id: Generation ID for this task
             
-            response = requests.get(models_url, headers=headers, timeout=60)
-            response.raise_for_status()
-            
-            data = response.json()
-            models = []
-            if 'data' in data:
-                for model_info in data['data']:
-                    if 'id' in model_info:
-                        models.append(model_info['id'])
-            return models if models else ['default']
-        except Exception as e:
-            print(f"❌ Failed to get models: {e}")
-            return ['default']
-
-
-async def _process_inference_task(
-    client: VLLMClient,
-    file_path: Path,
-    gen_id: int,
-    input_base_dir: Path,
-    output_base_dir: Path,
-    run_tag: str,
-    task_id: int
-) -> bool:
-    """
-    Process a single inference task for a file.
-    
-    Args:
-        client: VLLMClient instance
-        file_path: Path to the input Python file
-        gen_id: Generation ID for this task
-        input_base_dir: Base directory for input files
-        output_base_dir: Base directory for output files
-        run_tag: Run tag for evaluation
-        task_id: Task identifier for logging
+        Returns:
+            str: Generated code for this task
+        """
+        # Create conversation
+        system_prompt = self.get_system_prompt()
+        user_prompt = self.get_user_prompt(reference_code)
         
-    Returns:
-        bool: True if successful, False if failed
-    """
-    # Read the Python file
-    async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
-        source_code = await f.read()
-    
-    # Get relative path for output structure
-    relative_path = file_path.relative_to(input_base_dir)
-    output_sub_dir = output_base_dir / relative_path / f"{gen_id:02d}"
-    output_sub_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Create conversation
-    system_prompt = client.get_system_prompt()
-    user_prompt = client.get_user_prompt(source_code)
-    
-    # Generate response
-    start_time = time.time()
-    result = await client.generate(source_code)
-    generation_time = time.time() - start_time
-    
-    generated_text = result.get('text', '')
-    reasoning_content = result.get('reasoning_content', '')
-
-    num_tokens = len(result.get('tokens', []))
-    num_reasoning_tokens = len(result.get('reasoning_tokens', []))
-    print(f"🔍 [Task {task_id}] Responded [{f'{num_tokens}'} tokens] [{f'{num_reasoning_tokens}'} reasoning tokens] in [{generation_time:.2f}s]")
-
-    # save response to a file
-    response_file = output_sub_dir / f"response.txt"
-    with open(response_file, 'w') as f:
-        if reasoning_content:
-            f.write(f"<think>\n{reasoning_content}\n</think>\n")
-        f.write(generated_text)
-    
-    # Create conversation data
-    conversation = {
-        "messages": [
-            {
-                "role": "system",
-                "content": system_prompt
-            },
-            {
-                "role": "user",
-                "content": user_prompt
-            },
-            {
-                "role": "assistant",
-                "reasoning_content": reasoning_content,
-                "content": generated_text
-            }
-        ],
-        "metadata": {
-            "client_type": client.client_type,
-            "model": client.model,
-            "input_file": str(relative_path),
-            "generation_time": generation_time,
-            "num_tokens": num_tokens,
-            "num_reasoning_tokens": num_reasoning_tokens,
-            "task_id": task_id,
-            "run_tag": run_tag
-        }
-    }
-    
-    # Save conversation file
-    conversation_file = output_sub_dir / f"conversation.json"
-    async with aiofiles.open(conversation_file, 'w', encoding='utf-8') as f:
-        await f.write(json.dumps(conversation, indent=2, ensure_ascii=False))
-
-    # extract the generated code from the generated text
-    try:
-        # Try to extract last Python code blocks
-        if "```python" in generated_text:
-            generated_code = generated_text.split("```python")[-1].split("```")[0].strip()
-        elif "```" in generated_text:
-            # Try to extract the last code block
-            code_blocks = generated_text.split("```")
-            generated_code = code_blocks[-1].strip() if len(code_blocks) > 1 else generated_text
-        else:
-            # No code blocks found, use the entire generated text as the generated code
-            generated_code = generated_text.strip()
-            print(f"⚠️ [Task {task_id}] No code blocks found, using full response")
-    except (IndexError, AttributeError) as e:
-        print(f"⚠️ [Task {task_id}] Error extracting code: {e}, using full response")
-        generated_code = generated_text.strip()
-    
-    # save the generated code to a file
-    generated_code_file = output_sub_dir / f"generated_code.py"
-    with open(generated_code_file, 'w') as f:
-        f.write(generated_code)
-
-    """
-    # extract brief explanation from the generated text
-    brief_explaination = generated_text_no_think.split("```text")[1].split("```")[0]
-    # save the brief explaination to a file
-    brief_explaination_file = output_sub_dir / f"brief_explaination.txt"
-    with open(brief_explaination_file, 'w') as f:
-        f.write(brief_explaination)
-    """
-
-    # use generated emoji to beginning of the line
-    print(f"👏 [Task {task_id}] Generated [{f'{gen_id:02d}'}]: {generated_code_file}")
-    return True
-
-
-async def _process_evaluation_task(
-    kb_eval_client: KbEvalClient,
-    file_path: Path,
-    gen_id: int,
-    input_base_dir: Path,
-    output_base_dir: Path,
-    run_tag: str,
-    task_id: int,
-    model_tag: str = "vllm"
-) -> bool:
-    """
-    Process a single evaluation task for a generated file.
-    
-    Args:
-        kb_eval_client: KbEvalClient instance
-        file_path: Path to the original input Python file
-        gen_id: Generation ID for this task
-        input_base_dir: Base directory for input files
-        output_base_dir: Base directory for output files
-        run_tag: Run tag for evaluation
-        task_id: Task identifier for logging
-        model_tag: Model tag for evaluation
-        
-    Returns:
-        bool: True if successful, False if failed
-    """
-    try:
-        # Get relative path for file structure
-        relative_path = file_path.relative_to(input_base_dir)
-        output_sub_dir = output_base_dir / relative_path / f"{gen_id:02d}"
-        
-        # Check if the required files exist
-        reference_code_file = output_base_dir / relative_path / "reference_code.py"
-        generated_code_file = output_sub_dir / "generated_code.py"
-        
-        if not reference_code_file.exists():
-            print(f"⚠️ [Task {task_id}] Reference code file not found: {reference_code_file}")
-            return False
-            
-        if not generated_code_file.exists():
-            print(f"⚠️ [Task {task_id}] Generated code file not found: {generated_code_file}")
-            return False
-        
-        # Read the reference and generated code
-        with open(reference_code_file, 'r', encoding='utf-8') as f:
-            reference_code = f.read()
-        
-        with open(generated_code_file, 'r', encoding='utf-8') as f:
-            generated_code = f.read()
-        
-        # Prepare evaluation parameters
-        task_name = str(relative_path)  # Get filename without extension
-        
-        # Call the evaluation server
+        # Generate response
         start_time = time.time()
-        result = await kb_eval_client.kb_eval(run_tag=run_tag, model_tag=model_tag, task_tag=task_name, eval_tag=f"gen_{gen_id:02d}", reference_code=reference_code, generated_code=generated_code)
-        result = result.model_dump()
-        evaluation_time = time.time() - start_time
+        result = await self.inference_client.chat_completion([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ])
+        generation_time = time.time() - start_time
         
-        # Extract key metrics for logging
-        compiled = result.get('compiled', False)
-        correctness = result.get('correctness', False)
-        runtime = result.get('runtime', -1.0)
-        
-        # print(f"🔍 [Task {task_id}] Evaluated [{f'{gen_id:02d}'}]: [compiled={compiled}], [correct={correctness}], [runtime={runtime:.3f}ms] in [{evaluation_time:.2f}s]")
-        
-        # Save evaluation result
-        evaluation_file = output_sub_dir / "generated_code_eval.json"
-        with open(evaluation_file, 'w', encoding='utf-8') as f:
-            json.dump(result, f, indent=2, ensure_ascii=False, default=str)
-        
-        if compiled and correctness:
-            print(f"✅ [Task {task_id}] Evaluated [{f'{gen_id:02d}'}] [{generated_code_file}] [{runtime:.3f}ms] in [{evaluation_time:.1f}s]")
-        else:
-            print(f"⚠️ [Task {task_id}] Evaluated [{f'{gen_id:02d}'}] [{generated_code_file}] [{'✅' if compiled else '❌'}compiled], [{'✅' if correctness else '❌'}correctness] in [{evaluation_time:.2f}s]")
-        return True
-        
-    except Exception as e:
-        print(f"❌ [Task {task_id}] Error in _process_evaluation_task for {file_path}: {e}")
-        print(traceback.format_exc())
-        return False
+        content = result.get('content', '')
+        reasoning_content = result.get('reasoning_content', '')
 
+        tokens = self.tokenizer.encode(content) if content else []
+        reasoning_tokens = self.tokenizer.encode(reasoning_content) if reasoning_content else []
 
-async def inference_and_eval_task(queue: asyncio.Queue, inference_client: VLLMClient, kb_eval_client: KbEvalClient, input_base_dir: Path, output_base_dir: Path, run_tag: str, task_id: int):
-    """
-    Run inference task for a file.
-    
-    Args:
-        queue: Queue containing file paths to process
-        client: VLLMClient instance
-        input_base_dir: Base directory for input files
-        output_base_dir: Base directory for output files
-        run_tag: Run tag for evaluation
-        task_id: Unique task identifier
-    """
+        num_tokens = len(tokens)
+        num_reasoning_tokens = len(reasoning_tokens)
+        logger.info(f"🔍 [Task {task_tag}] Responded [{f'{num_tokens}'} tokens] [{f'{num_reasoning_tokens}'} reasoning tokens] in [{generation_time:.2f}s]")
 
-    while True:
+        # save response to a file
+        conversation_file = self.output_dir / task_tag / f"{gen_id}_conversation.json"
+
+        conversation = {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt
+                },
+                {
+                    "role": "assistant",
+                    "reasoning_content": reasoning_content,
+                    "content": content
+                }
+            ],
+            "metadata": {
+                "run_tag": self.run_tag,
+                "client_type": self.client_type,
+                "model_tag": self.model_tag,
+                "task_tag": task_tag,
+                "gen_id": gen_id,
+                "reference_code": reference_code,
+                "num_tokens": num_tokens,
+                "num_reasoning_tokens": num_reasoning_tokens,
+                "generation_time_seconds": generation_time,
+            }
+        }
+
+        with open(conversation_file, 'w') as f:
+            f.write(json.dumps(conversation, indent=2, ensure_ascii=False, default=str))
+
+        # extract the generated code from the generated text
         try:
-            # Get file path from queue (blocking with timeout)
-            item = await asyncio.wait_for(queue.get(), timeout=1.0)
-            if item is None:
-                print(f"[Task {task_id}] Received termination signal")
-                break
-            # break item into file_path and gen_id
-            file_path = item["file_path"]
-            gen_id = item["gen_id"]
+            # find the last Python code block using regex
+            code_blocks = re.findall(r"```python\n(.*?)\n```", content, re.DOTALL)
+            generated_code = code_blocks[-1].strip() if code_blocks else content.strip()
+        except (IndexError, AttributeError) as e:
+            logger.error(f"❌ [Task {task_tag}] Error extracting code: {e}, code generation failed")
+            return None
+        
+        # save the generated code to a file
+        generated_code_file = self.output_dir / task_tag / f"{gen_id}_generated_code.py"
+        with open(generated_code_file, 'w') as f:
+            f.write(generated_code)
+
+        # use generated emoji to beginning of the line
+        logger.info(f"👏 [Task {task_tag}] Generated [{f'{gen_id}'}]: {generated_code_file}")
+        return generated_code
+
+
+    async def _process_evaluation_task(
+        self,
+        task_tag: str,
+        gen_id: str,
+        generated_code: str,
+    ) -> bool:
+        """
+        Process a single evaluation task for a generated file.
+        
+        Args:
+            kb_eval_client: KbEvalClient instance
+            file_path: Path to the original input Python file
+            gen_id: Generation ID for this task
+            input_base_dir: Base directory for input files
+            output_base_dir: Base directory for output files
+            run_tag: Run tag for evaluation
+            task_id: Task identifier for logging
+            model_tag: Model tag for evaluation
             
-            # add info emoji to beginning of the line
-            print(f"🔍 [Task {task_id}] Processing [{f'{gen_id:02d}'}]: {file_path}")
-
-            retry_count = 0
-            max_retries = 3
-            while retry_count < max_retries:
-                retry_count += 1
-                try:
-                    # Process the inference task
-                    success = await _process_inference_task(
-                        client=inference_client,
-                        file_path=file_path,
-                        gen_id=gen_id,
-                        input_base_dir=input_base_dir,
-                        output_base_dir=output_base_dir,
-                        run_tag=run_tag,
-                        task_id=task_id
-                    )
-                    
-                    if success:
-                        # we are successful, break the retry loop
-                        break
-                    
-                except Exception as e:
-                    # add warning emoji to beginning of the line
-                    if retry_count >= max_retries:
-                        print(f"❌ [Task {task_id}] Error generating [{f'{gen_id:02d}'}] for {file_path}: {e}", f"[{retry_count}/{max_retries}]")
-                    else:
-                        print(f"⚠️  [Task {task_id}] Error generating [{f'{gen_id:02d}'}] for {file_path}: {e}", f"[{retry_count}/{max_retries}]")
-                    print(traceback.format_exc())
-
-            # add info emoji to beginning of the line
-            print(f"🔍 [Task {task_id}] Evaluating [{f'{gen_id:02d}'}]: {file_path}")
-
-            retry_count = 0
-            max_retries = 3
-            while retry_count < max_retries:
-                retry_count += 1
-                try:
-                    # Process the evaluation task
-                    success = await _process_evaluation_task(
-                        kb_eval_client=kb_eval_client,
-                        file_path=file_path,
-                        gen_id=gen_id,
-                        input_base_dir=input_base_dir,
-                        output_base_dir=output_base_dir,
-                        run_tag=run_tag,
-                        task_id=task_id,
-                        model_tag=inference_client.model
-                    )
-                    
-                    if success:
-                        # we are successful, break the retry loop
-                        break
-                    
-                except Exception as e:
-                    # add warning emoji to beginning of the line
-                    if retry_count >= max_retries:
-                        print(f"❌ [Task {task_id}] Error evaluating [{f'{gen_id:02d}'}] for {file_path}: {e}", f"[{retry_count}/{max_retries}]")
-                    else:
-                        print(f"⚠️  [Task {task_id}] Error evaluating [{f'{gen_id:02d}'}] for {file_path}: {e}", f"[{retry_count}/{max_retries}]")
-                    print(traceback.format_exc())
-
-        except asyncio.TimeoutError:
-            # Timeout waiting for queue item, check if queue is empty
-            if queue.empty():
-                print(f"❌ [Task {task_id}] Queue is empty, terminating for {file_path}")
-                break
+        Returns:
+            bool: True if successful, False if failed
+        """
+        try:
+            # Check if the required files exist
+            reference_code_file = self.output_dir / task_tag / "reference_code.py"
+            generated_code_file = self.output_dir / task_tag / f"{gen_id}_generated_code.py"
+            
+            if not reference_code_file.exists():
+                logger.error(f"❌ [Task {task_tag}] Reference code file not found: {reference_code_file}")
+                return False
+                
+            if not generated_code_file.exists():
+                logger.error(f"❌ [Task {task_tag}] Generated code file not found: {generated_code_file}")
+                return False
+            
+            # Read the reference and generated code
+            with open(reference_code_file, 'r', encoding='utf-8') as f:
+                reference_code = f.read()
+            
+            with open(generated_code_file, 'r', encoding='utf-8') as f:
+                generated_code = f.read()
+            
+            # Call the evaluation server
+            start_time = time.time()
+            result = await self.kb_eval_client.kb_eval(run_tag=self.run_tag, model_tag=self.model_tag, task_tag=task_tag, eval_tag=f"gen_{gen_id:02d}", reference_code=reference_code, generated_code=generated_code)
+            evaluation_time = time.time() - start_time
+            
+            # Save evaluation result
+            evaluation_file = self.output_dir / task_tag / f"{gen_id}_eval.json"
+            with open(evaluation_file, 'w') as f:
+                f.write(json.dumps(result.model_dump(), indent=2, ensure_ascii=False, default=str))
+            
+            if result.compiled and result.correctness:
+                logger.info(f"✅ [Task {task_tag}] Evaluated [{f'{gen_id}'}] [{generated_code_file}] [{result.runtime:.3f}ms] in [{evaluation_time:.1f}s]")
+            else:
+                logger.warning(f"⚠️ [Task {task_tag}] Evaluated [{f'{gen_id}'}] [{generated_code_file}] [{'✅' if result.compiled else '❌'}compiled], [{'✅' if result.correctness else '❌'}correctness] in [{evaluation_time:.2f}s]")
+            return result
+            
         except Exception as e:
-            print(f"❌ [Task {task_id}] Unexpected error: {e}")
-            print(traceback.format_exc())
-            break
-    
-    # circle emoji to beginning of the line
-    print(f"🔄 [Task {task_id}] completed")
+            logger.error(f"❌ [Task {task_tag}] Error in _process_evaluation_task for [gen_{gen_id}]: {e}")
+            logger.error(traceback.format_exc())
+            return None
 
 
-async def async_eval_reference_code(kb_eval_client: KbEvalClient, run_tag: str, model_tag: str, task_tag: str, reference_code: str, output_path: Path) -> KernelExecResult:
-    """
-    Evaluate the reference code for a file.
-    """
-    # for each file in bucket_files, run kb_eval_ref
-    result = await kb_eval_client.kb_eval_ref(run_tag=run_tag, model_tag=model_tag, task_tag=task_tag, reference_code=reference_code)
-    # write the result to the output path
-    output_eval_file = output_path / f"reference_code_eval.json"
-    with open(output_eval_file, 'w') as f:
-        json.dump(result.model_dump(), f, indent=2)
-    print(f"✅ Reference code [{task_tag}] evaluation result: [{result.runtime:.3f}ms]")
+    async def code_gen_and_eval_task(self, queue: asyncio.Queue, task_id: int):
+        """
+        Run inference task for a file.
+        
+        Args:
+            queue: Queue containing file paths to process
+            run_tag: Run tag for evaluation
+            task_tag: Unique task identifier
+        """
 
-    return result
+        while True:
+            try:
+                # Get file path from queue (blocking with timeout)
+                item = await asyncio.wait_for(queue.get(), timeout=1.0)
+                if item is None:
+                    logger.info(f"[Task {task_id:02d}] Received termination signal")
+                    break
+
+                reference_code = item['reference_code']
+                task_tag = item['task_tag']
+                gen_id = item['gen_id']
+
+                # add info emoji to beginning of the line
+                logger.info(f"🔍 [Task {task_id:02d}] Processing [{task_tag}] [{f'{gen_id}'}]: {reference_code[:20]}...")
+
+                retry_count = 0
+                max_retries = 3
+                while retry_count < max_retries:
+                    retry_count += 1
+                    try:
+                        # Process the inference task
+                        generated_code = await self._process_code_gen_task(task_tag=task_tag, reference_code=reference_code, gen_id=gen_id)
+                        
+                        if generated_code:
+                            # we are successful, break the retry loop
+                            break
+                        
+                    except Exception as e:
+                        # add warning emoji to beginning of the line
+                        if retry_count >= max_retries:
+                            logger.error(f"❌ [Task {task_id:02d}] Error generating [{task_tag}] [{f'{gen_id}'}]: {e}", f"[{retry_count}/{max_retries}]")
+                        else:
+                            logger.warning(f"⚠️  [Task {task_id:02d}] Error generating [{task_tag}] [{f'{gen_id}'}]: {e}", f"[{retry_count}/{max_retries}]")
+                        logger.error(traceback.format_exc())
+
+                # add info emoji to beginning of the line
+                logger.info(f"🔍 [Task {task_id:02d}] Evaluating [{task_tag}] [{f'{gen_id}'}]: {generated_code[:20]}...")
+
+                retry_count = 0
+                max_retries = 3
+                while retry_count < max_retries:
+                    retry_count += 1
+                    try:
+                        # Process the evaluation task
+                        result = await self._process_evaluation_task(task_tag=task_tag, gen_id=gen_id, generated_code=generated_code)
+                        
+                        if result:
+                            # we are successful, break the retry loop
+                            break
+                        
+                    except Exception as e:
+                        # add warning emoji to beginning of the line
+                        if retry_count >= max_retries:
+                            logger.error(f"❌ [Task {task_id:02d}] Error evaluating [{task_tag}] [{f'{gen_id}'}]: {e}", f"[{retry_count}/{max_retries}]")
+                        else:
+                            logger.warning(f"⚠️  [Task {task_id:02d}] Error evaluating [{task_tag}] [{f'{gen_id}'}]: {e}", f"[{retry_count}/{max_retries}]")
+                        logger.error(traceback.format_exc())
+
+            except asyncio.TimeoutError:
+                # Timeout waiting for queue item, check if queue is empty
+                if queue.empty():
+                    # add info magnifying glass emoji to beginning of the line
+                    logger.info(f"🔍 [Task {task_id:02d}] Queue is empty, terminating")
+                    break
+            except Exception as e:
+                logger.error(f"❌ [Task {task_id:02d}] Unexpected error: {e}")
+                logger.error(traceback.format_exc())
+                break
+        
+        # circle emoji to beginning of the line
+        logger.info(f"🔄 [Task {task_tag}] completed")
+
+
+    async def reference_eval_task(self, task_tag: str, reference_code: str) -> KernelExecResult:
+        """
+        Evaluate the reference code for a file.
+        """
+        # for each file in bucket_files, run kb_eval_ref
+        result = await self.kb_eval_client.kb_eval_ref(run_tag=self.run_tag, model_tag=self.model_tag, task_tag=task_tag, reference_code=reference_code)
+        # write the result to the output path
+        output_eval_file = self.output_dir / task_tag / f"reference_eval.json"
+        with open(output_eval_file, 'w') as f:
+            f.write(json.dumps(result.model_dump(), indent=2, ensure_ascii=False, default=str))
+        logger.info(f"✅ Reference code [{task_tag}] evaluation result: [{result.runtime:.3f}ms]")
+
+        return result
 
 async def main():
     """Main function for batch processing Python files."""
-    parser = argparse.ArgumentParser(description="Process Python files with SGLang or vLLM generate API")
-    parser.add_argument("--input-dir", type=str, default="./kernel_bench/level1", help="Input directory containing Python files")
+    parser = argparse.ArgumentParser(description="Process reference Python code with Inference and Evaluation API")
+    parser.add_argument("--input-dir", type=str, default="./kernel_bench/", help="Input directory containing Python files")
     parser.add_argument("--output-dir", type=str, default="./_output", help="Output directory for results")
-    parser.add_argument("--num-tasks", type=int, default=8, help="Number of concurrent processing tasks")
+    parser.add_argument("--num-tasks", type=int, default=15, help="Number of concurrent processing tasks")
+    parser.add_argument("--parallel-tasks", type=int, default=8, help="Number of parallel tasks to run in parallel")
     parser.add_argument("--num-generations", type=int, default=8, help="Number of generations to perform for each file")
-    parser.add_argument("--client", type=str, default="deepseek", help="Client type to use (vllm, runpod, sglang, deepseek, fireworks)")
+    parser.add_argument("--client", type=str, default="fireworks-r1", help="Client type to use (vllm, runpod, sglang, deepseek, fireworks)")
     parser.add_argument("--streaming", action="store_true", default=True, help="Use streaming mode")
+    parser.add_argument("--run-prefix", type=str, default="code_gen_v0.1", help="Run prefix")
     parser.add_argument("--epoch-id", type=int, default=1, help="Epoch ID to process")
-    parser.add_argument("--bucket-size", type=int, default=10, help="Number of files to process in each bucket")
-    parser.add_argument("--bucket-id", type=int, default=-1, help="Bucket ID to process")
-    parser.add_argument("--bucket-seed", type=int, default=42, help="Seed for random number generator")
-    parser.add_argument("--run-tag", type=str, default="auto", help="Run tag for evaluation")
     
     args = parser.parse_args()
 
@@ -606,47 +350,37 @@ async def main():
     # Set up directories
     input_dir = Path(args.input_dir)
     if not input_dir.exists():
-        print(f"Error: Input directory {input_dir} does not exist")
+        logger.error(f"Error: Input directory {input_dir} does not exist")
         return
 
-    # Find all Python files recursively
-    python_files = list(input_dir.rglob("*.py"))
-    # sort the python files by md5 of filepath
-    python_files.sort(key=lambda x: hashlib.md5(str(str(x) + str(args.epoch_id) + str(args.bucket_seed)).encode('utf-8')).hexdigest())
-    # split the python files into buckets
-    bucket_files = [python_files[i:i + args.bucket_size] for i in range(0, len(python_files), args.bucket_size)]
-    if not bucket_files:
-        print(f"Error: No Python files found in {input_dir}")
-        return
+    # recursively get all the python files under the input directory and store in a list
+    python_files = []
+    for root, dirs, files in os.walk(input_dir, followlinks=True):
+        for file in files:
+            if file.endswith(".py"):
+                python_files.append({
+                    "task_tag": os.path.relpath(os.path.join(root, file), input_dir),
+                    "file_path": os.path.join(root, file),
+                })
 
-    # get the bucket
-    if args.bucket_id < 0:
-        args.bucket_id = random.randint(0, len(bucket_files) - 1)
-        bucket_files = bucket_files[args.bucket_id]
-    else:
-        args.bucket_id = args.bucket_id - 1
-        bucket_files = bucket_files[args.bucket_id]
-
-    # output directory
-    run_tag = f"run_{datetime.now().strftime("%Y%m%d_%H%M%S")}" if args.run_tag == "auto" else args.run_tag
-    output_dir = Path(f"{args.output_dir}_{run_tag}_{f'{args.epoch_id:03d}'}_{f'{args.bucket_id:02d}'}_{f'{args.bucket_seed:02d}'}")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # randomly pick args.num_tasks files from the list
+    random.shuffle(python_files)
+    bucket_files = python_files[:args.num_tasks]
 
     # add info emoji to beginning of the line
-    print(f"🔍 Found {len(bucket_files)} Python files to process")
-    print(f"🔍 Output directory: [{output_dir}]")
-    print(f"🔍 Using {args.client} client with {args.num_tasks} concurrent tasks")
+    logger.info(f"🔍 Using [{args.client}] client [{args.parallel_tasks}] parallel tasks")
 
     # Create vLLM client
-    inference_client = VLLMClient(client_type=args.client, config_file="sequential_inference.yaml")
-    print("Created vLLM client")
+    run_tag = f"{args.run_prefix}_epoch_{args.epoch_id:02d}"
+    codeGenEvalClient = CodeGenEvalClient(config_file="inferenceClient.yaml", run_tag=run_tag, client_type=args.client)
+    logger.info(f"Created [{args.client}] client for [{run_tag}]")
     
     # Test client connection
-    print("Testing client connection...")
-    if await inference_client.health_check():
-        print("✅ Client connection successful")
-        models = inference_client.get_models()
-        print(f"Available models: {models}")
+    logger.info("Testing client connection...")
+    if await codeGenEvalClient.inference_client.health_check():
+        logger.info("✅ Client connection successful")
+        models = codeGenEvalClient.inference_client.get_models()
+        logger.info(f"Available models: {models}")
     else:
         print("❌ Client connection failed")
         return
@@ -656,32 +390,33 @@ async def main():
     print("Created KbEval client")
     
     # Test kbEvalRemoteServer connection
-    print(f"Testing kbEvalRemoteServer connection [{kb_eval_client.base_url}]...")
+    logger.info(f"Testing kbEvalRemoteServer connection [{kb_eval_client.base_url}]...")
     try:
         # test with /stats endpoint
         result = requests.get(f"{kb_eval_client.base_url}/stats", timeout=5)
         result.raise_for_status()
-        print(f"✅ kbEvalRemoteServer stats: {result.json()}")
+        logger.info(f"✅ kbEvalRemoteServer stats: {result.json()}")
     except Exception as e:
-        print(f"❌ kbEvalRemoteServer connection failed: {e}")
+        logger.error(f"❌ kbEvalRemoteServer connection failed: {e}")
         return
 
     # for each file in bucket_files, write file content to relevant path
     ref_eval_tasks = []
-    for file_path in bucket_files:
-        # get the relative path
-        relative_path = file_path.relative_to(input_dir)
+    for file in bucket_files:
+        file_path = file['file_path']
+        task_tag = file['task_tag']
         # get the output path
-        output_path = output_dir / relative_path
+        output_path = codeGenEvalClient.output_dir / task_tag
         output_path.mkdir(parents=True, exist_ok=True)
         output_file = output_path / f"reference_code.py"
         # write the file content to the output path
-        with open(output_file, 'w') as f:
-            reference_code = file_path.read_text()
-            f.write(reference_code)
+        with open(output_file, 'w') as f_out:
+            with open(file_path, 'r') as f_in:
+                reference_code = f_in.read()
+            f_out.write(reference_code)
 
         ref_eval_task = asyncio.create_task(
-            async_eval_reference_code(kb_eval_client, run_tag, inference_client.model, str(relative_path), reference_code, output_path)
+            codeGenEvalClient.reference_eval_task(task_tag, reference_code)
         )
         ref_eval_tasks.append(ref_eval_task)
 
@@ -690,11 +425,16 @@ async def main():
 
     # Create queue and add all files
     queue = asyncio.Queue()
-    for file_path in bucket_files:
+    for file in bucket_files:
+        file_path = file['file_path']
+        task_tag = file['task_tag']
+        with open(file_path, 'r') as f_in:
+            reference_code = f_in.read()
         for gen_id in range(args.num_generations):
             await queue.put({
-                "file_path": file_path,
-                "gen_id": gen_id + 1,
+                "reference_code": reference_code,
+                "task_tag": task_tag,
+                "gen_id": f"gen_{gen_id:02d}",
             })
     
     # Add sentinel values to signal task completion
@@ -703,9 +443,9 @@ async def main():
     
     # Create and start processing tasks
     tasks = []
-    for task_id in range(args.num_tasks):
+    for task_id in range(args.parallel_tasks):
         task = asyncio.create_task(
-            inference_and_eval_task(queue, inference_client, kb_eval_client, input_dir, output_dir, run_tag, task_id+1)
+            codeGenEvalClient.code_gen_and_eval_task(queue, task_id)
         )
         tasks.append(task)
     
@@ -715,36 +455,33 @@ async def main():
 
     metadata = {
         "input_dir": str(input_dir),
-        "output_dir": str(output_dir),
+        "output_dir": str(codeGenEvalClient.output_dir),
         "run_tag": run_tag,
         "num_tasks": args.num_tasks,
         "num_generations": args.num_generations,
-        "model_tag": inference_client.model,
+        "model_tag": codeGenEvalClient.model_tag,
         "epoch_id": args.epoch_id,
-        "bucket_id": args.bucket_id,
-        "bucket_seed": args.bucket_seed,
-        "bucket_size": args.bucket_size,
         "bucket_files": [{
-            "file_path": str(file_path),
-            "md5": hashlib.md5(str(str(file_path) + str(args.epoch_id) + str(args.bucket_seed)).encode('utf-8')).hexdigest()
+            "file_path": str(file_path["file_path"]),
+            "task_tag": file_path["task_tag"],
         } for file_path in bucket_files],
         "bucket_files_count": len(bucket_files),
     }
 
     # write the metadata to the output directory
-    metadata_file = output_dir / "metadata.json"
+    metadata_file = codeGenEvalClient.output_dir / "metadata.json"
     with open(metadata_file, 'w') as f:
         json.dump(metadata, f, indent=2)
 
-    print(f"All tasks completed!")
-    print(f"Results saved in: {output_dir}")
+    logger.info(f"All tasks completed!")
+    logger.info(f"Results saved in: {codeGenEvalClient.output_dir}")
 
     # upload the output directory to s3
     s3_client = boto3.client('s3')
     # recursively upload folder to s3 (not a file)
-    for root, dirs, files in os.walk(output_dir):
+    for root, dirs, files in os.walk(codeGenEvalClient.output_dir):
         for file in files:
-            s3_client.upload_file(os.path.join(root, file), 'agent-xyz', f'{args.epoch_id:03d}_{args.bucket_id:02d}/{output_dir.name}/{file}')
+            s3_client.upload_file(os.path.join(root, file), 'agent-xyz', f'{run_tag}/{file}')
 
 if __name__ == "__main__":
     asyncio.run(main())
