@@ -290,7 +290,7 @@ def main():
     dspy.configure(lm=lm, callbacks=[dspy_tool_callback])
 
     # must set the mlflow tracking after the above Callback configuration, otherwise the mlflow will not work
-    mlflow.set_tracking_uri("http://127.0.0.1:5050")
+    mlflow.set_tracking_uri("http://127.0.0.1:5051")
     mlflow.set_experiment(f"{AGENT_SHORT_NAME}_{AGENT_VERSION}_{args.provider}_{args.model}_DSPy")
     mlflow.dspy.autolog()
 

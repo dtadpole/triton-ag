@@ -1,0 +1,193 @@
+  # Inference Client Configuration
+
+vllm:
+  common:
+    base_url: "http://10.12.0.204:8091/v1"
+    api_key: "${HOME}/.keys/local.api.key"
+
+  generation:
+    model: "Qwen/Qwen3-14B-FP8"
+    temperature: 0.6
+    max_tokens: 12288
+
+sglang:
+  common:
+    base_url: "http://10.12.0.204:8081/v1"
+    api_key: "${HOME}/.keys/local.api.key"
+
+  generation:
+    model: "Qwen/Qwen3-14B-FP8"
+    temperature: 0.6
+    max_tokens: 14336
+
+deepinfra-14b:
+  common:
+    api_key: ${HOME}/.keys/deepinfra.api.key
+    base_url: https://api.deepinfra.com/v1/openai
+
+  generation:
+    model: Qwen/Qwen3-14B
+    temperature: 0.6
+    max_tokens: 14336
+
+deepinfra-32b:
+  common:
+    api_key: ${HOME}/.keys/deepinfra.api.key
+    base_url: https://api.deepinfra.com/v1/openai
+
+  generation:
+    model: Qwen/Qwen3-32B
+    temperature: 0.6
+    max_tokens: 14336
+
+deepinfra-235b:
+  common:
+    api_key: ${HOME}/.keys/deepinfra.api.key
+    base_url: https://api.deepinfra.com/v1/openai
+
+  generation:
+    model: Qwen/Qwen3-235B-A22B
+    temperature: 0.6
+    max_tokens: 14336
+
+deepseek:
+  common:
+    api_key: ${HOME}/.keys/deepseek.api.key
+    base_url: https://api.deepseek.com/v1
+
+  generation:
+    # model: deepseek-reasoner
+    model: deepseek-chat
+    # tokenizer: deepseek-ai/DeepSeek-R1-0528
+    tokenizer: deepseek-ai/DeepSeek-V3-0324
+    temperature: 0.6
+    max_tokens: 8192
+
+fireworks:
+  common:
+    api_key: ${HOME}/.keys/fireworks.api.key
+    base_url: https://api.fireworks.ai/inference/v1
+
+  generation:
+    model: accounts/fireworks/models/deepseek-r1-0528
+    tokenizer: deepseek-ai/DeepSeek-V3-0324
+    temperature: 0.6
+    max_tokens: 14336
+
+together:
+  common:
+    api_key: ${HOME}/.keys/together.api.key
+    base_url: https://api.together.xyz/v1
+
+  generation:
+    model: deepseek-ai/DeepSeek-V3
+    temperature: 0.6
+    max_tokens: 14336
+
+prompts:
+  # System and user prompts
+  system_prompt: |
+    You are an expert CUDA developer specializing in GPU performance optimization and parallel programming. Your expertise includes memory optimization (coalesced access patterns, shared memory utilization, bank conflict avoidance, memory hierarchy management), kernel engineering (occupancy tuning, optimal block sizing, warp-level optimization, branch divergence reduction), advanced techniques (kernel fusion, vectorized loads/stores, grid-stride loops, loop unrolling, efficient atomic operations, instruction-level parallelism), and performance analysis (profiling, roofline modeling, bottleneck identification, numerical stability considerations). Apply CUDA best practices and optimization techniques, and optimize the code for performance.
+
+    You are provided with PyTorch reference code and shall examine the code to understand how it works, then generate high-performance CUDA code that matches the reference code for correctness.
+
+    When generating code, always follow these instructions:
+    - Replace pytorch operators in the reference code with raw CUDA kernels, optimizing for performance on NVIDIA architecture.
+    - Use torch.utils.cpp_extension.load_inline and name your optimized output module ModelNew.
+    - You're NOT allowed to use torch.nn (except for Parameter, containers, and init).
+    - The input and output must be on CUDA device. Your answer must be the complete new module (no testing code, no other code): it will be evaluated and you will be given feedback on its correctness and speedup so you can iterate to maximize the speedup.
+
+    Example reference code:
+    ```python
+    {reference_code}
+    ```
+
+    Example generated code:
+    ```python
+    {generated_code}
+    ```
+
+  # User prompt template with substitutable source code parameter
+  user_prompt: |
+    Following is the reference PyTorch code, implement the complete new module with CUDA (no testing code, no other code).
+
+    ```python
+    {source_code}
+    ```
+
+    Be concise with your thinking.
+    
+  examples:
+    reference_code: |
+      import torch
+      import torch.nn as nn
+
+      class Model(nn.Module):
+          def __init__(self) -> None:
+              super().__init__()
+
+          def forward(self, a, b):
+              return a+b
+
+      batch_size = 16
+      dim = 16384 * 2
+
+      def get_inputs():
+          x = torch.randn(batch_size, dim)
+          y = torch.randn(batch_size, dim)
+          return [x, y]
+
+      def get_init_inputs():
+          return []  # No special initialization inputs needed
+
+    generated_code: |
+      import torch.nn as nn
+      from torch.utils.cpp_extension import load_inline
+
+      # Define the custom CUDA kernel for element-wise addition
+      elementwise_add_source = '''
+      #include <torch/extension.h>
+      #include <cuda_runtime.h>
+
+      __global__ void elementwise_add_kernel(const float* a, const float* b, float* out, int size) {
+          int idx = blockIdx.x * blockDim.x + threadIdx.x;
+          if (idx < size) {
+              out[idx] = a[idx] + b[idx];
+          }  
+      }
+
+      torch::Tensor elementwise_add_cuda(torch::Tensor a, torch::Tensor b) {
+          auto size = a.numel();
+          auto out = torch::zeros_like(a);
+
+          const int block_size = 256;
+          const int num_blocks = (size + block_size - 1) / block_size;
+
+          elementwise_add_kernel<<<num_blocks, block_size>>>(a.data_ptr<float>(), b.data_ptr<float>(), out.data_ptr<float>(), size);
+
+          return out;
+      }
+      '''
+
+      elementwise_add_cpp_source = (
+          "torch::Tensor elementwise_add_cuda(torch::Tensor a, torch::Tensor b);"
+      )
+
+      # Compile the inline CUDA code for element-wise addition
+      elementwise_add = load_inline(
+          name="elementwise_add",
+          cpp_sources=elementwise_add_cpp_source,
+          cuda_sources=elementwise_add_source,
+          functions=["elementwise_add_cuda"],
+          verbose=True,
+          extra_cflags=[""],
+          extra_ldflags=[""],
+      )
+
+      class ModelNew(nn.Module):
+          def __init__(self) -> None:
+              super().__init__()
+              self.elementwise_add = elementwise_add
+
+          def forward(self, a, b):
+              return self.elementwise_add.elementwise_add_cuda(a, b)

@@ -27,9 +27,11 @@ class FileLock:
 
     def __enter__(self):
         try:
-            self.lock_fd = open(self.lock_file, 'r+') # if open file with 'w', it will change modified timestamp even without writing to the file
+            # if open file with 'w', it will change modified timestamp even without writing to the file
+            self.lock_fd = open(self.lock_file, 'r+')
         except FileNotFoundError:
-            self.lock_fd = open(self.lock_file, 'w') # if file does not exist, open file with 'w'
+             # if file does not exist, open file with 'w'
+            self.lock_fd = open(self.lock_file, 'w')
         try:
             fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             # write my pid to lock file
@@ -40,11 +42,6 @@ class FileLock:
         except BlockingIOError as e:
             self.lock_fd.close()
             raise TimeoutError("Could not acquire lock")
-        # except IOError as e:
-        #     if e.errno == errno.EAGAIN or e.errno == errno.EACCES:
-        #         self.lock_fd.close()
-        #         raise TimeoutError("Could not acquire lock")
-        #     raise
         return self
 
     def __exit__(self, type, value, traceback):
@@ -82,9 +79,9 @@ def cleanup_lockfile(lock_file: str):
 
 
 def eval_kernel_reference(
+    run_tag: str,
     model_tag: str,
     task_tag: str,
-    time_tag: str,
     reference_code: str,
     device: torch.device,
     args: argparse.Namespace,
@@ -94,7 +91,7 @@ def eval_kernel_reference(
     """
     Evaluate the reference code against the original model
     """
-    eval_key = f"{model_tag}_{task_tag}_{time_tag}"
+    eval_key = f"{run_tag}_{model_tag}_{task_tag}"
 
     context = {}
     metadata = {
@@ -177,10 +174,10 @@ def eval_kernel_reference(
 
 
 def compile_and_eval_kernel(
+    run_tag: str,
     model_tag: str,
     task_tag: str,
     eval_tag: str,
-    time_tag: str,
     reference_code: str,
     generated_code: str,
     device: torch.device,
@@ -190,10 +187,10 @@ def compile_and_eval_kernel(
 
     try:
         Model, get_init_inputs, get_inputs, ModelNew, metadata, context = compile_kernel_new(
+            run_tag,
             model_tag,
             task_tag,
             eval_tag,
-            time_tag,
             reference_code,
             generated_code,
             build_directory=build_directory,
@@ -210,7 +207,7 @@ def compile_and_eval_kernel(
     # get my own process id
     pid = os.getpid()
 
-    eval_key = f"{model_tag}_{task_tag}_{eval_tag}_{time_tag}"
+    eval_key = f"{run_tag}_{model_tag}_{task_tag}_{eval_tag}"
 
     # lock file is {HOME}/.kbeval/lock_{str(device)}
     lock_file = os.path.join(KB_EVAL_DIR, f".lock_{str(device)}")
@@ -228,10 +225,10 @@ def compile_and_eval_kernel(
                     f.write(str(pid))
 
                 result = eval_kernel_against_ref_new(
+                    run_tag=run_tag,
                     model_tag=model_tag,
                     task_tag=task_tag,
                     eval_tag=eval_tag,
-                    time_tag=time_tag,
                     Model=Model,
                     get_init_inputs=get_init_inputs,
                     get_inputs=get_inputs,
@@ -262,10 +259,10 @@ def compile_and_eval_kernel(
             cleanup_lockfile(lock_file)
 
 def compile_kernel_new(
+    run_tag: str,
     model_tag: str,
     task_tag: str,
     eval_tag: str,
-    time_tag: str,
     original_model_src: str,
     custom_model_src: str,
     build_directory: str = None,
@@ -286,7 +283,7 @@ def compile_kernel_new(
         linewidth=80,  # Maximum width before wrapping
     )
 
-    eval_key = f"{model_tag}_{task_tag}_{eval_tag}_{time_tag}"
+    eval_key = f"{run_tag}_{model_tag}_{task_tag}_{eval_tag}"
 
     context = {}
 
@@ -325,10 +322,10 @@ def compile_kernel_new(
     return Model, get_init_inputs, get_inputs, ModelNew, metadata, context
 
 def eval_kernel_against_ref_new(
+    run_tag: str,
     model_tag: str,
     task_tag: str,
     eval_tag: str,
-    time_tag: str,
     Model: torch.nn.Module,
     get_init_inputs: callable,
     get_inputs: callable,
@@ -343,7 +340,7 @@ def eval_kernel_against_ref_new(
 
     global eval_queue, result_queue
 
-    eval_key = f"{model_tag}_{task_tag}_{eval_tag}_{time_tag}"
+    eval_key = f"{run_tag}_{model_tag}_{task_tag}_{eval_tag}"
     logger.info(f"[KB_Eval] Started on device {device} [{eval_key}]")
 
     num_correct_trials: int = 3
@@ -468,10 +465,10 @@ def eval_kernel_against_ref_new(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--wd", type=str, default="./kbEvalTest")
+    parser.add_argument("--run_tag", type=str, default="run_tag")
     parser.add_argument("--model_tag", type=str, default="model_tag")
     parser.add_argument("--task_tag", type=str, default="task_tag")
     parser.add_argument("--eval_tag", type=str, default="eval_tag")
-    parser.add_argument("--time_tag", type=str, default="auto")
     parser.add_argument("--reference_code", type=str,
                         # default="/home/centos/.kbeval/Qwen/Qwen3-8B-FP8/86_conv_depthwise_separable_2D/20250629_050843/reference_code.py")
                         default="elemAddRef.py")
@@ -485,9 +482,9 @@ if __name__ == "__main__":
 
     os.environ["MAX_JOBS"] = str(args.max_jobs)
 
-    # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}/{time_tag}
-    time_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
-    temp_dir = os.path.join(KB_EVAL_DIR, args.model_tag, args.task_tag, time_tag if args.time_tag == "auto" else args.time_tag, args.eval_tag)
+    # temp_dir is {HOME}/.kbeval/{run_tag}/{model_tag}/{task_tag}/{eval_tag}
+    run_tag = args.run_tag if args.run_tag != "auto" else f"run_{datetime.now().strftime("%Y%m%d_%H%M%S")}"
+    temp_dir = os.path.join(KB_EVAL_DIR, run_tag, args.model_tag, args.task_tag, args.eval_tag)
     os.makedirs(temp_dir, exist_ok=True)
 
     devices = args.device_list.split(",")
@@ -507,9 +504,9 @@ if __name__ == "__main__":
     if args.measure_reference:
         try:
             result = eval_kernel_reference(
+                run_tag=run_tag,
                 model_tag=args.model_tag,
                 task_tag=args.task_tag,
-                time_tag=args.time_tag,
                 reference_code=reference_model_src,
                 device=device,
                 args=args,
@@ -542,10 +539,10 @@ if __name__ == "__main__":
 
     try:
         result = compile_and_eval_kernel(
+            run_tag=run_tag,
             model_tag=args.model_tag,
             task_tag=args.task_tag,
             eval_tag=args.eval_tag,
-            time_tag=args.time_tag,
             reference_code=reference_model_src,
             generated_code=generated_model_src,
             device=device,

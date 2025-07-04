@@ -26,7 +26,8 @@ from openai import AsyncOpenAI
 from transformers import AutoTokenizer
 from datetime import datetime
 from typing import Dict, List, Optional
-from kbEvalRemoteServer import KernelExecResult
+from kbEvalClient import KbEvalClient
+from kbEvalTest.kbeval import KernelExecResult
 from pathlib import Path
 import requests
 import yaml
@@ -264,7 +265,7 @@ async def _process_inference_task(
     gen_id: int,
     input_base_dir: Path,
     output_base_dir: Path,
-    time_tag: str,
+    run_tag: str,
     task_id: int
 ) -> bool:
     """
@@ -276,7 +277,7 @@ async def _process_inference_task(
         gen_id: Generation ID for this task
         input_base_dir: Base directory for input files
         output_base_dir: Base directory for output files
-        time_tag: Timestamp tag for output files
+        run_tag: Run tag for evaluation
         task_id: Task identifier for logging
         
     Returns:
@@ -338,8 +339,8 @@ async def _process_inference_task(
             "generation_time": generation_time,
             "num_tokens": num_tokens,
             "num_reasoning_tokens": num_reasoning_tokens,
-            "time_tag": time_tag,
-            "task_id": task_id
+            "task_id": task_id,
+            "run_tag": run_tag
         }
     }
     
@@ -384,101 +385,13 @@ async def _process_inference_task(
     return True
 
 
-class KbEvalClient:
-    """Client for calling kbEvalRemoteServer to evaluate generated code."""
-    
-    def __init__(self, config_file: str = "sequential_inference.yaml"):
-        """Initialize the client with configuration"""
-        self.config = self._load_config(config_file)
-        # Get kbEval config from sequential_inference.yaml
-        kb_eval_config = self.config.get('kbEval', {})
-        self.base_url = kb_eval_config.get('base_url', 'http://localhost:5678')
-        # expand the api_key_file
-        api_key_file = kb_eval_config.get('api_key', '~/.keys/kbeval.api.key').replace("${HOME}", os.path.expanduser("~"))
-        # read the api_key from the file
-        with open(api_key_file, 'r') as f:
-            self.api_key = f.read().strip()
-        
-    def _load_config(self, config_file: str) -> Dict:
-        """Load configuration from YAML file."""
-        config_path = Path(config_file)
-        if not config_path.exists():
-            # Try relative to script directory
-            config_path = Path(__file__).parent / config_file
-        
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                config = yaml.safe_load(f)
-                return config or {}
-        else:
-            print(f"⚠️ Warning: Config file {config_file} not found")
-            return {}
-
-    async def call_kb_eval_ref(self, eval_params: Dict[str, str]) -> KernelExecResult:
-        """Call the kbEvalRemoteServer with evaluation parameters"""
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/kb_eval_ref",
-                    json=eval_params,
-                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
-                    timeout=300  # 5 minute timeout
-                )
-                
-                if response.status_code != 200:
-                    raise Exception(f"Server returned status {response.status_code}: {response.text}")
-                    
-                result = KernelExecResult(**response.json())
-
-                return result
-            
-        except httpx.TimeoutException:
-            raise Exception("Server request timed out after 5 minutes")
-        except httpx.ConnectError:
-            raise Exception(f"Could not connect to server at {self.base_url}")
-        except Exception as e:
-            raise Exception(f"Error calling server: {e}")
-
-    async def call_kb_eval_server(self, eval_params: Dict[str, str]) -> KernelExecResult:
-        """Call the kbEvalRemoteServer with evaluation parameters"""
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/kb_eval",
-                    json={
-                        "model_tag": eval_params["model_tag"],
-                        "task_tag": eval_params["task_tag"],
-                        "eval_tag": eval_params["eval_tag"],
-                        "time_tag": eval_params["time_tag"],
-                        "reference_code": eval_params["reference_code"],
-                        "generated_code": eval_params["generated_code"],
-                    },
-                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
-                    timeout=300  # 5 minute timeout
-                )
-                
-                if response.status_code != 200:
-                    raise Exception(f"Server returned status {response.status_code}: {response.text}")
-                    
-                result = KernelExecResult(**response.json())
-                
-                return result
-            
-        except httpx.TimeoutException:
-            raise Exception("Server request timed out after 5 minutes")
-        except httpx.ConnectError:
-            raise Exception(f"Could not connect to server at {self.base_url}")
-        except Exception as e:
-            raise Exception(f"Error calling server: {e}")
-
-
 async def _process_evaluation_task(
     kb_eval_client: KbEvalClient,
     file_path: Path,
     gen_id: int,
     input_base_dir: Path,
     output_base_dir: Path,
-    time_tag: str,
+    run_tag: str,
     task_id: int,
     model_tag: str = "vllm"
 ) -> bool:
@@ -491,7 +404,7 @@ async def _process_evaluation_task(
         gen_id: Generation ID for this task
         input_base_dir: Base directory for input files
         output_base_dir: Base directory for output files
-        time_tag: Timestamp tag for output files
+        run_tag: Run tag for evaluation
         task_id: Task identifier for logging
         model_tag: Model tag for evaluation
         
@@ -524,18 +437,10 @@ async def _process_evaluation_task(
         
         # Prepare evaluation parameters
         task_name = str(relative_path)  # Get filename without extension
-        eval_params = {
-            "model_tag": model_tag,
-            "task_tag": task_name,
-            "eval_tag": f"gen_{gen_id:02d}",
-            "time_tag": time_tag,
-            "reference_code": reference_code,
-            "generated_code": generated_code
-        }
         
         # Call the evaluation server
         start_time = time.time()
-        result = await kb_eval_client.call_kb_eval_server(eval_params)
+        result = await kb_eval_client.kb_eval(run_tag=run_tag, model_tag=model_tag, task_tag=task_name, eval_tag=f"gen_{gen_id:02d}", reference_code=reference_code, generated_code=generated_code)
         result = result.model_dump()
         evaluation_time = time.time() - start_time
         
@@ -563,7 +468,7 @@ async def _process_evaluation_task(
         return False
 
 
-async def inference_and_eval_task(queue: asyncio.Queue, inference_client: VLLMClient, kb_eval_client: KbEvalClient, input_base_dir: Path, output_base_dir: Path, time_tag: str, task_id: int):
+async def inference_and_eval_task(queue: asyncio.Queue, inference_client: VLLMClient, kb_eval_client: KbEvalClient, input_base_dir: Path, output_base_dir: Path, run_tag: str, task_id: int):
     """
     Run inference task for a file.
     
@@ -572,7 +477,7 @@ async def inference_and_eval_task(queue: asyncio.Queue, inference_client: VLLMCl
         client: VLLMClient instance
         input_base_dir: Base directory for input files
         output_base_dir: Base directory for output files
-        time_tag: Timestamp tag for output files
+        run_tag: Run tag for evaluation
         task_id: Unique task identifier
     """
 
@@ -602,7 +507,7 @@ async def inference_and_eval_task(queue: asyncio.Queue, inference_client: VLLMCl
                         gen_id=gen_id,
                         input_base_dir=input_base_dir,
                         output_base_dir=output_base_dir,
-                        time_tag=time_tag,
+                        run_tag=run_tag,
                         task_id=task_id
                     )
                     
@@ -633,7 +538,7 @@ async def inference_and_eval_task(queue: asyncio.Queue, inference_client: VLLMCl
                         gen_id=gen_id,
                         input_base_dir=input_base_dir,
                         output_base_dir=output_base_dir,
-                        time_tag=time_tag,
+                        run_tag=run_tag,
                         task_id=task_id,
                         model_tag=inference_client.model
                     )
@@ -664,20 +569,12 @@ async def inference_and_eval_task(queue: asyncio.Queue, inference_client: VLLMCl
     print(f"🔄 [Task {task_id}] completed")
 
 
-
-
-
-async def async_eval_reference_code(kb_eval_client: KbEvalClient, model_tag: str, task_tag: str, time_tag: str, reference_code: str, output_path: Path) -> KernelExecResult:
+async def async_eval_reference_code(kb_eval_client: KbEvalClient, run_tag: str, model_tag: str, task_tag: str, reference_code: str, output_path: Path) -> KernelExecResult:
     """
     Evaluate the reference code for a file.
     """
     # for each file in bucket_files, run kb_eval_ref
-    result = await kb_eval_client.call_kb_eval_ref(eval_params={
-        "model_tag": model_tag,
-        "task_tag": task_tag,
-        "time_tag": time_tag,
-        "reference_code": reference_code,
-    })
+    result = await kb_eval_client.kb_eval_ref(run_tag=run_tag, model_tag=model_tag, task_tag=task_tag, reference_code=reference_code)
     # write the result to the output path
     output_eval_file = output_path / f"reference_code_eval.json"
     with open(output_eval_file, 'w') as f:
@@ -693,21 +590,19 @@ async def main():
     parser.add_argument("--output-dir", type=str, default="./_output", help="Output directory for results")
     parser.add_argument("--num-tasks", type=int, default=8, help="Number of concurrent processing tasks")
     parser.add_argument("--num-generations", type=int, default=8, help="Number of generations to perform for each file")
-    parser.add_argument("--client", type=str, default="runpod-32b", help="Client type to use (vllm, runpod, sglang, deepseek, fireworks)")
+    parser.add_argument("--client", type=str, default="deepseek", help="Client type to use (vllm, runpod, sglang, deepseek, fireworks)")
     parser.add_argument("--streaming", action="store_true", default=True, help="Use streaming mode")
     parser.add_argument("--epoch-id", type=int, default=1, help="Epoch ID to process")
     parser.add_argument("--bucket-size", type=int, default=10, help="Number of files to process in each bucket")
     parser.add_argument("--bucket-id", type=int, default=-1, help="Bucket ID to process")
     parser.add_argument("--bucket-seed", type=int, default=42, help="Seed for random number generator")
+    parser.add_argument("--run-tag", type=str, default="auto", help="Run tag for evaluation")
     
     args = parser.parse_args()
 
     global STREAMING
     STREAMING = args.streaming
 
-    # Create timestamp for this run
-    time_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
     # Set up directories
     input_dir = Path(args.input_dir)
     if not input_dir.exists():
@@ -733,7 +628,8 @@ async def main():
         bucket_files = bucket_files[args.bucket_id]
 
     # output directory
-    output_dir = Path(args.output_dir + "_" + f"{args.epoch_id:03d}" + "_" + f"{args.bucket_id:02d}" + "_" + f"{args.bucket_seed:02d}" + "_" + time_tag)
+    run_tag = f"run_{datetime.now().strftime("%Y%m%d_%H%M%S")}" if args.run_tag == "auto" else args.run_tag
+    output_dir = Path(f"{args.output_dir}_{run_tag}_{f'{args.epoch_id:03d}'}_{f'{args.bucket_id:02d}'}_{f'{args.bucket_seed:02d}'}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # add info emoji to beginning of the line
@@ -756,7 +652,7 @@ async def main():
         return
 
     # Create KbEval client
-    kb_eval_client = KbEvalClient(config_file="sequential_inference.yaml")
+    kb_eval_client = KbEvalClient()
     print("Created KbEval client")
     
     # Test kbEvalRemoteServer connection
@@ -785,7 +681,7 @@ async def main():
             f.write(reference_code)
 
         ref_eval_task = asyncio.create_task(
-            async_eval_reference_code(kb_eval_client, inference_client.model, str(relative_path), time_tag, reference_code, output_path)
+            async_eval_reference_code(kb_eval_client, run_tag, inference_client.model, str(relative_path), reference_code, output_path)
         )
         ref_eval_tasks.append(ref_eval_task)
 
@@ -809,7 +705,7 @@ async def main():
     tasks = []
     for task_id in range(args.num_tasks):
         task = asyncio.create_task(
-            inference_and_eval_task(queue, inference_client, kb_eval_client, input_dir, output_dir, time_tag, task_id+1)
+            inference_and_eval_task(queue, inference_client, kb_eval_client, input_dir, output_dir, run_tag, task_id+1)
         )
         tasks.append(task)
     
@@ -820,7 +716,7 @@ async def main():
     metadata = {
         "input_dir": str(input_dir),
         "output_dir": str(output_dir),
-        "time_tag": time_tag,
+        "run_tag": run_tag,
         "num_tasks": args.num_tasks,
         "num_generations": args.num_generations,
         "model_tag": inference_client.model,

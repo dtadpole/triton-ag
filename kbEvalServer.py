@@ -6,6 +6,7 @@ import json
 import argparse
 import asyncio
 import yaml
+import uuid
 from fastapi import FastAPI, Body, HTTPException, Header, Depends
 from kbEvalTest.kbeval import KernelExecResult
 from logger import logger
@@ -15,7 +16,7 @@ KB_EVAL_TOKEN = None
 CURR_ERROR_COUNT = 0
 MAX_ERROR_COUNT = 10
 START_TIME = time.time()
-MAX_RUN_TIME = 3600 # restart periods in seconds
+MAX_RUN_TIME = 2 * 3600 # restart periods in seconds
 
 KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
 
@@ -84,22 +85,22 @@ async def stats():
 
 @app.post("/kb_eval_ref")
 async def kb_eval_ref(
+    run_tag: str = Body(...),
     model_tag: str = Body(...),
     task_tag: str = Body(...),
-    time_tag: str = Body(...),
     reference_code: str = Body(...),
     authenticated: bool = Depends(verify_token)
 ) -> KernelExecResult:
     global request_counter, request_counter_lock, DEVICES
 
-    # logger.info(f"kb_eval_ref: {model_tag}, {task_tag}, {time_tag}, {reference_code}")
+    # logger.info(f"kb_eval_ref: {run_tag}, {model_tag}, {task_tag}, {reference_code}")
 
     try:
         async with request_counter_lock:
             request_counter += 1
 
         # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}/{eval_tag}/{time_tag}
-        temp_dir = os.path.join(KB_EVAL_DIR, model_tag, task_tag, time_tag)
+        temp_dir = os.path.join(KB_EVAL_DIR, run_tag, model_tag, task_tag)
         os.makedirs(temp_dir, exist_ok=True)
 
         reference_file_path = os.path.join(temp_dir, f"reference_code.py")
@@ -107,7 +108,7 @@ async def kb_eval_ref(
             f.write(reference_code)
 
         # pre-compile the reference code
-        command = f"python kbEvalCli.py --wd {temp_dir} --model_tag {model_tag} --task_tag {task_tag} --time_tag {time_tag} --reference_code {reference_file_path} --measure_reference --device-list {','.join([str(device) for device in DEVICES])}"
+        command = f"python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --reference_code {reference_file_path} --measure_reference --device-list {','.join([str(device) for device in DEVICES])}"
         process = await asyncio.create_subprocess_shell(
             command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=os.environ.copy()
         )
@@ -163,10 +164,10 @@ async def kb_eval_ref(
 
 @app.post("/kb_eval")
 async def kb_eval(
+    run_tag: str = Body(...),
     model_tag: str = Body(...),
     task_tag: str = Body(...),
     eval_tag: str = Body(...),
-    time_tag: str = Body(...),
     reference_code: str = Body(...),
     generated_code: str = Body(...),
     authenticated: bool = Depends(verify_token)
@@ -177,8 +178,8 @@ async def kb_eval(
         async with request_counter_lock:
             request_counter += 1
 
-        # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}/{eval_tag}/{time_tag}
-        temp_dir = os.path.join(KB_EVAL_DIR, model_tag, task_tag, time_tag, eval_tag)
+        # temp_dir is {HOME}/.kbeval/{run_tag}/{model_tag}/{task_tag}/{eval_tag}
+        temp_dir = os.path.join(KB_EVAL_DIR, run_tag, model_tag, task_tag, eval_tag)
         os.makedirs(temp_dir, exist_ok=True)
 
         reference_file_path = os.path.join(temp_dir, f"reference_code.py")
@@ -199,7 +200,7 @@ async def kb_eval(
         # parser.add_argument("--generated_code", type=str, default="elemAddCuda.py")
 
         # pre-compile the generated code
-        command = f"python kbEvalCli.py --wd {temp_dir} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --time_tag {time_tag} --reference_code {reference_file_path} --generated_code {generated_file_path} --device-list {','.join([str(device) for device in DEVICES])}"
+        command = f"python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code {reference_file_path} --generated_code {generated_file_path} --device-list {','.join([str(device) for device in DEVICES])}"
         process = await asyncio.create_subprocess_shell(
             command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=os.environ.copy()
         )
@@ -283,6 +284,8 @@ async def main():
     #read kbEval.yaml
     with open("kbEval.yaml", "r") as f:
         kbEval_config = yaml.load(f, Loader=yaml.FullLoader)
+        # use file emoji
+        logger.info(f"📁 [kbEvalServer] Config file kbEval.yaml loaded")
 
     #########################################################
     # get hostname and host, port from kbEval.yaml
@@ -315,6 +318,14 @@ async def main():
     api_key_filepath = kbEval_config["kbEvalRemoteServer"]["common"]["api_key"]
     # read file from api_key, replace ${HOME} with os.path.expanduser("~") in api_key_filepath
     api_key_filepath = api_key_filepath.replace("${HOME}", os.path.expanduser("~"))
+    if not os.path.exists(api_key_filepath):
+        # create the file, and write a random string to it
+        with open(api_key_filepath, "w") as f:
+            api_key = str(uuid.uuid4())
+            f.write(api_key)
+            # add emoji to beginning and end of the string
+            logger.info(f"🔑 [kbEvalRemoteServer] API key [{api_key}] created and saved to [{api_key_filepath}]")
+    # now read in the api_key
     with open(api_key_filepath, "r") as f:
         global KB_EVAL_TOKEN
         KB_EVAL_TOKEN = f.read().strip()
