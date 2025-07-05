@@ -10,7 +10,7 @@ import yaml
 import requests
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessage
-# from transformers import AutoTokenizer
+from transformers import AutoTokenizer
 import traceback
 from logger import logger
 from pydantic import BaseModel, Field
@@ -63,6 +63,7 @@ class InferenceClient:
         self.model_short_name = config.model.model_short_name
         self.model_name = config.model.model_name
         self.tokenizer_name = config.model.tokenizer_name if config.model.tokenizer_name else self.model_name # use model_name as tokenizer_name if not provided
+        self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
         self.temperature = config.model.temperature
         self.max_tokens = config.model.max_tokens
         self.top_p = config.model.top_p
@@ -76,7 +77,7 @@ class InferenceClient:
         try:
             with open(self.api_key_path, 'r') as f:
                 self.api_key = f.read().strip() # read the api key from the file
-                logger.info(f"🔑 [InferenceClient] API key loaded from [{self.api_key_path}] [{self.api_key}]")
+                logger.info(f"🔑 [InferenceClient] API key loaded from [{self.api_key_path}]")
         except FileNotFoundError:
             logger.info(f"🔑 [InferenceClient] API key not found at [{self.api_key_path}], using [dummy_key]")
             self.api_key = "dummy_key"  # vLLM often doesn't require real auth

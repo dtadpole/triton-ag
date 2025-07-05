@@ -7,35 +7,41 @@ import traceback
 import argparse
 import yaml
 import random
-from typing import List
+from datetime import datetime
+from typing import List, Dict
 import boto3
 import requests
 from pathlib import Path
 from transformers import AutoTokenizer
-from inferenceClient import InferenceClient
+from inferenceClient import InferenceClient, InferenceClientConfig, load_inference_client_config
 from kbEvalClient import KbEvalClient
 from logger import logger
 from kbEvalTest.kbeval import KernelExecResult
 from globalRegistry import GlobalRegistry
 
+CODEGEN_EVAL_FOLDER = Path(os.path.expanduser("~/.codeGenEval"))
+
 class CodeGenEvalClient:
-    def __init__(self, config_file: str, run_tag: str, client_type: str):
+    def __init__(
+            self,
+            run_tag: str,
+            inference_client_config: InferenceClientConfig,
+            config_file: str = "inferenceCodeGenEval.yaml",
+    ):
         with open(config_file, 'r') as f:
             self.config = yaml.safe_load(f)
         self.run_tag = run_tag
-        self.client_type = client_type
-        self.model_tag = self.config.get(client_type, {}).get('generation', {}).get('model', 'deepseek-v3')
-        self.tokenizer_name = self.config.get(client_type, {}).get('generation', {}).get('tokenizer', 'Qwen/Qwen3-8B')
-        self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
-        self.inference_client = InferenceClient(client_type=client_type, config_file=config_file)
+        self.inference_client_config = inference_client_config
+        self.inference_client = InferenceClient(config=self.inference_client_config)
+        self.tokenizer = self.inference_client.tokenizer
+        self.model_tag = self.inference_client.model_tag
         self.kb_eval_client = KbEvalClient()
         self.output_dir = self._get_output_dir()
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def _get_output_dir(self) -> Path:
         """Get output sub directory for a task."""
-        model_folder = f"{self.client_type}/{self.model_tag}".replace("/", "_")
-        return Path(os.path.expanduser(f"~/.inferenceCodeGenEval/{self.run_tag}/{model_folder}"))
+        return CODEGEN_EVAL_FOLDER / self.run_tag / self.model_tag
 
     def get_system_prompt(self) -> str:
         """Get system prompt from configuration."""
@@ -60,11 +66,11 @@ class CodeGenEvalClient:
         prompts_config = self.config.get('prompts', {}).get('examples', {})
         return prompts_config.get('generated_code', '')
 
-    async def _process_code_gen_task(
+    async def _process_code_gen(
         self,
         task_tag: str,
+        gen_tag: str,
         reference_code: str,
-        gen_id: str,
     ) -> str:
         """
         Process a single inference task for a file.
@@ -72,7 +78,7 @@ class CodeGenEvalClient:
         Args:
             task_tag: Task tag for this task
             reference_code: Reference code for this task
-            gen_id: Generation ID for this task
+            gen_tag: Generation ID for this task
             
         Returns:
             str: Generated code for this task
@@ -100,7 +106,7 @@ class CodeGenEvalClient:
         token_per_second = (num_tokens + num_reasoning_tokens) / generation_time
 
         # save response to a
-        conversation_file = self.output_dir / task_tag / f"{gen_id}_conversation.json"
+        conversation_file = self.output_dir / task_tag / f"{gen_tag}_conversation.json"
 
         conversation = {
             "messages": [
@@ -120,10 +126,9 @@ class CodeGenEvalClient:
             ],
             "metadata": {
                 "run_tag": self.run_tag,
-                "client_type": self.client_type,
                 "model_tag": self.model_tag,
                 "task_tag": task_tag,
-                "gen_id": gen_id,
+                "gen_tag": gen_tag,
                 "reference_code": reference_code,
                 "num_tokens": num_tokens,
                 "num_reasoning_tokens": num_reasoning_tokens,
@@ -145,33 +150,27 @@ class CodeGenEvalClient:
             return None
         
         # save the generated code to a file
-        generated_code_file = self.output_dir / task_tag / f"{gen_id}_generated_code.py"
+        generated_code_file = self.output_dir / task_tag / f"{gen_tag}_generated_code.py"
         with open(generated_code_file, 'w') as f:
             f.write(generated_code)
 
         # use generated emoji to beginning of the line
-        logger.info(f"👏 [Task {task_tag}] Generated [{f'{gen_id}'}]: [{generated_code_file}] [{f'{num_tokens}'} tokens] [{f'{num_reasoning_tokens}'} reasoning tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
+        logger.info(f"👏 [Task {task_tag}] Generated [{f'{gen_tag}'}]: [{generated_code_file}] [{f'{num_tokens}'} tokens] [{f'{num_reasoning_tokens}'} reasoning tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
         return generated_code
 
-
-    async def _process_evaluation_task(
+    async def _process_code_eval(
         self,
         task_tag: str,
-        gen_id: str,
+        gen_tag: str,
         generated_code: str,
-    ) -> bool:
+    ) -> Dict:
         """
         Process a single evaluation task for a generated file.
         
         Args:
-            kb_eval_client: KbEvalClient instance
-            file_path: Path to the original input Python file
-            gen_id: Generation ID for this task
-            input_base_dir: Base directory for input files
-            output_base_dir: Base directory for output files
-            run_tag: Run tag for evaluation
-            task_id: Task identifier for logging
-            model_tag: Model tag for evaluation
+            task_tag: Task tag for this task
+            gen_tag: Generation ID for this task
+            generated_code: Generated code for this task
             
         Returns:
             bool: True if successful, False if failed
@@ -179,7 +178,7 @@ class CodeGenEvalClient:
         try:
             # Check if the required files exist
             reference_code_file = self.output_dir / task_tag / "reference_code.py"
-            generated_code_file = self.output_dir / task_tag / f"{gen_id}_generated_code.py"
+            generated_code_file = self.output_dir / task_tag / f"{gen_tag}_generated_code.py"
             
             if not reference_code_file.exists():
                 logger.error(f"❌ [Task {task_tag}] Reference code file not found: {reference_code_file}")
@@ -198,40 +197,63 @@ class CodeGenEvalClient:
             
             # Call the evaluation server
             start_time = time.time()
-            result = await self.kb_eval_client.kb_eval(run_tag=self.run_tag, model_tag=self.model_tag, task_tag=task_tag, eval_tag=gen_id, reference_code=reference_code, generated_code=generated_code)
+            result = await self.kb_eval_client.kb_eval(run_tag=self.run_tag, model_tag=self.model_tag, task_tag=task_tag, eval_tag=gen_tag, reference_code=reference_code, generated_code=generated_code)
+            result_json = result.model_dump()
+            result_json['metadata'] = {
+                "run_tag": self.run_tag,
+                "model_tag": self.model_tag,
+                "task_tag": task_tag
+            } | result_json['metadata']
             evaluation_time = time.time() - start_time
             
             # Save evaluation result
-            evaluation_file = self.output_dir / task_tag / f"{gen_id}_eval.json"
+            evaluation_file = self.output_dir / task_tag / f"{gen_tag}_eval.json"
             with open(evaluation_file, 'w') as f:
                 f.write(json.dumps(result.model_dump(), indent=2, ensure_ascii=False, default=str))
             
             if result.compiled and result.correctness:
-                logger.info(f"✅ [Task {task_tag}] Evaluated [{f'{gen_id}'}] [{generated_code_file}] [{result.runtime:.3f}ms] in [{evaluation_time:.1f}s]")
+                logger.info(f"✅ [Task {task_tag}] Evaluated [{f'{gen_tag}'}] [{generated_code_file}] [{result.runtime:.3f}ms] in [{evaluation_time:.1f}s]")
             else:
-                logger.warning(f"⚠️ [Task {task_tag}] Evaluated [{f'{gen_id}'}] [{generated_code_file}] [{'✅' if result.compiled else '❌'}compiled], [{'✅' if result.correctness else '❌'}correctness] in [{evaluation_time:.2f}s]")
-            return result
+                logger.warning(f"⚠️ [Task {task_tag}] Evaluated [{f'{gen_tag}'}] [{generated_code_file}] [{'✅' if result.compiled else '❌'}compiled], [{'✅' if result.correctness else '❌'}correctness] in [{evaluation_time:.2f}s]")
+
+            # return json
+            return result_json
             
         except Exception as e:
-            logger.error(f"❌ [Task {task_tag}] Error in _process_evaluation_task for [{gen_id}]: {e}")
+            logger.error(f"❌ [Task {task_tag}] Error in _process_evaluation_task for [{gen_tag}]: {e}")
             logger.error(traceback.format_exc())
             return None
 
 
-    async def reference_eval_task(self, task_id: int, task_tag: str, reference_code: str) -> KernelExecResult:
+    async def _process_ref_eval(self, task_tag: str, reference_code: str) -> Dict:
         """
         Evaluate the reference code for a file.
         """
-        logger.info(f"🔍 [Task {task_id:02d}] Evaluating reference code [{task_tag}]...")
-        # for each file in bucket_files, run kb_eval_ref
-        result = await self.kb_eval_client.kb_eval_ref(run_tag=self.run_tag, model_tag=self.model_tag, task_tag=task_tag, reference_code=reference_code)
-        # write the result to the output path
-        output_eval_file = self.output_dir / task_tag / f"reference_eval.json"
-        with open(output_eval_file, 'w') as f:
-            f.write(json.dumps(result.model_dump(), indent=2, ensure_ascii=False, default=str))
-        logger.info(f"✅ Reference code [{task_tag}] evaluation result: [{result.runtime:.3f}ms]")
+        logger.info(f"🔍 [Task {task_tag}] Evaluating reference code...")
+        try:
+            # for each file in bucket_files, run kb_eval_ref
+            start_time = time.time()
+            result = await self.kb_eval_client.kb_eval_ref(run_tag=self.run_tag, model_tag=self.model_tag, task_tag=task_tag, reference_code=reference_code)
+            result_json = result.model_dump()
+            evaluation_time = time.time() - start_time
+            result_json['metadata'] = {
+                "run_tag": self.run_tag,
+                "model_tag": self.model_tag,
+                "task_tag": task_tag
+            } | result_json['metadata']
 
-        return result
+            # write the result to the output path
+            ref_eval_file = self.output_dir / task_tag / f"ref_eval.json"
+            with open(ref_eval_file, 'w') as f:
+                f.write(json.dumps(result_json, indent=2, ensure_ascii=False, default=str))
+            logger.info(f"✅ Task [{task_tag}] Reference code evaluation result: [{result.runtime:.3f}ms] in [{evaluation_time:.2f}s]")
+
+            # return json
+            return result_json
+        except Exception as e:
+            logger.error(f"❌ [Task {task_tag}] Error in _process_ref_eval: [{e}] in [{evaluation_time:.1f}s]")
+            logger.error(traceback.format_exc())
+            return None
 
 
     async def code_gen_and_eval_task(self, queue: asyncio.Queue, task_id: int):
@@ -255,15 +277,15 @@ class CodeGenEvalClient:
                 is_reference = item['is_reference']
                 reference_code = item['reference_code']
                 task_tag = item['task_tag']
-                gen_id = item['gen_id']
+                gen_tag = item['gen_tag']
 
                 if is_reference:
                     # evaluate the reference code
-                    result = await self.reference_eval_task(task_id, task_tag, reference_code)
+                    result = await self._process_ref_eval(task_tag=task_tag, reference_code=reference_code)
                     continue
 
                 # add info emoji to beginning of the line
-                logger.info(f"🔍 [Task {task_id:02d}] Processing [{task_tag}] [{f'{gen_id}'}]...")
+                logger.info(f"🔍 [Task {task_id:02d}] Processing [{task_tag}] [{f'{gen_tag}'}]...")
 
                 retry_count = 0
                 max_retries = 3
@@ -271,7 +293,7 @@ class CodeGenEvalClient:
                     retry_count += 1
                     try:
                         # Process the inference task
-                        generated_code = await self._process_code_gen_task(task_tag=task_tag, reference_code=reference_code, gen_id=gen_id)
+                        generated_code = await self._process_code_gen(task_tag=task_tag, gen_tag=gen_tag, reference_code=reference_code)
                         
                         if generated_code:
                             # we are successful, break the retry loop
@@ -280,13 +302,13 @@ class CodeGenEvalClient:
                     except Exception as e:
                         # add warning emoji to beginning of the line
                         if retry_count >= max_retries:
-                            logger.error(f"❌ [Task {task_id:02d}] Error generating [{task_tag}] [{f'{gen_id}'}]: {e}", f"[{retry_count}/{max_retries}]")
+                            logger.error(f"❌ [Task {task_id:02d}] Error generating [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
                         else:
-                            logger.warning(f"⚠️ [Task {task_id:02d}] Error generating [{task_tag}] [{f'{gen_id}'}]: {e}", f"[{retry_count}/{max_retries}]")
+                            logger.warning(f"⚠️ [Task {task_id:02d}] Error generating [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
                         logger.error(traceback.format_exc())
 
                 # add info emoji to beginning of the line
-                logger.info(f"🔍 [Task {task_id:02d}] Evaluating [{task_tag}] [{f'{gen_id}'}]...")
+                logger.info(f"🔍 [Task {task_id:02d}] Evaluating [{task_tag}] [{f'{gen_tag}'}]...")
 
                 retry_count = 0
                 max_retries = 3
@@ -294,7 +316,7 @@ class CodeGenEvalClient:
                     retry_count += 1
                     try:
                         # Process the evaluation task
-                        result = await self._process_evaluation_task(task_tag=task_tag, gen_id=gen_id, generated_code=generated_code)
+                        result = await self._process_code_eval(task_tag=task_tag, gen_tag=gen_tag, generated_code=generated_code)
                         
                         if result:
                             # we are successful, break the retry loop
@@ -303,9 +325,9 @@ class CodeGenEvalClient:
                     except Exception as e:
                         # add warning emoji to beginning of the line
                         if retry_count >= max_retries:
-                            logger.error(f"❌ [Task {task_id:02d}] Error evaluating [{task_tag}] [{f'{gen_id}'}]: {e}", f"[{retry_count}/{max_retries}]")
+                            logger.error(f"❌ [Task {task_id:02d}] Error evaluating [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
                         else:
-                            logger.warning(f"⚠️  [Task {task_id:02d}] Error evaluating [{task_tag}] [{f'{gen_id}'}]: {e}", f"[{retry_count}/{max_retries}]")
+                            logger.warning(f"⚠️ [Task {task_id:02d}] Error evaluating [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
                         logger.error(traceback.format_exc())
 
             except asyncio.TimeoutError:
@@ -323,12 +345,18 @@ class CodeGenEvalClient:
         logger.info(f"🔄 [Task {task_id:02d}] completed")
 
 
-    async def run(self, epoch_id: int, batch_id: int, reference_code_contents: List[str], task_tags: List[str], num_generations: int, parallel_tasks: int):
+    async def run_mini_batch(
+        self,
+        reference_code_contents: List[str],
+        task_tags: List[str],
+        num_generations: int=8,
+        parallel_tasks: int=8,
+    ):
         """
         Run the code generation and evaluation tasks.
         """
         # add info emoji to beginning of the line
-        logger.info(f"🔍 Using [{self.client_type}] client [{parallel_tasks}] parallel tasks")
+        logger.info(f"🔍 [CodeGenEvalClient] [{self.run_tag}] [{self.model_tag}] Using [{num_generations}] generations, [{parallel_tasks}] parallel tasks")
 
         # Create queue and add all files
         queue = asyncio.Queue()
@@ -345,26 +373,18 @@ class CodeGenEvalClient:
 
             await queue.put({
                 "is_reference": True,
-                "reference_code": reference_code,
                 "task_tag": task_tag,
-                "gen_id": f"reference",
+                "gen_tag": f"reference",
+                "reference_code": reference_code,
             })
-
-            # ref_eval_task = asyncio.create_task(
-            #     self.reference_eval_task(task_tag, reference_code)
-            # )
-            # ref_eval_tasks.append(ref_eval_task)
-
-        # wait for all reference code evaluation tasks to complete
-        # await asyncio.gather(*ref_eval_tasks)
 
         for reference_code, task_tag in zip(reference_code_contents, task_tags):
             for gen_id in range(num_generations):
                 await queue.put({
                     "is_reference": False,
-                    "reference_code": reference_code,
                     "task_tag": task_tag,
-                    "gen_id": f"gen_{gen_id:02d}",
+                    "gen_tag": f"gen_{gen_id:02d}",
+                    "reference_code": reference_code,
                 })
         
         # Add sentinel values to signal task completion
@@ -380,18 +400,15 @@ class CodeGenEvalClient:
             tasks.append(task)
         
         # Wait for all tasks to complete
-        print(f"Starting {parallel_tasks} tasks...")
+        logger.info(f"🔍 [CodeGenEvalClient] [{self.run_tag}] [{self.model_tag}] Starting [{parallel_tasks}] tasks...")
         await asyncio.gather(*tasks)
 
         metadata = {
             "output_dir": str(self.output_dir),
-            "run_tag": run_tag,
-            "epoch_id": epoch_id,
-            "batch_id": batch_id,
+            "run_tag": self.run_tag,
+            "model_tag": self.model_tag,
             "num_samples": len(reference_code_contents),
             "num_generations": num_generations,
-            "model_tag": self.model_tag,
-            "task_tags": task_tags,
             "parallel_tasks": parallel_tasks,
         }
 
@@ -410,61 +427,83 @@ class CodeGenEvalClient:
             for root, dirs, files in os.walk(self.output_dir):
                 for file in files:
                     relative_path = os.path.relpath(os.path.join(root, file), self.output_dir)
-                    s3_client.upload_file(os.path.join(root, file), 'agent-xyz', f'{run_tag}/epoch_{epoch_id}/batch_{batch_id}/{relative_path}')
+                    s3_client.upload_file(os.path.join(root, file), 'agent-xyz', f'{self.run_tag}/{relative_path}')
                     # add success emoji to beginning of the line
-            logger.info(f"✅ Uploaded [{self.output_dir}] to [s3://agent-xyz/{run_tag}/epoch_{epoch_id}/batch_{batch_id}]")
+            logger.info(f"✅ Uploaded [{self.output_dir}] to [s3://agent-xyz/{self.run_tag}]")
         except Exception as e:
             logger.error(f"❌ Error uploading to s3: {e}")
             logger.error(traceback.format_exc())
 
-async def run_once(args):
-    
-    # Set up directories
-    input_dir = Path(args.input_dir)
-    if not input_dir.exists():
-        logger.error(f"Error: Input directory {input_dir} does not exist")
-        return
 
-    # recursively get all the python files under the input directory and store in a list
-    reference_code_json = []
-    for root, dirs, files in os.walk(input_dir, followlinks=True):
-        for file in files:
-            if file.endswith(".py"):
-                # read the file content
-                with open(os.path.join(root, file), 'r') as f:
-                    reference_code = f.read()
-                reference_code_json.append({
-                    "reference_code": reference_code,
-                    "task_tag": os.path.relpath(os.path.join(root, file), input_dir).replace("/", "_"),
-                })
+async def code_gen_eval_mini_batch(prefix_tag: str, config: InferenceClientConfig, epoch_id: int=-1, batch_id: int=-1, num_samples: int=12, num_generations: int=8, parallel_tasks: int=10, input_dir: str="./kernel_bench/"):
+    """
+    Run one batch of code generation and evaluation.
+    """
+    try:
+        # create the codeGenEvalClient
+        if epoch_id < 0 or batch_id < 0:
+            run_tag = f"{prefix_tag}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        else:
+            run_tag = f"{prefix_tag}_{epoch_id:03d}_{batch_id:02d}"
 
-    # randomly pick args.num_samples files from the list
-    random.shuffle(reference_code_json)
-    reference_code_json = reference_code_json[:args.num_samples]
+        # start running the batch
+        logger.info(f"🔍 [CodeGenEvalClient] [{run_tag}] Running batch...")
 
-    # create the codeGenEvalClient
-    run_tag = args.run_tag if not args.include_timestamp else f"{args.run_tag}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    codeGenEvalClient = CodeGenEvalClient(config_file=args.config, run_tag=run_tag, client_type=args.client_type)
+        # Set up directories
+        input_dir = Path(input_dir)
+        if not input_dir.exists():
+            logger.error(f"Error: Input directory {input_dir} does not exist")
+            return
 
-    # run the codeGenEvalClient
-    reference_code_contents = [item['reference_code'] for item in reference_code_json]
-    task_tags = [item['task_tag'] for item in reference_code_json]
-    # now run inference
-    await codeGenEvalClient.run(args.epoch_id, args.batch_id, reference_code_contents, task_tags, args.num_generations, args.parallel_tasks)
+        # recursively get all the python files under the input directory and store in a list
+        reference_code_json = []
+        for root, dirs, files in os.walk(input_dir, followlinks=True):
+            for file in files:
+                if file.endswith(".py"):
+                    # read the file content
+                    with open(os.path.join(root, file), 'r') as f:
+                        reference_code = f.read()
+                    relpath = os.path.relpath(os.path.join(root, file), input_dir).replace("/", "_")
+                    task_tag = "_".join(relpath.split("_")[:4])
+                    reference_code_json.append({
+                        "reference_code": reference_code,
+                        "task_tag": task_tag,
+                    })
+
+        # randomly pick args.num_samples files from the list
+        random.shuffle(reference_code_json)
+        reference_code_json = reference_code_json[:num_samples]
+
+        reference_code_contents = [item['reference_code'] for item in reference_code_json]
+        task_tags = [item['task_tag'] for item in reference_code_json]
+
+        # now run inference
+        codeGenEvalClient = CodeGenEvalClient(run_tag=run_tag, inference_client_config=config)
+        await codeGenEvalClient.run_mini_batch(reference_code_contents, task_tags, num_generations, parallel_tasks)
+        logger.info(f"✅ [CodeGenEvalClient] [{run_tag}] Batch completed")
+
+    except Exception as e:
+        logger.error(f"❌ [CodeGenEvalClient] [{run_tag}] Error running batch: [{e}] in [{traceback.format_exc()}]")
+        logger.error(traceback.format_exc())
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="inferenceCodeGenEval.yaml")
     parser.add_argument("--input-dir", type=str, default="./kernel_bench/", help="Input directory containing Python files")
-    parser.add_argument("--config", type=str, default="inferenceClient.yaml")
-    parser.add_argument("--client", type=str, default="fireworks-v3")  # most cost effective models are deepinfra-r1 and fireworks-v3
-    parser.add_argument("--epoch_id", type=int, default=1)
-    parser.add_argument("--batch_id", type=int, default=1)
-    parser.add_argument("--run_tag", type=str, default="sequential_inference")
-    parser.add_argument("--include_timestamp", action="store_true", default=False)
+    parser.add_argument("--provider", type=str, default="fireworks")  # most cost effective models are deepinfra-r1 and fireworks-v3
+    parser.add_argument("--model", type=str, default="deepseek-v3")  # most cost effective models are deepinfra-r1 and fireworks-v3
+    parser.add_argument("--epoch_id", type=int, default=-1)
+    parser.add_argument("--batch_id", type=int, default=-1)
+    parser.add_argument("--prefix_tag", type=str, default="v0.1")
     parser.add_argument("--num_samples", type=int, default=12)
     parser.add_argument("--num_generations", type=int, default=8)
-    parser.add_argument("--parallel_tasks", type=int, default=16)
+    parser.add_argument("--parallel_tasks", type=int, default=10)
     args = parser.parse_args()
 
-    asyncio.run(run_once(args))
+    config = load_inference_client_config(
+        provider_name=args.provider,
+        model_short_name=args.model,
+    )
+
+    asyncio.run(code_gen_eval_mini_batch(args.prefix_tag, config, args.epoch_id, args.batch_id, args.num_samples, args.num_generations, args.parallel_tasks, args.input_dir))
