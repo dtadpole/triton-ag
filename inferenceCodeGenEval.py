@@ -146,7 +146,7 @@ class CodeGenEvalClient:
             code_blocks = re.findall(r"```python\n(.*?)\n```", content, re.DOTALL)
             generated_code = code_blocks[-1].strip() if code_blocks else content.strip()
         except (IndexError, AttributeError) as e:
-            logger.error(f"❌ [Task {task_tag}] Error extracting code [{e}] [{f'{num_tokens}'} tokens] [{f'{num_reasoning_tokens}'} reasoning tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
+            logger.error(f"❌ [CodeGenEval Task {task_tag}] Error extracting code [{e}] [{f'{num_tokens}'} tokens] [{f'{num_reasoning_tokens}'} reasoning tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
             return None
         
         # save the generated code to a file
@@ -155,7 +155,7 @@ class CodeGenEvalClient:
             f.write(generated_code)
 
         # use generated emoji to beginning of the line
-        logger.info(f"👏 [Task {task_tag}] Generated [{f'{gen_tag}'}]: [{generated_code_file}] [{f'{num_tokens}'} tokens] [{f'{num_reasoning_tokens}'} reasoning tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
+        logger.info(f"👏 [CodeGenEval Client] [{self.run_tag}] Generated [{f'{task_tag}'}] [{f'{gen_tag}'}]: [{generated_code_file}] [{f'{num_tokens}'} tokens] [{f'{num_reasoning_tokens}'} reasoning tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
         return generated_code
 
     async def _process_code_eval(
@@ -181,11 +181,11 @@ class CodeGenEvalClient:
             generated_code_file = self.output_dir / task_tag / f"{gen_tag}_generated_code.py"
             
             if not reference_code_file.exists():
-                logger.error(f"❌ [Task {task_tag}] Reference code file not found: {reference_code_file}")
+                logger.error(f"❌ [CodeGenEval Client] [{self.run_tag}] Reference code file not found: {reference_code_file}")
                 return False
                 
             if not generated_code_file.exists():
-                logger.error(f"❌ [Task {task_tag}] Generated code file not found: {generated_code_file}")
+                logger.error(f"❌ [CodeGenEval Client] [{self.run_tag}] Generated code file not found: {generated_code_file}")
                 return False
             
             # Read the reference and generated code
@@ -212,15 +212,15 @@ class CodeGenEvalClient:
                 f.write(json.dumps(result.model_dump(), indent=2, ensure_ascii=False, default=str))
             
             if result.compiled and result.correctness:
-                logger.info(f"✅ [Task {task_tag}] Evaluated [{f'{gen_tag}'}] [{generated_code_file}] [{result.runtime:.3f}ms] in [{evaluation_time:.1f}s]")
+                logger.info(f"✅ [CodeGenEval Client] [{self.run_tag}] Evaluated [{f'{task_tag}'}] [{f'{gen_tag}'}] [{generated_code_file}] [{result.runtime:.3f}ms] in [{evaluation_time:.1f}s]")
             else:
-                logger.warning(f"⚠️ [Task {task_tag}] Evaluated [{f'{gen_tag}'}] [{generated_code_file}] [{'✅' if result.compiled else '❌'}compiled], [{'✅' if result.correctness else '❌'}correctness] in [{evaluation_time:.2f}s]")
+                logger.warning(f"⚠️ [CodeGenEval Client] [{self.run_tag}] Evaluated [{f'{task_tag}'}] [{f'{gen_tag}'}] [{generated_code_file}] [{'✅' if result.compiled else '❌'}compiled], [{'✅' if result.correctness else '❌'}correctness] in [{evaluation_time:.2f}s]")
 
             # return json
             return result_json
             
         except Exception as e:
-            logger.error(f"❌ [Task {task_tag}] Error in _process_evaluation_task for [{gen_tag}]: {e}")
+            logger.error(f"❌ [CodeGenEval Client] [{self.run_tag}] Error in _process_evaluation_task for [{task_tag}]: {e}")
             logger.error(traceback.format_exc())
             return None
 
@@ -229,7 +229,7 @@ class CodeGenEvalClient:
         """
         Evaluate the reference code for a file.
         """
-        logger.info(f"🔍 [Task {task_tag}] Evaluating reference code...")
+        logger.info(f"🔍 [CodeGenEval Client] [{self.run_tag}] Evaluating reference code...")
         try:
             # for each file in bucket_files, run kb_eval_ref
             start_time = time.time()
@@ -243,15 +243,15 @@ class CodeGenEvalClient:
             } | result_json['metadata']
 
             # write the result to the output path
-            ref_eval_file = self.output_dir / task_tag / f"ref_eval.json"
-            with open(ref_eval_file, 'w') as f:
+            reference_eval_file = self.output_dir / task_tag / f"reference_eval.json"
+            with open(reference_eval_file, 'w') as f:
                 f.write(json.dumps(result_json, indent=2, ensure_ascii=False, default=str))
-            logger.info(f"✅ Task [{task_tag}] Reference code evaluation result: [{result.runtime:.3f}ms] in [{evaluation_time:.2f}s]")
+            logger.info(f"✅ [CodeGenEval Client] [{self.run_tag}] Task [{task_tag}] Reference code evaluation result: [{result.runtime:.3f}ms] in [{evaluation_time:.2f}s]")
 
             # return json
             return result_json
         except Exception as e:
-            logger.error(f"❌ [Task {task_tag}] Error in _process_ref_eval: [{e}] in [{evaluation_time:.1f}s]")
+            logger.error(f"❌ [CodeGenEval Client] [{self.run_tag}] Error in _process_ref_eval: [{e}] in [{evaluation_time:.1f}s]")
             logger.error(traceback.format_exc())
             return None
 
@@ -271,7 +271,7 @@ class CodeGenEvalClient:
                 # Get file path from queue (blocking with timeout)
                 item = await asyncio.wait_for(queue.get(), timeout=1.0)
                 if item is None:
-                    logger.info(f"[Task {task_id:02d}] Received termination signal")
+                    logger.info(f"[CodeGenEval Client] [{self.run_tag}] Received termination signal")
                     break
 
                 is_reference = item['is_reference']
@@ -285,7 +285,7 @@ class CodeGenEvalClient:
                     continue
 
                 # add info emoji to beginning of the line
-                logger.info(f"🔍 [Task {task_id:02d}] Processing [{task_tag}] [{f'{gen_tag}'}]...")
+                logger.info(f"🔍 [CodeGenEval Client] [{self.run_tag}] Processing [{task_tag}] [{f'{gen_tag}'}]...")
 
                 retry_count = 0
                 max_retries = 3
@@ -302,13 +302,13 @@ class CodeGenEvalClient:
                     except Exception as e:
                         # add warning emoji to beginning of the line
                         if retry_count >= max_retries:
-                            logger.error(f"❌ [Task {task_id:02d}] Error generating [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
+                            logger.error(f"❌ [CodeGenEval Client] [{self.run_tag}] Error generating [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
                         else:
-                            logger.warning(f"⚠️ [Task {task_id:02d}] Error generating [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
+                            logger.warning(f"⚠️ [CodeGenEval Client] [{self.run_tag}] Error generating [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
                         logger.error(traceback.format_exc())
 
                 # add info emoji to beginning of the line
-                logger.info(f"🔍 [Task {task_id:02d}] Evaluating [{task_tag}] [{f'{gen_tag}'}]...")
+                logger.info(f"🔍 [CodeGenEval Client] [{self.run_tag}] Evaluating [{task_tag}] [{f'{gen_tag}'}]...")
 
                 retry_count = 0
                 max_retries = 3
@@ -325,24 +325,24 @@ class CodeGenEvalClient:
                     except Exception as e:
                         # add warning emoji to beginning of the line
                         if retry_count >= max_retries:
-                            logger.error(f"❌ [Task {task_id:02d}] Error evaluating [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
+                            logger.error(f"❌ [CodeGenEval Client] [{self.run_tag}] Error evaluating [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
                         else:
-                            logger.warning(f"⚠️ [Task {task_id:02d}] Error evaluating [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
+                            logger.warning(f"⚠️ [CodeGenEval Client] [{self.run_tag}] Error evaluating [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
                         logger.error(traceback.format_exc())
 
             except asyncio.TimeoutError:
                 # Timeout waiting for queue item, check if queue is empty
                 if queue.empty():
                     # add info magnifying glass emoji to beginning of the line
-                    logger.info(f"🔍 [Task {task_id:02d}] Queue is empty, terminating")
+                    logger.info(f"🔍 [CodeGenEval Client] [{self.run_tag}] Queue is empty, terminating")
                     break
             except Exception as e:
-                logger.error(f"❌ [Task {task_id:02d}] Unexpected error: {e}")
+                logger.error(f"❌ [CodeGenEval Client] [{self.run_tag}] Unexpected error: {e}")
                 logger.error(traceback.format_exc())
                 break
         
         # circle emoji to beginning of the line
-        logger.info(f"🔄 [Task {task_id:02d}] completed")
+        logger.info(f"🎯 [CodeGenEval Client] [{self.run_tag}] [Task {task_id:02d}] completed")
 
 
     async def run_mini_batch(
@@ -429,9 +429,9 @@ class CodeGenEvalClient:
                     relative_path = os.path.relpath(os.path.join(root, file), self.output_dir)
                     s3_client.upload_file(os.path.join(root, file), 'agent-xyz', f'{self.run_tag}/{relative_path}')
                     # add success emoji to beginning of the line
-            logger.info(f"✅ Uploaded [{self.output_dir}] to [s3://agent-xyz/{self.run_tag}]")
+            logger.info(f"✅ [CodeGenEvalClient] [{self.run_tag}] Uploaded [{self.output_dir}] to [s3://agent-xyz/{self.run_tag}]")
         except Exception as e:
-            logger.error(f"❌ Error uploading to s3: {e}")
+            logger.error(f"❌ [CodeGenEvalClient] [{self.run_tag}] Error uploading to s3: {e}")
             logger.error(traceback.format_exc())
 
 
@@ -452,7 +452,7 @@ async def code_gen_eval_mini_batch(prefix_tag: str, config: InferenceClientConfi
         # Set up directories
         input_dir = Path(input_dir)
         if not input_dir.exists():
-            logger.error(f"Error: Input directory {input_dir} does not exist")
+            logger.error(f"❌ [CodeGenEvalClient] [{run_tag}] Error: Input directory {input_dir} does not exist")
             return
 
         # recursively get all the python files under the input directory and store in a list
@@ -464,7 +464,7 @@ async def code_gen_eval_mini_batch(prefix_tag: str, config: InferenceClientConfi
                     with open(os.path.join(root, file), 'r') as f:
                         reference_code = f.read()
                     relpath = os.path.relpath(os.path.join(root, file), input_dir).replace("/", "_")
-                    task_tag = "_".join(relpath.split("_")[:4])
+                    task_tag = "_".join(relpath.split("_")[:5])
                     reference_code_json.append({
                         "reference_code": reference_code,
                         "task_tag": task_tag,
