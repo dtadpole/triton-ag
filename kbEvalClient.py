@@ -46,10 +46,10 @@ class KbEvalClient:
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
                 # use file emoji
-                logger.info(f"📁 [kbEvalClient] Config file {config_file} loaded")
+                logger.info(f"📁 [kbEvalClient] Config file [{config_file}] loaded")
                 return config or {}
         else:
-            logger.warning(f"⚠️ [kbEvalClient] Warning: Config file {config_file} not found")
+            logger.warning(f"⚠️ [kbEvalClient] Warning: Config file [{config_file}] not found")
             return {}
 
     async def kb_eval_ref(self, run_tag: str="auto", model_tag: str="model_tag", task_tag: str="task_tag", reference_code: str="reference_code") -> KernelExecResult:
