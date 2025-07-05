@@ -532,7 +532,7 @@ if __name__ == "__main__":
 
     # we are here if we need to measure generated code, evaluate the custom kernel against the reference code
 
-    # read generated code from file
+    # read generated code from file ???
     if args.generated_code.startswith("/"):
         generated_model_src = open(args.generated_code, "r").read()
     else:
