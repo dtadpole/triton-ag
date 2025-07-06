@@ -509,7 +509,7 @@ if __name__ == "__main__":
     os.environ["MAX_JOBS"] = str(args.max_jobs)
 
     # temp_dir is {HOME}/.kbeval/{run_tag}/{model_tag}/{task_tag}/{eval_tag}
-    run_tag = args.run_tag if args.run_tag != "auto" else f"run_{datetime.now().strftime("%Y%m%d_%H%M%S")}"
+    run_tag = args.run_tag if args.run_tag != "auto" else f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     temp_dir = os.path.join(KB_EVAL_DIR, run_tag, args.model_tag, args.task_tag, args.eval_tag)
     os.makedirs(temp_dir, exist_ok=True)
 
