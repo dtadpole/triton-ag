@@ -1,21 +1,21 @@
-import os
-import asyncio
 import argparse
+import asyncio
+import os
+from time import sleep
 from typing import Union
-from agents import (
-    Agent,
-    Runner,
-    RunConfig,
-    trace,
-    function_tool,
-    RunResult,
-)
+
+from agents import Agent, function_tool, RunConfig, Runner, RunResult, trace
 from agents.mcp import MCPServerStdio
-from util import load_agent_model, init_logging, get_next_run_folder, get_run_hooks, log_result_items
 from logger import logger
 from pydantic import Field
 from pydantic.json_schema import to_jsonable_python
-
+from util import (
+    get_next_run_folder,
+    get_run_hooks,
+    init_logging,
+    load_agent_model,
+    log_result_items,
+)
 
 
 AGENT_NAME = "triton_coder"
@@ -78,34 +78,50 @@ async def triton_coder(
 
 
 # this is the main function that will be called by the Runner
-async def run_triton_coder(workspace_dir: str, task: str, provider: Union[str, None] = None, model_name: Union[str, None] = None):
+async def run_triton_coder(
+    workspace_dir: str,
+    task: str,
+    provider: Union[str, None] = None,
+    model_name: Union[str, None] = None,
+):
 
     logger.info(f"Running [{AGENT_NAME}] [{workspace_dir}] with task: {task}")
 
-    model, model_settings, run_config, model_config = load_agent_model(AGENT_NAME, provider, model_name)
+    model, model_settings, run_config, model_config = load_agent_model(
+        AGENT_NAME, provider, model_name
+    )
 
-    TASK_NAME = os.path.join(AGENT_NAME, 
-                             os.path.basename(os.path.dirname(task)),
-                             os.path.basename(task))
+    TASK_NAME = os.path.join(
+        AGENT_NAME, os.path.basename(os.path.dirname(task)), os.path.basename(task)
+    )
 
-    MODEL_TAG = f"{provider or model_config['provider']}_{model_name or model_config['model']}"
-
+    MODEL_TAG = (
+        f"{provider or model_config['provider']}_{model_name or model_config['model']}"
+    )
+    print("start checkpoint server")
     checkpoint_server = MCPServerStdio(
         params={
-            "command": "uv",
-            "args": ["run", "--with", "mcp", "mcp", "run", "checkpointServer.py"],
-        }
+            "command": "python",
+            "args": ["checkpointServer.py"],
+        },
+        client_session_timeout_seconds=10,
     )
-    async with checkpoint_server as cs:
-        result = await cs.call_tool(
+    async with checkpoint_server as ckpts:
+        result = await ckpts.call_tool(
             tool_name="init_workspace_folder",
             arguments={
                 "workspace_folder": workspace_dir,
-                "include_verifier": True,
+                "reference_pytorch_code": task,
+                "environ_vars": {
+                    "provider": provider,
+                    "model_name": model_name,
+                },
+                "include_verifier": False,
             },
         )
+        print(result)
         logger.info(result)
-
+        print("start file_server")
         file_server = MCPServerStdio(
             params={
                 "command": "npx",
@@ -114,12 +130,13 @@ async def run_triton_coder(workspace_dir: str, task: str, provider: Union[str, N
                     "@modelcontextprotocol/server-filesystem",
                     os.path.join(workspace_dir, "current"),
                 ],
-            }
+            },
+            client_session_timeout_seconds=10,
         )
         code_run_server = MCPServerStdio(
             params={
-                "command": "uv",
-                "args": ["run", "--with", "mcp", "mcp", "run", "codeRunServer.py"],
+                "command": "python",
+                "args": ["codeRunServer.py"],
             },
             client_session_timeout_seconds=120,
         )
@@ -131,7 +148,7 @@ async def run_triton_coder(workspace_dir: str, task: str, provider: Union[str, N
                     instructions=TRITON_CODER_SYSTEM_PROMPT.format(
                         workspace_dir=workspace_dir
                     ),
-                    mcp_servers=[fs, cs, crs],
+                    mcp_servers=[fs, ckpts, crs],
                 )
                 prompt = TRITON_CODER_NEXT_PROMPT.format(
                     task=task, workspace_dir=workspace_dir
@@ -143,7 +160,9 @@ async def run_triton_coder(workspace_dir: str, task: str, provider: Union[str, N
                     result = await Runner.run(
                         triton_coder,
                         input=prompt,
-                        max_turns=run_config['max_turns'] if 'max_turns' in run_config else 50,
+                        max_turns=(
+                            run_config["max_turns"] if "max_turns" in run_config else 50
+                        ),
                         hooks=run_hooks,
                         run_config=RunConfig(
                             model_settings=model_settings,
@@ -159,8 +178,6 @@ async def run_triton_coder(workspace_dir: str, task: str, provider: Union[str, N
                 logger.info(f"Agent [{AGENT_NAME}] completed!")
 
 
-
-
 if __name__ == "__main__":
     # argparse
     parser = argparse.ArgumentParser()
@@ -171,7 +188,7 @@ if __name__ == "__main__":
         "-i",
         "--input",
         type=str,
-        default="Implement Triton kernel for the forward pass of nn.Linear, use autotune for the tiling parameters",
+        default="./kernel_bench/level1/1_Square_matrix_multiplication_.py",
     )
     args = parser.parse_args()
 
@@ -184,4 +201,6 @@ if __name__ == "__main__":
         workspace_dir = get_next_run_folder()
         logger.info(f"Working directory: {workspace_dir}")
 
-    asyncio.run(run_triton_coder(workspace_dir, args.input, args.provider, args.model_name))
+    asyncio.run(
+        run_triton_coder(workspace_dir, args.input, args.provider, args.model_name)
+    )

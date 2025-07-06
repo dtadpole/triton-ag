@@ -44,6 +44,39 @@ mlflow:
 kbEval:
 	while true; do python kbEvalServer.py; sleep 1; done
 
+kbEvalLocal1:
+	docker run -itd  \
+	--gpus all \
+	--net=host -p 8081:8081 -p 8082:8082 \
+	-v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ \
+	-v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ \
+	--name kblocal_1 \
+	--replace \
+	localhost/triton_ag \
+	/bin/bash -c "python kbEvalServer.py --local_host --port 5678 --device 5"
+
+kbEvalLocal2:
+	docker run -itd  \
+	--gpus all \
+	--net=host -p 8081:8081 -p 8082:8082 \
+	-v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ \
+	-v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ \
+	--name kblocal_2 \
+	--replace \
+	localhost/triton_ag \
+	/bin/bash -c "python kbEvalServer.py --local_host --port 5677 --device 6"
+
+kbEvalLocal3:
+	docker run -itd  \
+	--gpus all \
+	--net=host -p 8081:8081 -p 8082:8082 \
+	-v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ \
+	-v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ \
+	--name kblocal_3 \
+	--replace \
+	localhost/triton_ag \
+	/bin/bash -c "python kbEvalServer.py --local_host --port 5676 --device 7"
+
 codeRunServer:
 	mcp dev codeRunServer.py
 
@@ -77,18 +110,17 @@ vllm-qwen3-32b:
 	--tool-call-parser hermes
 
 vllm-qwen3-32b-devserver:
-	CUDA_VISIBLE_DEVICES=2,5 vllm serve unsloth/Qwen3-32B \
-	--max_model_len 40960 \
+	CUDA_VISIBLE_DEVICES=2 vllm serve Qwen/Qwen3-32B-AWQ \
+	--max-model-len 40960 \
 	--enable-auto-tool-choice \
 	--tool-call-parser hermes \
-	--tensor-parallel-size 2 \
 	--dtype bfloat16 \
 	--host "::" \
 	--port 8086
 
 vllm-qwen3-14b-devserver:
-	CUDA_VISIBLE_DEVICES=2,5 vllm serve unsloth/Qwen3-14B \
-	--max_model_len 40960 \
+	CUDA_VISIBLE_DEVICES=2,5 vllm serve Qwen/Qwen3-14B \
+	--rope-scaling '{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' --max-model-len 131072 \
 	--enable-auto-tool-choice \
 	--tool-call-parser hermes \
 	--tensor-parallel-size 2 \
@@ -103,7 +135,6 @@ vllm-qwen25-7b-devserver:
 	--tensor-parallel-size 2 \
 	--host "::" \
 	--port 8086
-
 
 sglang-qwen3-8b:
 	sglang serve qwen/qwen3-8b-instruct \

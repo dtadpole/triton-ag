@@ -42,6 +42,7 @@ async def init_workspace_folder(
                     os.path.join(os.getcwd(), "verifier"),
                     os.path.join(init_checkpoint_folder, "verifier"),
                 )
+        print("finished making init_checkpoint_folder")
         # copy task file to workspace_dir as "pytorch_reference.py"
         shutil.copy(
             reference_pytorch_code,

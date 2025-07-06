@@ -1,9 +1,7 @@
-from mcp.server.fastmcp import FastMCP
 import asyncio
-import time
 import json
-import yaml
-import requests
+import os
+import time
 import traceback
 from datetime import datetime
 import os
@@ -12,7 +10,13 @@ from logger import logger
 from kbEvalClient import KbEvalClient
 from kbEvalTest.kbeval import KernelExecResult
 import boto3
+import requests
+import yaml
+from kbEvalTest.kbeval import KernelExecResult
+from logger import logger
+from mcp.server.fastmcp import FastMCP
 from pydantic import Field
+from util import is_devserver, is_subfolder
 
 server = FastMCP("kbEval")
 
@@ -56,14 +60,15 @@ def upload_recap_to_s3(current_wd: str,
     # push to aws s3
     try:
         s3_client = boto3.client("s3")
-        s3_client.put_object(Bucket="agent-xyz",
-                            Key=upload_key,
-                            Body=json.dumps(summary, indent=4))
+        s3_client.put_object(
+            Bucket="agent-xyz", Key=upload_key, Body=json.dumps(summary, indent=4)
+        )
         return f"uploaded to s3://agent-xyz/{upload_key}"
     except Exception as e:
         logger.error(f"Error pushing to s3: {e}")
         logger.error(traceback.format_exc())
         return f"Error pushing to s3: {e}"
+
 
 @server.tool(
     name="kb_eval_reference",
@@ -103,25 +108,31 @@ async def kb_eval_reference(
         }
         with open(f"{current_wd}/kbeval_reference_{run_tag}.result.json", "w") as f:
             f.write(json.dumps(response_json, indent=4))
-        logger.info(f"Response from remote server: {json.dumps(response_json, indent=4)}")
+        logger.info(
+            f"Response from remote server: {json.dumps(response_json, indent=4)}"
+        )
 
-        # upload recap to s3
-        upload_recap_to_s3(current_wd,
-                             run_tag,
-                             model_tag,
-                             task_tag,
-                             "reference",
-                             response_json,
-                             reference_code,
-                             "",
-                             recap="Benchmark the reference code")
-        
+        if is_devserver() is False:
+            # upload recap to s3
+            upload_recap_to_s3(
+                current_wd,
+                model_tag,
+                task_tag,
+                "reference",
+                run_tag,
+                response_json,
+                reference_code,
+                "",
+                recap="Benchmark the reference code",
+            )
+
         return KernelExecResult.model_validate_json(json.dumps(response_json))
-    
+
     except Exception as e:
         logger.error(f"Error in kb_eval: {e}")
         logger.error(traceback.format_exc())
         raise e
+
 
 @server.tool(
     name="kb_eval_dspy",
@@ -134,8 +145,12 @@ async def kb_eval_dspy(
     model_tag: str = Field(..., description="The tag of the model"),
     task_tag: str = Field(..., description="The tag of the task"),
     eval_tag: str = Field(..., description="The tag of the iteration"),
-    reference_code_filename: str = Field(..., description="The filename of the reference code"),
-    generated_code_filename: str = Field(..., description="The filename of the generated code"),
+    reference_code_filename: str = Field(
+        ..., description="The filename of the reference code"
+    ),
+    generated_code_filename: str = Field(
+        ..., description="The filename of the generated code"
+    ),
 ) -> KernelExecResult:
     try:
         if not is_subfolder(parent_folder=os.getcwd(), child_folder=current_wd):
@@ -168,21 +183,26 @@ async def kb_eval_dspy(
         result_filename = f"{current_wd}/kbeval_{eval_tag}_{run_tag}.result.json"
         with open(result_filename, "w") as f:
             f.write(json.dumps(response_json, indent=4))
-        logger.info(f"Response from remote server: {json.dumps(response_json, indent=4)}")
+        logger.info(
+            f"Response from remote server: {json.dumps(response_json, indent=4)}"
+        )
 
-        # upload recap to s3
-        upload_recap_to_s3(current_wd,
-                             run_tag,
-                             model_tag,
-                             task_tag,
-                             eval_tag,
-                             response_json,
-                             reference_code,
-                             generated_code,
-                             recap=rationale)
-        
+        if is_devserver() is False:
+            # upload recap to s3
+            upload_recap_to_s3(
+                current_wd,
+                model_tag,
+                task_tag,
+                eval_tag,
+                run_tag,
+                response_json,
+                reference_code,
+                generated_code,
+                recap=rationale,
+            )
+
         return KernelExecResult.model_validate_json(json.dumps(response_json))
-    
+
     except Exception as e:
         logger.error(f"Error in kb_eval_dspy: {e}")
         logger.error(traceback.format_exc())
@@ -199,8 +219,12 @@ async def kb_eval_iteration(
     model_tag: str = Field(..., description="The tag of the model"),
     task_tag: str = Field(..., description="The tag of the task"),
     eval_tag: str = Field(..., description="The tag of the iteration"),
-    reference_code_filename: str = Field(..., description="The filename of the reference code"),
-    generated_code_filename: str = Field(..., description="The filename of the generated code"),
+    reference_code_filename: str = Field(
+        ..., description="The filename of the reference code"
+    ),
+    generated_code_filename: str = Field(
+        ..., description="The filename of the generated code"
+    ),
 ) -> KernelExecResult:
     try:
         if not is_subfolder(parent_folder=os.getcwd(), child_folder=current_wd):
@@ -232,21 +256,26 @@ async def kb_eval_iteration(
         }
         with open(f"{current_wd}/kbeval_{eval_tag}_{run_tag}.result.json", "w") as f:
             f.write(json.dumps(response_json, indent=4))
-        logger.info(f"Response from remote server: {json.dumps(response_json, indent=4)}")
+        logger.info(
+            f"Response from remote server: {json.dumps(response_json, indent=4)}"
+        )
 
-        # upload recap to s3
-        upload_recap_to_s3(current_wd,
-                             run_tag,
-                             model_tag,
-                             task_tag,
-                             eval_tag,
-                             response_json,
-                             reference_code,
-                             generated_code,
-                             recap="")
-        
+        if is_devserver() is False:
+            # upload recap to s3
+            upload_recap_to_s3(
+                current_wd,
+                model_tag,
+                task_tag,
+                eval_tag,
+                run_tag,
+                response_json,
+                reference_code,
+                generated_code,
+                recap="",
+            )
+
         return KernelExecResult.model_validate_json(json.dumps(response_json))
-    
+
     except Exception as e:
         logger.error(f"Error in kb_eval: {e}")
         logger.error(traceback.format_exc())
@@ -263,8 +292,12 @@ async def kb_upload_iteration(
     model_tag: str = Field(..., description="The tag of the model"),
     task_tag: str = Field(..., description="The tag of the task"),
     eval_tag: str = Field(..., description="The tag of the iteration"),
-    reference_code_filename: str = Field(..., description="The filename of the reference code"),
-    generated_code_filename: str = Field(..., description="The filename of the generated code"),
+    reference_code_filename: str = Field(
+        ..., description="The filename of the reference code"
+    ),
+    generated_code_filename: str = Field(
+        ..., description="The filename of the generated code"
+    ),
     recap: str = Field(..., description="The recap of the iteration"),
 ) -> str:
     try:
@@ -278,23 +311,29 @@ async def kb_upload_iteration(
         with open(os.path.join(current_wd, generated_code_filename), "r") as f:
             generated_code = f.read()
         # read response from file
-        with open(f"{current_wd}/kbeval_{eval_tag}_{time_tag}.result.json", "r") as f:
+        with open(f"{current_wd}/kbeval_{eval_tag}_{run_tag}.result.json", "r") as f:
             result = KernelExecResult.model_validate_json(f.read())
-            
-        msg = upload_recap_to_s3(current_wd,
-                             run_tag,
-                             model_tag,
-                             task_tag,
-                             eval_tag,
-                             result.model_dump(),
-                             reference_code,
-                             generated_code,
-                             recap)
+
+        if is_devserver() is False:
+            msg = upload_recap_to_s3(
+                current_wd,
+                model_tag,
+                task_tag,
+                eval_tag,
+                run_tag,
+                result.model_dump(),
+                reference_code,
+                generated_code,
+                recap,
+            )
+        else:
+            msg = "no s3 access on devserver"
         return msg
     except Exception as e:
         logger.error(f"Error uploading recap to s3: {e}")
         logger.error(traceback.format_exc())
         raise e
+
 
 if __name__ == "__main__":
     logger.info(f"starting kbEvalMCPServer")

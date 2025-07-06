@@ -11,8 +11,7 @@ RUN echo 'APT::Sandbox::User "root";' | tee -a /etc/apt/apt.conf.d/10sandbox
 RUN apt-get -o APT::Sandbox::User=root update && apt-get -o APT::Sandbox::User=root install -y less nano git
 
 # Install stable packages first for better caching
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install \
+RUN pip install --no-cache-dir \
     aiohttp \
     anthropic \
     autoawq \
@@ -31,7 +30,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     ninja \
     openai-agents \
     pandas \
-    pre-commit \
     protobuf \
     pydantic \
     pyyaml \
@@ -39,24 +37,19 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     scikit-learn \
     sentencepiece \
     together \
-    torch==2.4.0 \
     triton \
     unsloth
 
 # Install frequently changed or version-pinned packages separately
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install \
+RUN pip install \
     "accelerate>=0.25.0" \
     "bitsandbytes>=0.41.0" \
     "datasets>=2.14.0" \
     "peft>=0.6.0" \
-    "sglang[all]>=0.4.6.post5" \
     "transformers>=4.36.0" \
     "trl>=0.7.0"
 
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install \
-    mlflow
+RUN pip install mlflow
 
 
 # RUN echo 'APT::Sandbox::User "root";' | tee -a /etc/apt/apt.conf.d/10sandbox
@@ -87,9 +80,10 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.5/install.sh | b
     ln -s "$NVM_DIR/versions/node/$(nvm version)/bin/npm" /usr/local/bin/npm && \
     ln -s "$NVM_DIR/versions/node/$(nvm version)/bin/npx" /usr/local/bin/npx
 
-    RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install \
-    vllm==0.8.5
+RUN pip install \
+"sglang[all]>=0.4.6.post5"
+
+RUN pip install vllm
 
 RUN npm config set proxy http://fwdproxy:8080
 RUN npm config set https-proxy http://fwdproxy:8080
