@@ -19,15 +19,17 @@ import wandb
 
 EVAL_TIMEOUT = 300 # seconds
 MAX_RETRIES = 7 # 2^7 = 128 seconds
+MAX_SPEED_UP = 2.0 # cap maximum speed up at 2x
 
 max_prompt_length = 1536
 max_seq_length = 4096 # Can increase for longer reasoning traces
-lora_rank = 32 # Larger rank = smarter, but slower
+lora_rank = 64 # Larger rank = smarter, but slower
+
+num_generations = 8
 
 batch_size = 8
 accumulation_steps = 1
-
-num_generations = 8
+learning_rate = 5e-6
 
 # model_name = "Qwen/Qwen3-4B"
 # model_name = "Qwen/Qwen3-8B"
@@ -37,8 +39,6 @@ model_tag = model_name
 time_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
 
 reference_eval_cache = {}
-
-time_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
 
 """
 # distributed training
@@ -294,18 +294,20 @@ async def async_kb_eval_reward_func(prompts, completions, reference_codes, task_
         if generated_eval['compiled'] == True:
             score += 0.1
         else:
-            score -= 1.0
+            score -= 0.5
         if generated_eval['correctness'] == True:
-            score += 0.3
+            score += 0.1
         else:
             score -= 0.5
         if generated_eval['runtime'] > 0.0:
             generated_runtime = generated_eval['runtime']
             reference_runtime = reference_eval['runtime']
             speed_up = reference_runtime / generated_runtime
-            score += speed_up * 2.0
+            if speed_up > MAX_SPEED_UP:
+                speed_up = MAX_SPEED_UP
+            score += speed_up * 0.5
         else:
-            score -= 1.0
+            score -= 0.5
         scores.append(score)
         log_results[f'{task_tag}_{eval_tag}'] = {
             'score': score,
@@ -318,7 +320,7 @@ async def async_kb_eval_reward_func(prompts, completions, reference_codes, task_
 
     # logger.info(f"🔍 [{model_tag}] [{task_tag}] [{time_tag}] eval results:")
     for key, value in log_results.items():
-        emoji = '✅' if value['compiled'] and value['correctness'] else '❌'
+        emoji = '✅' if value['compiled'] and value['correctness'] else '⚠️' if value['compiled'] else '❌'
         logger.info(f"{emoji} [{model_tag}] [{task_tag}] [{time_tag}] [{key.split('_')[-1]}]: {json.dumps(value)}")
     # return the scores
     return scores
@@ -337,7 +339,7 @@ def strict_format_reward_func(completions, **kwargs) -> list[float]:
 
 def soft_format_reward_func(completions, **kwargs) -> list[float]:
     """Reward function that checks if the completion has a specific format."""
-    pattern = r"<think>.*?</think>\n<code>.*?</code>"
+    pattern = r"<think>.*?</think>.*?<code>.*?</code>"
     responses = [completion[0]["content"].strip() for completion in completions]
     matches = [re.match(pattern, r, re.DOTALL) for r in responses]
     logger.info(f"🔍 [{model_tag}] [{time_tag}] [soft_format_reward_func] [{len(matches)}] [{[match for match in matches]}]")
@@ -345,14 +347,14 @@ def soft_format_reward_func(completions, **kwargs) -> list[float]:
 
 def count_xml(text) -> float:
     count = 0.0
-    if text.count("<think>\n") == 1:
+    if text.count("<think>") == 1:
         count += 0.1
-    if text.count("\n</think>\n") == 1:
+    if text.count("</think>") == 1:
         count += 0.1
-    if text.count("<code>\n") == 1:
+    if text.count("<code>") == 1:
         count += 0.1
-        # count -= len(text.split("\n</code>\n")[-1])*0.001
-    if text.count("\n</code>\n") == 1:
+        # count -= len(text.split("\n</code>")[-1])*0.001
+    if text.count("</code>") == 1:
         count += 0.1
         # count -= (len(text.split("\n</code>")[-1]) - 1)*0.001
     return count
@@ -365,7 +367,7 @@ def xmlcount_reward_func(completions, **kwargs) -> list[float]:
 
 from trl import GRPOConfig, GRPOTrainer
 training_args = GRPOConfig(
-    learning_rate = 1e-5,
+    learning_rate = learning_rate,
     adam_beta1 = 0.9,
     adam_beta2 = 0.99,
     weight_decay = 0.1,
@@ -382,12 +384,13 @@ training_args = GRPOConfig(
     max_steps = 200 * 50,
     save_steps = 20,
     max_grad_norm = 0.1,
-    loss_type="dr_grpo", # token-level loss
-    epsilon=0.2,         # clip lower
-    epsilon_high=0.28,   # clip higher
-    delta = 1.8,         # two-sided confidence interval
-    beta = 0.0,          # no kl-divergence
-    report_to = "wandb", # Can use Weights & Biases
+    loss_type="dr_grpo",    # token-level loss
+    epsilon=0.2,            # clip lower
+    epsilon_high=0.28,      # clip higher
+    delta = 1.8,            # two-sided confidence interval
+    beta = 0.0,             # no kl-divergence
+    scale_rewards = False,  # improves training stability by avoiding super large relative rewards
+    report_to = "wandb",    # Can use Weights & Biases
     output_dir = f"/root/.cache/huggingface/outputs_kb_{time_tag}",
     run_name = f"{model_name}_{time_tag}",
     generation_kwargs={

@@ -42,7 +42,7 @@ mlflow:
 	mlflow server --host localhost --port 5051 --backend-store-uri sqlite:///mlflow.sqlite
 
 kbEval:
-	while true; do python kbEvalRemoteServer.py; sleep 1; done
+	while true; do python kbEvalServer.py; sleep 1; done
 
 kbEvalLocal1:
 	docker run -itd  \
@@ -53,7 +53,7 @@ kbEvalLocal1:
 	--name kblocal_1 \
 	--replace \
 	localhost/triton_ag \
-	/bin/bash -c "python kbEvalRemoteServer.py --local_host --port 5678 --device 5"
+	/bin/bash -c "python kbEvalServer.py --local_host --port 5678 --device 5"
 
 kbEvalLocal2:
 	docker run -itd  \
@@ -64,7 +64,7 @@ kbEvalLocal2:
 	--name kblocal_2 \
 	--replace \
 	localhost/triton_ag \
-	/bin/bash -c "python kbEvalRemoteServer.py --local_host --port 5677 --device 6"
+	/bin/bash -c "python kbEvalServer.py --local_host --port 5677 --device 6"
 
 kbEvalLocal3:
 	docker run -itd  \
@@ -75,7 +75,7 @@ kbEvalLocal3:
 	--name kblocal_3 \
 	--replace \
 	localhost/triton_ag \
-	/bin/bash -c "python kbEvalRemoteServer.py --local_host --port 5676 --device 7"
+	/bin/bash -c "python kbEvalServer.py --local_host --port 5676 --device 7"
 
 codeRunServer:
 	mcp dev codeRunServer.py

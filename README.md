@@ -79,14 +79,9 @@ Run Evaluator Service on another terminal or tmux session (adapted from Kernel B
 make env
 make kbEval
 # To speed up the evaluation, we can spin up 3 local servers and run 3 evaluators in parallel.
-# open terminal 1 or tmux session 1
-make env
+# each command will launch a docker container with the local kbeval service
 make kbEvalLocal1
-# open terminal 2 or tmux session 2
-make env
 make kbEvalLocal2
-# open terminal 3 or tmux session 3
-make env
 make kbEvalLocal3
 ```
 

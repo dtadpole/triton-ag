@@ -5,37 +5,87 @@ import os
 import random
 import sys
 import time
+import fcntl
+import errno
 import traceback
 from kbEvalTest.kbeval import KernelExecResult, graceful_eval_cleanup, run_and_check_correctness, time_execution_with_cuda_event, get_timing_stats, load_original_model_and_inputs, load_custom_model, set_seed
 import torch
 import asyncio
 import os
 import json
+import psutil
 from datetime import datetime
-
-import torch
-from filelock import FileLock, Timeout
-from kbEvalTest.kbeval import (
-    eval_kernel_against_ref,
-    get_timing_stats,
-    graceful_eval_cleanup,
-    KernelExecResult,
-    load_custom_model,
-    load_original_model_and_inputs,
-    run_and_check_correctness,
-    set_seed,
-    time_execution_with_cuda_event,
-)
 from util import logger
+import random
+# from filelock import FileLock, Timeout
 
 KB_EVAL_DIR = os.path.expanduser("~/.kbeval")
 
-MAX_LOCK_AGE = 90 # seconds
+MAX_LOCK_AGE = 15 # seconds
+
+class FileLock:
+    def __init__(self, lock_file):
+        self.lock_file = lock_file
+        self.lock_fd = None
+        self.pid = os.getpid()
+
+    def __enter__(self):
+        try:
+            # if open file with 'w', it will change modified timestamp even without writing to the file
+            self.lock_fd = open(self.lock_file, 'r+')
+        except FileNotFoundError:
+             # if file does not exist, open file with 'w'
+            self.lock_fd = open(self.lock_file, 'w')
+        try:
+            fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # write my pid to lock file
+            self.lock_fd.truncate(0)
+            self.lock_fd.write(str(self.pid) + "\n")
+            self.lock_fd.flush()
+            # os.fsync(self.lock_fd.fileno())
+        except BlockingIOError as e:
+            self.lock_fd.close()
+            raise TimeoutError("Could not acquire lock")
+        return self
+
+    def __exit__(self, type, value, traceback):
+        if self.lock_fd:
+            self.lock_fd.write('\n[done]\n')
+            fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_UN)
+            self.lock_fd.close()
+
+def cleanup_lockfile(lock_file: str):
+    if os.path.exists(lock_file):
+        my_pid = os.getpid()
+        lock_modified_time = os.path.getmtime(lock_file)
+        with open(lock_file, 'r') as file:
+            try:
+                fcntl.flock(file.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+                first_line = file.readline().strip()
+                digits_only = ""
+                for c in first_line:
+                    if c.isdigit():
+                        digits_only += c
+                if digits_only:
+                    file_pid = int(digits_only)
+                    if my_pid != file_pid:
+                        if psutil.pid_exists(file_pid):
+                            logger.warning(f"[{my_pid}] Lock file [{lock_file}] for [pid={digits_only}] is running...")
+                        else:
+                            # if process is not running
+                            logger.error(f"[{my_pid}] Lock file [{lock_file}] [pid={digits_only}] is not running, deleting...")
+                            os.remove(lock_file)
+            except BlockingIOError:
+                if lock_modified_time < time.time() - MAX_LOCK_AGE:
+                    # safety net: if modified time is more than MAX_LOCK_AGE, delete lock file
+                    logger.error(f"[{my_pid}] Lock file [{lock_file}] older than [{MAX_LOCK_AGE}s], deleting...")
+                    os.remove(lock_file)
+
 
 def eval_kernel_reference(
+    run_tag: str,
     model_tag: str,
     task_tag: str,
-    time_tag: str,
     reference_code: str,
     device: torch.device,
     args: argparse.Namespace,
@@ -45,7 +95,7 @@ def eval_kernel_reference(
     """
     Evaluate the reference code against the original model
     """
-    eval_key = f"{model_tag}_{task_tag}_{time_tag}"
+    eval_key = f"{run_tag}_{model_tag}_{task_tag}"
 
     context = {}
     metadata = {
@@ -60,11 +110,13 @@ def eval_kernel_reference(
         )
 
         lock_file = os.path.join(KB_EVAL_DIR, f".lock_{str(device)}")
-        lock = FileLock(lock_file)
         while True:
             try:
-                with lock.acquire(timeout=1):
+                with FileLock(lock_file):
                     logger.warning(f"[KB_Eval_Ref] Acquired lock {lock_file} [{eval_key}]")
+
+                    # verify lock is working by sleeping randome between 10 and 20 seconds
+                    # time.sleep(random.randint(3, 5)) # verified lock is working
 
                     init_inputs = get_init_inputs()
                     init_inputs = [
@@ -103,8 +155,9 @@ def eval_kernel_reference(
                         runtime_stats=runtime_stats,
                     )
 
-            except Timeout:
+            except TimeoutError:
                 logger.info(f"[KB_Eval_Ref] Waiting for lock to be released {lock_file} [{eval_key}]")
+                time.sleep(2)
                 continue
             except Exception as e:
                 logger.warning(f"[KB_Eval_Ref] Error acquiring lock: {e} [{eval_key}]")
@@ -114,14 +167,7 @@ def eval_kernel_reference(
                 return result
             finally:
                 # torch.cuda.synchronize(device=device)
-                lock.release()
-                # check lockfile modified time
-                if os.path.exists(lock_file):
-                    lock_modified_time = os.path.getmtime(lock_file)
-                    # if modified time is more than 1.5 minutes, delete lock file
-                    if lock_modified_time < os.path.getmtime(lock_file) - MAX_LOCK_AGE:
-                        logger.error(f"[KB_Eval] Lock file {lock_file} is older than 1.5 minutes, deleting... [{eval_key}]")
-                        os.remove(lock_file)
+                cleanup_lockfile(lock_file)
 
     except Exception as e:
         logger.warning(f"[KB_Eval] Error evaluating reference code: {e}")
@@ -134,10 +180,10 @@ def eval_kernel_reference(
 
 
 def compile_and_eval_kernel(
+    run_tag: str,
     model_tag: str,
     task_tag: str,
     eval_tag: str,
-    time_tag: str,
     reference_code: str,
     generated_code: str,
     device: torch.device,
@@ -146,17 +192,15 @@ def compile_and_eval_kernel(
 ) -> KernelExecResult:
 
     try:
-        Model, get_init_inputs, get_inputs, ModelNew, metadata, context = (
-            compile_kernel_new(
-                model_tag,
-                task_tag,
-                eval_tag,
-                time_tag,
-                reference_code,
-                generated_code,
-                build_directory=build_directory,
-                verbose=args.verbose,
-            )
+        Model, get_init_inputs, get_inputs, ModelNew, metadata, context = compile_kernel_new(
+            run_tag,
+            model_tag,
+            task_tag,
+            eval_tag,
+            reference_code,
+            generated_code,
+            build_directory=build_directory,
+            verbose=args.verbose,
         )
     except Exception as e:
         logger.warning(f"[KB_Eval] Error compiling kernel: {e}")
@@ -169,28 +213,28 @@ def compile_and_eval_kernel(
     # get my own process id
     pid = os.getpid()
 
-    eval_key = f"{model_tag}_{task_tag}_{eval_tag}_{time_tag}"
+    eval_key = f"{run_tag}_{model_tag}_{task_tag}_{eval_tag}"
 
     # lock file is {HOME}/.kbeval/lock_{str(device)}
     lock_file = os.path.join(KB_EVAL_DIR, f".lock_{str(device)}")
-    lock = FileLock(lock_file)
     while True:
         try:
-            with lock.acquire(timeout=2):
+            # with lock.acquire(timeout=2):
+            with FileLock(lock_file):
                 logger.warning(f"[KB_Eval] Acquired lock {lock_file} [{eval_key}]")
 
                 # verify lock is working by sleeping randome between 10 and 20 seconds
-                # time.sleep(random.randint(10, 20)) # verified lock is working
+                # time.sleep(random.randint(3, 5)) # verified lock is working
 
                 # write my pid to lock file
                 with open(lock_file, "w") as f:
                     f.write(str(pid))
 
                 result = eval_kernel_against_ref_new(
+                    run_tag=run_tag,
                     model_tag=model_tag,
                     task_tag=task_tag,
                     eval_tag=eval_tag,
-                    time_tag=time_tag,
                     Model=Model,
                     get_init_inputs=get_init_inputs,
                     get_inputs=get_inputs,
@@ -203,14 +247,12 @@ def compile_and_eval_kernel(
                     measure_performance=True,
                 )
 
-            # os.remove(lock_file)
             logger.warning(f"[KB_Eval] Released lock {lock_file} [{eval_key}]")
             return result
 
-        except Timeout:
-            logger.info(
-                f"[KB_Eval] Waiting for lock to be released {lock_file} [{eval_key}]"
-            )
+        except TimeoutError:
+            logger.info(f"[KB_Eval] Waiting for lock to be released {lock_file} [{eval_key}]")
+            time.sleep(2)
             continue
         except Exception as e:
             logger.warning(f"[KB_Eval] Error acquiring lock: {e} [{eval_key}]")
@@ -220,21 +262,14 @@ def compile_and_eval_kernel(
             return result
         finally:
             # torch.cuda.synchronize(device=device)
-            lock.release()
-            # check lockfile modified time
-            if os.path.exists(lock_file):
-                lock_modified_time = os.path.getmtime(lock_file)
-                # if modified time is more than 1.5 minutes, delete lock file
-                if lock_modified_time < os.path.getmtime(lock_file) - MAX_LOCK_AGE:
-                    logger.error(f"[KB_Eval] Lock file {lock_file} is older than 1.5 minutes, deleting... [{eval_key}]")
-                    os.remove(lock_file)
+            cleanup_lockfile(lock_file)
 
 
 def compile_kernel_new(
+    run_tag: str,
     model_tag: str,
     task_tag: str,
     eval_tag: str,
-    time_tag: str,
     original_model_src: str,
     custom_model_src: str,
     build_directory: str = None,
@@ -257,7 +292,7 @@ def compile_kernel_new(
         linewidth=80,  # Maximum width before wrapping
     )
 
-    eval_key = f"{model_tag}_{task_tag}_{eval_tag}_{time_tag}"
+    eval_key = f"{run_tag}_{model_tag}_{task_tag}_{eval_tag}"
 
     context = {}
 
@@ -301,10 +336,10 @@ def compile_kernel_new(
 
 
 def eval_kernel_against_ref_new(
+    run_tag: str,
     model_tag: str,
     task_tag: str,
     eval_tag: str,
-    time_tag: str,
     Model: torch.nn.Module,
     get_init_inputs: callable,
     get_inputs: callable,
@@ -319,7 +354,7 @@ def eval_kernel_against_ref_new(
 
     global eval_queue, result_queue
 
-    eval_key = f"{model_tag}_{task_tag}_{eval_tag}_{time_tag}"
+    eval_key = f"{run_tag}_{model_tag}_{task_tag}_{eval_tag}"
     logger.info(f"[KB_Eval] Started on device {device} [{eval_key}]")
 
     num_correct_trials: int = 3
@@ -456,10 +491,10 @@ def eval_kernel_against_ref_new(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--wd", type=str, default="./kbEvalTest")
+    parser.add_argument("--run_tag", type=str, default="run_tag")
     parser.add_argument("--model_tag", type=str, default="model_tag")
     parser.add_argument("--task_tag", type=str, default="task_tag")
     parser.add_argument("--eval_tag", type=str, default="eval_tag")
-    parser.add_argument("--time_tag", type=str, default="auto")
     parser.add_argument("--reference_code", type=str,
                         # default="/home/centos/.kbeval/Qwen/Qwen3-8B-FP8/86_conv_depthwise_separable_2D/20250629_050843/reference_code.py")
                         default="elemAddRef.py")
@@ -473,15 +508,9 @@ if __name__ == "__main__":
 
     os.environ["MAX_JOBS"] = str(args.max_jobs)
 
-    # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}/{time_tag}
-    time_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
-    temp_dir = os.path.join(
-        KB_EVAL_DIR,
-        args.model_tag,
-        args.task_tag,
-        time_tag if args.time_tag == "auto" else args.time_tag,
-        args.eval_tag,
-    )
+    # temp_dir is {HOME}/.kbeval/{run_tag}/{model_tag}/{task_tag}/{eval_tag}
+    run_tag = args.run_tag if args.run_tag != "auto" else f"run_{datetime.now().strftime("%Y%m%d_%H%M%S")}"
+    temp_dir = os.path.join(KB_EVAL_DIR, run_tag, args.model_tag, args.task_tag, args.eval_tag)
     os.makedirs(temp_dir, exist_ok=True)
 
     devices = args.device_list.split(",")
@@ -504,9 +533,9 @@ if __name__ == "__main__":
     if args.measure_reference:
         try:
             result = eval_kernel_reference(
+                run_tag=run_tag,
                 model_tag=args.model_tag,
                 task_tag=args.task_tag,
-                time_tag=args.time_tag,
                 reference_code=reference_model_src,
                 device=device,
                 args=args,
@@ -540,10 +569,10 @@ if __name__ == "__main__":
 
     try:
         result = compile_and_eval_kernel(
+            run_tag=run_tag,
             model_tag=args.model_tag,
             task_tag=args.task_tag,
             eval_tag=args.eval_tag,
-            time_tag=args.time_tag,
             reference_code=reference_model_src,
             generated_code=generated_model_src,
             device=device,

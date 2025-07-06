@@ -120,6 +120,13 @@ rm cuda_12.9.0_575.51.03_linux.run
 
 /root/.venv/bin/python3 -m vllm.entrypoints.openai.api_server  --model Qwen/Qwen3-14B --enable-lora --lora-modules my_adapter=dtadpole/KernelCoder-4B_20250621-071556 --max-lora-rank 64 --host 0.0.0.0  --port 8091  --dtype bfloat16  --trust-remote-code  --quantization bitsandbytes  --load-format bitsandbytes  --max-model-len 32768  --gpu-memory-utilization 0.9  --pipeline-parallel-size 1  --data-parallel-size 1  --tensor-parallel-size 1 --enable-auto-tool-choice  --tool-call-parser hermes  --reasoning-parser qwen3  --disable-log-requests
 
+# try this:
+
+/root/.venv/bin/python3 -m vllm.entrypoints.openai.api_server  --model Qwen/Qwen3-14B --top-k 40 --host 0.0.0.0 --port 8091 --max-model-len 16384  --gpu-memory-utilization 0.9 --pipeline-parallel-size 1 --data-parallel-size 1 --tensor-parallel-size 1 --enable-auto-tool-choice  --tool-call-parser hermes --reasoning-parser qwen3 --disable-log-requests
+
+/root/.venv/bin/python3 -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-32B --top-k 40 --enable-lora --lora-modules my_adapter=dtadpole/KernelCoder-32B_20250621-013349 --max-lora-rank 64 --host 0.0.0.0 --port 8091 --max-model-len 16384 --gpu-memory-utilization 0.9  --pipeline-parallel-size 1 --data-parallel-size 1 --tensor-parallel-size 1 --enable-auto-tool-choice --tool-call-parser hermes --reasoning-parser qwen3 --disable-log-requests
+
+
 
 ========================================
 

@@ -1,59 +1,39 @@
-# Sequential Inference Configuration
-kbEval:
-  base_url: http://66.179.249.233:44456
-  api_key: ${HOME}/.keys/kbeval.api.key
+# Code Gen and Eval prompts
 
 prompts:
   # System and user prompts
   system_prompt: |
-    You are an expert CUDA developer specializing in GPU performance optimization. Your expertise includes memory optimization (coalesced access patterns, shared memory utilization, bank conflict avoidance, memory hierarchy management), kernel engineering (occupancy tuning, optimal block sizing, warp-level optimization, branch divergence reduction), advanced techniques (kernel fusion, vectorized loads/stores, grid-stride loops, loop unrolling, efficient atomic operations, instruction-level parallelism), and performance analysis (profiling, roofline modeling, bottleneck identification, numerical stability considerations).
+    You are an experienced CUDA developer specializing in GPU performance optimization and parallel programming.
 
-    You are provided with PyTorch reference code and shall generate high-performance CUDA code that matches the reference code for correctness:
+    You are provided with PyTorch reference code and shall examine the code to understand how it works, then generate high-performance CUDA code that matches the reference code for correctness.
+
+    When generating code, always follow these instructions:
     - Replace pytorch operators in the reference code with raw CUDA kernels, optimizing for performance on NVIDIA architecture.
     - Use torch.utils.cpp_extension.load_inline and name your optimized output module ModelNew.
     - You're NOT allowed to use torch.nn (except for Parameter, containers, and init).
-    - The input and output must be on CUDA device. Your answer must be the complete new module (no testing code, no other code): it will be evaluated and you will be given feedback on its correctness and performance.
+    - The input and output must be on CUDA device. Your answer must be the complete new module (no testing code, no other code): it will be evaluated and you will be given feedback on its correctness and speedup so you can iterate to maximize the speedup.
 
     Example reference code:
-    <code>
+    ```python
     {reference_code}
-    </code>
+    ```
 
     Example generated code:
-    <code>
+    ```python
     {generated_code}
-    </code>
-
-    When you respond, you must follow the following format:
-
-    <think>
-    ...
-    </think>
-    <code>
-    ...
-    </code>
-
+    ```
 
   # User prompt template with substitutable source code parameter
   user_prompt: |
-    Following is the reference source code of a PyTorch model, write the complete new module with optimized CUDA code (no testing code, no other content).
+    Following is the reference PyTorch code, implement the complete new module with CUDA (no testing code, no other code).
 
-    <code>
+    ```python
     {source_code}
-    </code>
+    ```
 
-    Be concise with your thinking. Respond in the following format:
-
-    <think>
-    ...
-    </think>
-    <code>
-    ...
-    </code>
+    Be concise with your thinking.
     
-  
   examples:
-
     reference_code: |
       import torch
       import torch.nn as nn
@@ -66,7 +46,7 @@ prompts:
               return a+b
 
       batch_size = 16
-      dim = 16384
+      dim = 16384 * 2
 
       def get_inputs():
           x = torch.randn(batch_size, dim)
@@ -74,7 +54,7 @@ prompts:
           return [x, y]
 
       def get_init_inputs():
-          return []
+          return []  # No special initialization inputs needed
 
     generated_code: |
       import torch.nn as nn
