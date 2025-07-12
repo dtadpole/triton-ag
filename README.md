@@ -78,6 +78,11 @@ Run Evaluator Service on another terminal or tmux session (adapted from Kernel B
 ```bash
 make env
 make kbEval
+# To speed up the evaluation, we can spin up 3 local servers and run 3 evaluators in parallel.
+# each command will launch a docker container with the local kbeval service
+make kbEvalLocal1
+make kbEvalLocal2
+make kbEvalLocal3
 ```
 
 Clone the KernelBench git repo under ${HOME} to access various KernelBench test cases.

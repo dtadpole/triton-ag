@@ -19,7 +19,7 @@ from typing import Dict
 # reusable client for calling kbEvalRemoteServer
 class KbEvalClient:
     """Client for calling kbEvalRemoteServer to evaluate generated code."""
-    
+
     def __init__(self, config_file: str = "kbEval.yaml"):
         """Initialize the client with configuration"""
         self.config = self._load_config(config_file)
@@ -28,6 +28,9 @@ class KbEvalClient:
         self.base_url = kb_eval_config.get('servers', [])[0].get('url', 'http://localhost:44456')
         self.timeout = kb_eval_config.get('servers', [])[0].get('timeout', 300)
         self.num_retries = kb_eval_config.get('servers', [])[0].get('num_retries', 7)
+        self.server_last_refresh_time = time.time()
+        self.server_stats = {}
+        self.kb_eval_config = kb_eval_config
         # expand the api_key_file
         api_key_file = kb_eval_config.get('servers', [])[0].get('api_key', '~/.keys/kbeval.api.key').replace("${HOME}", os.path.expanduser("~")).replace("~", os.path.expanduser("~"))
         # read the api_key from the file
@@ -41,7 +44,7 @@ class KbEvalClient:
         if not config_path.exists():
             # Try relative to script directory
             config_path = Path(__file__).parent / config_file
-        
+
         if config_path.exists():
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
@@ -54,7 +57,9 @@ class KbEvalClient:
 
     async def kb_eval_ref(self, run_tag: str="auto", model_tag: str="model_tag", task_tag: str="task_tag", reference_code: str="reference_code") -> KernelExecResult:
         """Call the kbEvalRemoteServer with evaluation parameters"""
-        run_tag = run_tag if run_tag != "auto" else f"run_{datetime.now().strftime("%Y%m%d_%H%M%S")}"
+        if len(self.kb_eval_config) > 0 and len(self.kb_eval_config["servers"]) > 1:
+            self.pick_server()
+        run_tag = run_tag if run_tag != "auto" else f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         retry_count = 0
         while retry_count < self.num_retries:
             try:
@@ -69,8 +74,8 @@ class KbEvalClient:
                             "reference_code": reference_code,
                         },
                         headers={
-                            "Content-Type": "application/json", 
-                            "Authorization": f"Bearer {self.api_key}",  
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {self.api_key}",
                         },
                         timeout=self.timeout  # 5 minute timeout
                     )
@@ -96,7 +101,9 @@ class KbEvalClient:
 
     async def kb_eval(self, run_tag: str="auto", model_tag: str="model_tag", task_tag: str="task_tag", eval_tag: str="eval_tag", reference_code: str="reference_code", generated_code: str="generated_code") -> KernelExecResult:
         """Call the kbEvalRemoteServer with evaluation parameters"""
-        run_tag = run_tag if run_tag != "auto" else f"run_{datetime.now().strftime("%Y%m%d_%H%M%S")}"
+        if len(self.kb_eval_config) > 0 and len(self.kb_eval_config["servers"]) > 1:
+            self.pick_server()
+        run_tag = run_tag if run_tag != "auto" else f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         retry_count = 0
         while retry_count < self.num_retries:
             try:
@@ -118,13 +125,13 @@ class KbEvalClient:
                         },
                         timeout=self.timeout  # 5 minute timeout
                     )
-                    
+
                     response.raise_for_status()
-                    
+
                     result = KernelExecResult(**response.json())
-                    
+
                     return result
-                
+
             except Exception as e:
                 # add retry emoji to beginning and end of the string
                 logger.warning(f"🔍 [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Error calling server: [{e}]")
@@ -138,6 +145,32 @@ class KbEvalClient:
                     # add error emoji to beginning and end of the string
                     logger.error(f"❌ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Failed after {retry_count} retries")
                     return None
+
+    def get_server_stats(self):
+        time_now = time.time()
+        kb_eval_config = self.config.get("kbEvalClient", {})
+        if "servers" not in kb_eval_config:
+            return {}
+        self.server_stats = {}
+        if len(self.server_stats) == 0 or time_now - self.server_last_refresh_time > 10:
+            for server in kb_eval_config["servers"]:
+                try:
+                    response = requests.get(f"{server['url']}/stats")
+                    self.server_stats[server["url"]] = response.json()
+                except:
+                    pass
+
+    def pick_server(self):
+        self.get_server_stats()
+        min_avg_load = float("inf")
+        min_avg_load_server = None
+        for server in self.server_stats:
+            if self.server_stats[server]["pending_requests"] / self.server_stats[server]["num_devices"] < min_avg_load:
+                min_avg_load = self.server_stats[server]["pending_requests"] / self.server_stats[server]["num_devices"]
+                min_avg_load_server = server
+        logger.info(f"[kbEvalClient] choose {min_avg_load_server}")
+        self.base_url = min_avg_load_server
+
 
 async def main():
     parser = argparse.ArgumentParser()
@@ -166,4 +199,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

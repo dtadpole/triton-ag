@@ -335,7 +335,7 @@ async def main(args):
 if __name__ == "__main__":
     # argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("-d", "--workspace-dir", type=str, default="")
+    parser.add_argument("-d", "--workspace_dir", type=str, default="")
     parser.add_argument("-p", "--provider", type=str, default=None)
     parser.add_argument("-m", "--model-name", type=str, default=None)
     parser.add_argument("-i", "--max-iterations", type=int, default=4)
@@ -355,4 +355,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    if os.path.exists(args.workspace_dir) is False and args.workspace_dir != "":
+        print("The specified workspace directory does not exist. Creating it now...")
+        os.makedirs(args.workspace_dir)
     asyncio.run(main(args))

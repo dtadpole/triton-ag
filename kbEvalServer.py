@@ -1,3 +1,7 @@
+import argparse
+import asyncio
+import concurrent.futures
+import json
 import os
 import sys
 import time
@@ -10,6 +14,7 @@ import uuid
 from fastapi import FastAPI, Body, HTTPException, Header, Depends
 from kbEvalTest.kbeval import KernelExecResult
 from logger import logger
+from pydantic import BaseModel, Field
 
 KB_EVAL_TOKEN = None
 
@@ -35,17 +40,17 @@ def verify_token(authorization: str = Header(None)):
     expected_token = KB_EVAL_TOKEN
     if not expected_token:
         raise HTTPException(status_code=500, detail="Server authentication not configured")
-    
+
     if not authorization:
         raise HTTPException(status_code=401, detail="Authorization header missing")
-    
+
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Invalid authorization format. Use 'Bearer <token>'")
-    
+
     token = authorization[7:].strip()  # Remove "Bearer " prefix, and strip whitespace
     if token != expected_token:
         raise HTTPException(status_code=403, detail="Invalid token")
-    
+
     return True
 
 
@@ -56,6 +61,7 @@ async def get_with_timeout(queue, timeout):
     except asyncio.TimeoutError:
         return None  # Or raise an exception, or handle it as needed
 
+
 async def read_stream(stream, prefix: str, is_error: bool = False):
     """Read from a stream and print each line with a prefix."""
     while True:
@@ -63,7 +69,7 @@ async def read_stream(stream, prefix: str, is_error: bool = False):
         if not line:
             break
         # Decode bytes to string and strip newline
-        output = line.decode('utf-8').rstrip()
+        output = line.decode("utf-8").rstrip()
         if is_error:
             logger.error(f"[{prefix}] {output}")
         else:
@@ -73,6 +79,7 @@ async def read_stream(stream, prefix: str, is_error: bool = False):
 async def get_pending_task_count():
     all_tasks = asyncio.all_tasks()
     return len(set(all_tasks))
+
 
 @app.get("/stats")
 async def stats():
@@ -110,26 +117,35 @@ async def kb_eval_ref(
         # pre-compile the reference code
         command = f"python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --reference_code {reference_file_path} --measure_reference --device-list {','.join([str(device) for device in DEVICES])}"
         process = await asyncio.create_subprocess_shell(
-            command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=os.environ.copy()
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=os.environ.copy(),
         )
 
         logger.info(f"[KB Eval] [reference] START ====================")
         logger.info(f"[KB Eval] [reference] command: {command}")
 
-       # Create tasks to read stdout and stderr concurrently
-        stdout_task = asyncio.create_task(read_stream(process.stdout, "reference", is_error=False))
-        stderr_task = asyncio.create_task(read_stream(process.stderr, "reference", is_error=True))
-        
+        # Create tasks to read stdout and stderr concurrently
+        stdout_task = asyncio.create_task(
+            read_stream(process.stdout, "reference", is_error=False)
+        )
+        stderr_task = asyncio.create_task(
+            read_stream(
+                process.stderr, "reference", is_error=True
+            )  # seems taking warning message as error message
+        )
+
         # Wait for the process to complete
         return_code = await process.wait()
-        
+
         # Wait for all output to be processed
         await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
         if process.returncode != 0:
             logger.error(f"[KB Eval] [reference] return code: {process.returncode}")
         else:
             logger.info(f"[KB Eval] [reference] return code: {process.returncode}")
- 
+
         logger.info(f"[KB Eval] [reference] END ====================")
 
         # read the result from {temp_dir}/kbeval_{eval_tag}.json
@@ -140,7 +156,7 @@ async def kb_eval_ref(
         result = KernelExecResult.model_validate_json(result_text)
 
         return result
-    
+
     except Exception as e:
         global CURR_ERROR_COUNT
         CURR_ERROR_COUNT += 1
@@ -156,9 +172,11 @@ async def kb_eval_ref(
 
     finally:
         async with request_counter_lock:
-            request_counter -= 1 
+            request_counter -= 1
             if request_counter < 0:
-                logger.error(f"Request counter is negative: {request_counter}, resetting to 0")
+                logger.error(
+                    f"Request counter is negative: {request_counter}, resetting to 0"
+                )
                 request_counter = 0
 
 
@@ -190,38 +208,36 @@ async def kb_eval(
         with open(generated_file_path, "w") as f:
             f.write(generated_code)
 
-
-        # parser.add_argument("--wd", type=str, default="./kbEvalTest")
-        # parser.add_argument("--model_tag", type=str, default="model_tag")
-        # parser.add_argument("--task_tag", type=str, default="task_tag")
-        # parser.add_argument("--eval_tag", type=str, default="eval_tag")
-        # parser.add_argument("--time_tag", type=str, default="time_tag")
-        # parser.add_argument("--reference_code", type=str, default="elemAddRef.py")
-        # parser.add_argument("--generated_code", type=str, default="elemAddCuda.py")
-
         # pre-compile the generated code
         command = f"python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code {reference_file_path} --generated_code {generated_file_path} --device-list {','.join([str(device) for device in DEVICES])}"
         process = await asyncio.create_subprocess_shell(
-            command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=os.environ.copy()
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=os.environ.copy(),
         )
 
         logger.info(f"[KB Eval] [{eval_tag}] START ====================")
         logger.info(f"[KB Eval] [{eval_tag}] command: {command}")
 
-       # Create tasks to read stdout and stderr concurrently
-        stdout_task = asyncio.create_task(read_stream(process.stdout, eval_tag, is_error=False))
-        stderr_task = asyncio.create_task(read_stream(process.stderr, eval_tag, is_error=True))
-        
+        # Create tasks to read stdout and stderr concurrently
+        stdout_task = asyncio.create_task(
+            read_stream(process.stdout, eval_tag, is_error=False)
+        )
+        stderr_task = asyncio.create_task(
+            read_stream(process.stderr, eval_tag, is_error=True)
+        )
+
         # Wait for the process to complete
         return_code = await process.wait()
-        
+
         # Wait for all output to be processed
         await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
         if process.returncode != 0:
             logger.error(f"[KB Eval] [{eval_tag}] return code: {process.returncode}")
         else:
             logger.info(f"[KB Eval] [{eval_tag}] return code: {process.returncode}")
- 
+
         logger.info(f"[KB Eval] [{eval_tag}] END ====================")
 
         # read the result from {temp_dir}/kbeval_{eval_tag}.json
@@ -245,9 +261,11 @@ async def kb_eval(
 
     finally:
         async with request_counter_lock:
-            request_counter -= 1 
+            request_counter -= 1
             if request_counter < 0:
-                logger.error(f"Request counter is negative: {request_counter}, resetting to 0")
+                logger.error(
+                    f"Request counter is negative: {request_counter}, resetting to 0"
+                )
                 request_counter = 0
 
 
@@ -280,7 +298,8 @@ async def _check_total_error_count():
             await asyncio.sleep(check_interval)
 
 
-async def main():
+async def main(args):
+
     #read kbEval.yaml
     with open("kbEval.yaml", "r") as f:
         kbEval_config = yaml.load(f, Loader=yaml.FullLoader)
@@ -290,21 +309,26 @@ async def main():
     #########################################################
     # get hostname and host, port from kbEval.yaml
     import socket
+
     hostname = socket.gethostname()
-    # if hostname is not in kbEval_config["kbEvalRemoteServer"], use "one"  
+    # if hostname is not in kbEval_config["kbEvalRemoteServer"], use "one"
     if hostname not in kbEval_config["kbEvalRemoteServer"]:
-        logger.warning(f"Hostname {hostname} not found in kbEval.yaml, using 'one' as default")
+        logger.warning(
+            f"Hostname {hostname} not found in kbEval.yaml, using 'one' as default"
+        )
         hostname = "one"
-    # if hostname not in kbEval_config["kbEvalRemoteServer"]:
-    #     logger.error(f"Hostname {hostname} not found in kbEval.yaml")
-    #     exit(1)
 
-    host = kbEval_config["kbEvalRemoteServer"][hostname]["host"]
-    port = kbEval_config["kbEvalRemoteServer"][hostname]["port"]
-
-    # get devices from kbEval_config["kbEvalRemoteServer"][hostname]["devices"]
     global DEVICES
-    DEVICES = [int(d) for d in kbEval_config["kbEvalRemoteServer"][hostname]["devices"]]
+
+    if args.local_host:
+        host = "0.0.0.0"
+        port = args.port
+        DEVICES = [args.device]
+    else:
+        host = kbEval_config["kbEvalRemoteServer"][hostname]["host"]
+        port = kbEval_config["kbEvalRemoteServer"][hostname]["port"]
+        DEVICES = [int(d) for d in kbEval_config["kbEvalRemoteServer"][hostname]["devices"]]
+
     logger.info(f"Running on [{hostname}:{port}] with devices: {DEVICES}")
 
     #########################################################
@@ -333,6 +357,7 @@ async def main():
     #########################################################
 
     import uvicorn
+
     server = uvicorn.Server(uvicorn.Config(app, host=host, port=port))
 
     # run server and check total error count in parallel
@@ -345,4 +370,9 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--local_host", action="store_true")
+    parser.add_argument("--port",  type=int, default=8088)
+    parser.add_argument("--device",  type=str, default=5)
+    args = parser.parse_args()
+    asyncio.run(main(args))

@@ -127,12 +127,12 @@ def load_model(provider: str, model: str):
             api_key=api_key,
             base_url=base_url,
             http_client=httpx.AsyncClient(proxy=httpx.Proxy("http://fwdproxy:8080")),
-            timeout=60,
-            max_retries=3,
+            timeout=240,
+            max_retries=5,
         )
     else:
         client = AsyncOpenAI(
-            api_key=api_key, base_url=base_url, timeout=60, max_retries=3
+            api_key=api_key, base_url=base_url, timeout=240, max_retries=5
         )
     model = OpenAIChatCompletionsModel(
         model=model_name,
@@ -153,7 +153,6 @@ def load_agent_model(
 
     if "model" not in agent_yaml[agent_name]:
         raise ValueError(f"Model not found in agent.yaml for agent {agent_name}")
-
     model_config = agent_yaml[agent_name]["model"]
     if not provider and "provider" not in model_config:
         raise ValueError(f"Provider not found in agent.yaml for agent {agent_name}")
@@ -283,16 +282,17 @@ def log_result_items(
     except Exception as e:
         logger.error(f"Error writing to file: {e}")
 
-    # push to s3
-    try:
-        s3_client = boto3.client("s3")
-        datetime_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        s3_client.put_object(
-            Bucket="agent-xyz",
-            Key=f"agent/{model_tag}/{task_tag}/{name_tag}_{datetime_str}.json",
-            Body=json_output,
-        )
-    except Exception as e:
-        logger.error(f"Error pushing to s3: {e}")
+    if is_devserver() is not True:  # No s3 access on meta's devserver
+        # push to s3
+        try:
+            s3_client = boto3.client("s3")
+            datetime_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            s3_client.put_object(
+                Bucket="agent-xyz",
+                Key=f"agent/{model_tag}/{task_tag}/{name_tag}_{datetime_str}.json",
+                Body=json_output,
+            )
+        except Exception as e:
+            logger.error(f"Error pushing to s3: {e}")
 
     return messages
