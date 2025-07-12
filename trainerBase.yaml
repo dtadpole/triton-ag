@@ -1,0 +1,74 @@
+# ============================================================================
+# TrainerBase Configuration File
+# ============================================================================
+# Simplified configuration for Unsloth-based training with LoRA
+# Automatically uses 4-bit quantization for memory efficiency
+
+# ============================================================================
+# MODEL CONFIGURATION
+# ============================================================================
+model:
+  name: "Qwen/Qwen3-8B"  # Model name from Hugging Face
+  tokenizer_name: null  # If null, uses model name as tokenizer
+  max_seq_length: 512  # Maximum sequence length for training
+  gradient_checkpointing: true  # Enable gradient checkpointing to save memory
+  use_4bit_quantization: true  # Enable 4-bit quantization for memory efficiency
+  compute_dtype: "bfloat16"  # bfloat16 or float16
+
+# ============================================================================
+# TRAINING CONFIGURATION
+# ============================================================================
+training:
+  # Basic training parameters
+  batch_size: 2
+  gradient_accumulation_steps: 1
+  learning_rate: 0.00001
+  max_steps: 50
+  
+  # Checkpointing and evaluation
+  save_steps: 10
+  eval_steps: 10
+  logging_steps: 1
+  
+  # Output directory
+  checkpoint_path: "./checkpoints"
+  latest_checkpoint_name: "checkpoint-latest"
+  
+  # Optimization settings
+  max_grad_norm: 0.1
+  scheduler_type: "cosine"
+  num_warmup_steps: 5
+  
+  # Performance settings
+  dataloader_num_workers: 4
+  seed: -1
+
+# ============================================================================
+# OPTIMIZER CONFIGURATION
+# ============================================================================
+optimizer:
+  optimizer_type: "AdamW"  # AdamW, Adam, SGD
+  betas: [0.9, 0.99]  # Beta parameters for Adam/AdamW
+  eps: 1e-8  # Epsilon for Adam/AdamW
+  weight_decay: 0.01  # Weight decay
+  momentum: 0.9  # Momentum for SGD
+  nesterov: false  # Nesterov momentum for SGD
+
+# ============================================================================
+# LORA CONFIGURATION
+# ============================================================================
+lora:
+  use_lora: true  # Always use LoRA for efficient training
+  rank: 64   # LoRA rank (r)
+  alpha: 32  # LoRA alpha
+  dropout: 0.0  # Use 0.0 for optimal Unsloth performance
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+  bias: "none"  # Options: "none", "all", "lora_only"
+
+# ============================================================================
+# LOGGING CONFIGURATION
+# ============================================================================
+logging:
+  use_wandb: false
+  wandb_project: "unsloth-lora-training"
+  wandb_run_name: null 
