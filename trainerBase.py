@@ -35,6 +35,12 @@ import argparse
 from logger import logger
 
 
+class TrainerStatus(BaseModel):
+    """Running status of the trainer"""
+    global_step: int = 0
+    epoch_id: int = 0
+    block_id: int = 0
+
 class ModelConfig(BaseModel):
     """Configuration for model parameters"""
     name: str = 'gpt2'
@@ -63,7 +69,7 @@ class TrainingConfig(BaseModel):
     save_steps: int = 10
     eval_steps: int = 10
     logging_steps: int = 1
-    checkpoint_path: str = "./checkpoints"
+    checkpoint_path: str = "~/.trainer"
     latest_checkpoint_name: Optional[str] = "checkpoint-latest"
     max_grad_norm: float = 0.1
     scheduler_type: str = "cosine"
@@ -187,13 +193,12 @@ class TextDataset(Dataset):
 class BaseTrainer:
     """Base trainer for Hugging Face models with step-by-step training implementation"""
     
-    def __init__(self, config: TrainerConfig):
+    def __init__(self, prefix_tag: str, config: TrainerConfig, status: Optional[TrainerStatus] = None):
+        self.prefix_tag = prefix_tag
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.global_step = 0
-        self.epoch = 0
-        self.block_id = 0
-        self.use_lora = config.lora.use_lora
+        self.trainer_status = status if status is not None else TrainerStatus()
+        self.run_tag = f"{prefix_tag}_{self.trainer_status.epoch_id:03d}_{self.trainer_status.block_id:02d}"
         
         # Set random seeds for reproducibility
         self._set_seed()
@@ -202,14 +207,15 @@ class BaseTrainer:
         self._setup_model_and_tokenizer()
         
         # Setup LoRA if enabled
-        if self.use_lora:
+        if self.config.lora.use_lora:
             self._setup_lora()
         
         # Initialize optimizer and scheduler
         self._setup_optimizer_and_scheduler()
         
         # Setup output directory
-        self.checkpoint_path = Path(config.training.checkpoint_path)
+        self.checkpoint_path = Path(os.path.expanduser(config.training.checkpoint_path)) / self.prefix_tag
+
         self.checkpoint_path.mkdir(parents=True, exist_ok=True)
         
         # Initialize logging
@@ -379,9 +385,9 @@ class BaseTrainer:
         checkpoint = torch.load(training_state_path, map_location='cpu')
         
         # Load model state
-        if self.use_lora and 'lora_state_dict' in checkpoint:
+        if self.config.lora.use_lora and 'lora_state_dict' in checkpoint:
             set_peft_model_state_dict(self.model, checkpoint['lora_state_dict'])
-        elif not self.use_lora and 'model_state_dict' in checkpoint:
+        elif not self.config.lora.use_lora and 'model_state_dict' in checkpoint:
             self.model.load_state_dict(checkpoint['model_state_dict'])
         else:
             logger.warning(f"⚠️ [BaseTrainer] Model state not found or incompatible in checkpoint")
@@ -392,11 +398,11 @@ class BaseTrainer:
             self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         
         # Load training state
-        self.global_step = checkpoint.get('global_step', 0)
-        self.epoch = checkpoint.get('epoch', 0)
-        self.block_id = checkpoint.get('block_id', 0)
+        self.trainer_status.global_step = checkpoint.get('global_step', 0)
+        self.trainer_status.epoch_id = checkpoint.get('epoch_id', 0)
+        self.trainer_status.block_id = checkpoint.get('block_id', 0)
         
-        logger.info(f"✅ [BaseTrainer] Checkpoint loaded - Step: [{self.global_step}], Epoch: [{self.epoch}], Block: [{self.block_id}]")
+        logger.info(f"✅ [BaseTrainer] Checkpoint loaded - Step: [{self.trainer_status.global_step}], Epoch: [{self.trainer_status.epoch_id}], Block: [{self.trainer_status.block_id}]")
     
     def _save_checkpoint(self, step: int):
         """Save training checkpoint"""
@@ -411,14 +417,13 @@ class BaseTrainer:
         checkpoint_state = {
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
-            'global_step': self.global_step,
-            'epoch': self.epoch,
-            'block_id': self.block_id,
+            'global_step': self.trainer_status.global_step,
+            'epoch_id': self.trainer_status.epoch_id,
+            'block_id': self.trainer_status.block_id,
             'config': self.config.model_dump(),
-            'use_lora': self.use_lora
         }
         
-        if self.use_lora:
+        if self.config.lora.use_lora:
             checkpoint_state['lora_state_dict'] = get_peft_model_state_dict(self.model)
         else:
             checkpoint_state['model_state_dict'] = self.model.state_dict()
@@ -532,7 +537,7 @@ class BaseTrainer:
             pin_memory=True
         )
 
-        logger.info(f"🏋️ [BaseTrainer] [{run_tag}] Block started with [{len(dataloader)}] micro batches, Initial global step: [{self.global_step}]")
+        logger.info(f"🏋️ [BaseTrainer] [{run_tag}] Block started with [{len(dataloader)}] micro batches, Initial global step: [{self.trainer_status.global_step}]")
 
         start_time = time.time()
         accumulated_loss = 0.0
@@ -558,66 +563,29 @@ class BaseTrainer:
                 accumulated_loss = 0.0
                 
                 # Update step counter
-                self.global_step += 1
+                self.trainer_status.global_step += 1
                 progress_bar.update(1)
                 
                 # Log metrics
                 current_lr = self.scheduler.get_last_lr()[0]
-                self._log_metrics(avg_loss, current_lr, self.global_step)
+                self._log_metrics(avg_loss, current_lr, self.trainer_status.global_step)
                 
                 # Save checkpoint
-                if self.global_step % self.config.training.save_steps == 0:
-                    self._save_checkpoint(self.global_step)
+                if self.trainer_status.global_step % self.config.training.save_steps == 0:
+                    self._save_checkpoint(self.trainer_status.global_step)
                 
                 # Evaluation
-                if eval_dataset and self.global_step % self.config.training.eval_steps == 0:
+                if eval_dataset and self.trainer_status.global_step % self.config.training.eval_steps == 0:
                     self._evaluate(eval_dataset)
                 
                 # Check if training is complete
-                if self.global_step >= self.config.training.max_steps:
+                if self.trainer_status.global_step >= self.config.training.max_steps:
                     break
 
         total_time = time.time() - start_time
-        logger.info(f"🎉 [BaseTrainer] [{run_tag}] Block completed in [{total_time:.1f}s] - Final global step: [{self.global_step}]")
+        logger.info(f"🎉 [BaseTrainer] [{run_tag}] Block completed in [{total_time:.1f}s] - Final global step: [{self.trainer_status.global_step}]")
         progress_bar.close()
 
-
-    async def train(self, prefix_tag: str, dataset: Dataset, eval_dataset: Optional[Dataset] = None):
-        """Main training loop"""
-        logger.info(f"🏋️ [BaseTrainer] Starting training - Total steps: [{self.config.training.max_steps}], Batch size: [{self.config.training.micro_batch_size}], Block size: [{self.config.training.block_size}]")
-
-        # run with asyncio task
-        loop = asyncio.get_event_loop()
-
-        # Training loop
-        while self.global_step < self.config.training.max_steps:
-
-            # use ceil to calculate the number of blocks
-            num_blocks = math.ceil(len(dataset) / self.config.training.block_size)
-
-            for block_idx in range(self.block_id, num_blocks):
-
-                # extract a block from the dataset by sampling random indices of 8 items
-                block_indices = torch.randperm(len(dataset))[:self.config.training.block_size]
-                block_dataset = Subset(dataset, block_indices)
-
-                run_tag = f"{prefix_tag}_{self.epoch:03d}_{block_idx:02d}"
-
-                # train the model on the block
-                await loop.run_in_executor(None, self.train_block, run_tag, block_dataset, eval_dataset)
-                
-                # Check if training is complete
-                if self.global_step >= self.config.training.max_steps:
-                    break
-
-            self.epoch += 1
-        
-        # Final checkpoint
-        self._save_checkpoint(self.global_step)
-        
-        if self.config.logging.use_wandb:
-            wandb.finish()
-    
     def _evaluate(self, eval_dataset: Dataset):
         """Evaluate the model on evaluation dataset"""
         logger.info(f"📊 [BaseTrainer] Running evaluation...")
@@ -649,7 +617,7 @@ class BaseTrainer:
             wandb.log({
                 "eval/loss": avg_eval_loss,
                 "eval/perplexity": perplexity,
-                "eval/step": self.global_step
+                "eval/step": self.trainer_status.global_step
             })
         
         self.model.train()
@@ -690,11 +658,47 @@ class BaseTrainer:
         
         return generated_text.strip()
 
+async def _train_loop(prefix_tag: str, trainer: BaseTrainer, dataset: Dataset, eval_dataset: Optional[Dataset] = None):
+    """Main training loop"""
+    logger.info(f"🏋️ [BaseTrainer] Starting training - Total steps: [{trainer.config.training.max_steps}], Batch size: [{trainer.config.training.micro_batch_size}], Block size: [{trainer.config.training.block_size}]")
+
+    # run with asyncio task
+    loop = asyncio.get_event_loop()
+
+    # Training loop
+    while trainer.trainer_status.global_step < trainer.config.training.max_steps:
+
+        # use ceil to calculate the number of blocks
+        num_blocks = math.ceil(len(dataset) / trainer.config.training.block_size)
+
+        for block_idx in range(trainer.trainer_status.block_id, num_blocks):
+
+            # extract a block from the dataset by sampling random indices of 8 items
+            block_indices = torch.randperm(len(dataset))[:trainer.config.training.block_size]
+            block_dataset = Subset(dataset, block_indices)
+
+            run_tag = f"{prefix_tag}_{trainer.trainer_status.epoch_id:03d}_{block_idx:02d}"
+
+            # train the model on the block
+            await loop.run_in_executor(None, trainer.train_block, run_tag, block_dataset, eval_dataset)
+            
+            # Check if training is complete
+            if trainer.trainer_status.global_step >= trainer.config.training.max_steps:
+                break
+
+        trainer.trainer_status.epoch_id += 1
+    
+    # Final checkpoint
+    trainer._save_checkpoint(trainer.trainer_status.global_step)
+    
+    if trainer.config.logging.use_wandb:
+        wandb.finish()
+
 async def train_async(prefix_tag: str, trainer: BaseTrainer, train_dataset: Dataset, eval_dataset: Dataset) -> bool:
     """Train the model asynchronously"""
     # Run sync function in thread pool
     try:
-        await trainer.train(prefix_tag=prefix_tag, dataset=train_dataset, eval_dataset=eval_dataset)
+        await _train_loop(prefix_tag=prefix_tag, trainer=trainer, dataset=train_dataset, eval_dataset=eval_dataset)
         logger.info("🎉 Training completed successfully!")
         return True
     except Exception as e:
