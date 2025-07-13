@@ -345,7 +345,7 @@ class CodeGenEvalClient:
         logger.info(f"🎯 [CodeGenEval Client] [{self.run_tag}] [Task {task_id:02d}] completed")
 
 
-    async def run_mini_batch(
+    async def run_block(
         self,
         reference_code_contents: List[str],
         task_tags: List[str],
@@ -435,16 +435,16 @@ class CodeGenEvalClient:
             logger.error(traceback.format_exc())
 
 
-async def code_gen_eval_mini_batch(prefix_tag: str, config: InferenceClientConfig, epoch_id: int=-1, batch_id: int=-1, num_samples: int=12, num_generations: int=8, parallel_tasks: int=10, input_dir: str="./kernel_bench/"):
+async def code_gen_eval_block(prefix_tag: str, config: InferenceClientConfig, epoch_id: int=-1, block_id: int=-1, num_samples: int=12, num_generations: int=8, parallel_tasks: int=10, input_dir: str="./kernel_bench/"):
     """
     Run one batch of code generation and evaluation.
     """
     try:
         # create the codeGenEvalClient
-        if epoch_id < 0 or batch_id < 0:
+        if epoch_id < 0 or block_id < 0:
             run_tag = f"{prefix_tag}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         else:
-            run_tag = f"{prefix_tag}_{epoch_id:03d}_{batch_id:02d}"
+            run_tag = f"{prefix_tag}_{epoch_id:03d}_{block_id:02d}"
 
         # start running the batch
         logger.info(f"🔍 [CodeGenEvalClient] [{run_tag}] Running batch...")
@@ -479,7 +479,7 @@ async def code_gen_eval_mini_batch(prefix_tag: str, config: InferenceClientConfi
 
         # now run inference
         codeGenEvalClient = CodeGenEvalClient(run_tag=run_tag, inference_client_config=config)
-        await codeGenEvalClient.run_mini_batch(reference_code_contents, task_tags, num_generations, parallel_tasks)
+        await codeGenEvalClient.run_block(reference_code_contents, task_tags, num_generations, parallel_tasks)
         logger.info(f"✅ [CodeGenEvalClient] [{run_tag}] Batch completed")
 
     except Exception as e:
@@ -494,7 +494,7 @@ if __name__ == "__main__":
     parser.add_argument("--provider", type=str, default="fireworks")  # most cost effective models are deepinfra-r1 and fireworks-v3
     parser.add_argument("--model", type=str, default="deepseek-v3")  # most cost effective models are deepinfra-r1 and fireworks-v3
     parser.add_argument("--epoch_id", type=int, default=-1)
-    parser.add_argument("--batch_id", type=int, default=-1)
+    parser.add_argument("--block_id", type=int, default=-1)
     parser.add_argument("--prefix_tag", type=str, default="v0.1")
     parser.add_argument("--num_samples", type=int, default=12)
     parser.add_argument("--num_generations", type=int, default=8)
@@ -506,4 +506,4 @@ if __name__ == "__main__":
         model_short_name=args.model,
     )
 
-    asyncio.run(code_gen_eval_mini_batch(args.prefix_tag, config, args.epoch_id, args.batch_id, args.num_samples, args.num_generations, args.parallel_tasks, args.input_dir))
+    asyncio.run(code_gen_eval_block(args.prefix_tag, config, args.epoch_id, args.block_id, args.num_samples, args.num_generations, args.parallel_tasks, args.input_dir))

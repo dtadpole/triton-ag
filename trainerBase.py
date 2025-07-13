@@ -5,6 +5,8 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # Import Unsloth first for optimal performance
 from unsloth import FastLanguageModel
 import unsloth
+import asyncio
+import sys
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
@@ -24,10 +26,12 @@ from pathlib import Path
 import math
 import random
 import numpy as np
+from torch.utils.data import Subset
 from pydantic import BaseModel
 from tqdm import tqdm
 import wandb
 import yaml
+import argparse
 from logger import logger
 
 
@@ -54,6 +58,7 @@ class TrainingConfig(BaseModel):
     micro_batch_size: int = 1
     gradient_accumulation_steps: int = 1
     learning_rate: float = 0.00001
+    block_size: int = 3
     max_steps: int = 50
     save_steps: int = 10
     eval_steps: int = 10
@@ -187,6 +192,7 @@ class BaseTrainer:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.global_step = 0
         self.epoch = 0
+        self.block_id = 0
         self.use_lora = config.lora.use_lora
         
         # Set random seeds for reproducibility
@@ -388,8 +394,9 @@ class BaseTrainer:
         # Load training state
         self.global_step = checkpoint.get('global_step', 0)
         self.epoch = checkpoint.get('epoch', 0)
+        self.block_id = checkpoint.get('block_id', 0)
         
-        logger.info(f"✅ [BaseTrainer] Checkpoint loaded - Step: {self.global_step}, Epoch: {self.epoch}")
+        logger.info(f"✅ [BaseTrainer] Checkpoint loaded - Step: [{self.global_step}], Epoch: [{self.epoch}], Block: [{self.block_id}]")
     
     def _save_checkpoint(self, step: int):
         """Save training checkpoint"""
@@ -406,6 +413,7 @@ class BaseTrainer:
             'scheduler_state_dict': self.scheduler.state_dict(),
             'global_step': self.global_step,
             'epoch': self.epoch,
+            'block_id': self.block_id,
             'config': self.config.model_dump(),
             'use_lora': self.use_lora
         }
@@ -512,11 +520,9 @@ class BaseTrainer:
                     "train/learning_rate": lr,
                     "train/step": step
                 })
-    
-    def train(self, dataset: Dataset, eval_dataset: Optional[Dataset] = None):
-        """Main training loop"""
-        logger.info(f"🏋️ [BaseTrainer] Starting training - Steps: {self.config.training.max_steps}, Batch size: {self.config.training.micro_batch_size}")
-        
+
+    def train_block(self, run_tag: str, dataset: Dataset, eval_dataset: Optional[Dataset] = None):
+        """Train the model for one block"""
         # Create data loader
         dataloader = DataLoader(
             dataset,
@@ -525,65 +531,89 @@ class BaseTrainer:
             num_workers=self.config.training.dataloader_num_workers,
             pin_memory=True
         )
-        
-        # Training loop
+
+        logger.info(f"🏋️ [BaseTrainer] [{run_tag}] Block started with [{len(dataloader)}] micro batches, Initial global step: [{self.global_step}]")
+
         start_time = time.time()
         accumulated_loss = 0.0
-        
+
         # Create progress bar
         progress_bar = tqdm(
-            total=self.config.training.max_steps,
-            desc="Training",
-            initial=self.global_step
+            total=len(dataloader),
+            desc=run_tag,
+            initial=0
         )
-        
-        while self.global_step < self.config.training.max_steps:
+
+        for batch_idx, batch in enumerate(dataloader):
+            # Training step
+            step_loss = self._training_step(batch)
+            accumulated_loss += step_loss
             
-            for batch_idx, batch in enumerate(dataloader):
-                # Training step
-                step_loss = self._training_step(batch)
-                accumulated_loss += step_loss
+            # Optimization step (only after accumulation)
+            if (batch_idx + 1) % self.config.training.gradient_accumulation_steps == 0:
+                self._optimization_step()
                 
-                # Optimization step (only after accumulation)
-                if (batch_idx + 1) % self.config.training.gradient_accumulation_steps == 0:
-                    self._optimization_step()
-                    
-                    # Calculate average loss
-                    avg_loss = accumulated_loss / self.config.training.gradient_accumulation_steps
-                    accumulated_loss = 0.0
-                    
-                    # Update step counter
-                    self.global_step += 1
-                    progress_bar.update(1)
-                    
-                    # Log metrics
-                    current_lr = self.scheduler.get_last_lr()[0]
-                    self._log_metrics(avg_loss, current_lr, self.global_step)
-                    
-                    # Save checkpoint
-                    if self.global_step % self.config.training.save_steps == 0:
-                        self._save_checkpoint(self.global_step)
-                    
-                    # Evaluation
-                    if eval_dataset and self.global_step % self.config.training.eval_steps == 0:
-                        self._evaluate(eval_dataset)
-                    
-                    # Check if training is complete
-                    if self.global_step >= self.config.training.max_steps:
-                        break
+                # Calculate average loss
+                avg_loss = accumulated_loss / self.config.training.gradient_accumulation_steps
+                accumulated_loss = 0.0
+                
+                # Update step counter
+                self.global_step += 1
+                progress_bar.update(1)
+                
+                # Log metrics
+                current_lr = self.scheduler.get_last_lr()[0]
+                self._log_metrics(avg_loss, current_lr, self.global_step)
+                
+                # Save checkpoint
+                if self.global_step % self.config.training.save_steps == 0:
+                    self._save_checkpoint(self.global_step)
+                
+                # Evaluation
+                if eval_dataset and self.global_step % self.config.training.eval_steps == 0:
+                    self._evaluate(eval_dataset)
+                
+                # Check if training is complete
+                if self.global_step >= self.config.training.max_steps:
+                    break
+
+        total_time = time.time() - start_time
+        logger.info(f"🎉 [BaseTrainer] [{run_tag}] Block completed in [{total_time:.1f}s] - Final global step: [{self.global_step}]")
+        progress_bar.close()
+
+
+    async def train(self, prefix_tag: str, dataset: Dataset, eval_dataset: Optional[Dataset] = None):
+        """Main training loop"""
+        logger.info(f"🏋️ [BaseTrainer] Starting training - Total steps: [{self.config.training.max_steps}], Batch size: [{self.config.training.micro_batch_size}], Block size: [{self.config.training.block_size}]")
+
+        # run with asyncio task
+        loop = asyncio.get_event_loop()
+
+        # Training loop
+        while self.global_step < self.config.training.max_steps:
+
+            # use ceil to calculate the number of blocks
+            num_blocks = math.ceil(len(dataset) / self.config.training.block_size)
+
+            for block_idx in range(self.block_id, num_blocks):
+
+                # extract a block from the dataset by sampling random indices of 8 items
+                block_indices = torch.randperm(len(dataset))[:self.config.training.block_size]
+                block_dataset = Subset(dataset, block_indices)
+
+                run_tag = f"{prefix_tag}_{self.epoch:03d}_{block_idx:02d}"
+
+                # train the model on the block
+                await loop.run_in_executor(None, self.train_block, run_tag, block_dataset, eval_dataset)
+                
+                # Check if training is complete
+                if self.global_step >= self.config.training.max_steps:
+                    break
 
             self.epoch += 1
-            if self.global_step >= self.config.training.max_steps:
-                break
         
         # Final checkpoint
         self._save_checkpoint(self.global_step)
-        
-        # Training completion
-        total_time = time.time() - start_time
-        logger.info(f"🎉 [BaseTrainer] Training completed in {total_time:.1f}s - Final step: {self.global_step}")
-        
-        progress_bar.close()
         
         if self.config.logging.use_wandb:
             wandb.finish()
@@ -660,6 +690,17 @@ class BaseTrainer:
         
         return generated_text.strip()
 
+async def train_async(prefix_tag: str, trainer: BaseTrainer, train_dataset: Dataset, eval_dataset: Dataset) -> bool:
+    """Train the model asynchronously"""
+    # Run sync function in thread pool
+    try:
+        await trainer.train(prefix_tag=prefix_tag, dataset=train_dataset, eval_dataset=eval_dataset)
+        logger.info("🎉 Training completed successfully!")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Training failed: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return False
 
 def create_sample_training_dataset(tokenizer, size: int = 100, max_length: int = 512) -> TextDataset:
     """Create a sample dataset for CLI training"""
@@ -680,12 +721,11 @@ def create_sample_training_dataset(tokenizer, size: int = 100, max_length: int =
     return TextDataset(repeated_conversations, tokenizer, max_length)
 
 
-def main():
+async def main():
     """Main training function"""
-    import argparse
-    import sys
-    
     parser = argparse.ArgumentParser(description="Train a model using BaseTrainer")
+    parser.add_argument("--prefix-tag", type=str, default="v0.1",
+                       help="Prefix tag for the training run")
     parser.add_argument("--config", type=str, default="trainerBase.yaml", 
                        help="Path to configuration YAML file")
     parser.add_argument("--model-name", type=str, default=None,
@@ -731,8 +771,12 @@ def main():
     logger.info(f"📊 Dataset created - Train: {len(train_dataset)}, Eval: {len(eval_dataset)}")
     
     # Start training
+    success = await train_async(args.prefix_tag, trainer, train_dataset, eval_dataset)
+    if not success:
+        logger.error("❌ Training failed")
+        sys.exit(1)
+    
     try:
-        trainer.train(train_dataset, eval_dataset)
         logger.info("🎉 Training completed successfully!")
     except Exception as e:
         logger.error(f"❌ Training failed: {e}")
@@ -761,4 +805,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # run main async
+    asyncio.run(main())
