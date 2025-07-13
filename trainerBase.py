@@ -12,6 +12,7 @@ from torch.nn.utils import clip_grad_norm_
 from transformers import (
     get_scheduler,
 )
+import bitsandbytes as bnb
 from peft import (
     get_peft_model_state_dict,
     set_peft_model_state_dict,
@@ -35,7 +36,7 @@ class ModelConfig(BaseModel):
     name: str = 'gpt2'
     tokenizer_name: Optional[str] = None
     max_seq_length: int = 1024
-    gradient_checkpointing: bool = False
+    use_gradient_checkpointing: str = "unsloth"
     use_4bit_quantization: bool = True
     compute_dtype: str = "bfloat16"
 
@@ -50,7 +51,7 @@ class OptimizerConfig(BaseModel):
 
 class TrainingConfig(BaseModel):
     """Configuration for training parameters"""
-    batch_size: int = 2
+    micro_batch_size: int = 1
     gradient_accumulation_steps: int = 1
     learning_rate: float = 0.00001
     max_steps: int = 50
@@ -108,7 +109,7 @@ class TrainerConfig(BaseModel):
                 name=model_data.get('name', 'gpt2'),
                 tokenizer_name=model_data.get('tokenizer_name'),
                 max_seq_length=model_data.get('max_seq_length', 1024),
-                gradient_checkpointing=model_data.get('gradient_checkpointing', False),
+                use_gradient_checkpointing=model_data.get('use_gradient_checkpointing', "unsloth"),
                 use_4bit_quantization=model_data.get('use_4bit_quantization', True),
                 compute_dtype=model_data.get('compute_dtype', 'bfloat16')
             )
@@ -238,12 +239,9 @@ class BaseTrainer:
             max_seq_length=self.config.model.max_seq_length,
             dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16),
             load_in_4bit=self.config.model.use_4bit_quantization,
+            use_gradient_checkpointing=self.config.model.use_gradient_checkpointing,
             # token="hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
         )
-        
-        # Enable gradient checkpointing if requested
-        if self.config.model.gradient_checkpointing:
-            self.model.gradient_checkpointing_enable()
         
         # Ensure tokenizer has pad token
         if self.tokenizer.pad_token is None:
@@ -280,7 +278,7 @@ class BaseTrainer:
             lora_alpha=self.config.lora.alpha,
             lora_dropout=self.config.lora.dropout,
             bias=self.config.lora.bias,
-            use_gradient_checkpointing=self.config.model.gradient_checkpointing,
+            use_gradient_checkpointing=self.config.model.use_gradient_checkpointing,
             random_state=self.config.training.seed if self.config.training.seed is not None and self.config.training.seed >= 0 else random.randint(0,2**31),
             use_rslora=False,  # Use regular LoRA
             loftq_config=None,
@@ -314,9 +312,10 @@ class BaseTrainer:
             },
         ]
         
-        # Create optimizer based on type
+        # Create optimizer based on type (using bitsandbytes paged optimizers)
         optimizer_type = self.config.optimizer.optimizer_type.lower()
         if optimizer_type == "adamw":
+            # self.optimizer = bnb.optim.PagedAdamW(
             self.optimizer = optim.AdamW(
                 optimizer_grouped_parameters,
                 lr=self.config.training.learning_rate,
@@ -324,6 +323,7 @@ class BaseTrainer:
                 eps=self.config.optimizer.eps
             )
         elif optimizer_type == "adam":
+            # self.optimizer = bnb.optim.PagedAdam(
             self.optimizer = optim.Adam(
                 optimizer_grouped_parameters,
                 lr=self.config.training.learning_rate,
@@ -331,6 +331,7 @@ class BaseTrainer:
                 eps=self.config.optimizer.eps
             )
         elif optimizer_type == "sgd":
+            # Fall back to standard SGD as bitsandbytes doesn't have paged SGD
             self.optimizer = optim.SGD(
                 optimizer_grouped_parameters,
                 lr=self.config.training.learning_rate,
@@ -348,7 +349,7 @@ class BaseTrainer:
             num_training_steps=self.config.training.max_steps,
         )
         
-        logger.info(f"⚙️ [BaseTrainer] Optimizer ({optimizer_type}) and scheduler initialized")
+        logger.info(f"⚙️ [BaseTrainer] Paged optimizer ({optimizer_type}) and scheduler initialized")
     
     def _checkpoint_exists(self, checkpoint_path: str) -> bool:
         """Check if checkpoint exists"""
@@ -514,12 +515,12 @@ class BaseTrainer:
     
     def train(self, dataset: Dataset, eval_dataset: Optional[Dataset] = None):
         """Main training loop"""
-        logger.info(f"🏋️ [BaseTrainer] Starting training - Steps: {self.config.training.max_steps}, Batch size: {self.config.training.batch_size}")
+        logger.info(f"🏋️ [BaseTrainer] Starting training - Steps: {self.config.training.max_steps}, Batch size: {self.config.training.micro_batch_size}")
         
         # Create data loader
         dataloader = DataLoader(
             dataset,
-            batch_size=self.config.training.batch_size,
+            batch_size=self.config.training.micro_batch_size,
             shuffle=True,
             num_workers=self.config.training.dataloader_num_workers,
             pin_memory=True
@@ -594,7 +595,7 @@ class BaseTrainer:
         self.model.eval()
         eval_dataloader = DataLoader(
             eval_dataset,
-            batch_size=self.config.training.batch_size,
+            batch_size=self.config.training.micro_batch_size,
             shuffle=False,
             num_workers=self.config.training.dataloader_num_workers,
             pin_memory=True
@@ -709,7 +710,7 @@ def main():
         config.training.max_steps = args.max_steps
     
     # Display configuration summary
-    logger.info(f"📊 Training Config - Model: {config.model.name}, Steps: {config.training.max_steps}, Batch: {config.training.batch_size}, LR: {config.training.learning_rate}")
+    logger.info(f"📊 Training Config - Model: {config.model.name}, Steps: {config.training.max_steps}, Batch: {config.training.micro_batch_size}, LR: {config.training.learning_rate}")
     logger.info(f"⚙️ Optimizer Config - Type: {config.optimizer.optimizer_type}, Weight Decay: {config.optimizer.weight_decay}")
     if config.lora.use_lora:
         logger.info(f"🎯 LoRA Config - Rank: {config.lora.rank}, Alpha: {config.lora.alpha}")
