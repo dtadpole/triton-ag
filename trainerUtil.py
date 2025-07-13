@@ -56,13 +56,15 @@ def _manual_format_conversation(messages: List[Dict[str, str]]) -> str:
         content = message.get('content', '')
         
         if role == 'system':
-            formatted_parts.append(f"<|im_start|>system\n{content}\n<|im_end|>\n")
+            formatted_parts.append(f"<|im_start|>system\n{content}<|im_end|>")
         elif role == 'user':
-            formatted_parts.append(f"<|im_start|>user\n{content}\n<|im_end|>\n")
+            formatted_parts.append(f"<|im_start|>user\n{content}<|im_end|>")
         elif role == 'assistant':
-            formatted_parts.append(f"<|im_start|>assistant\n{content}\n<|im_end|>\n")
+            formatted_parts.append(f"<|im_start|>assistant\n{content}<|im_end|>")
+        elif role == 'tool':
+            formatted_parts.append(f"<|im_start|>tool\n{content}<|im_end|>")
         elif role == 'function':
-            formatted_parts.append(f"<|im_start|>function\n{content}\n<|im_end|>\n")
+            formatted_parts.append(f"<|im_start|>function\n{content}<|im_end|>")
         else:
             raise ValueError(f"Unknown role: {role}")
     
