@@ -307,8 +307,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--provider", type=str, default="fireworks")  # most cost effective models are deepinfra-r1 and fireworks-v3
     parser.add_argument("--model", type=str, default="deepseek-v3")  # most cost effective models are deepinfra-r1 and fireworks-v3
-    parser.add_argument("--run_tag", type=str, default="v0.1_20250705_081913") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
-    parser.add_argument("--parallel_tasks", type=int, default=10)
+    parser.add_argument("--run_tag", type=str, default="v0.1_20250714_050308") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
+    parser.add_argument("--parallel_tasks", type=int, default=16)
     args = parser.parse_args()
 
     config = load_inference_client_config(
