@@ -358,7 +358,7 @@ async def main(args):
 
     import uvicorn
 
-    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port))
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, workers=args.workers))
 
     # run server and check total error count in parallel
     # need running event loop to run the tasks
@@ -373,6 +373,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_host", action="store_true")
     parser.add_argument("--port",  type=int, default=8088)
-    parser.add_argument("--device",  type=str, default=5)
+    parser.add_argument("--workers",  type=int, default=32)
+    parser.add_argument("--device",  type=str, default='4')
     args = parser.parse_args()
     asyncio.run(main(args))

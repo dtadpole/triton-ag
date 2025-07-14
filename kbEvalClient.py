@@ -26,7 +26,7 @@ class KbEvalClient:
         # Get kbEval config from kbEval.yaml
         kb_eval_config = self.config.get('kbEvalClient', {})
         self.base_url = kb_eval_config.get('servers', [])[0].get('url', 'http://localhost:44456')
-        self.timeout = kb_eval_config.get('servers', [])[0].get('timeout', 300)
+        self.timeout = kb_eval_config.get('servers', [])[0].get('timeout', 450)
         self.num_retries = kb_eval_config.get('servers', [])[0].get('num_retries', 7)
         self.server_last_refresh_time = time.time()
         self.server_stats = {}

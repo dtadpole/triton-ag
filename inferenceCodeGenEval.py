@@ -498,7 +498,7 @@ if __name__ == "__main__":
     parser.add_argument("--prefix_tag", type=str, default="v0.1")
     parser.add_argument("--num_samples", type=int, default=12)
     parser.add_argument("--num_generations", type=int, default=8)
-    parser.add_argument("--parallel_tasks", type=int, default=16)
+    parser.add_argument("--parallel_tasks", type=int, default=20)
     args = parser.parse_args()
 
     config = load_inference_client_config(
