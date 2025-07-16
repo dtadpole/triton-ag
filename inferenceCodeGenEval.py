@@ -147,7 +147,7 @@ class CodeGenEvalClient:
             generated_code = code_blocks[-1].strip() if code_blocks else content.strip()
         except (IndexError, AttributeError) as e:
             logger.error(f"❌ [CodeGenEval Task {task_tag}] Error extracting code [{e}] [{f'{num_tokens}'} tokens] [{f'{num_reasoning_tokens}'} reasoning tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
-            return None
+            return conversation, None
         
         # save the generated code to a file
         generated_code_file = self.output_dir / task_tag / f"{gen_tag}_generated_code.py"
@@ -156,7 +156,7 @@ class CodeGenEvalClient:
 
         # use generated emoji to beginning of the line
         logger.info(f"👏 [CodeGenEval Client] [{self.run_tag}] Generated [{f'{task_tag}'}] [{f'{gen_tag}'}]: [{generated_code_file}] [{f'{num_tokens}'} tokens] [{f'{num_reasoning_tokens}'} reasoning tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
-        return generated_code
+        return conversation, generated_code
 
     async def _process_code_eval(
         self,
@@ -198,18 +198,18 @@ class CodeGenEvalClient:
             # Call the evaluation server
             start_time = time.time()
             result = await self.kb_eval_client.kb_eval(run_tag=self.run_tag, model_tag=self.model_tag, task_tag=task_tag, eval_tag=gen_tag, reference_code=reference_code, generated_code=generated_code)
-            result_json = result.model_dump()
-            result_json['metadata'] = {
+            eval_result_json = result.model_dump()
+            eval_result_json['metadata'] = {
                 "run_tag": self.run_tag,
                 "model_tag": self.model_tag,
                 "task_tag": task_tag
-            } | result_json['metadata']
+            } | eval_result_json['metadata']
             evaluation_time = time.time() - start_time
             
             # Save evaluation result
             evaluation_file = self.output_dir / task_tag / f"{gen_tag}_eval.json"
             with open(evaluation_file, 'w') as f:
-                f.write(json.dumps(result.model_dump(), indent=2, ensure_ascii=False, default=str))
+                f.write(json.dumps(eval_result_json, indent=2, ensure_ascii=False, default=str))
             
             if result.compiled and result.correctness:
                 logger.info(f"✅ [CodeGenEval Client] [{self.run_tag}] Evaluated [{f'{task_tag}'}] [{f'{gen_tag}'}] [{generated_code_file}] [{result.runtime:.3f}ms] in [{evaluation_time:.1f}s]")
@@ -217,7 +217,7 @@ class CodeGenEvalClient:
                 logger.warning(f"⚠️ [CodeGenEval Client] [{self.run_tag}] Evaluated [{f'{task_tag}'}] [{f'{gen_tag}'}] [{generated_code_file}] [{'✅' if result.compiled else '❌'}compiled], [{'✅' if result.correctness else '❌'}correctness] in [{evaluation_time:.2f}s]")
 
             # return json
-            return result_json
+            return eval_result_json
             
         except Exception as e:
             logger.error(f"❌ [CodeGenEval Client] [{self.run_tag}] Error in _process_evaluation_task for [{task_tag}]: {e}")
@@ -281,7 +281,7 @@ class CodeGenEvalClient:
 
                 if is_reference:
                     # evaluate the reference code
-                    result = await self._process_ref_eval(task_tag=task_tag, reference_code=reference_code)
+                    ref_eval_result = await self._process_ref_eval(task_tag=task_tag, reference_code=reference_code)
                     continue
 
                 # add info emoji to beginning of the line
@@ -293,7 +293,7 @@ class CodeGenEvalClient:
                     retry_count += 1
                     try:
                         # Process the inference task
-                        generated_code = await self._process_code_gen(task_tag=task_tag, gen_tag=gen_tag, reference_code=reference_code)
+                        gen_conversation, generated_code = await self._process_code_gen(task_tag=task_tag, gen_tag=gen_tag, reference_code=reference_code)
                         
                         if generated_code:
                             # we are successful, break the retry loop
@@ -316,9 +316,9 @@ class CodeGenEvalClient:
                     retry_count += 1
                     try:
                         # Process the evaluation task
-                        result = await self._process_code_eval(task_tag=task_tag, gen_tag=gen_tag, generated_code=generated_code)
+                        gen_eval_result = await self._process_code_eval(task_tag=task_tag, gen_tag=gen_tag, generated_code=generated_code)
                         
-                        if result:
+                        if gen_eval_result:
                             # we are successful, break the retry loop
                             break
                         
@@ -498,7 +498,7 @@ if __name__ == "__main__":
     parser.add_argument("--prefix_tag", type=str, default="v0.1")
     parser.add_argument("--num_samples", type=int, default=12)
     parser.add_argument("--num_generations", type=int, default=8)
-    parser.add_argument("--parallel_tasks", type=int, default=10)
+    parser.add_argument("--parallel_tasks", type=int, default=24)
     args = parser.parse_args()
 
     config = load_inference_client_config(

@@ -4,7 +4,8 @@ from transformers import AutoTokenizer
 from logger import logger
 from typing import List, Dict, Any
 
-def format_conversation(messages: List[Dict[str, Any]], tokenizer: AutoTokenizer, max_length: int, mask_non_assistant_tokens: bool = True) -> Dict[str, Any]:
+
+def format_conversation(messages: List[Dict[str, Any]], tokenizer: AutoTokenizer, mask_non_assistant_tokens: bool = True, ignore_index: int = -100) -> Dict[str, Any]:
     # Format conversation using chat template if available
     if hasattr(tokenizer, 'apply_chat_template') and tokenizer.chat_template:
         try:
@@ -24,10 +25,9 @@ def format_conversation(messages: List[Dict[str, Any]], tokenizer: AutoTokenizer
     # Tokenize the formatted conversation
     encoding = tokenizer(
         formatted_text,
-        truncation=True,
-        max_length=max_length,
-        padding='max_length',
-        return_tensors='pt'
+        truncation=False,
+        padding=False,
+        return_tensors='pt',
     )
     
     input_ids = encoding['input_ids'].squeeze()
@@ -38,7 +38,9 @@ def format_conversation(messages: List[Dict[str, Any]], tokenizer: AutoTokenizer
     
     if mask_non_assistant_tokens:
         # Mask user tokens if requested (only train on assistant responses)
-        labels = _mask_non_assistant_tokens(input_ids, labels, tokenizer)
+        labels = _mask_non_assistant_tokens(input_ids, labels, tokenizer, ignore_index)
+        # convert labels to tensor
+        labels = torch.tensor(labels)
     
     return {
         'text': formatted_text,
@@ -76,7 +78,7 @@ def _token_sequence_match(input_ids, start_idx, target_sequence):
         return False
     return input_ids[start_idx:start_idx + len(target_sequence)] == target_sequence
 
-def _mask_non_assistant_tokens(input_ids, labels, tokenizer, ignore_index=-100) -> torch.Tensor:
+def _mask_non_assistant_tokens(input_ids, labels, tokenizer, ignore_index) -> torch.Tensor:
     """Mask tokens that are not assistant responses."""
     # Convert to list for easier processing and ensure 1D
     input_ids_list = input_ids.squeeze().tolist() if input_ids.dim() > 1 else input_ids.tolist()
@@ -186,6 +188,54 @@ def _mask_non_assistant_tokens(input_ids, labels, tokenizer, ignore_index=-100) 
         result = result.view(labels.shape)
 
     return result
+
+class SimpleCollator:
+    def __init__(self, tokenizer, pad_to_multiple_of=None, ignore_index=-100):
+        self.tokenizer = tokenizer
+        self.pad_to_multiple_of = pad_to_multiple_of
+        self.ignore_index = ignore_index
+        
+    def __call__(self, batch):
+        # Extract sequences
+        input_ids = [torch.tensor(item['input_ids']) for item in batch]
+        
+        # Find max length
+        max_len = max(len(seq) for seq in input_ids)
+        
+        # Round up to multiple if specified
+        if self.pad_to_multiple_of:
+            max_len = ((max_len + self.pad_to_multiple_of - 1) // self.pad_to_multiple_of) * self.pad_to_multiple_of
+        
+        # Pad input_ids
+        input_ids_padded = []
+        for seq in input_ids:
+            pad_len = max_len - len(seq)
+            padded = torch.cat([seq, torch.full((pad_len,), self.tokenizer.pad_token_id)])
+            input_ids_padded.append(padded)
+        
+        result = {'input_ids': torch.stack(input_ids_padded)}
+        
+        # Handle attention_mask if present
+        if 'attention_mask' in batch[0]:
+            attention_masks = []
+            for item in batch:
+                mask = torch.tensor(item['attention_mask'])
+                pad_len = max_len - len(mask)
+                padded_mask = torch.cat([mask, torch.zeros(pad_len)])
+                attention_masks.append(padded_mask)
+            result['attention_mask'] = torch.stack(attention_masks)
+        
+        # Handle labels if present
+        if 'labels' in batch[0]:
+            labels = []
+            for item in batch:
+                label = torch.tensor(item['labels'])
+                pad_len = max_len - len(label)
+                padded_label = torch.cat([label, torch.full((pad_len,), self.ignore_index)])
+                labels.append(padded_label)
+            result['labels'] = torch.stack(labels)
+        
+        return result
 
 def print_masking_analysis(batch, tokenizer):
     """Print detailed analysis of masked vs unmasked tokens in a batch."""
@@ -299,11 +349,9 @@ def test_data_util():
     }]
 
     for message in messages:
-        formatted_data = format_conversation(message["messages"], tokenizer, 4096, mask_non_assistant_tokens=True)
+        formatted_data = format_conversation(message["messages"], tokenizer, mask_non_assistant_tokens=True)
         logger.info(formatted_data['text'])
         print_masking_analysis(formatted_data, tokenizer)
-
-    # this will end in error
 
 if __name__ == "__main__":
     test_data_util()
