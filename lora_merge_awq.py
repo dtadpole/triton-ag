@@ -9,7 +9,8 @@ from awq import AutoAWQForCausalLM
 from datasets import load_dataset
 import torch
 from transformers import AutoTokenizer
-from data_processor import load_experiences, format_conversation_by_turns, format_conversation
+from data_processor import load_experiences, format_conversation
+from trainerUtil import _manual_format_conversation
 from tqdm import tqdm
 
 # Set up environment
@@ -101,35 +102,34 @@ def main(config_path):
         config = yaml.safe_load(file)
 
     # Read paths from config
-    base_model_config = config['base_model']
-    if "path" in base_model_config:
-        base_model_path = base_model_config['path']
+    model_paths = config['model_paths']
+    if "base_model" in model_paths:
+        base_model_path = model_paths["base_model"]
     else:
         raise ValueError("Base model path not found in config")
 
-    lora_config = config['lora_adapter']
-    if "path" in lora_config:
-        lora_adapter_path = lora_config['path']
+    if "lora_adapter" in model_paths:
+        lora_adapter_path = model_paths['lora_adapter']
     else:
         raise ValueError("Lora adapter path not found in config")
 
-    output_config = config['output_model']
-    if "path" in output_config:
-        output_model_path = output_config['path']
+    if "output_model_path" in model_paths:
+        output_model_path = model_paths['output_model_path']
     else:
         raise ValueError("Output model path not found in config")
 
-    calibration_config = config['calibration_experience']
-    if "path" in calibration_config:
-        calibration_experience_path = calibration_config['path']
+    data_paths = config['data_paths']
+    if "calibration_experience" in data_paths:
+        calibration_experience_path = data_paths['calibration_experience']
     else:
         raise ValueError("Calibration experience path not found in config")
 
-    eval_config = config['eval_experience']
-    if "path" in eval_config:
-        eval_experience = eval_config['path']
+    if "eval_experience" in data_paths:
+        eval_experience = data_paths['eval_experience']
     else:
         raise ValueError("Evaluation experience path not found in config")
+
+    quant_params_config = config['quantize_params']
 
     device_map = config["device"] if "device" in config else "auto"
     tem_full_precision_model = "/tmp/tem_model_path"
@@ -158,7 +158,7 @@ def main(config_path):
         tokenizer = AutoTokenizer.from_pretrained(base_model_path)
 
         # Calculate perplexity of the merged full precision model
-        logger.info("Calculating perplexity of the merged full precision model...")
+        logger.info("Calculating perplexity of the full precision model...")
         merged_model_for_eval = AutoModelForCausalLM.from_pretrained(
             base_model_path,
             device_map=device_map,
@@ -170,7 +170,7 @@ def main(config_path):
             eval_subset,
             device=device_map if device_map != "auto" else "cuda"
         )
-        logger.info(f"Merged model perplexity: {merged_model_perplexity:.4f}")
+        logger.info(f"Raw model perplexity: {merged_model_perplexity:.4f}")
 
         # Free up memory
         del merged_model_for_eval
@@ -231,15 +231,17 @@ def main(config_path):
     else:
         experiences = load_experiences(calibration_experience_path)
         data = []
-        max_length = 512 # hardcode for calibration experience
+        max_length = quant_params_config["max_calib_seq_len"] # hardcode for calibration experience
         logger.info("Start reading and formatting the experience data...")
         for example in tqdm(experiences):
-            result_turns = format_conversation_by_turns(example)
-            for turn in result_turns:
-                tokens = tokenizer.encode(turn, add_special_tokens=True)
-                if len(tokens) <= max_length:
-                    data.append(turn.strip())
+            text_result = _manual_format_conversation(example["messages"])
+            tokens = tokenizer.encode(text_result, add_special_tokens=True)
+            if len(tokens) <= max_length:
+                data.append(text_result.strip())
     logger.info("There are %i data for calibration" % len(data))
+    if len(data) > 256:
+        data = data[:256]
+        logger.info("Truncate the calibration data to 256")
 
     # hardcode for AWQ config for now
     quant_config = {
@@ -251,13 +253,17 @@ def main(config_path):
 
     # start calibration and quantization
     logger.info("Start calibration and quantization...")
-    if (len(data) > 0):
-        model.quantize(tokenizer, quant_config = quant_config, calib_data=data)
+    if quant_params_config["apply_quantization"]:
+        model.quantize(tokenizer,
+                       quant_config = quant_config,
+                       calib_data=data,
+                       n_parallel_calib_samples=quant_params_config["n_parallel_calib_samples"],
+                       max_calib_samples=quant_params_config["max_calib_samples"],
+                       max_calib_seq_len=quant_params_config["max_calib_seq_len"])
+        model.save_quantized(output_model_path)
+        tokenizer.save_pretrained(output_model_path)
     else:
-        model.quantize(tokenizer, quant_config = quant_config)
-
-    model.save_quantized(output_model_path)
-    tokenizer.save_pretrained(output_model_path)
+        logger.info("skip quantization, make sure your model output has the quantized model")
 
     # Calculate perplexity of the AWQ quantized model
     logger.info("Calculating perplexity of the AWQ quantized model...")
