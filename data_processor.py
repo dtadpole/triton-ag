@@ -15,6 +15,7 @@ from transformers import DataCollatorForLanguageModeling
 from transformers import AutoTokenizer
 from util import logger, is_devserver
 from huggingface_hub import HfApi
+from tqdm import tqdm
 
 
 class CustomDataCollatorWithMasking(DataCollatorForLanguageModeling):
@@ -339,15 +340,17 @@ def qwen3_assistant_message_content_format(assistant_message):
     ## if content is a list, it is the assistant thinking
     conversation_text = ""
     if type(content) is list:
-        conversation_text += "<think>\n"
+        if "<think>" not in content[0]["text"]:
+            conversation_text += "<think>\n"
         for item in content:
             conversation_text += item["text"] + "\n"
-        conversation_text += "</think>\n"
+        if "</think>" not in content[-1]["text"]:
+            conversation_text += "</think>\n"
     elif content is None and "function_call" in assistant_message:
         function_call = assistant_message["function_call"]
         func_call_json = {
             "name": function_call["name"],
-            "arguments": json.loads(function_call["arguments"])
+            "arguments": json.loads(function_call["arguments"]) if type(function_call["arguments"]) is str else function_call["arguments"]
         }
         conversation_text += f"<tool_call>\n{json.dumps(func_call_json)}\n</tool_call>"
     elif type(content) is str:
@@ -795,7 +798,7 @@ def process_data(args):
     dataloader = torch.utils.data.DataLoader(dataset=dataset, collate_fn=collate_fn, batch_size=args.batch_size)
 
     idx = 0
-    for batch in dataloader:
+    for batch in tqdm(dataloader):
         # recursively convert batch data from Tensor to list
         for k, v in batch.items():
             if isinstance(v, torch.Tensor):
@@ -819,7 +822,7 @@ def process_data(args):
 
     logger.info(f"Processed {idx} experiences")
 
-    if args.upload_to_hf:
+    if args.upload_to_hf and is_devserver() is False:
         # create repo if it doesn't exist
         api = HfApi()
         if not api.repo_exists(args.upload_to_hf):
