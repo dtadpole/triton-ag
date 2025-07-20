@@ -27,7 +27,7 @@ class CodeGenEvalClient:
             run_tag: str,
             inference_client_config: InferenceClientConfig,
             config_file: str = "inferenceCodeGenEval.yaml",
-            logprobs: bool = False,
+            logprobs: bool = True,
     ):
         with open(config_file, 'r') as f:
             self.config = yaml.safe_load(f)
@@ -90,13 +90,17 @@ class CodeGenEvalClient:
         # Create conversation
         system_prompt = self.get_system_prompt()
         user_prompt = self.get_user_prompt(reference_code)
-        
-        # Generate response
-        start_time = time.time()
-        result = await self.inference_client.chat_completion([
+
+        messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
-        ])
+        ]
+        
+        prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+        # Generate response
+        start_time = time.time()
+        result = await self.inference_client.completion(prompt)
         generation_time = time.time() - start_time
         
         content = result.get('content', '')
@@ -110,9 +114,20 @@ class CodeGenEvalClient:
         num_reasoning_tokens = len(reasoning_tokens)
         token_per_second = (num_tokens + num_reasoning_tokens) / generation_time
 
+        metadata = {
+            "run_tag": self.run_tag,
+            "model_tag": self.model_tag,
+            "task_tag": task_tag,
+            "gen_tag": gen_tag,
+            "reference_code": reference_code,
+            "num_tokens": num_tokens,
+            "num_reasoning_tokens": num_reasoning_tokens,
+            "generation_time_seconds": generation_time,
+            "token_per_second": token_per_second,
+        }
+
         # save response to a
         conversation_file = self.output_dir / task_tag / f"{gen_tag}_conversation.json"
-
         conversation = {
             "messages": [
                 {
@@ -129,22 +144,22 @@ class CodeGenEvalClient:
                     "content": content
                 }
             ],
-            "logprobs": logprobs,
-            "metadata": {
-                "run_tag": self.run_tag,
-                "model_tag": self.model_tag,
-                "task_tag": task_tag,
-                "gen_tag": gen_tag,
-                "reference_code": reference_code,
-                "num_tokens": num_tokens,
-                "num_reasoning_tokens": num_reasoning_tokens,
-                "generation_time_seconds": generation_time,
-                "token_per_second": token_per_second,
-            }
+            "metadata": metadata,
         }
 
         with open(conversation_file, 'w') as f:
             f.write(json.dumps(conversation, indent=2, ensure_ascii=False, default=str))
+
+        completion_file = self.output_dir / task_tag / f"{gen_tag}_completion.json"
+        completion = {
+            "prompt": prompt,
+            "generation": content,
+            "logprobs": logprobs,
+            "metadata": metadata,
+        }
+
+        with open(completion_file, 'w') as f:
+            f.write(json.dumps(completion, indent=2, ensure_ascii=False, default=str))
 
         # extract the generated code from the generated text
         try:

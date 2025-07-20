@@ -15,12 +15,16 @@ import traceback
 from logger import logger
 from pydantic import BaseModel, Field
 
+EOS_TOKENS = ["<|endoftext|>", "<|end▁of▁sentence|>", "<｜end▁of▁sentence｜>", "<|im_end|>", "<|im_start|>"]
+
+REQUIRED_MATCHED_RATIO = 99.0
+
 class ProviderConfig(BaseModel):
     provider_name: str = Field()
     base_url: str = Field()
     api_key_path: str = Field()
     streaming: bool = Field(default=True)
-    max_retries: int = Field(default=3)
+    max_retries: int = Field(default=5)
     timeout: int = Field(default=600)
 
 class ModelConfig(BaseModel):
@@ -223,7 +227,7 @@ class InferenceClient:
                 prompt=prompt,
                 temperature=self.temperature,
                 max_tokens=max_tokens,
-                stop=["<|im_end|>", "\n<|im_end|>", " <|im_end|>", ".<|im_end|>", "<|im_start|>"],
+                stop=[self.tokenizer.eos_token] + EOS_TOKENS,
                 stream=True,
                 timeout=self.timeout,
                 logprobs=1 if self.logprobs else NOT_GIVEN,
@@ -251,7 +255,7 @@ class InferenceClient:
                 prompt=prompt,
                 temperature=self.temperature,
                 max_tokens=max_tokens,
-                stop=["<|im_end|>", "\n<|im_end|>", " <|im_end|>", ".<|im_end|>", "<|im_start|>"],
+                stop=[self.tokenizer.eos_token] + EOS_TOKENS,
                 stream=False,
                 timeout=self.timeout,
                 logprobs=1 if self.logprobs else NOT_GIVEN,
@@ -268,7 +272,77 @@ class InferenceClient:
                         logprobs_content.append({"token": token, "logprob": logprob})
                 logger.info(f"🔍 [InferenceClient] [Completion] Logprobs: [len={len(logprobs_content)}]")
 
-        return {'content': generated_content, "logprobs": logprobs_content}
+        logprobs_tokenized_content = []
+        if logprobs_content:
+            # tokenize the generated content
+            token_ids = self.tokenizer.encode(generated_content, add_special_tokens=False, padding=False)
+            generated_tokens = [self.tokenizer.decode([token_id]) for token_id in token_ids]
+            if len(token_ids) == len(logprobs_content) - 1:
+                # add eos_token_id is handling for Qwen, where <|im_end|> is not included in the generated content
+                token_ids = token_ids + [self.tokenizer.eos_token_id]
+            # elif len(token_ids) == len(logprobs_content) + 1:
+            #     # truncate the last token_id
+            #     token_ids = token_ids[:-1]
+            else:
+                # use exact tokens from logprobs_content
+                logger.warning(f"⚠️ [InferenceClient] [Completion] unable to match the generated content [len={len(token_ids)}] with the logprobs content [len={len(logprobs_content)}], using exact tokens from logprobs_content")
+                token_ids = []
+                generated_tokens = []
+                for token_prob in logprobs_content:
+                    encoded_token = self.tokenizer.encode(token_prob['token'], add_special_tokens=False)
+                    if len(encoded_token) == 1:
+                        token_ids.append(encoded_token[0])
+                        generated_tokens.append(token_prob['token'])
+                    elif len(encoded_token) == 0:
+                        if len(token_ids) == len(logprobs_content) - 1:
+                            logger.warning(f"⚠️ [InferenceClient] [Completion] encountered empty token: [token_ids={len(token_ids)}], [logprobs_content={len(logprobs_content)}], adding [eos_token_id] to the end")
+                            token_ids.append(self.tokenizer.eos_token_id)
+                            generated_tokens.append(self.tokenizer.eos_token)
+                        else:
+                            error_message = f"❌ [InferenceClient] [Completion] encountered empty token: [token_ids={len(token_ids)}] [logprobs_content={len(logprobs_content)}]"
+                            logger.error(error_message)
+                            raise ValueError(error_message)
+                    else:
+                        logger.warning(f"⚠️ [InferenceClient] [Completion] encountered multiple tokens: [encoded_token={len(encoded_token)}], [logprobs_content={len(logprobs_content)}], using the first token")
+                        token_ids.append(encoded_token[0])
+                        generated_tokens.append(token_prob['token'])
+            if len(token_ids) != len(logprobs_content):
+                logger.error(f"❌ [InferenceClient] [Completion] Generated content: [generated_content={generated_content}] [len={len(token_ids)}] [generated_tokens={list(zip(token_ids, generated_tokens))}]")
+                logger.error(f"❌ [InferenceClient] [Completion] Logprobs: [len={len(logprobs_content)}] [{logprobs_content}]")
+                error_message = f"❌ [InferenceClient] [Completion] Logprobs length mismatch: [token_ids={len(token_ids)}] != [logprobs={len(logprobs_content)}]]"
+                logger.error(error_message)
+                raise ValueError(error_message)
+            # replace all the tokens in logprobs_content with the tokens from the generated content
+            num_matched_tokens = 0
+            num_mismatched_tokens = 0
+            for token_id, logprob in zip(token_ids, logprobs_content):
+                decoded_token = self.tokenizer.decode([token_id])
+                encoded_token_id = self.tokenizer.encode(decoded_token, add_special_tokens=False)
+                logprob_token = logprob['token']
+                logprob_token_normalized = logprob_token.replace('Ġ', ' ').replace('Ċ', '\n').replace('▁', ' ')
+                encoded_logprob_token_id = self.tokenizer.encode(logprob_token, add_special_tokens=False)
+                if encoded_token_id == encoded_logprob_token_id or decoded_token == logprob_token_normalized:
+                    num_matched_tokens += 1
+                else:
+                    num_mismatched_tokens += 1
+                    if num_mismatched_tokens < 10:
+                        logger.warning(f"⚠️ [InferenceClient] [Completion] Logprobs: logprob_token=[{logprob_token}], logprob_token_id=[{encoded_logprob_token_id}] != decoded_token=[{decoded_token}], decoded_token_id=[{encoded_token_id}], token_id=[{token_id}]")
+                tokenized_logprob = {
+                    "token": decoded_token,
+                    "token_id": token_id,
+                    "logprob": logprob['logprob']
+                }
+                logprobs_tokenized_content.append(tokenized_logprob)
+            # check if the matched ratio is less than 90%
+            matched_ratio = num_matched_tokens * 100.0 / len(logprobs_content) if len(logprobs_content) > 0 else 0.0
+            if matched_ratio < REQUIRED_MATCHED_RATIO:
+                error_message = f"❌ [InferenceClient] [Completion] Logprobs: [num_matched_tokens={num_matched_tokens}] / [len={len(logprobs_content)}] = [ratio={matched_ratio:.2f}%]"
+                logger.error(error_message)
+                raise ValueError(error_message)
+            else:
+                logger.info(f"🔍 [InferenceClient] [Completion] Logprobs: [num_matched_tokens={num_matched_tokens}] / [len={len(logprobs_content)}] = [ratio={matched_ratio:.2f}%]")
+
+        return {'content': generated_content, "logprobs": logprobs_tokenized_content}
        
     async def completion(self, prompt: str, max_tokens: int = None) -> Dict:
         """
@@ -377,12 +451,11 @@ def load_inference_client_config(
         model=model_config
     )
 
-
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--provider", type=str, default="deepinfra", help="Provider to use (vllm, sglang, deepseek, fireworks, together)")
     parser.add_argument("--model", type=str, default="deepseek-v3", help="Model to use (vllm, sglang, deepseek, fireworks, together)")
-    parser.add_argument("--api_type", type=str, default="chat", choices=["chat", "completion"], help="API type to use (chat or completion)")
+    parser.add_argument("--api_type", type=str, default="completion", choices=["chat", "completion"], help="API type to use (chat or completion)")
     parser.add_argument("--streaming", type=bool, default=True, help="Whether to use streaming mode")
     parser.add_argument("--logprobs", type=bool, default=True, help="Whether to use logprobs")
     args = parser.parse_args()
@@ -420,7 +493,8 @@ async def main():
             logger.info(f"[InferenceClient] Chat completion [logprobs]: {result['logprobs']}")
     else:
         # Use completion API
-        prompt = f"<|im_start|>system\n{system_prompt}\n<|im_end|><|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        prompt = client.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        logger.info(f"[InferenceClient] Completion [prompt]: {prompt}")
         result = await client.completion(prompt)
         if 'content' in result:
             logger.info(f"[InferenceClient] Completion [content]: {result['content']}")
