@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 from pathlib import Path
 import yaml
 import requests
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, NOT_GIVEN
 from openai.types.chat import ChatCompletionMessage
 from transformers import AutoTokenizer
 import traceback
@@ -31,6 +31,7 @@ class ModelConfig(BaseModel):
     max_tokens: int = Field(default=8192)
     top_p: float = Field(default=1.0)
     top_k: int = Field(default=40)
+    logprobs: bool = Field(default=False)
 
 class InferenceClientConfig(BaseModel):
     provider: ProviderConfig = Field()
@@ -68,6 +69,7 @@ class InferenceClient:
         self.max_tokens = config.model.max_tokens
         self.top_p = config.model.top_p
         self.top_k = config.model.top_k
+        self.logprobs = config.model.logprobs
         # model tag
         self.model_tag = f"{self.provider_name}_{self.model_short_name}"
 
@@ -114,33 +116,42 @@ class InferenceClient:
                 messages=messages,
                 temperature=self.temperature,
                 max_tokens=max_tokens,
-                top_p=self.top_p,
                 stream=True,
                 timeout=self.timeout,
+                logprobs=self.logprobs,
+                top_p=self.top_p,
                 extra_body={"top_k": self.top_k}
             )
             
             # Initialize variables to accumulate streaming response
-            generated_text = ""
+            generated_content = ""
             reasoning_content = ""
+            logprobs_content = []
             
-            # Process streaming response
+            # Process streaming response, including logprobs
             async for chunk in stream:
                 if chunk.choices:
                     choice = chunk.choices[0]
                     # Safely access content
                     if hasattr(choice.delta, 'content') and choice.delta.content:
-                        generated_text += choice.delta.content
+                        generated_content += choice.delta.content
                     # Safely access reasoning_content (only available for reasoning models like o1)
                     if hasattr(choice.delta, 'reasoning_content') and choice.delta.reasoning_content:
+                        logger.warning(f"⚠️ [InferenceClient] [Chat completion] Reasoning content: {choice.delta.reasoning_content}")
                         reasoning_content += choice.delta.reasoning_content
-            
+                    # Safely access logprobs
+                    if hasattr(choice.delta, 'logprobs') and choice.delta.logprobs:
+                        if 'content' in choice.delta.logprobs:
+                            logprobs_content.append(choice.delta.logprobs['content'])
+
+            logger.info(f"🔍 [InferenceClient] [Chat completion] Logprobs: [len={len(logprobs_content)}]")
+
             # Create a proper ChatCompletionMessage object
             return_message = ChatCompletionMessage(
-                content=generated_text,
+                content=generated_content,
                 role="assistant",
-                reasoning_content=reasoning_content if reasoning_content else None
-            ).model_dump()
+                reasoning_content=reasoning_content if reasoning_content else None,
+            ).model_dump() | {"logprobs": logprobs_content}
         else:
             # NON-STREAMING MODE: Single response using OpenAI client
             response = await self.openai_client.chat.completions.create(
@@ -148,9 +159,10 @@ class InferenceClient:
                 messages=messages,
                 temperature=self.temperature,
                 max_tokens=max_tokens,
-                top_p=self.top_p,
                 stream=False,
                 timeout=self.timeout,
+                logprobs=self.logprobs,
+                top_p=self.top_p,
                 extra_body={"top_k": self.top_k}
             )
             
@@ -158,14 +170,16 @@ class InferenceClient:
             if response.choices:
                 choice = response.choices[0]
                 return_message = choice.message.model_dump()
+                logger.info(f"🔍 [InferenceClient] [Chat completion] Logprobs: [len={len(choice.logprobs.content)}]")
+                return_message['logprobs'] = choice.logprobs.model_dump()
 
         # check if return_message['content'] has <think> and </think> using regex
-        matches = re.search(r'<think>(.*?)</think>(.*?)$', return_message['content'].strip(), re.DOTALL)
-        if matches:
-            # if yes, extract the content between <think> and </think> and add it to return_message['reasoning_content']
+        # matches = re.search(r'<think>(.*?)</think>(.*?)$', return_message['content'].strip(), re.DOTALL)
+        # if matches:
+        #     # if yes, extract the content between <think> and </think> and add it to return_message['reasoning_content']
             # use re.DOTALL to match newline characters
-            return_message['reasoning_content'] = matches.group(1)
-            return_message['content'] = matches.group(2)
+            # return_message['reasoning_content'] = matches.group(1)
+            # return_message['content'] = matches.group(2)
 
         return return_message
 
@@ -199,7 +213,8 @@ class InferenceClient:
         """
         max_tokens = max_tokens or self.max_tokens
 
-        generated_text = ""
+        generated_content = ""
+        logprobs_content = []
         
         if self.streaming:
             # STREAMING MODE: Real-time token streaming using OpenAI client
@@ -208,9 +223,11 @@ class InferenceClient:
                 prompt=prompt,
                 temperature=self.temperature,
                 max_tokens=max_tokens,
-                top_p=self.top_p,
+                stop=["<|im_end|>", "\n<|im_end|>", " <|im_end|>", ".<|im_end|>", "<|im_start|>"],
                 stream=True,
                 timeout=self.timeout,
+                logprobs=1 if self.logprobs else NOT_GIVEN,
+                top_p=self.top_p,
                 extra_body={"top_k": self.top_k}
             )
             
@@ -220,7 +237,13 @@ class InferenceClient:
                     choice = chunk.choices[0]
                     # Safely access text
                     if hasattr(choice, 'text') and choice.text:
-                        generated_text += choice.text
+                        generated_content += choice.text
+                    if hasattr(choice, 'logprobs') and choice.logprobs:
+                        if hasattr(choice.logprobs, 'token_logprobs') and hasattr(choice.logprobs, 'tokens'):
+                            for token, logprob in zip(choice.logprobs.tokens, choice.logprobs.token_logprobs):
+                                logprobs_content.append({"token": token, "logprob": logprob})
+                        else:
+                            logprobs_content.append(choice.logprobs.model_dump())
         else:
             # NON-STREAMING MODE: Single response using OpenAI client
             response = await self.openai_client.completions.create(
@@ -228,19 +251,25 @@ class InferenceClient:
                 prompt=prompt,
                 temperature=self.temperature,
                 max_tokens=max_tokens,
-                top_p=self.top_p,
+                stop=["<|im_end|>", "\n<|im_end|>", " <|im_end|>", ".<|im_end|>", "<|im_start|>"],
                 stream=False,
                 timeout=self.timeout,
+                logprobs=1 if self.logprobs else NOT_GIVEN,
+                top_p=self.top_p,
                 extra_body={"top_k": self.top_k}
             )
             
             # Extract text from response
             if response.choices:
                 choice = response.choices[0]
-                generated_text = choice.text or ""
+                generated_content = choice.text or ""
+                if hasattr(choice, 'logprobs') and choice.logprobs:
+                    for token, logprob in zip(choice.logprobs.tokens, choice.logprobs.token_logprobs):
+                        logprobs_content.append({"token": token, "logprob": logprob})
+                logger.info(f"🔍 [InferenceClient] [Completion] Logprobs: [len={len(logprobs_content)}]")
 
-        return {'text': generated_text} # return a ChatCompletionMessage object
-    
+        return {'content': generated_content, "logprobs": logprobs_content}
+       
     async def completion(self, prompt: str, max_tokens: int = None) -> Dict:
         """
         Generate text completion using OpenAI-compatible API with streaming or non-streaming mode.
@@ -255,6 +284,7 @@ class InferenceClient:
                     logger.warning(f"⚠️ [InferenceClient] [Completion] Failed: {e} [{retry_count}/{self.max_retries}], retrying in {2 ** retry_count} seconds...")
                     await asyncio.sleep(2 ** retry_count) # exponential backoff
                 else:
+                    traceback.print_exc()
                     logger.error(f"❌ [InferenceClient] [Completion] Failed: {e}, giving up...") # give up after max retries
         return None
 
@@ -300,6 +330,8 @@ class InferenceClient:
 def load_inference_client_config(
         provider_name: str,
         model_short_name: str,
+        logprobs: bool = False,
+        streaming: bool = True,
         config_file: str = "inferenceClient.yaml"
     ) -> InferenceClientConfig:
     """Load configuration from YAML file."""
@@ -331,6 +363,12 @@ def load_inference_client_config(
         model_json = config_yaml[provider_name]['models'][model_short_name] | {"model_short_name": model_short_name}
         model_config = ModelConfig(**model_json)
 
+    # override logprobs
+    model_config.logprobs = logprobs
+
+    # override streaming mode
+    provider_config.streaming = streaming
+
     # use file emoji
     logger.info(f"📁 [InferenceClient] Config file [{config_file}] loaded with Provider [{provider_config.provider_name}] and Model [{model_config.model_short_name}]")
 
@@ -345,11 +383,15 @@ async def main():
     parser.add_argument("--provider", type=str, default="deepinfra", help="Provider to use (vllm, sglang, deepseek, fireworks, together)")
     parser.add_argument("--model", type=str, default="deepseek-r1", help="Model to use (vllm, sglang, deepseek, fireworks, together)")
     parser.add_argument("--api_type", type=str, default="chat", choices=["chat", "completion"], help="API type to use (chat or completion)")
+    parser.add_argument("--streaming", type=bool, default=True, help="Whether to use streaming mode")
+    parser.add_argument("--logprobs", type=bool, default=True, help="Whether to use logprobs")
     args = parser.parse_args()
 
     config = load_inference_client_config(
         provider_name=args.provider,
         model_short_name=args.model,
+        logprobs=args.logprobs,
+        streaming=args.streaming,
         config_file="inferenceClient.yaml"
     )
 
@@ -374,12 +416,16 @@ async def main():
             logger.info(f"[InferenceClient] Chat completion [reasoning_content]: {result['reasoning_content']}")
         if 'content' in result:
             logger.info(f"[InferenceClient] Chat completion [content]: {result['content']}")
+        if 'logprobs' in result:
+            logger.info(f"[InferenceClient] Chat completion [logprobs]: {result['logprobs']}")
     else:
         # Use completion API
-        prompt = f"<|im_start|>system\n{system_prompt}\n<|im_end|>\n<|im_start|>user\n{user_prompt}\n<|im_end|>\n<|im_start|>assistant\n"
+        prompt = f"<|im_start|>system\n{system_prompt}\n<|im_end|><|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant\n"
         result = await client.completion(prompt)
-        if 'text' in result:
-            logger.info(f"[InferenceClient] Completion [text]: {result['text']}")
+        if 'content' in result:
+            logger.info(f"[InferenceClient] Completion [content]: {result['content']}")
+        if 'logprobs' in result:
+            logger.info(f"[InferenceClient] Completion [logprobs]: {result['logprobs']}")
 
 if __name__ == "__main__":
     asyncio.run(main())
