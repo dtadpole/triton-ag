@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 EOS_TOKENS = ["<|endoftext|>", "<|end▁of▁sentence|>", "<｜end▁of▁sentence｜>", "<|im_end|>", "<|im_start|>"]
 
-REQUIRED_MATCHED_RATIO = 99.0
+REQUIRED_MATCHED_RATIO = 99.5
 
 class ProviderConfig(BaseModel):
     provider_name: str = Field()
@@ -277,12 +277,11 @@ class InferenceClient:
             # tokenize the generated content
             token_ids = self.tokenizer.encode(generated_content, add_special_tokens=False, padding=False)
             generated_tokens = [self.tokenizer.decode([token_id]) for token_id in token_ids]
-            if len(token_ids) == len(logprobs_content) - 1:
+            if len(token_ids) == len(logprobs_content):
+                pass
+            elif len(token_ids) == len(logprobs_content) - 1:
                 # add eos_token_id is handling for Qwen, where <|im_end|> is not included in the generated content
                 token_ids = token_ids + [self.tokenizer.eos_token_id]
-            # elif len(token_ids) == len(logprobs_content) + 1:
-            #     # truncate the last token_id
-            #     token_ids = token_ids[:-1]
             else:
                 # use exact tokens from logprobs_content
                 logger.warning(f"⚠️ [InferenceClient] [Completion] unable to match the generated content [len={len(token_ids)}] with the logprobs content [len={len(logprobs_content)}], using exact tokens from logprobs_content")
@@ -336,11 +335,11 @@ class InferenceClient:
             # check if the matched ratio is less than 90%
             matched_ratio = num_matched_tokens * 100.0 / len(logprobs_content) if len(logprobs_content) > 0 else 0.0
             if matched_ratio < REQUIRED_MATCHED_RATIO:
-                error_message = f"❌ [InferenceClient] [Completion] Logprobs: [num_matched_tokens={num_matched_tokens}] / [len={len(logprobs_content)}] = [ratio={matched_ratio:.2f}%]"
+                error_message = f"❌ [InferenceClient] [Completion] Logprobs: [num_matched_tokens={num_matched_tokens}] / [len={len(logprobs_content)}] = [matched_ratio={matched_ratio:.2f}%]"
                 logger.error(error_message)
                 raise ValueError(error_message)
             else:
-                logger.info(f"🔍 [InferenceClient] [Completion] Logprobs: [num_matched_tokens={num_matched_tokens}] / [len={len(logprobs_content)}] = [ratio={matched_ratio:.2f}%]")
+                logger.info(f"🔍 [InferenceClient] [Completion] Logprobs: [num_matched_tokens={num_matched_tokens}] / [len={len(logprobs_content)}] = [matched_ratio={matched_ratio:.2f}%]")
 
         return {'content': generated_content, "logprobs": logprobs_tokenized_content}
        
