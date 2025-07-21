@@ -500,7 +500,7 @@ class BaseTrainer:
         
         return loss
     
-    def _training_step(self, batch: Dict[str, torch.Tensor]) -> float:
+    def _train_step(self, batch: Dict[str, torch.Tensor]) -> float:
         """Execute a single training step"""
         self.model.train()
         
@@ -571,7 +571,7 @@ class BaseTrainer:
 
         for batch_idx, batch in enumerate(dataloader):
             # Training step
-            step_loss = self._training_step(batch)
+            step_loss = self._train_step(batch)
             accumulated_loss += step_loss
             
             # Optimization step (only after accumulation)
