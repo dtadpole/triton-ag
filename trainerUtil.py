@@ -233,7 +233,11 @@ class SimpleCollator:
         if 'labels' in batch[0]:
             labels = []
             for item in batch:
-                label = torch.tensor(item['labels'])
+                # if item['labels'] is already a tensor, use it directly
+                if isinstance(item['labels'], torch.Tensor):
+                    label = item['labels']
+                else:
+                    label = torch.tensor(item['labels'])
                 pad_len = max_len - len(label)
                 padded_label = torch.cat([label, torch.full((pad_len,), self.ignore_index)])
                 labels.append(padded_label)
