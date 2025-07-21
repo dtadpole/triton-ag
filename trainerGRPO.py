@@ -36,7 +36,7 @@ class GRPOConfig(BaseModel):
     clip_epsilon_lower: float = 0.2
     clip_epsilon_upper: float = 0.3
     beta: float = 0.0  # KL divergence coefficient
-    reward_scale: bool = False
+    reward_scale: bool = True
     reward_epsilon: float = 1e-3
     reward_noise: float = 1e-2
     loss_type: str = "group_max" # "episode" or "token" or "seq_max" or "group_max"

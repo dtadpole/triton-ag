@@ -219,7 +219,11 @@ class SimpleCollator:
         if 'attention_mask' in batch[0]:
             attention_masks = []
             for item in batch:
-                mask = torch.tensor(item['attention_mask'])
+                # if item['attention_mask'] is already a tensor, use it directly
+                if isinstance(item['attention_mask'], torch.Tensor):
+                    mask = item['attention_mask']
+                else:
+                    mask = torch.tensor(item['attention_mask'])
                 pad_len = max_len - len(mask)
                 padded_mask = torch.cat([mask, torch.zeros(pad_len)])
                 attention_masks.append(padded_mask)
