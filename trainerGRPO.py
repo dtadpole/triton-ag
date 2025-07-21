@@ -36,11 +36,10 @@ class GRPOConfig(BaseModel):
     clip_epsilon_lower: float = 0.2
     clip_epsilon_upper: float = 0.3
     beta: float = 0.0  # KL divergence coefficient
-    scale_rewards: bool = False
-    reward_scale: bool = True
+    reward_scale: bool = False
     reward_epsilon: float = 1e-3
     reward_noise: float = 1e-2
-    loss_type: str = "token" # "episode" or "token" or "drgrpo"
+    loss_type: str = "token" # "episode" or "token" or "drgrpo" or "group_max"
 
     @classmethod
     def from_yaml(cls, file_path: str) -> "GRPOConfig":
@@ -228,7 +227,7 @@ class GRPOTrainer(BaseTrainer):
             log_probs = F.log_softmax(logits, dim=-1)
             return log_probs # dim: (batch_size, seq_len, vocab_size)
 
-    def _compute_mini_batch_loss(self, batch: Dict[str, Any]):
+    def _compute_mini_batch_loss(self, batch: Dict[str, Any], group_max_length: Optional[int] = None):
         """Compute loss for the generated tokens"""
         # gen_tags = batch['gen_tag']
         # rewards = batch['reward']
@@ -277,7 +276,9 @@ class GRPOTrainer(BaseTrainer):
             if self.grpo_config.loss_type == "episode":
                 loss = -final_ratio_advantage.mean()
             elif self.grpo_config.loss_type == "token":
-                loss = -torch.sum(final_ratio_advantage) / len(completion_token_ids)
+                loss = -torch.sum(final_ratio_advantage) / len(new_action_log_probs)
+            elif self.grpo_config.loss_type == "group_max":
+                loss = -torch.sum(final_ratio_advantage) / group_max_length
             elif self.grpo_config.loss_type == "drgrpo":
                 loss = -torch.sum(final_ratio_advantage) / self.grpo_config.max_seq_length
             else:
@@ -301,8 +302,9 @@ class GRPOTrainer(BaseTrainer):
         )
 
         for group in dataset.result_groups:
+            group_dataset = group.get_dataset(self.grpo_config)
             dataloader = DataLoader(
-                group.get_dataset(self.grpo_config),
+                group_dataset,
                 batch_size=self.config.training.micro_batch_size,
                 shuffle=True,
                 num_workers=self.config.training.dataloader_num_workers,
@@ -312,10 +314,13 @@ class GRPOTrainer(BaseTrainer):
             
             accumulated_loss = 0.0
 
+            # group_max_length = max(len(result['input_ids']) for result in group_dataset)
+            group_max_length = max(len(result['completion_token_ids']) for result in group_dataset)
+
             self.model.train()
             for batch_idx, batch in enumerate(dataloader):
                 # Training step
-                mini_batch_loss = self._compute_mini_batch_loss(batch)
+                mini_batch_loss = self._compute_mini_batch_loss(batch, group_max_length)
                 
                 # Scale loss for gradient accumulation
                 mini_batch_loss = mini_batch_loss / len(dataloader) # divide by the group size
