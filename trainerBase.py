@@ -519,7 +519,7 @@ class BaseTrainer:
         """Execute optimization step with gradient clipping"""
         # Clip gradients
         grad_norm = clip_grad_norm_(self.model.parameters(), self.config.training.max_grad_norm)
-        logger.info(f"🔍 [{self.__class__.__name__}] Grad norm: {grad_norm:.4f}")
+        logger.info(f"🔍 [{self.__class__.__name__}] Grad norm: [{grad_norm:.4f}] max grad norm: [{self.config.training.max_grad_norm:.2f}]")
         
         # Update parameters
         self.optimizer.step()

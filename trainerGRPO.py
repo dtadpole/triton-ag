@@ -39,7 +39,7 @@ class GRPOConfig(BaseModel):
     reward_scale: bool = False
     reward_epsilon: float = 1e-3
     reward_noise: float = 1e-2
-    loss_type: str = "token" # "episode" or "token" or "drgrpo" or "group_max"
+    loss_type: str = "group_max" # "episode" or "token" or "seq_max" or "group_max"
 
     @classmethod
     def from_yaml(cls, file_path: str) -> "GRPOConfig":
@@ -279,7 +279,7 @@ class GRPOTrainer(BaseTrainer):
                 loss = -torch.sum(final_ratio_advantage) / len(new_action_log_probs)
             elif self.grpo_config.loss_type == "group_max":
                 loss = -torch.sum(final_ratio_advantage) / group_max_length
-            elif self.grpo_config.loss_type == "drgrpo":
+            elif self.grpo_config.loss_type == "seq_max":
                 loss = -torch.sum(final_ratio_advantage) / self.grpo_config.max_seq_length
             else:
                 raise ValueError(f"❌ [GRPOTrainingGroup] Invalid loss type: {self.grpo_config.loss_type}")
