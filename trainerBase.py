@@ -205,14 +205,16 @@ class BaseTrainer:
         self._set_seed()
         
         # Initialize model and tokenizer
-        self._setup_model_and_tokenizer()
+        self.base_model, self.tokenizer = self._setup_model_and_tokenizer()
         
         # Setup LoRA if enabled
         if self.config.lora.use_lora:
-            self._setup_lora()
+            self.model = self._setup_lora(self.base_model)
+        else:
+            self.model = self.base_model
         
         # Initialize optimizer and scheduler
-        self._setup_optimizer_and_scheduler()
+        self.optimizer, self.scheduler = self._setup_optimizer_and_scheduler()
 
         # Initialize data collator
         self.data_collator = SimpleCollator(
@@ -253,7 +255,7 @@ class BaseTrainer:
         logger.info(f"🚀 [{self.__class__.__name__}] Loading model: {self.config.model.name}")
         
         # Load model with Unsloth
-        self.model, self.tokenizer = FastLanguageModel.from_pretrained(
+        model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=self.config.model.name,
             max_seq_length=self.config.model.max_seq_length,
             dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16),
@@ -263,35 +265,37 @@ class BaseTrainer:
         )
         
         # Ensure tokenizer has pad token
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
         
         # Special handling for Qwen models
         is_qwen_model = "qwen" in self.config.model.name.lower()
         if is_qwen_model:
             # Ensure Qwen-specific tokenizer settings
-            if hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template is None:
+            if hasattr(tokenizer, 'chat_template') and tokenizer.chat_template is None:
                 logger.warning("⚠️ [{self.__class__.__name__}] Qwen model missing chat template, this may cause generation issues")
             
             # Set trust_remote_code for Qwen models if needed
-            if hasattr(self.tokenizer, 'trust_remote_code'):
-                self.tokenizer.trust_remote_code = True
+            if hasattr(tokenizer, 'trust_remote_code'):
+                tokenizer.trust_remote_code = True
                 
-            logger.info(f"🔧 [{self.__class__.__name__}] Qwen tokenizer configured with chat template: {hasattr(self.tokenizer, 'chat_template')}")
+            logger.info(f"🔧 [{self.__class__.__name__}] Qwen tokenizer configured with chat template: {hasattr(tokenizer, 'chat_template')}")
         
         # Log model information
-        total_params = sum(p.numel() for p in self.model.parameters())
-        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         
         logger.info(f"✅ [{self.__class__.__name__}] Model loaded - Total: {total_params:,}, Trainable: {trainable_params:,} ({100 * trainable_params / total_params:.1f}%)")
+
+        return model, tokenizer
     
-    def _setup_lora(self):
+    def _setup_lora(self, model: FastLanguageModel):
         """Setup LoRA configuration using Unsloth"""
         logger.info(f"🔧 [{self.__class__.__name__}] Setting up LoRA (rank={self.config.lora.rank}, alpha={self.config.lora.alpha})")
         
         # Apply LoRA with Unsloth
-        self.model = FastLanguageModel.get_peft_model(
-            self.model,
+        lora_model = FastLanguageModel.get_peft_model(
+            model,
             r=self.config.lora.rank,
             target_modules=self.config.lora.target_modules,
             lora_alpha=self.config.lora.alpha,
@@ -304,14 +308,16 @@ class BaseTrainer:
         )
         
         # Log LoRA information
-        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in lora_model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in lora_model.parameters())
         
         logger.info(f"🎯 [{self.__class__.__name__}] LoRA applied - Trainable: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)")
         
         if trainable_params == 0:
             logger.error(f"❌ [{self.__class__.__name__}] No trainable parameters found!")
             raise RuntimeError("No trainable parameters found after LoRA application")
+
+        return lora_model
     
     def _setup_optimizer_and_scheduler(self):
         """Setup optimizer and learning rate scheduler"""
@@ -335,7 +341,7 @@ class BaseTrainer:
         optimizer_type = self.config.optimizer.optimizer_type.lower()
         if optimizer_type == "adamw":
             # self.optimizer = bnb.optim.PagedAdamW(
-            self.optimizer = optim.AdamW(
+            optimizer = optim.AdamW(
                 optimizer_grouped_parameters,
                 lr=self.config.training.learning_rate,
                 betas=self.config.optimizer.betas,
@@ -343,7 +349,7 @@ class BaseTrainer:
             )
         elif optimizer_type == "adam":
             # self.optimizer = bnb.optim.PagedAdam(
-            self.optimizer = optim.Adam(
+            optimizer = optim.Adam(
                 optimizer_grouped_parameters,
                 lr=self.config.training.learning_rate,
                 betas=self.config.optimizer.betas,
@@ -351,7 +357,7 @@ class BaseTrainer:
             )
         elif optimizer_type == "sgd":
             # Fall back to standard SGD as bitsandbytes doesn't have paged SGD
-            self.optimizer = optim.SGD(
+            optimizer = optim.SGD(
                 optimizer_grouped_parameters,
                 lr=self.config.training.learning_rate,
                 momentum=self.config.optimizer.momentum,
@@ -361,14 +367,16 @@ class BaseTrainer:
             raise ValueError(f"Unsupported optimizer type: {self.config.optimizer.optimizer_type}")
         
         # Setup learning rate scheduler
-        self.scheduler = get_scheduler(
+        scheduler = get_scheduler(
             self.config.training.scheduler_type,
-            optimizer=self.optimizer,
+            optimizer=optimizer,
             num_warmup_steps=self.config.training.num_warmup_steps,
             num_training_steps=self.config.training.max_steps,
         )
         
         logger.info(f"⚙️ [{self.__class__.__name__}] Paged optimizer ({optimizer_type}) and scheduler initialized")
+
+        return optimizer, scheduler
     
     def _checkpoint_exists(self, checkpoint_path: str) -> bool:
         """Check if checkpoint exists"""
@@ -492,7 +500,7 @@ class BaseTrainer:
         
         return loss
     
-    def _training_step(self, batch: Dict[str, torch.Tensor]) -> float:
+    def _train_step(self, batch: Dict[str, torch.Tensor]) -> float:
         """Execute a single training step"""
         self.model.train()
         
@@ -511,7 +519,7 @@ class BaseTrainer:
         """Execute optimization step with gradient clipping"""
         # Clip gradients
         grad_norm = clip_grad_norm_(self.model.parameters(), self.config.training.max_grad_norm)
-        logger.info(f"🔍 [{self.__class__.__name__}] Grad norm: {grad_norm:.4f}")
+        logger.info(f"🔍 [{self.__class__.__name__}] Grad norm: [{grad_norm:.4f}] max grad norm: [{self.config.training.max_grad_norm:.2f}]")
         
         # Update parameters
         self.optimizer.step()
@@ -563,7 +571,7 @@ class BaseTrainer:
 
         for batch_idx, batch in enumerate(dataloader):
             # Training step
-            step_loss = self._training_step(batch)
+            step_loss = self._train_step(batch)
             accumulated_loss += step_loss
             
             # Optimization step (only after accumulation)

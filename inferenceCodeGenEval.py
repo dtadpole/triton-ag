@@ -27,17 +27,21 @@ class CodeGenEvalClient:
             run_tag: str,
             inference_client_config: InferenceClientConfig,
             config_file: str = "inferenceCodeGenEval.yaml",
+            logprobs: bool = True,
     ):
         with open(config_file, 'r') as f:
             self.config = yaml.safe_load(f)
         self.run_tag = run_tag
         self.inference_client_config = inference_client_config
+        self.inference_client_config.model.logprobs = logprobs # always use logprobs
         self.inference_client = InferenceClient(config=self.inference_client_config)
         self.tokenizer = self.inference_client.tokenizer
         self.model_tag = self.inference_client.model_tag
         self.kb_eval_client = KbEvalClient()
         self.output_dir = self._get_output_dir()
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        logger.info(f"🔍 [CodeGenEvalClient] [{self.run_tag}] [{self.model_tag}] Using logprobs: [{self.inference_client_config.model.logprobs}]")
 
     def _get_output_dir(self) -> Path:
         """Get output sub directory for a task."""
@@ -86,17 +90,22 @@ class CodeGenEvalClient:
         # Create conversation
         system_prompt = self.get_system_prompt()
         user_prompt = self.get_user_prompt(reference_code)
-        
-        # Generate response
-        start_time = time.time()
-        result = await self.inference_client.chat_completion([
+
+        messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
-        ])
+        ]
+        
+        prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+        # Generate response
+        start_time = time.time()
+        result = await self.inference_client.completion(prompt)
         generation_time = time.time() - start_time
         
         content = result.get('content', '')
         reasoning_content = result.get('reasoning_content', '')
+        logprobs = result.get('logprobs', [])
 
         tokens = self.tokenizer.encode(content) if content else []
         reasoning_tokens = self.tokenizer.encode(reasoning_content) if reasoning_content else []
@@ -105,9 +114,20 @@ class CodeGenEvalClient:
         num_reasoning_tokens = len(reasoning_tokens)
         token_per_second = (num_tokens + num_reasoning_tokens) / generation_time
 
+        metadata = {
+            "run_tag": self.run_tag,
+            "model_tag": self.model_tag,
+            "task_tag": task_tag,
+            "gen_tag": gen_tag,
+            "reference_code": reference_code,
+            "num_tokens": num_tokens,
+            "num_reasoning_tokens": num_reasoning_tokens,
+            "generation_time_seconds": generation_time,
+            "token_per_second": token_per_second,
+        }
+
         # save response to a
         conversation_file = self.output_dir / task_tag / f"{gen_tag}_conversation.json"
-
         conversation = {
             "messages": [
                 {
@@ -124,21 +144,22 @@ class CodeGenEvalClient:
                     "content": content
                 }
             ],
-            "metadata": {
-                "run_tag": self.run_tag,
-                "model_tag": self.model_tag,
-                "task_tag": task_tag,
-                "gen_tag": gen_tag,
-                "reference_code": reference_code,
-                "num_tokens": num_tokens,
-                "num_reasoning_tokens": num_reasoning_tokens,
-                "generation_time_seconds": generation_time,
-                "token_per_second": token_per_second,
-            }
+            "metadata": metadata,
         }
 
         with open(conversation_file, 'w') as f:
             f.write(json.dumps(conversation, indent=2, ensure_ascii=False, default=str))
+
+        completion_file = self.output_dir / task_tag / f"{gen_tag}_completion.json"
+        completion = {
+            "prompt": prompt,
+            "generation": content,
+            "logprobs": logprobs,
+            "metadata": metadata,
+        }
+
+        with open(completion_file, 'w') as f:
+            f.write(json.dumps(completion, indent=2, ensure_ascii=False, default=str))
 
         # extract the generated code from the generated text
         try:
@@ -435,7 +456,7 @@ class CodeGenEvalClient:
             logger.error(traceback.format_exc())
 
 
-async def code_gen_eval_block(prefix_tag: str, config: InferenceClientConfig, epoch_id: int=-1, block_id: int=-1, num_samples: int=12, num_generations: int=8, parallel_tasks: int=10, input_dir: str="./kernel_bench/"):
+async def code_gen_eval_block(prefix_tag: str, config: InferenceClientConfig, epoch_id: int=-1, block_id: int=-1, num_samples: int=12, num_generations: int=8, parallel_tasks: int=10, input_dir: str="./kernel_bench/", logprobs: bool=False):
     """
     Run one batch of code generation and evaluation.
     """
@@ -478,7 +499,7 @@ async def code_gen_eval_block(prefix_tag: str, config: InferenceClientConfig, ep
         task_tags = [item['task_tag'] for item in reference_code_json]
 
         # now run inference
-        codeGenEvalClient = CodeGenEvalClient(run_tag=run_tag, inference_client_config=config)
+        codeGenEvalClient = CodeGenEvalClient(run_tag=run_tag, inference_client_config=config, logprobs=logprobs)
         await codeGenEvalClient.run_block(reference_code_contents, task_tags, num_generations, parallel_tasks)
         logger.info(f"✅ [CodeGenEvalClient] [{run_tag}] Batch completed")
 
@@ -491,14 +512,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="inferenceCodeGenEval.yaml")
     parser.add_argument("--input-dir", type=str, default="./kernel_bench/", help="Input directory containing Python files")
-    parser.add_argument("--provider", type=str, default="fireworks")  # most cost effective models are deepinfra-r1 and fireworks-v3
+    parser.add_argument("--provider", type=str, default="deepinfra")  # most cost effective models are deepinfra-r1 and fireworks-v3
     parser.add_argument("--model", type=str, default="deepseek-v3")  # most cost effective models are deepinfra-r1 and fireworks-v3
     parser.add_argument("--epoch_id", type=int, default=-1)
     parser.add_argument("--block_id", type=int, default=-1)
     parser.add_argument("--prefix_tag", type=str, default="v0.1")
     parser.add_argument("--num_samples", type=int, default=12)
     parser.add_argument("--num_generations", type=int, default=8)
-    parser.add_argument("--parallel_tasks", type=int, default=24)
+    parser.add_argument("--parallel_tasks", type=int, default=20)
+    parser.add_argument("--logprobs", type=bool, default=True)
     args = parser.parse_args()
 
     config = load_inference_client_config(
@@ -506,4 +528,4 @@ if __name__ == "__main__":
         model_short_name=args.model,
     )
 
-    asyncio.run(code_gen_eval_block(args.prefix_tag, config, args.epoch_id, args.block_id, args.num_samples, args.num_generations, args.parallel_tasks, args.input_dir))
+    asyncio.run(code_gen_eval_block(args.prefix_tag, config, args.epoch_id, args.block_id, args.num_samples, args.num_generations, args.parallel_tasks, args.input_dir, args.logprobs))

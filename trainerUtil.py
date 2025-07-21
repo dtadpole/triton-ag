@@ -234,7 +234,7 @@ def _mask_non_assistant_tokens(input_ids, labels, tokenizer, ignore_index) -> to
     return result
 
 class SimpleCollator:
-    def __init__(self, tokenizer, pad_to_multiple_of=None, ignore_index=-100):
+    def __init__(self, tokenizer, pad_to_multiple_of=8, ignore_index=-100):
         self.tokenizer = tokenizer
         self.pad_to_multiple_of = pad_to_multiple_of
         self.ignore_index = ignore_index
@@ -263,7 +263,11 @@ class SimpleCollator:
         if 'attention_mask' in batch[0]:
             attention_masks = []
             for item in batch:
-                mask = torch.tensor(item['attention_mask'])
+                # if item['attention_mask'] is already a tensor, use it directly
+                if isinstance(item['attention_mask'], torch.Tensor):
+                    mask = item['attention_mask']
+                else:
+                    mask = torch.tensor(item['attention_mask'])
                 pad_len = max_len - len(mask)
                 padded_mask = torch.cat([mask, torch.zeros(pad_len)])
                 attention_masks.append(padded_mask)
@@ -273,11 +277,23 @@ class SimpleCollator:
         if 'labels' in batch[0]:
             labels = []
             for item in batch:
-                label = torch.tensor(item['labels'])
+                # if item['labels'] is already a tensor, use it directly
+                if isinstance(item['labels'], torch.Tensor):
+                    label = item['labels']
+                else:
+                    label = torch.tensor(item['labels'])
                 pad_len = max_len - len(label)
                 padded_label = torch.cat([label, torch.full((pad_len,), self.ignore_index)])
                 labels.append(padded_label)
             result['labels'] = torch.stack(labels)
+
+        # for all other keys, do not pad, do not convert to tensor
+        for key in batch[0]:
+            if key not in ['input_ids', 'attention_mask', 'labels']:
+                values = []
+                for item in batch:
+                    values.append(item[key])
+                result[key] = values
 
         return result
 
