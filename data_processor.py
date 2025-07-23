@@ -15,6 +15,7 @@ from transformers import DataCollatorForLanguageModeling
 from transformers import AutoTokenizer
 from util import logger, is_devserver
 from huggingface_hub import HfApi
+from tqdm import tqdm
 
 
 class CustomDataCollatorWithMasking(DataCollatorForLanguageModeling):
@@ -330,7 +331,36 @@ def process_old_0_1_conversation(data):
     return processed
 
 
-def format_conversation_by_turns(example) -> List[str]:
+def qwen3_assistant_message_content_format(assistant_message):
+    """Format assistant message for Qwen3."""
+    role = assistant_message["role"]
+    content = assistant_message["content"]
+    if role != "assistant":
+        raise ValueError("role for assistant_message have to be assistant")
+    ## if content is a list, it is the assistant thinking
+    conversation_text = ""
+    if type(content) is list:
+        if "<think>" not in content[0]["text"]:
+            conversation_text += "<think>\n"
+        for item in content:
+            conversation_text += item["text"] + "\n"
+        if "</think>" not in content[-1]["text"]:
+            conversation_text += "</think>\n"
+    elif content is None and "function_call" in assistant_message:
+        function_call = assistant_message["function_call"]
+        func_call_json = {
+            "name": function_call["name"],
+            "arguments": json.loads(function_call["arguments"]) if type(function_call["arguments"]) is str else function_call["arguments"]
+        }
+        conversation_text += f"<tool_call>\n{json.dumps(func_call_json)}\n</tool_call>"
+    elif type(content) is str:
+        conversation_text += content
+    else:
+        raise ValueError("Current assitant_message is not formatted appropriately")
+    return conversation_text
+
+
+def format_conversation_for_Qwen3(example) -> str:
     """Format conversations by turn for AWQ calibration.
        The experience data is too long for AWQ calibration, so we need to break it down by turns.
     """
@@ -341,7 +371,6 @@ def format_conversation_by_turns(example) -> List[str]:
     system_message_found = False
     prev_role = None
     prev_tool_call_name = None
-    turns = []
 
     for message in messages:
         role = message["role"]
@@ -352,293 +381,238 @@ def format_conversation_by_turns(example) -> List[str]:
             # If we have functions, incorporate them into the system message
             if functions:
                 # functions_text = "You have access to the following functions:\n\n"
-                functions_text = "You are provided with function signatures within <tools></tools> XML tags. You may call one or more functions to assist with the user query.\n\n<tools>\n"
-
-                tools = []
+                functions_text = "#Tools\n\nYou may call one or more functions to assist with the user query.\n You are provided with function signatures within <tools></tools> XML tags. \n<tools>\n"
+                minimum_parameter_keys = ["type", "properties", "required"]
                 for func in functions:
                     if not func.get("name"):
                         raise ValueError(f"Function name is required: {func}")
-                    tools.append({
+                    current_tool = {
                         "type": "function",
                         "function": {
                             "name": func.get("name"),
                             "description": func.get("description", ""),
-                            "parameters": func.get("parameters", {})
+                            "parameters": {key: val for key, val in func.get("parameters", {}).items() if key in minimum_parameter_keys}
                         }
-                    })
-                functions_text += json.dumps(tools, indent=2)
-                functions_text += "</tools>\n"
+                    }
+                    functions_text += json.dumps(current_tool) + "\n"
+                functions_text += '</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{"name": <function-name>, "arguments": <args-json-object>}\n</tool_call>'
+
 
                 # Combine original system content with functions
                 enhanced_content = content
                 if content and not content.endswith('\n'):
-                    enhanced_content += "\n\n"
+                    enhanced_content += "\n"
                 elif not content:
                     enhanced_content = ""
                 enhanced_content += functions_text.rstrip()
 
-                conversation += f"<|im_start|>system\n{enhanced_content}\n<|im_end|>\n"
-                turns.append(f"<|im_start|>system\n{enhanced_content}\n<|im_end|>\n")
+                conversation += f"<|im_start|>system\n{enhanced_content}<|im_end|>\n"
             else:
-                conversation += f"<|im_start|>system\n{content}\n<|im_end|>\n"
-                turns.append(f"<|im_start|>system\n{content}\n<|im_end|>\n")
+                conversation += f"<|im_start|>system\n{content}<|im_end|>\n"
             prev_role = "system"
         elif role == "user":
             # If no system message was found but we have functions, add them at the beginning
             if not system_message_found and functions:
-                functions_text = "You have access to the following functions:\n\n"
+                functions_text = "#Tools\n\nYou may call one or more functions to assist with the user query.\n You are provided with function signatures within <tools></tools> XML tags. \n<tools>\n"
+                minimum_parameter_keys = ["type", "properties", "required"]
                 for func in functions:
-                    functions_text += f"Function: {func.get('name', 'unknown')}\n"
-                    if 'description' in func:
-                        functions_text += f"Description: {func['description']}\n"
-                    if 'parameters' in func:
-                        functions_text += f"Parameters: {json.dumps(func['parameters'], indent=2)}\n"
-                    functions_text += "\n"
-
+                    if not func.get("name"):
+                        raise ValueError(f"Function name is required: {func}")
+                    current_tool = {
+                        "type": "function",
+                        "function": {
+                            "name": func.get("name"),
+                            "description": func.get("description", ""),
+                            "parameters": {key: val for key, val in func.get("parameters", {}).items() if key in minimum_parameter_keys}
+                        }
+                    }
+                    functions_text += json.dumps(current_tool) + "\n"
+                functions_text += '</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{"name": <function-name>, "arguments": <args-json-object>}\n</tool_call>'
                 conversation = f"<|im_start|>system\n{functions_text.rstrip()}\n<|im_end|>\n" + conversation
-                turns.append(f"<|im_start|>system\n{functions_text.rstrip()}\n<|im_end|>\n")
                 system_message_found = True
 
             conversation += f"<|im_start|>user\n{content}\n<|im_end|>\n"
-            turns.append(f"<|im_start|>user\n{content}\n<|im_end|>\n")
             prev_role = "user"
         elif role == "assistant":
             if prev_role == "assistant":
                 # Merge with previous assistant message - remove the last <|im_end|>\n and append content
                 if conversation.endswith("<|im_end|>\n"):
                     conversation = conversation[:-11]  # Remove "<|im_end|>\n"
-                    turns[-1] = turns[-1][:-11]  # Remove "<|im_end|>\n"
                     # Add the new content
-                    if content:
-                        # Handle complex content structure (list of objects with text)
-                        if isinstance(content, list):
-                            for item in content:
-                                if isinstance(item, dict) and "text" in item:
-                                    conversation += "\n" + item["text"]
-                                    turns[-1] += "\n" + item["text"]
-                                elif isinstance(item, str):
-                                    conversation += "\n" + item
-                                    turns[-1] += "\n" + item
-                        else:
-                            conversation += "\n" + content
-                            turns[-1] += "\n" + content
-                    if "function_call" in message:
-                        func_call = message["function_call"]
-                        try:
-                            arguments = json.loads(func_call["arguments"])
-                        except:
-                            arguments = func_call["arguments"]
-                        # if isinstance(arguments, dict) and "content" in arguments:
-                        #     try:
-                        #         arguments = json.loads(arguments['content'])
-                        #     except:
-                        #         pass
-                        func_call_json = {
-                            "name": func_call["name"],
-                            "arguments": arguments
-                        }
-                        prev_tool_call_name = func_call["name"]
-                        conversation += f"\n<tool_call>\n{json.dumps(func_call_json)}\n</tool_call>"
-                        turns[-1] += f"\n<tool_call>\n{json.dumps(func_call_json)}\n</tool_call>"
+                    conversation += qwen3_assistant_message_content_format(message)
                     conversation += "\n<|im_end|>\n"
-                    turns[-1] += "\n<|im_end|>\n"
             else:
                 # Start new assistant message
                 conversation += f"<|im_start|>assistant\n"
-                turns.append(f"<|im_start|>assistant\n")
-                if "function_call" in message:
-                    func_call = message["function_call"]
-                    conversation += f"<tool_call>\n{json.dumps(func_call)}\n</tool_call>"
-                    turns[-1] += f"<tool_call>\n{json.dumps(func_call)}\n</tool_call>"
-                if content:
-                    # Handle complex content structure (list of objects with text)
-                    if isinstance(content, list):
-                        for item in content:
-                            if isinstance(item, dict) and "text" in item:
-                                conversation += item["text"]
-                                turns[-1] += item["text"]
-                            elif isinstance(item, str):
-                                conversation += item
-                                turns[-1] += item
-                    else:
-                        conversation += content
-                        turns[-1] += content
+                conversation += qwen3_assistant_message_content_format(message)
                 conversation += "\n<|im_end|>\n"
-                turns[-1] += "\n<|im_end|>\n"
             prev_role = "assistant"
         elif role == "function" or role == "tool":
+            ## The return values from tool calling
             if not "name" in message:
                 raise ValueError(f"Function name is required: {message}")
             name = message.get("name")
-            if not name:
-                name = prev_tool_call_name
-            conversation += f"<|im_start|>tool\n"
-            turns.append(f"<|im_start|>tool\n")
-            try:
+
+            conversation += f"<|im_start|>user\n"
+            if type(content) is str:
                 content = json.loads(content)
-            except:
-                pass
+            function_response = ""
             if isinstance(content, dict) and "type" in content and content["type"] == "text" and "text" in content:
                 try:
-                    content = json.loads(content["text"])
+                    function_response += content["text"]
                 except:
                     pass
-            tool_response = {
-                "name": name,
-                "content": content,
-            }
-            conversation += f"\n<tool_response>\n{json.dumps(tool_response)}\n</tool_response>"
-            turns[-1] += f"\n<tool_response>\n{json.dumps(tool_response)}\n</tool_response>"
+            conversation += f"\n<tool_response>\n{function_response}\n</tool_response>"
             conversation += "\n<|im_end|>\n"
-            turns[-1] += "\n<|im_end|>\n"
             prev_role = "tool"
+    return conversation
 
-    return turns
 
-
-def format_conversation(example) -> str:
+def format_conversation(example, target_model_type="Qwen3") -> str:
     """Format conversations for training with token length validation."""
     messages = example.get("messages", [])
     functions = example.get("functions", [])
+    if target_model_type == "Qwen3":
+        return format_conversation_for_Qwen3(example)
+    else:
+        conversation = ""
+        system_message_found = False
+        prev_role = None
+        prev_tool_call_name = None
 
-    conversation = ""
-    system_message_found = False
-    prev_role = None
-    prev_tool_call_name = None
+        for message in messages:
+            role = message["role"]
+            content = message.get("content", "")
 
-    for message in messages:
-        role = message["role"]
-        content = message.get("content", "")
-
-        if role == "system":
-            system_message_found = True
-            # If we have functions, incorporate them into the system message
-            if functions:
-                # functions_text = "You have access to the following functions:\n\n"
-                functions_text = "You are provided with function signatures within <tools></tools> XML tags. You may call one or more functions to assist with the user query.\n\n<tools>\n"
-
-                tools = []
-                for func in functions:
-                    if not func.get("name"):
-                        raise ValueError(f"Function name is required: {func}")
-                    tools.append({
-                        "type": "function",
-                        "function": {
-                            "name": func.get("name"),
-                            "description": func.get("description", ""),
-                            "parameters": func.get("parameters", {})
-                        }
-                    })
-                functions_text += json.dumps(tools, indent=2)
-                functions_text += "</tools>\n"
-
-                # Combine original system content with functions
-                enhanced_content = content
-                if content and not content.endswith('\n'):
-                    enhanced_content += "\n\n"
-                elif not content:
-                    enhanced_content = ""
-                enhanced_content += functions_text.rstrip()
-
-                conversation += f"<|im_start|>system\n{enhanced_content}\n<|im_end|>\n"
-            else:
-                conversation += f"<|im_start|>system\n{content}\n<|im_end|>\n"
-            prev_role = "system"
-        elif role == "user":
-            # If no system message was found but we have functions, add them at the beginning
-            if not system_message_found and functions:
-                functions_text = "You have access to the following functions:\n\n"
-                for func in functions:
-                    functions_text += f"Function: {func.get('name', 'unknown')}\n"
-                    if 'description' in func:
-                        functions_text += f"Description: {func['description']}\n"
-                    if 'parameters' in func:
-                        functions_text += f"Parameters: {json.dumps(func['parameters'], indent=2)}\n"
-                    functions_text += "\n"
-
-                conversation = f"<|im_start|>system\n{functions_text.rstrip()}\n<|im_end|>\n" + conversation
+            if role == "system":
                 system_message_found = True
+                # If we have functions, incorporate them into the system message
+                if functions:
+                    # functions_text = "You have access to the following functions:\n\n"
+                    functions_text = "You are provided with function signatures within <tools></tools> XML tags. You may call one or more functions to assist with the user query.\n\n<tools>\n"
 
-            conversation += f"<|im_start|>user\n{content}\n<|im_end|>\n"
-            prev_role = "user"
-        elif role == "assistant":
-            if prev_role == "assistant":
-                # Merge with previous assistant message - remove the last <|im_end|>\n and append content
-                if conversation.endswith("<|im_end|>\n"):
-                    conversation = conversation[:-11]  # Remove "<|im_end|>\n"
-                    # Add the new content
+                    tools = []
+                    for func in functions:
+                        if not func.get("name"):
+                            raise ValueError(f"Function name is required: {func}")
+                        tools.append({
+                            "type": "function",
+                            "function": {
+                                "name": func.get("name"),
+                                "description": func.get("description", ""),
+                                "parameters": func.get("parameters", {})
+                            }
+                        })
+                    functions_text += json.dumps(tools, indent=2)
+                    functions_text += "</tools>\n"
+
+                    # Combine original system content with functions
+                    enhanced_content = content
+                    if content and not content.endswith('\n'):
+                        enhanced_content += "\n\n"
+                    elif not content:
+                        enhanced_content = ""
+                    enhanced_content += functions_text.rstrip()
+
+                    conversation += f"<|im_start|>system\n{enhanced_content}\n<|im_end|>\n"
+                else:
+                    conversation += f"<|im_start|>system\n{content}\n<|im_end|>\n"
+                prev_role = "system"
+            elif role == "user":
+                # If no system message was found but we have functions, add them at the beginning
+                if not system_message_found and functions:
+                    functions_text = "You have access to the following functions:\n\n"
+                    for func in functions:
+                        functions_text += f"Function: {func.get('name', 'unknown')}\n"
+                        if 'description' in func:
+                            functions_text += f"Description: {func['description']}\n"
+                        if 'parameters' in func:
+                            functions_text += f"Parameters: {json.dumps(func['parameters'], indent=2)}\n"
+                        functions_text += "\n"
+
+                    conversation = f"<|im_start|>system\n{functions_text.rstrip()}\n<|im_end|>\n" + conversation
+                    system_message_found = True
+
+                conversation += f"<|im_start|>user\n{content}\n<|im_end|>\n"
+                prev_role = "user"
+            elif role == "assistant":
+                if prev_role == "assistant":
+                    # Merge with previous assistant message - remove the last <|im_end|>\n and append content
+                    if conversation.endswith("<|im_end|>\n"):
+                        conversation = conversation[:-11]  # Remove "<|im_end|>\n"
+                        # Add the new content
+                        if content:
+                            # Handle complex content structure (list of objects with text)
+                            if isinstance(content, list):
+                                for item in content:
+                                    if isinstance(item, dict) and "text" in item:
+                                        conversation += "\n" + item["text"]
+                                    elif isinstance(item, str):
+                                        conversation += "\n" + item
+                            else:
+                                conversation += "\n" + content
+                        if "function_call" in message:
+                            func_call = message["function_call"]
+                            try:
+                                arguments = json.loads(func_call["arguments"])
+                            except:
+                                arguments = func_call["arguments"]
+                            # if isinstance(arguments, dict) and "content" in arguments:
+                            #     try:
+                            #         arguments = json.loads(arguments['content'])
+                            #     except:
+                            #         pass
+                            func_call_json = {
+                                "name": func_call["name"],
+                                "arguments": arguments
+                            }
+                            prev_tool_call_name = func_call["name"]
+                            conversation += f"\n<tool_call>\n{json.dumps(func_call_json)}\n</tool_call>"
+                        conversation += "\n<|im_end|>\n"
+                else:
+                    # Start new assistant message
+                    conversation += f"<|im_start|>assistant\n"
+                    if "function_call" in message:
+                        func_call = message["function_call"]
+                        conversation += f"<tool_call>\n{json.dumps(func_call)}\n</tool_call>"
                     if content:
                         # Handle complex content structure (list of objects with text)
                         if isinstance(content, list):
                             for item in content:
                                 if isinstance(item, dict) and "text" in item:
-                                    conversation += "\n" + item["text"]
+                                    conversation += item["text"]
                                 elif isinstance(item, str):
-                                    conversation += "\n" + item
+                                    conversation += item
                         else:
-                            conversation += "\n" + content
-                    if "function_call" in message:
-                        func_call = message["function_call"]
-                        try:
-                            arguments = json.loads(func_call["arguments"])
-                        except:
-                            arguments = func_call["arguments"]
-                        # if isinstance(arguments, dict) and "content" in arguments:
-                        #     try:
-                        #         arguments = json.loads(arguments['content'])
-                        #     except:
-                        #         pass
-                        func_call_json = {
-                            "name": func_call["name"],
-                            "arguments": arguments
-                        }
-                        prev_tool_call_name = func_call["name"]
-                        conversation += f"\n<tool_call>\n{json.dumps(func_call_json)}\n</tool_call>"
+                            conversation += content
                     conversation += "\n<|im_end|>\n"
-            else:
-                # Start new assistant message
-                conversation += f"<|im_start|>assistant\n"
-                if "function_call" in message:
-                    func_call = message["function_call"]
-                    conversation += f"<tool_call>\n{json.dumps(func_call)}\n</tool_call>"
-                if content:
-                    # Handle complex content structure (list of objects with text)
-                    if isinstance(content, list):
-                        for item in content:
-                            if isinstance(item, dict) and "text" in item:
-                                conversation += item["text"]
-                            elif isinstance(item, str):
-                                conversation += item
-                    else:
-                        conversation += content
-                conversation += "\n<|im_end|>\n"
-            prev_role = "assistant"
-        elif role == "function" or role == "tool":
-            if not "name" in message:
-                raise ValueError(f"Function name is required: {message}")
-            name = message.get("name")
-            if not name:
-                name = prev_tool_call_name
-            conversation += f"<|im_start|>tool\n"
-            try:
-                content = json.loads(content)
-            except:
-                pass
-            if isinstance(content, dict) and "type" in content and content["type"] == "text" and "text" in content:
+                prev_role = "assistant"
+            elif role == "function" or role == "tool":
+                if not "name" in message:
+                    raise ValueError(f"Function name is required: {message}")
+                name = message.get("name")
+                if not name:
+                    name = prev_tool_call_name
+                conversation += f"<|im_start|>tool\n"
                 try:
-                    content = json.loads(content["text"])
+                    content = json.loads(content)
                 except:
                     pass
-            tool_response = {
-                "name": name,
-                "content": content,
-            }
-            conversation += f"\n<tool_response>\n{json.dumps(tool_response)}\n</tool_response>"
-            conversation += "\n<|im_end|>\n"
-            prev_role = "tool"
+                if isinstance(content, dict) and "type" in content and content["type"] == "text" and "text" in content:
+                    try:
+                        content = json.loads(content["text"])
+                    except:
+                        pass
+                tool_response = {
+                    "name": name,
+                    "content": content,
+                }
+                conversation += f"\n<tool_response>\n{json.dumps(tool_response)}\n</tool_response>"
+                conversation += "\n<|im_end|>\n"
+                prev_role = "tool"
 
-    logger.info(f"Conversation: {conversation}")
-    return conversation
+        # logger.info(f"Conversation: {conversation}") # for debugging
+        return conversation
 
 
 # this will filter out examples that are too long
@@ -824,7 +798,7 @@ def process_data(args):
     dataloader = torch.utils.data.DataLoader(dataset=dataset, collate_fn=collate_fn, batch_size=args.batch_size)
 
     idx = 0
-    for batch in dataloader:
+    for batch in tqdm(dataloader):
         # recursively convert batch data from Tensor to list
         for k, v in batch.items():
             if isinstance(v, torch.Tensor):
@@ -848,7 +822,7 @@ def process_data(args):
 
     logger.info(f"Processed {idx} experiences")
 
-    if args.upload_to_hf:
+    if args.upload_to_hf and is_devserver() is False:
         # create repo if it doesn't exist
         api = HfApi()
         if not api.repo_exists(args.upload_to_hf):
