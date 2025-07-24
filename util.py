@@ -153,6 +153,7 @@ def load_agent_model(
 
     if "model" not in agent_yaml[agent_name]:
         raise ValueError(f"Model not found in agent.yaml for agent {agent_name}")
+
     model_config = agent_yaml[agent_name]["model"]
     if not provider and "provider" not in model_config:
         raise ValueError(f"Provider not found in agent.yaml for agent {agent_name}")

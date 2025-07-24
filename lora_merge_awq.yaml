@@ -1,16 +1,17 @@
 # Base Model, full precision
-base_model:
-  path: "Qwen/Qwen3-32B" # path to the base model, or the model id in the huggingface model hub
+model_paths:
+  base_model: "Qwen/Qwen3-32B"
+  lora_adapter: ""
+  output_model_path: "finetune_model_output/qwen3_32b_awq_alpaca_repeat/" # path to the output model
 
-# LoRA Adapther
-lora_adapter:
-  path: "finetune_model_output/checkpoint-286/"
+data_paths:
+  calibration_experience: "finetune_raw_experiences/" # "alpaca"  # path to the calibration experience
+  eval_experience: "finetune_raw_experiences/"  # path to the evaluation experience
 
-# Output Model
-output_model:
-  path: "finetune_model_output/qwen3_32b_test/"
+device_map: auto
 
-device: cuda:0
-
-calibration_experience:
-  path: "finetune_raw_experiences/"
+quantize_params:
+  apply_quantization: False
+  n_parallel_calib_samples: 32
+  max_calib_samples: 128
+  max_calib_seq_len: 2048
