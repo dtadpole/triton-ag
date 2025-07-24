@@ -519,7 +519,7 @@ if __name__ == "__main__":
     parser.add_argument("--prefix_tag", type=str, default="v0.1")
     parser.add_argument("--num_samples", type=int, default=12)
     parser.add_argument("--num_generations", type=int, default=8)
-    parser.add_argument("--parallel_tasks", type=int, default=20)
+    parser.add_argument("--parallel_tasks", type=int, default=24)
     parser.add_argument("--logprobs", type=bool, default=True)
     args = parser.parse_args()
 

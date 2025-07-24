@@ -46,7 +46,7 @@ class ModelConfig(BaseModel):
     """Configuration for model parameters"""
     name: str = 'gpt2'
     tokenizer_name: Optional[str] = None
-    max_seq_length: int = 1024
+    max_seq_length: int = 16384
     use_gradient_checkpointing: str = "unsloth"
     use_4bit_quantization: bool = True
     compute_dtype: str = "bfloat16"
@@ -66,15 +66,15 @@ class TrainingConfig(BaseModel):
     gradient_accumulation_steps: int = 1
     learning_rate: float = 0.00001
     block_size: int = 3
-    max_steps: int = 50
-    save_steps: int = 10
-    eval_steps: int = 10
+    max_steps: int = 100000
+    save_steps: int = 20
+    eval_steps: int = 20
     logging_steps: int = 1
     checkpoint_path: str = "~/.trainer"
     latest_checkpoint_name: Optional[str] = "checkpoint-latest"
     max_grad_norm: float = 0.1
     scheduler_type: str = "cosine"
-    num_warmup_steps: int = 10
+    num_warmup_steps: int = 20
     dataloader_num_workers: int = 4
     seed: int = -1
 
