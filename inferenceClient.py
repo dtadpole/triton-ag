@@ -26,6 +26,7 @@ class ProviderConfig(BaseModel):
     streaming: bool = Field(default=True)
     max_retries: int = Field(default=5)
     timeout: int = Field(default=600)
+    trust_remote_code: bool = Field(default=False)
 
 class ModelConfig(BaseModel):
     model_short_name: str = Field()
@@ -68,7 +69,7 @@ class InferenceClient:
         self.model_short_name = config.model.model_short_name
         self.model_name = config.model.model_name
         self.tokenizer_name = config.model.tokenizer_name if config.model.tokenizer_name else self.model_name # use model_name as tokenizer_name if not provided
-        self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name, trust_remote_code=self.config.provider.trust_remote_code)
         self.temperature = config.model.temperature
         self.max_tokens = config.model.max_tokens
         self.top_p = config.model.top_p
@@ -452,8 +453,8 @@ def load_inference_client_config(
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--provider", type=str, default="deepinfra", help="Provider to use (vllm, sglang, deepseek, fireworks, together)")
-    parser.add_argument("--model", type=str, default="deepseek-v3", help="Model to use (vllm, sglang, deepseek, fireworks, together)")
+    parser.add_argument("--provider", type=str, default="fireworks", help="Provider to use (vllm, sglang, deepseek, fireworks, together)")
+    parser.add_argument("--model", type=str, default="kimi-k2", help="Model to use (deepseek-v3, deepseek-r1, kimi-k2)")
     parser.add_argument("--api_type", type=str, default="completion", choices=["chat", "completion"], help="API type to use (chat or completion)")
     parser.add_argument("--streaming", type=bool, default=True, help="Whether to use streaming mode")
     parser.add_argument("--logprobs", type=bool, default=True, help="Whether to use logprobs")
