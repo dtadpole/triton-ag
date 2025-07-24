@@ -175,8 +175,9 @@ class InferenceClient:
             if response.choices:
                 choice = response.choices[0]
                 return_message = choice.message.model_dump()
-                logger.info(f"🔍 [InferenceClient] [Chat completion] Logprobs: [len={len(choice.logprobs.content)}]")
-                return_message['logprobs'] = choice.logprobs.model_dump()
+                if hasattr(choice, 'logprobs') and choice.logprobs:
+                    logger.info(f"🔍 [InferenceClient] [Chat completion] Logprobs: [len={len(choice.logprobs.content)}]")
+                    return_message['logprobs'] = choice.logprobs.model_dump()
 
         # check if return_message['content'] has <think> and </think> using regex
         # matches = re.search(r'<think>(.*?)</think>(.*?)$', return_message['content'].strip(), re.DOTALL)
