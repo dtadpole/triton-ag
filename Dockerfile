@@ -89,3 +89,8 @@ RUN npm config set proxy http://fwdproxy:8080
 RUN npm config set https-proxy http://fwdproxy:8080
 
 RUN pip install openai-agents==0.0.19
+RUN pip install transformers==4.52.1
+RUN pip install together==1.5.8
+RUN pip install wandb
+RUN pip install duckdb
+RUN pip install autoawq

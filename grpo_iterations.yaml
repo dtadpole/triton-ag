@@ -1,0 +1,346 @@
+rewards:
+  speed_up_threshold: 1.3
+  compile_reward: 0.1
+  compile_penalty: -0.5
+  correct_reward: 0.1
+  correct_penalty: -0.5
+  speed_up_reward: 0.5
+  speed_up_penalty: -0.1
+
+train:
+    max_epochs: 1
+    group_size: 4
+    max_new_tokens: 3000
+    reference_update_interval: 1
+
+kbtasks:
+    select_level1: true
+    level1_tasks: [1] # [2, 13, 28] # some easy tasks to start with
+    select_level2: false
+    level2_tasks: [4, 14, 23]
+
+
+# copied from inferenceCodeGenEval.yaml
+prompts:
+  # System and user prompts
+  system_prompt: |
+    You are an experienced CUDA developer specializing in GPU performance optimization and parallel programming.
+
+    You are provided with PyTorch reference code and shall examine the code to understand how it works, then generate high-performance CUDA code that matches the reference code for correctness.
+
+    When generating code, always follow these instructions:
+    - Replace pytorch operators in the reference code with raw CUDA kernels, optimizing for performance on NVIDIA architecture.
+    - Use torch.utils.cpp_extension.load_inline and name your optimized output module ModelNew.
+    - You're NOT allowed to use torch.nn (except for Parameter, containers, and init).
+    - The input and output must be on CUDA device. Your answer must be the complete new module (no testing code, no other code): it will be evaluated and you will be given feedback on its correctness and speedup so you can iterate to maximize the speedup.
+
+    Example reference code:
+    ```python
+    {reference_code}
+    ```
+
+    Example generated code:
+    ```python
+    {generated_code}
+    ```
+
+  # User prompt template with substitutable source code parameter
+  user_prompt: |
+    Following is the reference PyTorch code, implement the complete new module with CUDA (no testing code, no other code).
+
+    ```python
+    {source_code}
+    ```
+
+    Be concise with your thinking. Please limit your reasoning and thinking within 600 words for each complete code writing.
+
+  examples:
+    reference_code: |
+      import torch
+      import torch.nn as nn
+
+      class Model(nn.Module):
+          def __init__(self) -> None:
+              super().__init__()
+
+          def forward(self, a, b):
+              return a+b
+
+      batch_size = 16
+      dim = 16384 * 2
+
+      def get_inputs():
+          x = torch.randn(batch_size, dim)
+          y = torch.randn(batch_size, dim)
+          return [x, y]
+
+      def get_init_inputs():
+          return []  # No special initialization inputs needed
+
+    generated_code: |
+      import torch.nn as nn
+      from torch.utils.cpp_extension import load_inline
+
+      # Define the custom CUDA kernel for element-wise addition
+      elementwise_add_source = '''
+      #include <torch/extension.h>
+      #include <cuda_runtime.h>
+
+      __global__ void elementwise_add_kernel(const float* a, const float* b, float* out, int size) {
+          int idx = blockIdx.x * blockDim.x + threadIdx.x;
+          if (idx < size) {
+              out[idx] = a[idx] + b[idx];
+          }
+      }
+
+      torch::Tensor elementwise_add_cuda(torch::Tensor a, torch::Tensor b) {
+          auto size = a.numel();
+          auto out = torch::zeros_like(a);
+
+          const int block_size = 256;
+          const int num_blocks = (size + block_size - 1) / block_size;
+
+          elementwise_add_kernel<<<num_blocks, block_size>>>(a.data_ptr<float>(), b.data_ptr<float>(), out.data_ptr<float>(), size);
+
+          return out;
+      }
+      '''
+
+      elementwise_add_cpp_source = (
+          "torch::Tensor elementwise_add_cuda(torch::Tensor a, torch::Tensor b);"
+      )
+
+      # Compile the inline CUDA code for element-wise addition
+      elementwise_add = load_inline(
+          name="elementwise_add",
+          cpp_sources=elementwise_add_cpp_source,
+          cuda_sources=elementwise_add_source,
+          functions=["elementwise_add_cuda"],
+          verbose=True,
+          extra_cflags=[""],
+          extra_ldflags=[""],
+      )
+
+      class ModelNew(nn.Module):
+          def __init__(self) -> None:
+              super().__init__()
+              self.elementwise_add = elementwise_add
+
+          def forward(self, a, b):
+              return self.elementwise_add.elementwise_add_cuda(a, b)
+
+    reference_code2: |
+      import torch
+      import torch.nn as nn
+
+      class Model(nn.Module):
+          """
+          Simple model that performs Layer Normalization.
+          """
+          def __init__(self, normalized_shape: tuple):
+              """
+              Initializes the LayerNorm layer.
+
+              Args:
+                  normalized_shape (tuple): Shape of the input tensor to be normalized.
+              """
+              super(Model, self).__init__()
+              self.ln = nn.LayerNorm(normalized_shape=normalized_shape)
+
+          def forward(self, x: torch.Tensor) -> torch.Tensor:
+              """
+              Applies Layer Normalization to the input tensor.
+
+              Args:
+                  x (torch.Tensor): Input tensor of shape (*, normalized_shape).
+
+              Returns:
+                  torch.Tensor: Output tensor with Layer Normalization applied, same shape as input.
+              """
+              return self.ln(x)
+
+      batch_size = 16
+      features = 64
+      dim1 = 256
+      dim2 = 256
+
+      def get_inputs():
+          x = torch.randn(batch_size, features, dim1, dim2)
+          return [x]
+
+      def get_init_inputs():
+          return [(features, dim1, dim2)]
+
+    generated_code2: |
+      import torch
+      import torch.nn as nn
+      from torch.utils.cpp_extension import load_inline
+
+      # CUDA kernel for Layer Normalization
+      layer_norm_source = """
+      #include <torch/extension.h>
+      #include <cuda_runtime.h>
+      #include <cmath>
+
+      namespace {
+      __global__ void layer_norm_forward_kernel(
+          const float* input,
+          float* output,
+          const float* gamma,
+          const float* beta,
+          float eps,
+          int num_instances,
+          int instance_size
+      ) {
+          extern __shared__ float sdata[];
+
+          int instance_idx = blockIdx.x;
+          if (instance_idx >= num_instances) return;
+
+          const float* instance_input = input + instance_idx * instance_size;
+          float* instance_output = output + instance_idx * instance_size;
+
+          int tid = threadIdx.x;
+          int stride = blockDim.x;
+
+          // Step 1: Compute mean for this instance
+          float sum = 0.0f;
+          for (int i = tid; i < instance_size; i += stride) {
+              sum += instance_input[i];
+          }
+
+          sdata[tid] = sum;
+          __syncthreads();
+
+          // Parallel reduction for sum
+          for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+              if (tid < s) {
+                  sdata[tid] += sdata[tid + s];
+              }
+              __syncthreads();
+          }
+
+          float mean = sdata[0] / instance_size;
+          __syncthreads();
+
+          // Step 2: Compute variance for this instance
+          float sq_sum = 0.0f;
+          for (int i = tid; i < instance_size; i += stride) {
+              float diff = instance_input[i] - mean;
+              sq_sum += diff * diff;
+          }
+
+          sdata[tid] = sq_sum;
+          __syncthreads();
+
+          // Parallel reduction for variance
+          for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+              if (tid < s) {
+                  sdata[tid] += sdata[tid + s];
+              }
+              __syncthreads();
+          }
+
+          float variance = sdata[0] / instance_size;
+          float inv_std = 1.0f / sqrtf(variance + eps);
+          __syncthreads();
+
+          // Step 3: Normalize and scale
+          for (int i = tid; i < instance_size; i += stride) {
+              float normalized = (instance_input[i] - mean) * inv_std;
+              instance_output[i] = normalized * gamma[i] + beta[i];
+          }
+      }
+
+      } // anonymous namespace
+
+      torch::Tensor layer_norm_forward_cuda(
+          torch::Tensor input,
+          torch::Tensor gamma,
+          torch::Tensor beta,
+          float eps
+      ) {
+          // Flatten the normalized dimensions
+          auto input_flat = input.contiguous().view({input.size(0), -1});
+          auto output = torch::empty_like(input_flat);
+
+          int num_instances = input_flat.size(0);
+          int instance_size = input_flat.size(1);
+
+          // Flatten gamma and beta to match the instance size
+          auto gamma_flat = gamma.contiguous().view({-1});
+          auto beta_flat = beta.contiguous().view({-1});
+
+          // Kernel configuration
+          const int block_size = 256;
+          dim3 grid(num_instances);
+          dim3 block(block_size);
+
+          // Shared memory size for reductions
+          size_t shared_mem_size = block_size * sizeof(float);
+
+          // Launch kernel
+          layer_norm_forward_kernel<<<grid, block, shared_mem_size>>>(
+              input_flat.data_ptr<float>(),
+              output.data_ptr<float>(),
+              gamma_flat.data_ptr<float>(),
+              beta_flat.data_ptr<float>(),
+              eps,
+              num_instances,
+              instance_size
+          );
+
+          // Reshape output to original dimensions
+          return output.view_as(input);
+      }
+      """
+
+      layer_norm_cpp_source = """
+      torch::Tensor layer_norm_forward_cuda(
+          torch::Tensor input,
+          torch::Tensor gamma,
+          torch::Tensor beta,
+          float eps
+      );
+      """
+
+      # Load the CUDA kernel
+      layer_norm_cuda = load_inline(
+          name="layer_norm_cuda",
+          cpp_sources=layer_norm_cpp_source,
+          cuda_sources=layer_norm_source,
+          functions=["layer_norm_forward_cuda"],
+          verbose=True
+      )
+
+      class ModelNew(nn.Module):
+          def __init__(self, normalized_shape: tuple):
+              super().__init__()
+              self.normalized_shape = normalized_shape
+              self.normalized_size = normalized_shape[0] * normalized_shape[1] * normalized_shape[2]
+
+              # Create gamma and beta parameters
+              self.gamma = nn.Parameter(torch.ones(*normalized_shape))
+              self.beta = nn.Parameter(torch.zeros(*normalized_shape))
+              self.eps = 1e-5
+
+          def forward(self, x: torch.Tensor) -> torch.Tensor:
+              return layer_norm_cuda.layer_norm_forward_cuda(
+                  x,
+                  self.gamma,
+                  self.beta,
+                  self.eps
+              )
+
+      # For testing
+      batch_size = 16
+      features = 64
+      dim1 = 256
+      dim2 = 256
+
+      def get_inputs():
+          x = torch.randn(batch_size, features, dim1, dim2)
+          return [x]
+
+      def get_init_inputs():
+          return [(features, dim1, dim2)]
