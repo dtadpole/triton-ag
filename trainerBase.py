@@ -13,9 +13,15 @@ from torch.utils.data import DataLoader, Dataset
 from torch.nn.utils import clip_grad_norm_
 from transformers import (
     get_scheduler,
+    AutoModelForCausalLM,
+    AutoConfig,
+    AutoTokenizer,
 )
 import bitsandbytes as bnb
 from peft import (
+    TaskType,
+    LoraConfig,
+    get_peft_model,
     get_peft_model_state_dict,
     set_peft_model_state_dict,
 )
@@ -47,8 +53,10 @@ class ModelConfig(BaseModel):
     name: str = 'gpt2'
     tokenizer_name: Optional[str] = None
     max_seq_length: int = 16384
+    use_unsloth: bool = True
     use_gradient_checkpointing: str = "unsloth"
-    use_4bit_quantization: bool = True
+    load_in_4bit: bool = False
+    load_in_8bit: bool = False
     compute_dtype: str = "bfloat16"
 
 class OptimizerConfig(BaseModel):
@@ -65,7 +73,7 @@ class TrainingConfig(BaseModel):
     micro_batch_size: int = 2
     gradient_accumulation_steps: int = 1
     learning_rate: float = 0.000005
-    block_size: int = 8
+    block_size: int = 32
     max_steps: int = 100000
     save_steps: int = 20
     eval_steps: int = 20
@@ -78,7 +86,7 @@ class TrainingConfig(BaseModel):
     dataloader_num_workers: int = 4
     seed: int = -1
 
-class LoraConfig(BaseModel):
+class TrainerLoraConfig(BaseModel):
     """Configuration for LoRA parameters"""
     use_lora: bool = True
     rank: int = 64
@@ -98,7 +106,7 @@ class TrainerConfig(BaseModel):
     model: ModelConfig = ModelConfig()
     training: TrainingConfig = TrainingConfig()
     optimizer: OptimizerConfig = OptimizerConfig()
-    lora: LoraConfig = LoraConfig()
+    lora: TrainerLoraConfig = TrainerLoraConfig()
     logging: LoggingConfig = LoggingConfig()
     
     @classmethod
@@ -111,7 +119,7 @@ class TrainerConfig(BaseModel):
         model_config = ModelConfig()
         training_config = TrainingConfig()
         optimizer_config = OptimizerConfig()
-        lora_config = LoraConfig()
+        lora_config = TrainerLoraConfig()
         logging_config = LoggingConfig()
         
         # Update from YAML sections
@@ -121,8 +129,10 @@ class TrainerConfig(BaseModel):
                 name=model_data.get('name', 'gpt2'),
                 tokenizer_name=model_data.get('tokenizer_name'),
                 max_seq_length=model_data.get('max_seq_length', 1024),
+                use_unsloth=model_data.get('use_unsloth', True),
                 use_gradient_checkpointing=model_data.get('use_gradient_checkpointing', "unsloth"),
-                use_4bit_quantization=model_data.get('use_4bit_quantization', True),
+                load_in_4bit=model_data.get('load_in_4bit', False),
+                load_in_8bit=model_data.get('load_in_8bit', False),
                 compute_dtype=model_data.get('compute_dtype', 'bfloat16')
             )
         
@@ -139,7 +149,7 @@ class TrainerConfig(BaseModel):
         
         if 'lora' in config_dict:
             lora_data = config_dict['lora']
-            lora_config = LoraConfig(
+            lora_config = TrainerLoraConfig(
                 use_lora=lora_data.get('use_lora', True),
                 rank=lora_data.get('rank', 64),
                 alpha=lora_data.get('alpha', 16),
@@ -180,7 +190,7 @@ class TextDataset(Dataset):
             text,
             truncation=True,
             max_length=self.max_length,
-            padding='max_length',
+            # padding='max_length',
             return_tensors='pt'
         )
         
@@ -209,7 +219,7 @@ class BaseTrainer:
         
         # Setup LoRA if enabled
         if self.config.lora.use_lora:
-            self.model = self._setup_lora(self.base_model)
+            self.model = self._setup_lora()
         else:
             self.model = self.base_model
         
@@ -254,15 +264,27 @@ class BaseTrainer:
         """Initialize the model and tokenizer using Unsloth"""
         logger.info(f"🚀 [{self.__class__.__name__}] Loading model: {self.config.model.name}")
         
-        # Load model with Unsloth
-        model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=self.config.model.name,
-            max_seq_length=self.config.model.max_seq_length,
-            dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16),
-            load_in_4bit=self.config.model.use_4bit_quantization,
-            use_gradient_checkpointing=self.config.model.use_gradient_checkpointing,
-            # token="hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
-        )
+        if self.config.model.use_unsloth:
+            # Load model with Unsloth
+            model, tokenizer = FastLanguageModel.from_pretrained(
+                model_name=self.config.model.name,
+                max_seq_length=self.config.model.max_seq_length,
+                dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16),
+                load_in_4bit=self.config.model.load_in_4bit,
+                use_gradient_checkpointing=self.config.model.use_gradient_checkpointing,
+                # token="hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
+            )
+        else:
+            config = AutoConfig.from_pretrained(self.config.model.name)
+            config.max_position_embeddings = self.config.model.max_seq_length
+            model = AutoModelForCausalLM.from_pretrained(
+                self.config.model.name,
+                config=config,
+                torch_dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16),
+                device_map="auto",
+            )
+            model.gradient_checkpointing_enable()
+            tokenizer = AutoTokenizer.from_pretrained(self.config.model.name if self.config.model.tokenizer_name is None else self.config.model.tokenizer_name)
         
         # Ensure tokenizer has pad token
         if tokenizer.pad_token is None:
@@ -284,28 +306,38 @@ class BaseTrainer:
         # Log model information
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        
+
         logger.info(f"✅ [{self.__class__.__name__}] Model loaded - Total: {total_params:,}, Trainable: {trainable_params:,} ({100 * trainable_params / total_params:.1f}%)")
 
         return model, tokenizer
     
-    def _setup_lora(self, model: FastLanguageModel):
+    def _setup_lora(self):
         """Setup LoRA configuration using Unsloth"""
         logger.info(f"🔧 [{self.__class__.__name__}] Setting up LoRA (rank={self.config.lora.rank}, alpha={self.config.lora.alpha})")
         
+        if self.config.model.use_unsloth:
         # Apply LoRA with Unsloth
-        lora_model = FastLanguageModel.get_peft_model(
-            model,
-            r=self.config.lora.rank,
-            target_modules=self.config.lora.target_modules,
-            lora_alpha=self.config.lora.alpha,
-            lora_dropout=self.config.lora.dropout,
-            bias=self.config.lora.bias,
-            use_gradient_checkpointing=self.config.model.use_gradient_checkpointing,
-            random_state=self.config.training.seed if self.config.training.seed is not None and self.config.training.seed >= 0 else random.randint(0,2**31),
-            use_rslora=False,  # Use regular LoRA
-            loftq_config=None,
-        )
+            lora_model = FastLanguageModel.get_peft_model(
+                self.base_model,
+                r=self.config.lora.rank,
+                target_modules=self.config.lora.target_modules,
+                lora_alpha=self.config.lora.alpha,
+                lora_dropout=self.config.lora.dropout,
+                bias=self.config.lora.bias,
+                use_gradient_checkpointing=self.config.model.use_gradient_checkpointing,
+                random_state=self.config.training.seed if self.config.training.seed is not None and self.config.training.seed >= 0 else random.randint(0,2**31),
+                use_rslora=False,  # Use regular LoRA
+                loftq_config=None,
+            )
+        else:
+            lora_model = get_peft_model(self.base_model, LoraConfig(
+                r=self.config.lora.rank,
+                lora_alpha=self.config.lora.alpha,
+                target_modules=self.config.lora.target_modules,
+                lora_dropout=self.config.lora.dropout,
+                bias=self.config.lora.bias,
+                task_type=TaskType.CAUSAL_LM,
+            ))
         
         # Log LoRA information
         trainable_params = sum(p.numel() for p in lora_model.parameters() if p.requires_grad)
@@ -616,7 +648,8 @@ class BaseTrainer:
             batch_size=self.config.training.micro_batch_size,
             shuffle=False,
             num_workers=self.config.training.dataloader_num_workers,
-            pin_memory=True
+            pin_memory=True,
+            collate_fn=self.data_collator
         )
         
         total_loss = 0.0

@@ -118,6 +118,7 @@ class GRPOTrainer(BaseTrainer):
         self.grpo_config = grpo_config
         self.reference_model = None
 
+        """
         self.reference_model = self.base_model
         if self.config.lora.use_lora:
             self.reference_model = self._setup_lora(self.reference_model)
@@ -128,6 +129,7 @@ class GRPOTrainer(BaseTrainer):
 
         if self._reference_exists(self.reference_path):
             self.reference_model = self._load_reference(self.reference_path)
+        """
 
         logger.info(f"🎯 [GRPOTrainer] Initialized for preference optimization with GRPOConfig: {grpo_config}")
 
@@ -461,7 +463,7 @@ async def main():
     parser = argparse.ArgumentParser(description="Train a model using GRPOTrainer")
     parser.add_argument("--simple_mode", type=bool, default=False)
     parser.add_argument("--input_dir", type=str, default="~/.codeGenEval")
-    parser.add_argument("--run_tag", type=str, default="v0.1_20250724_223559")
+    parser.add_argument("--run_tag", type=str, default="v0.1_20250725_020900")
     parser.add_argument("--base-config", type=str, default="trainerBase.yaml")
     parser.add_argument("--config", type=str, default="trainerGRPO.yaml")
     args = parser.parse_args()

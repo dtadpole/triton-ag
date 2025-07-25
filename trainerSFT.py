@@ -107,7 +107,7 @@ async def main():
     """Main function for SFT training"""
     parser = argparse.ArgumentParser(description="Train a model using SFTTrainer")
     parser.add_argument("--input_dir", type=str, default="~/.critique")
-    parser.add_argument("--run_tag", type=str, default="v0.1_20250724_223559") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
+    parser.add_argument("--run_tag", type=str, default="v0.1_20250725_020900") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
     parser.add_argument("--base-config", type=str, default="trainerBase.yaml")
     parser.add_argument("--config", type=str, default="trainerSFT.yaml")
     args = parser.parse_args()
