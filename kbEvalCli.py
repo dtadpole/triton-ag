@@ -96,6 +96,7 @@ def eval_kernel_reference(
     Evaluate the reference code against the original model
     """
     eval_key = f"{run_tag}_{model_tag}_{task_tag}"
+    torch.cuda.set_device(device)
 
     context = {}
     metadata = {
@@ -190,7 +191,6 @@ def compile_and_eval_kernel(
     build_directory: str,
     args: argparse.Namespace,
 ) -> KernelExecResult:
-
     try:
         Model, get_init_inputs, get_inputs, ModelNew, metadata, context = compile_kernel_new(
             run_tag,
@@ -229,7 +229,7 @@ def compile_and_eval_kernel(
                 # write my pid to lock file
                 with open(lock_file, "w") as f:
                     f.write(str(pid))
-
+                torch.cuda.set_device(device)
                 result = eval_kernel_against_ref_new(
                     run_tag=run_tag,
                     model_tag=model_tag,
@@ -361,6 +361,7 @@ def eval_kernel_against_ref_new(
     num_perf_trials: int = 100
 
     try:
+        print("in eval_kernel_against_ref_new", seed_num)
         set_seed(seed_num)  # set seed for reproducible input
         init_inputs = get_init_inputs()
         init_inputs = [
@@ -424,6 +425,7 @@ def eval_kernel_against_ref_new(
             )
         except Exception as e:
             # TODO: add metadata for runtime error e.g. error in launching kernel, illegal memory access, ...
+            graceful_eval_cleanup(context, device)
             metadata["runtime_error"] = e
             kernel_exec_result = KernelExecResult(
                 compiled=True, correctness=False, metadata=metadata

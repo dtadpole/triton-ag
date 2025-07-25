@@ -30,7 +30,7 @@ from huggingface_hub import HfApi, create_repo
 
 class OptimizedUnslothFineTuner:
     """Optimized fine-tuning using unsloth with memory management and auto-tuning."""
-    
+
     def __init__(self, config_path: str = "finetune.yaml"):
         """Initialize the fine-tuner with configuration."""
         self.config_path = config_path
@@ -39,18 +39,18 @@ class OptimizedUnslothFineTuner:
         self.tokenizer = None
         self.dataset = None
         self.trainer = None
-        
+
         # Setup distributed training if available
         self.local_rank = self._setup_distributed()
         self.device = torch.device(f'cuda:{self.local_rank}' if torch.cuda.is_available() else 'cpu')
-        
+
         # Memory management
         self.initial_memory = self._get_gpu_memory() if torch.cuda.is_available() else 0
         self.peak_memory = 0
-        
+
         self._load_config()
         self._optimize_config()
-        
+
     def _setup_distributed(self) -> int:
         """Initialize distributed training if running in distributed mode."""
         if "RANK" in os.environ:
@@ -65,13 +65,13 @@ class OptimizedUnslothFineTuner:
                 logger.info("Falling back to single GPU training")
                 return 0
         return 0
-    
+
     def _get_gpu_memory(self) -> float:
         """Get current GPU memory usage in GB."""
         if torch.cuda.is_available():
             return torch.cuda.memory_allocated() / 1024**3
         return 0.0
-    
+
     def _get_available_gpu_memory(self) -> float:
         """Get available GPU memory in GB."""
         if torch.cuda.is_available():
@@ -79,13 +79,13 @@ class OptimizedUnslothFineTuner:
             allocated = torch.cuda.memory_allocated() / 1024**3
             return total - allocated
         return 0.0
-    
+
     def _cleanup_memory(self):
         """Aggressive memory cleanup."""
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
-    
+
     def _load_config(self):
         """Load configuration from YAML file."""
         try:
@@ -99,16 +99,16 @@ class OptimizedUnslothFineTuner:
         except yaml.YAMLError as e:
             logger.error(f"Error parsing configuration file: {e}")
             sys.exit(1)
-    
+
     def _optimize_config(self):
         """Auto-optimize configuration based on available resources."""
         if not torch.cuda.is_available():
             return
-            
+
         available_memory = self._get_available_gpu_memory()
         if self.local_rank == 0:
             logger.info(f"Available GPU memory: {available_memory:.2f} GB")
-        
+
         # Auto-adjust sequence length based on memory
         max_seq = self.config['model']['max_seq_length']
         if available_memory < 20 and max_seq > 16384:
@@ -123,11 +123,11 @@ class OptimizedUnslothFineTuner:
             new_max_seq = 4096
             logger.warning(f"Extremely limited GPU memory detected. Reducing max_seq_length from {max_seq} to {new_max_seq}")
             self.config['model']['max_seq_length'] = new_max_seq
-        
+
         # Auto-adjust batch size based on memory and sequence length
         current_batch_size = self.config['training']['per_device_batch_size']
         seq_len = self.config['model']['max_seq_length']
-        
+
         # Estimate memory usage and adjust batch size
         if seq_len > 16384 and available_memory < 20:
             if current_batch_size > 1:
@@ -136,30 +136,30 @@ class OptimizedUnslothFineTuner:
                 self.config['training']['per_device_batch_size'] = new_batch_size
                 # Increase gradient accumulation to maintain effective batch size
                 self.config['training']['gradient_accumulation_steps'] *= current_batch_size
-        
+
         # Optimize number of workers based on CPU count
         cpu_count = psutil.cpu_count()
         optimal_workers = min(4, max(0, cpu_count // 2))
         self.config['training']['num_workers'] = optimal_workers
-        
+
         # Check if this is an AWQ model and adjust precision settings
         model_name = self.config['model']['name']
         if 'AWQ' in model_name.upper() or 'awq' in model_name.lower():
             if self.local_rank == 0:
                 logger.info("AWQ quantized model detected - configuring for float16 precision")
             self.config.setdefault('training', {})['use_awq_precision'] = True
-        
+
         if self.local_rank == 0:
             logger.info("Configuration auto-optimization complete")
-    
+
     def setup_model_and_tokenizer(self):
         """Initialize model and tokenizer using Unsloth with optimizations."""
         model_config = self.config['model']
-        
+
         if self.local_rank == 0:
             logger.info(f"Loading model: {model_config['name']}")
             logger.info(f"Max sequence length: {model_config['max_seq_length']}")
-        
+
         # Configure device mapping
         if self.config['gpu'].get('single_gpu', False):
             device_map = {"": 0}
@@ -167,7 +167,7 @@ class OptimizedUnslothFineTuner:
             device_map = {"": self.local_rank}
         else:
             device_map = "auto"
-        
+
         try:
             # Load model and tokenizer with Unsloth
             self.model, self.tokenizer = FastLanguageModel.from_pretrained(
@@ -179,7 +179,7 @@ class OptimizedUnslothFineTuner:
                 device_map=device_map,
                 use_cache=False,  # Disable cache to save memory during training
             )
-            
+
             # Setup LoRA with optimizations
             lora_config = self.config['lora']
             self.model = FastLanguageModel.get_peft_model(
@@ -194,58 +194,58 @@ class OptimizedUnslothFineTuner:
                 use_rslora=False,
                 loftq_config=None,
             )
-            
+
             # Memory cleanup after model loading
             self._cleanup_memory()
-            
+
             if self.local_rank == 0:
                 current_memory = self._get_gpu_memory()
                 logger.info(f"Model loaded. GPU memory usage: {current_memory:.2f} GB")
                 logger.info("Model and tokenizer setup complete")
-                
+
         except Exception as e:
             logger.error(f"Error loading model: {e}")
             self._cleanup_memory()
             raise
-    
+
     def setup_dataset(self):
         """Setup training dataset with optimizations."""
         # Load experiences from processed directory
         data_dir = self.config['data']['processed_dir']
         if self.local_rank == 0:
             logger.info(f"Loading experiences from: {data_dir}")
-        
+
         try:
             # Create dataset using data_util
             self.dataset = ExperienceDataset(
                 data_dir=data_dir,
                 max_length=self.config['model']['max_seq_length']
             )
-            
+
             if self.local_rank == 0:
                 logger.info(f"Created dataset with {len(self.dataset)} examples")
-                
+
         except Exception as e:
             logger.error(f"Error setting up dataset: {e}")
             raise
-    
+
     def setup_trainer(self):
         """Setup the SFTTrainer with optimizations."""
         training_config = self.config['training']
-        
+
         # Create output directory
         output_dir = Path(training_config['output_dir'])
         output_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Setup data collator with optimizations
         data_collator = SimpleDataCollator(
             tokenizer=self.tokenizer,
             pad_to_multiple_of=8
         )
-        
+
         # Optimize training arguments
         num_workers = training_config.get('num_workers', 0)
-        
+
         # Determine precision settings based on model type
         use_awq_precision = training_config.get('use_awq_precision', False)
         if use_awq_precision:
@@ -258,7 +258,7 @@ class OptimizedUnslothFineTuner:
             # Regular precision logic
             use_fp16 = not torch.cuda.get_device_capability()[0] >= 8
             use_bf16 = torch.cuda.get_device_capability()[0] >= 8
-        
+
         # Setup training arguments with optimizations
         training_args = TrainingArguments(
             output_dir=str(output_dir),
@@ -288,7 +288,7 @@ class OptimizedUnslothFineTuner:
             remove_unused_columns=False,  # Keep all columns for custom collator
             prediction_loss_only=True,   # Only compute loss, not predictions
         )
-        
+
         try:
             # Create trainer
             self.trainer = SFTTrainer(
@@ -301,105 +301,105 @@ class OptimizedUnslothFineTuner:
                 dataset_text_field="text",  # This will be ignored since we use custom collator
                 packing=False,  # Disable packing since we use custom data processing
             )
-            
+
             if self.local_rank == 0:
                 logger.info("Trainer setup complete")
                 current_memory = self._get_gpu_memory()
                 logger.info(f"Memory usage after trainer setup: {current_memory:.2f} GB")
-                
+
         except Exception as e:
             logger.error(f"Error setting up trainer: {e}")
             self._cleanup_memory()
             raise
-    
+
     def train(self):
         """Run the fine-tuning process with monitoring."""
         if self.local_rank == 0:
             logger.info("Starting fine-tuning...")
             start_time = time.time()
             start_memory = self._get_gpu_memory()
-        
+
         try:
             # Monitor memory during training
             if self.local_rank == 0:
                 logger.info(f"Pre-training memory usage: {start_memory:.2f} GB")
-            
+
             # Run training
             self.trainer.train()
-            
+
             if self.local_rank == 0:
                 end_time = time.time()
                 end_memory = self._get_gpu_memory()
                 duration = end_time - start_time
-                
+
                 logger.info(f"Fine-tuning completed in {duration:.2f} seconds")
                 logger.info(f"Final memory usage: {end_memory:.2f} GB")
                 logger.info(f"Peak memory usage: {max(end_memory, self.peak_memory):.2f} GB")
-                
+
         except Exception as e:
             logger.error(f"Error during training: {e}")
             self._cleanup_memory()
             raise
-    
+
     def save_model(self, output_path: Optional[str] = None):
         """Save the fine-tuned model with optimizations."""
         time_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
         if output_path is None:
             output_path = os.path.join(self.config['training']['output_dir'], self.config['model']['name'], time_tag)
-        
+
         output_path = Path(output_path)
         output_path.mkdir(parents=True, exist_ok=True)
         self.output_path = output_path
-        
+
         if self.local_rank == 0:
             logger.info(f"Saving model to {output_path}")
-        
+
         try:
             # Save using unsloth's efficient method
             self.model.save_pretrained(str(output_path))
             self.tokenizer.save_pretrained(str(output_path))
-            
+
             # Save configuration for reproducibility
             config_save_path = output_path / "training_config.yaml"
             with open(config_save_path, 'w') as f:
                 yaml.dump(self.config, f, default_flow_style=False)
-            
+
             if self.local_rank == 0:
                 logger.info("Model saved successfully")
-                
+
         except Exception as e:
             logger.error(f"Error saving model: {e}")
             raise
-    
+
     def upload_to_huggingface(self, model_path: Optional[str] = None, repo_name: str = None):
         """Upload the fine-tuned model to Hugging Face Hub."""
         if self.local_rank != 0:
             return  # Only upload from rank 0
-            
+
         # Get configuration for HF upload
         upload_config = self.config.get('huggingface', {})
         if not upload_config.get('upload', False):
             logger.info("Hugging Face upload is disabled")
             return
-        
+
         if model_path is None:
             model_path = self.output_path
-        
+
         if repo_name is None:
             repo_name = upload_config.get('repo_name')
-            
+
         if not repo_name:
             logger.error("No Hugging Face repository name specified")
             return
-            
+
         model_path = Path(model_path)
-        
+
         try:
             logger.info(f"Uploading model to Hugging Face: {repo_name}")
-            
+
             # Initialize HF API
             api = HfApi()
-            
+
             # Create repository if it doesn't exist
             try:
                 create_repo(
@@ -411,7 +411,7 @@ class OptimizedUnslothFineTuner:
                 logger.info(f"Repository {repo_name} is ready")
             except Exception as e:
                 logger.warning(f"Repository creation/check failed: {e}")
-            
+
             # Upload all files in the model directory
             api.upload_folder(
                 folder_path=str(model_path),
@@ -420,20 +420,20 @@ class OptimizedUnslothFineTuner:
                 commit_message=f"Upload fine-tuned model - {upload_config.get('commit_message', 'Fine-tuned model')}",
                 ignore_patterns=["*.git*", "__pycache__", "*.pyc"]
             )
-            
+
             logger.info(f"Successfully uploaded model to https://huggingface.co/{repo_name}")
-            
+
             # Create a model card if specified
             if upload_config.get('create_model_card', True):
                 self._create_model_card(api, repo_name, upload_config)
-                
+
         except Exception as e:
             logger.error(f"Error uploading to Hugging Face: {e}")
             logger.error("Make sure you have:")
             logger.error("1. Set your HF_TOKEN environment variable or specify token in config")
             logger.error("2. Have write access to the repository")
             logger.error("3. Installed huggingface_hub: pip install huggingface_hub")
-    
+
     def _create_model_card(self, api: HfApi, repo_name: str, upload_config: dict):
         """Create a model card for the uploaded model."""
         try:
@@ -494,8 +494,8 @@ messages = [
 ]
 
 formatted_prompt = tokenizer.apply_chat_template(
-    messages, 
-    tokenize=False, 
+    messages,
+    tokenize=False,
     add_generation_prompt=True
 )
 
@@ -524,7 +524,7 @@ This model was fine-tuned on processed conversation experiences for improved per
 - PEFT: Latest
 
 """
-            
+
             # Upload model card
             api.upload_file(
                 path_or_fileobj=model_card_content.encode(),
@@ -533,17 +533,17 @@ This model was fine-tuned on processed conversation experiences for improved per
                 token=upload_config.get('token'),
                 commit_message="Add model card"
             )
-            
+
             logger.info("Model card created successfully")
-            
+
         except Exception as e:
             logger.warning(f"Failed to create model card: {e}")
-    
+
     def test_model(self, prompt: str = "What is machine learning?", max_length: int = 256):
         """Test the fine-tuned model with optimizations."""
         if self.local_rank == 0:
             logger.info("Testing fine-tuned model...")
-            
+
             try:
                 # Enable fast inference - handle quantized models
                 try:
@@ -552,23 +552,23 @@ This model was fine-tuned on processed conversation experiences for improved per
                     logger.warning(f"Fast inference mode failed, using regular mode: {e}")
                     # For quantized models, we might need to use regular mode
                     self.model.eval()
-                
+
                 # Format prompt in chat format
                 messages = [
                     {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": prompt}
                 ]
-                
+
                 # Apply chat template
                 formatted_prompt = self.tokenizer.apply_chat_template(
-                    messages, 
-                    tokenize=False, 
+                    messages,
+                    tokenize=False,
                     add_generation_prompt=True
                 )
-                
+
                 # Tokenize and generate
                 inputs = self.tokenizer(formatted_prompt, return_tensors="pt").to(self.device)
-                
+
                 with torch.no_grad():
                     try:
                         # Try with unsloth's fast generation first
@@ -605,17 +605,17 @@ This model was fine-tuned on processed conversation experiences for improved per
                                 use_cache=False,
                                 pad_token_id=self.tokenizer.eos_token_id if self.tokenizer.eos_token_id else self.tokenizer.pad_token_id
                             )
-                
+
                 # Decode response
                 response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
                 logger.info(f"Test prompt: {prompt}")
                 logger.info(f"Model response: {response}")
-                
+
             except Exception as e:
                 logger.error(f"Error during model testing: {e}")
                 import traceback
                 logger.error(f"Traceback: {traceback.format_exc()}")
-    
+
     def run_full_pipeline(self):
         """Run the complete optimized fine-tuning pipeline."""
         try:
@@ -623,23 +623,23 @@ This model was fine-tuned on processed conversation experiences for improved per
             self.setup_model_and_tokenizer()
             self.setup_dataset()
             self.setup_trainer()
-            
+
             # Run training
             self.train()
-            
+
             # Save model
             self.save_model()
-            
+
             # Upload to Hugging Face (if configured)
             self.upload_to_huggingface()
-            
+
             # Test the model
             if self.local_rank == 0:
                 self.test_model()
-            
+
             # Final cleanup
             self._cleanup_memory()
-                
+
         except Exception as e:
             logger.error(f"Error during fine-tuning pipeline: {e}")
             import traceback
@@ -651,11 +651,11 @@ This model was fine-tuned on processed conversation experiences for improved per
 def main():
     """Main entry point with enhanced argument parsing."""
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="Optimized Fine-tune models using Unsloth")
     parser.add_argument(
-        "--config", 
-        type=str, 
+        "--config",
+        type=str,
         default="finetune.yaml",
         help="Path to configuration file"
     )
@@ -699,18 +699,18 @@ def main():
         default=True,
         help="Create a model card for the uploaded model"
     )
-    
+
     args = parser.parse_args()
-    
+
     # Set memory optimization environment variables
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    
+
     # Suppress some warnings for cleaner output
     warnings.filterwarnings("ignore", category=UserWarning, module="torch")
-    
+
     # Initialize fine-tuner
     finetuner = OptimizedUnslothFineTuner(config_path=args.config)
-    
+
     # Override HF settings from command line arguments
     if args.upload_to_hf:
         finetuner.config.setdefault('huggingface', {})
@@ -722,12 +722,12 @@ def main():
             time_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
             finetuner.config['huggingface']['repo_name'] = f"{args.hf_repo_user}/{model_tag}_{time_tag}"
             finetuner.config['huggingface']['create_model_card'] = args.hf_create_model_card
-    
+
     if args.memory_report and torch.cuda.is_available():
         logger.info(f"GPU: {torch.cuda.get_device_name()}")
         logger.info(f"Total GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
         logger.info(f"Available GPU memory: {finetuner._get_available_gpu_memory():.2f} GB")
-    
+
     if args.test_only:
         # Only test the model
         finetuner.setup_model_and_tokenizer()
@@ -738,4 +738,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()
