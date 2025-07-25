@@ -2,8 +2,8 @@ import os
 import yaml
 import asyncio
 import uvicorn
-from typing import Any
-from fastapi import FastAPI, HTTPException
+from typing import Any, Dict
+from fastapi import FastAPI, HTTPException, Body
 from loguru import logger
 from globalUtils import GlobalUtils
 
@@ -218,7 +218,7 @@ async def qlist():
     }
 
 @fastapi.post("/queue/enqueue")
-async def enqueue(queue_name: str, item: Any):
+async def enqueue(queue_name: str = Body(...), item: Dict[str, Any] = Body(...)):
     queue = reg.get(f"{QUEUE_PREFIX}{queue_name}")
     if queue is None:
         raise HTTPException(status_code=404, detail=f"Queue [{queue_name}] not found")
@@ -252,7 +252,7 @@ if __name__ == "__main__":
     # initialize the global registry singleton
     reg = GlobalRegistry()
     # add repl server to the fastapi app, and initialize/reset the repl namespace
-    from replServer import reset
-    reset()
+    from replServer import reset_vars
+    reset_vars()
     # run the main loop
     asyncio.run(reg.run())

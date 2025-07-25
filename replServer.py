@@ -82,14 +82,14 @@ def get_variables():
 
 
 @fastapi.post("/repl/reset")
-def reset():
+def reset_vars():
     """Reset the global namespace"""
     from globalRegistry import GlobalRegistry
     reg = GlobalRegistry()
     global_namespace.clear()
     global_namespace['reg'] = reg
     global_namespace['vars'] = get_variables
-    global_namespace['reset'] = reset
+    global_namespace['reset'] = reset_vars
     return {"message": "Namespace reset"}
 
 @fastapi.get("/repl", response_class=HTMLResponse)
