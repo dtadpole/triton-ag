@@ -361,7 +361,6 @@ def eval_kernel_against_ref_new(
     num_perf_trials: int = 100
 
     try:
-        print("in eval_kernel_against_ref_new", seed_num)
         set_seed(seed_num)  # set seed for reproducible input
         init_inputs = get_init_inputs()
         init_inputs = [
