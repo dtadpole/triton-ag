@@ -454,8 +454,8 @@ def load_inference_client_config(
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--provider", type=str, default="fireworks", help="Provider to use (vllm, sglang, deepseek, fireworks, together)")
-    parser.add_argument("--model", type=str, default="kimi-k2", help="Model to use (deepseek-v3, deepseek-r1, kimi-k2)")
+    parser.add_argument("--provider", type=str, default="deepinfra", help="Provider to use (vllm, sglang, deepseek, fireworks, together)")
+    parser.add_argument("--model", type=str, default="qwen3-14b", help="Model to use (deepseek-v3, deepseek-r1, kimi-k2)")
     parser.add_argument("--api_type", type=str, default="completion", choices=["chat", "completion"], help="API type to use (chat or completion)")
     parser.add_argument("--streaming", type=bool, default=True, help="Whether to use streaming mode")
     parser.add_argument("--logprobs", type=bool, default=True, help="Whether to use logprobs")

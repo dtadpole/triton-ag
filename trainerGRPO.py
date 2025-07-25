@@ -328,6 +328,9 @@ class GRPOTrainer(BaseTrainer):
                 mini_batch_loss = mini_batch_loss / len(dataloader) # divide by the group size
                 mini_batch_loss.backward()
 
+                # del outputs
+                torch.cuda.empty_cache()
+
                 accumulated_loss += mini_batch_loss.item()
                 
             # Optimization step (only after entire group is processed, this changes the model parameters)

@@ -513,7 +513,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default="inferenceCodeGenEval.yaml")
     parser.add_argument("--input-dir", type=str, default="./kernel_bench/", help="Input directory containing Python files")
     parser.add_argument("--provider", type=str, default="deepinfra")  # most cost effective models are deepinfra-r1 and fireworks-v3
-    parser.add_argument("--model", type=str, default="deepseek-v3")  # most cost effective models are deepinfra-r1 and fireworks-v3
+    parser.add_argument("--model", type=str, default="qwen3-14b")  # most cost effective models are deepinfra-r1 and fireworks-v3
     parser.add_argument("--epoch_id", type=int, default=-1)
     parser.add_argument("--block_id", type=int, default=-1)
     parser.add_argument("--prefix_tag", type=str, default="v0.1")

@@ -2,8 +2,15 @@ import os
 import yaml
 import asyncio
 import uvicorn
-from fastapi import FastAPI
+from typing import Any
+from fastapi import FastAPI, HTTPException
 from loguru import logger
+from globalUtils import GlobalUtils
+
+global_utils = GlobalUtils()
+fastapi = global_utils.fastapi
+
+QUEUE_PREFIX = "queue."
 
 # create a singleton class to store global variables
 class GlobalRegistry:
@@ -24,7 +31,7 @@ class GlobalRegistry:
             self.config = self._load_config()
             self.registry = {}  # registry of global variables, or object registry ==> {key: value}
             self.tasks = {}  # registry of tasks, or task registry ==> {task_name: task_coroutine}
-            self.put("reg.fastapi", FastAPI()) # this is a reference to the fastapi instance
+            self.put("reg.fastapi", fastapi) # this is a reference to the fastapi instance
 
     def _load_config(self):
         with open("globalRegistry.yaml", "r") as f:
@@ -34,11 +41,29 @@ class GlobalRegistry:
         interval = self.config.get("_refresh_config", {}).get("interval", 10)
         while True:
             try:
-                self._load_config()
+                # logger.info("🔄 Refreshing config")
+                self.config = self._load_config()
+                await self._update_queues()
             except Exception as e:
                 logger.error(f"Error refreshing config: {e}")
             finally:
                 await asyncio.sleep(interval)
+
+    async def _update_queues(self):
+        """
+        Update the queues in the config
+        """
+        try:
+            queues = self.config.get("queues", [])
+            for queue in queues:
+                object_name = f"{QUEUE_PREFIX}{queue.get('name')}"
+                if object_name not in self.registry:
+                    logger.info(f"🎢 Creating queue [{object_name}]")
+                    self.put(object_name, asyncio.Queue())
+                else:
+                    pass
+        except Exception as e:
+            logger.error(f"Error updating queues: {e}")
 
     def keys(self):
         """
@@ -186,8 +211,48 @@ class GlobalRegistry:
             logger.error(f"Error running server: {e}")
             return
 
+@fastapi.get("/queue/list")
+async def qlist():
+    return {
+        "queues": [key.replace(QUEUE_PREFIX, "") for key in reg.keys() if key.startswith(QUEUE_PREFIX)]
+    }
+
+@fastapi.post("/queue/enqueue")
+async def enqueue(queue_name: str, item: Any):
+    queue = reg.get(f"{QUEUE_PREFIX}{queue_name}")
+    if queue is None:
+        raise HTTPException(status_code=404, detail=f"Queue [{queue_name}] not found")
+    try:
+        await queue.put(item)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error enqueuing item [{item}] into queue [{queue_name}]: {e}")
+    return {"message": f"Item [{item}] enqueued into queue [{queue_name}]"}
+
+@fastapi.get("/queue/dequeue/{queue_name}")
+async def dequeue(queue_name: str):
+    queue = reg.get(f"{QUEUE_PREFIX}{queue_name}")
+    if queue is None:
+        raise HTTPException(status_code=404, detail=f"Queue [{queue_name}] not found")
+    # get timeout from config
+    timeout = reg.config.get("fastapi", {}).get("dequeue_timeout", 5)
+    try:
+        return await asyncio.wait_for(queue.get(), timeout=timeout)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=408, detail=f"Queue [{queue_name}] timed out")
+
+@fastapi.get("/queue/qsize/{queue_name}")
+async def qsize(queue_name: str):
+    queue = reg.get(f"{QUEUE_PREFIX}{queue_name}")
+    if queue is None:
+        raise HTTPException(status_code=404, detail=f"Queue [{queue_name}] not found")
+    return {"size": queue.qsize()}
+
+
 if __name__ == "__main__":
     # initialize the global registry singleton
     reg = GlobalRegistry()
+    # add repl server to the fastapi app, and initialize/reset the repl namespace
+    from replServer import reset
+    reset()
     # run the main loop
     asyncio.run(reg.run())
