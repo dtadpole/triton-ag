@@ -96,7 +96,7 @@ class GlobalRegistry:
             if key not in self.registry:
                 item = {
                     "version": 1,
-                "value": value
+                    "value": value
                 }
                 self.registry[key] = item
             else:
@@ -252,7 +252,7 @@ if __name__ == "__main__":
     # initialize the global registry singleton
     reg = GlobalRegistry()
     # add repl server to the fastapi app, and initialize/reset the repl namespace
-    from replServer import reset_vars
-    reset_vars()
+    from replServer import init_vars
+    init_vars(reg)
     # run the main loop
     asyncio.run(reg.run())

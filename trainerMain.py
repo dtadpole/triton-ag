@@ -8,7 +8,7 @@ from trainerGRPO import grpo_train_block, grpo_get_trainer
 
 client = GlobalRegClient()
 
-async def main_loop(prefix_tag: str):
+async def main_loop(prefix_tag: str, test_mode: bool):
 
     queues = await client.get_queues()
     logger.info(f"🌀 [trainerMain] Main loop started for prefix: {prefix_tag}")
@@ -27,6 +27,9 @@ async def main_loop(prefix_tag: str):
                 if grpo_item['prefix_tag'] != prefix_tag:
                     logger.error(f"❌ [trainerMain] Skipping item with prefix: {grpo_item['prefix_tag']}")
                     continue
+                if not test_mode and 'test_mode' in grpo_item and grpo_item['test_mode']:
+                    logger.info(f"🔍 [trainerMain] Skipping test mode item with prefix: {grpo_item['prefix_tag']}")
+                    continue
                 grpo_train_block(
                     trainer=grpo_trainer,
                     prefix_tag=grpo_item['prefix_tag'],
@@ -40,6 +43,9 @@ async def main_loop(prefix_tag: str):
                 if sft_item['prefix_tag'] != prefix_tag:
                     logger.error(f"❌ [trainerMain] Skipping item with prefix: {sft_item['prefix_tag']}")
                     continue
+                if not test_mode and 'test_mode' in sft_item and sft_item['test_mode']:
+                    logger.info(f"🔍 [trainerMain] Skipping test mode item with prefix: {sft_item['prefix_tag']}")
+                    continue
                 sft_train_block(
                     trainer=sft_trainer,
                     prefix_tag=sft_item['prefix_tag'],
@@ -49,7 +55,7 @@ async def main_loop(prefix_tag: str):
                     input_dir=sft_item['input_dir']
                 )
             else:
-                logger.info(f"🔍 [trainerMain] No items to process, sleeping for [5] seconds")
+                logger.info(f"🔍 [trainerMain] No items to process, sleeping for [10] seconds")
                 await asyncio.sleep(10)
         except Exception as e:
             logger.error(f"❌ [trainerMain] Error: {e}")
@@ -59,24 +65,29 @@ async def main_loop(prefix_tag: str):
 async def main():
     parser = argparse.ArgumentParser(description="Train a model using mixed SFT and GRPO trainers")
     parser.add_argument("--prefix_tag", type=str, default="KC_0.1.0")
+    parser.add_argument("--test_mode", action="store_true")
     args = parser.parse_args()
 
-    await client.enqueue('trainer.sft', {
-        'prefix_tag': args.prefix_tag,
-        'epoch_id': 0,
-        'block_id': 0,
-        'input_tag': 'v0.1_20250725_020900',
-        'input_dir': '~/.critique'
-    })
-    await client.enqueue('trainer.grpo', {
-        'prefix_tag': args.prefix_tag,
-        'epoch_id': 0,
-        'block_id': 0,
-        'input_tag': 'v0.1_20250725_020900',
-        'input_dir': '~/.codeGenEval'
-    })
-    # start main loop
-    await main_loop(args.prefix_tag)
+    if args.test_mode:
+        await client.enqueue('trainer.sft', {
+            'prefix_tag': args.prefix_tag,
+            'epoch_id': 0,
+            'block_id': 0,
+            'input_tag': 'v0.1_20250725_020900',
+            'input_dir': '~/.critique',
+            'test_mode': args.test_mode
+        })
+        await client.enqueue('trainer.grpo', {
+            'prefix_tag': args.prefix_tag,
+            'epoch_id': 0,
+            'block_id': 0,
+            'input_tag': 'v0.1_20250725_020900',
+            'input_dir': '~/.codeGenEval',
+            'test_mode': args.test_mode
+        })
+
+    # run the main loop
+    await main_loop(args.prefix_tag, args.test_mode)
 
 if __name__ == "__main__":
     # test

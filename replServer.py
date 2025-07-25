@@ -84,13 +84,20 @@ def get_variables():
 @fastapi.post("/repl/reset")
 def reset_vars():
     """Reset the global namespace"""
-    from globalRegistry import GlobalRegistry
-    reg = GlobalRegistry()
+    reg = global_namespace['reg']
     global_namespace.clear()
     global_namespace['reg'] = reg
     global_namespace['vars'] = get_variables
     global_namespace['reset'] = reset_vars
     return {"message": "Namespace reset"}
+
+def init_vars(reg):
+    """Initialize the global namespace"""
+    global_namespace.clear()
+    global_namespace['reg'] = reg
+    global_namespace['vars'] = get_variables
+    global_namespace['reset'] = reset_vars
+    return {"message": "Namespace initialized"}
 
 @fastapi.get("/repl", response_class=HTMLResponse)
 async def web_repl():
@@ -258,5 +265,7 @@ Type Python code below and press Execute.
 
 
 if __name__ == "__main__":
-    reset()
+    from globalRegistry import GlobalRegistry
+    reg = GlobalRegistry()
+    init_vars(reg)
     asyncio.run(reg.run())

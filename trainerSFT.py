@@ -155,7 +155,7 @@ def sft_train_block(trainer: SFTTrainer, prefix_tag: str, epoch_id: int, block_i
     # train the block
     try:
         trainer.train_block(run_tag, message_dataset)
-        logger.info(f"� [SFTTrainer] [{run_tag}] Training completed successfully!")
+        logger.info(f"🎉 [SFTTrainer] [{run_tag}] Training completed successfully!")
     except Exception as e:
         error_msg = f"❌ [SFTTrainer] [{run_tag}] Training failed: {e}"
         logger.error(error_msg)
