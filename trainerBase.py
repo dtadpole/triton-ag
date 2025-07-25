@@ -64,8 +64,8 @@ class TrainingConfig(BaseModel):
     """Configuration for training parameters"""
     micro_batch_size: int = 2
     gradient_accumulation_steps: int = 1
-    learning_rate: float = 0.00001
-    block_size: int = 3
+    learning_rate: float = 0.000005
+    block_size: int = 8
     max_steps: int = 100000
     save_steps: int = 20
     eval_steps: int = 20
@@ -74,7 +74,7 @@ class TrainingConfig(BaseModel):
     latest_checkpoint_name: Optional[str] = "checkpoint-latest"
     max_grad_norm: float = 0.1
     scheduler_type: str = "cosine"
-    num_warmup_steps: int = 20
+    num_warmup_steps: int = 50
     dataloader_num_workers: int = 4
     seed: int = -1
 

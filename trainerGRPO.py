@@ -459,8 +459,9 @@ def get_sample_dataset(tokenizer: AutoTokenizer, size: int = 20) -> GenerationDa
 async def main():
     """Main function for GRPO training"""
     parser = argparse.ArgumentParser(description="Train a model using GRPOTrainer")
+    parser.add_argument("--simple_mode", type=bool, default=False)
     parser.add_argument("--input_dir", type=str, default="~/.codeGenEval")
-    parser.add_argument("--run_tag", type=str, default="v0.1_20250714_050308")
+    parser.add_argument("--run_tag", type=str, default="v0.1_20250724_223559")
     parser.add_argument("--base-config", type=str, default="trainerBase.yaml")
     parser.add_argument("--config", type=str, default="trainerGRPO.yaml")
     args = parser.parse_args()
@@ -487,27 +488,107 @@ async def main():
         logger.error(f"❌ [GRPOTrainer] Initialization failed: {e}")
         sys.exit(1)
     
-    '''
-    # Load dataset
-    search_path = os.path.expanduser(f"{args.input_dir}/{args.run_tag}")
-    if not os.path.exists(search_path):
-        logger.error(f"❌ [GRPOTrainer] [{args.run_tag}] Input directory [{search_path}] does not exist")
-        return
+    if args.simple_mode:
+        dataset = get_sample_dataset(trainer.tokenizer)
+        logger.info(f"📊 [GRPOTrainer] Use Simple Mode - loaded [{len(dataset)}] groups")
+    else:
+        # Load dataset
+        search_path = os.path.expanduser(f"{args.input_dir}/{args.run_tag}")
+        if not os.path.exists(search_path):
+            logger.error(f"❌ [GRPOTrainer] [{args.run_tag}] Input directory [{search_path}] does not exist")
+            return
 
-    # Query conversation files
-    result = duckdb.sql(f"""SELECT filename, compiled, correctness, metadata, runtime, runtime_stats
-                        FROM read_json_auto('{search_path}/**/reference_eval.json', sample_size=-1, ignore_errors=true) 
-                        WHERE messages[3]['content'] IS NOT NULL
-                    """)
-    
-    result_df = result.df()
-    
-    # Create preference dataset
-    preference_dataset = ReferenceDataset(result_df.tolist(), trainer.tokenizer, grpo_config)
+        # Query conversation files
+        result = duckdb.sql(f"""SELECT filename, compiled, correctness, metadata, runtime, runtime_stats
+                            FROM read_json_auto('{search_path}/**/reference_eval.json', sample_size=-1, ignore_errors=true) 
+                        """)
+        
+        result_df = result.df()
 
-    logger.info(f"📊 [GRPOTrainer] Dataset created - Train: {len(preference_dataset)}")
-    '''
-    dataset = get_sample_dataset(trainer.tokenizer)
+        # for each row in the result_df, create a generation result group
+        result_groups = []
+        for index, row in result_df.iterrows():
+            if not row['compiled'] or not row['correctness']:
+                logger.warning(f"⚠️ [GRPOTrainer] Skipping [{row['filename']}] Compiled: [{row['compiled']}] Correctness: [{row['correctness']}]")
+                continue
+
+            folder = os.path.dirname(row['filename'])
+            ref_runtime = row['runtime']
+
+            # get task tag from metadata
+            if 'task_tag' not in row['metadata']:
+                logger.warning(f"⚠️ [GRPOTrainer] Skipping [{row['filename']}] No task tag in metadata")
+                continue
+            task_tag = row['metadata']['task_tag']
+
+            generation_results = []
+            prompt = None
+            prompt_token_ids = []
+            # read in all the gen_xx_completion.json files in the same folder (non-recursive)
+            completion_files = [f for f in os.listdir(folder) if f.startswith('gen_') and f.endswith('_completion.json')]
+            for completion_file in completion_files:
+                with open(os.path.join(folder, completion_file), 'r') as f:
+                    completion_data = json.load(f)
+                gen_tag = completion_file.replace('_completion.json', '')
+                # read corresponding gen_xx_eval.json
+                eval_file = completion_file.replace('_completion.json', '_eval.json')
+                if not os.path.exists(os.path.join(folder, eval_file)):
+                    logger.warning(f"⚠️ [GRPOTrainer] No eval file found for [{completion_file}]")
+                    continue
+                with open(os.path.join(folder, eval_file), 'r') as f:
+                    eval_data = json.load(f)
+                # ok, now compile all the information together
+                compiled = eval_data['compiled']
+                correctness = eval_data['correctness']
+                runtime = eval_data['runtime']
+                reward_compiled = 0.0 if compiled else -0.5
+                reward_correctness = 0.0 if correctness else -0.5
+                reward_runtime = 0.0 if runtime < 0 else ref_runtime / runtime
+                reward = reward_compiled + reward_correctness + reward_runtime
+                # create a generation result group
+                if prompt is None:
+                    prompt = completion_data['prompt']
+                    prompt_token_ids = trainer.tokenizer.encode(prompt)
+                else:
+                    if prompt != completion_data['prompt']:
+                        logger.error(f"❌ [GRPOTrainer] Prompt mismatch for [{gen_tag}] - [{prompt}] != [{completion_data['prompt']}]")
+                        # ignore this generation result and continue
+                        continue
+                # split completion_data['logprobs'] into a list of completion ids and logprobs
+                completion_token_ids = [logprob['token_id'] for logprob in completion_data['logprobs']]
+                completion_log_probs = [logprob['logprob'] for logprob in completion_data['logprobs']]
+                # create the generation result object
+                result = GenerationResult(
+                    gen_tag=gen_tag,
+                    reward=reward,
+                    reward_items={
+                        "compiled": reward_compiled,
+                        "correctness": reward_correctness,
+                        "runtime": reward_runtime,
+                    },
+                    prompt_token_ids=prompt_token_ids,
+                    completion_token_ids=completion_token_ids,
+                    completion_log_probs=completion_log_probs,
+                )
+                generation_results.append(result)
+
+            # create a generation result group only if we have at least 2 results
+            if len(generation_results) < 2:
+                logger.warning(f"⚠️ [GRPOTrainer] Skipping [{folder}] that has only [{len(generation_results)}] results")
+                continue
+            # check if all the reward are the same, if so, skip
+            if all(result.reward == generation_results[0].reward for result in generation_results):
+                logger.warning(f"⚠️ [GRPOTrainer] Skipping [{folder}] All rewards are the same: [{generation_results[0].reward}]")
+                continue
+            # we are here because we have at least 2 results and the rewards are not the same
+            # so we can create a generation result group
+            result_group = GenerationResultGroup(task_tag=task_tag, results=generation_results)
+            result_groups.append(result_group)
+
+
+        # Create group dataset
+        dataset = GenerationDataset(result_groups)
+        logger.info(f"✅ [GRPOTrainer] Dataset prepared from [{args.run_tag}] - loaded [{len(dataset)}] groups")
     
     # Train the block
     try:
