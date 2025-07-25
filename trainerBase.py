@@ -45,8 +45,6 @@ from trainerUtil import SimpleCollator
 class TrainerStatus(BaseModel):
     """Running status of the trainer"""
     global_step: int = 0
-    epoch_id: int = 0
-    block_id: int = 0
 
 class ModelConfig(BaseModel):
     """Configuration for model parameters"""
@@ -204,27 +202,41 @@ class TextDataset(Dataset):
 class BaseTrainer:
     """Base trainer for Hugging Face models with step-by-step training implementation"""
     
-    def __init__(self, prefix_tag: str, config: TrainerConfig, status: Optional[TrainerStatus] = None):
+    def __init__(self, prefix_tag: str, config: TrainerConfig, status: Optional[TrainerStatus] = None, base_trainer = None):
         self.prefix_tag = prefix_tag
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.trainer_status = status if status is not None else TrainerStatus()
-        self.run_tag = f"{prefix_tag}_{self.trainer_status.epoch_id:03d}_{self.trainer_status.block_id:02d}"
+
+        if base_trainer is None:
+            self.trainer_status = status if status is not None else TrainerStatus()
+        else:
+            self.trainer_status = base_trainer.trainer_status
 
         # Set random seeds for reproducibility
         self._set_seed()
         
         # Initialize model and tokenizer
-        self.base_model, self.tokenizer = self._setup_model_and_tokenizer()
+        if base_trainer is None:
+            self.base_model, self.tokenizer = self._setup_model_and_tokenizer()
+        else:
+            self.base_model = base_trainer.base_model
+            self.tokenizer = base_trainer.tokenizer
         
         # Setup LoRA if enabled
-        if self.config.lora.use_lora:
-            self.model = self._setup_lora()
+        if base_trainer is None:
+            if self.config.lora.use_lora:
+                self.model = self._setup_lora()
+            else:
+                self.model = self.base_model
         else:
-            self.model = self.base_model
+            self.model = base_trainer.model
         
         # Initialize optimizer and scheduler
-        self.optimizer, self.scheduler = self._setup_optimizer_and_scheduler()
+        if base_trainer is None:
+            self.optimizer, self.scheduler = self._setup_optimizer_and_scheduler()
+        else:
+            self.optimizer = base_trainer.optimizer
+            self.scheduler = base_trainer.scheduler
 
         # Initialize data collator
         self.data_collator = SimpleCollator(
@@ -241,7 +253,7 @@ class BaseTrainer:
         self._setup_logging()
         
         # Load checkpoint if specified
-        if config.training.latest_checkpoint_name:
+        if base_trainer is None and config.training.latest_checkpoint_name:
             checkpoint_location = self.checkpoint_path / config.training.latest_checkpoint_name
             if self._checkpoint_exists(checkpoint_location):
                 self._load_checkpoint(checkpoint_location)
@@ -301,19 +313,19 @@ class BaseTrainer:
             if hasattr(tokenizer, 'trust_remote_code'):
                 tokenizer.trust_remote_code = True
                 
-            logger.info(f"🔧 [{self.__class__.__name__}] Qwen tokenizer configured with chat template: {hasattr(tokenizer, 'chat_template')}")
+            logger.info(f"🛠️ [{self.__class__.__name__}] Qwen tokenizer configured with chat template: {hasattr(tokenizer, 'chat_template')}")
         
         # Log model information
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-        logger.info(f"✅ [{self.__class__.__name__}] Model loaded - Total: {total_params:,}, Trainable: {trainable_params:,} ({100 * trainable_params / total_params:.1f}%)")
+        logger.info(f"📜 [{self.__class__.__name__}] Model loaded - Total: {total_params:,}, Trainable: {trainable_params:,} ({100 * trainable_params / total_params:.1f}%)")
 
         return model, tokenizer
     
     def _setup_lora(self):
         """Setup LoRA configuration using Unsloth"""
-        logger.info(f"🔧 [{self.__class__.__name__}] Setting up LoRA (rank={self.config.lora.rank}, alpha={self.config.lora.alpha})")
+        logger.info(f"🛠️ [{self.__class__.__name__}] Setting up LoRA (rank={self.config.lora.rank}, alpha={self.config.lora.alpha})")
         
         if self.config.model.use_unsloth:
         # Apply LoRA with Unsloth
@@ -343,7 +355,7 @@ class BaseTrainer:
         trainable_params = sum(p.numel() for p in lora_model.parameters() if p.requires_grad)
         total_params = sum(p.numel() for p in lora_model.parameters())
         
-        logger.info(f"🎯 [{self.__class__.__name__}] LoRA applied - Trainable: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)")
+        logger.info(f"🛠️ [{self.__class__.__name__}] LoRA applied - Trainable: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)")
         
         if trainable_params == 0:
             logger.error(f"❌ [{self.__class__.__name__}] No trainable parameters found!")
@@ -446,10 +458,8 @@ class BaseTrainer:
         
         # Load training state
         self.trainer_status.global_step = checkpoint.get('global_step', 0)
-        self.trainer_status.epoch_id = checkpoint.get('epoch_id', 0)
-        self.trainer_status.block_id = checkpoint.get('block_id', 0)
         
-        logger.info(f"✅ [{self.__class__.__name__}] Checkpoint loaded - Step: [{self.trainer_status.global_step}], Epoch: [{self.trainer_status.epoch_id}], Block: [{self.trainer_status.block_id}]")
+        logger.info(f"📜 [{self.__class__.__name__}] Checkpoint loaded - Step: [{self.trainer_status.global_step}]")
     
     def _save_checkpoint(self, step: int):
         """Save training checkpoint"""
@@ -465,8 +475,6 @@ class BaseTrainer:
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
             'global_step': self.trainer_status.global_step,
-            'epoch_id': self.trainer_status.epoch_id,
-            'block_id': self.trainer_status.block_id,
             'config': self.config.model_dump(),
         }
         
@@ -551,7 +559,7 @@ class BaseTrainer:
         """Execute optimization step with gradient clipping"""
         # Clip gradients
         grad_norm = clip_grad_norm_(self.model.parameters(), self.config.training.max_grad_norm)
-        logger.info(f"🔍 [{self.__class__.__name__}] Grad norm: [{grad_norm:.4f}] max grad norm: [{self.config.training.max_grad_norm:.2f}]")
+        # logger.info(f"🔍 [{self.__class__.__name__}] Grad norm: [{grad_norm:.4f}] max grad norm: [{self.config.training.max_grad_norm:.2f}]")
         
         # Update parameters
         self.optimizer.step()
@@ -567,7 +575,7 @@ class BaseTrainer:
     def _log_metrics(self, loss: float, lr: float, step: int, grad_norm: float):
         """Log training metrics"""
         if step % self.config.training.logging_steps == 0:
-            logger.info(f"�� [{self.__class__.__name__}] Step {step}: Loss = {loss:.4f}, LR = {lr:.2e}, GradNorm = {grad_norm:.4f}")
+            logger.info(f"🔍 [{self.__class__.__name__}] [G-Step={step}]: [Loss={loss:.4f}], [LR={lr:.2e}], [GradNorm={grad_norm:.4f}/{self.config.training.max_grad_norm:.2f}]")
             
             if self.config.logging.use_wandb:
                 wandb.log({
@@ -589,7 +597,7 @@ class BaseTrainer:
             collate_fn=self.data_collator
         )
 
-        logger.info(f"🏋️ [{self.__class__.__name__}] [{run_tag}] Block started with [{len(dataloader)}] micro batches, Initial global step: [{self.trainer_status.global_step}]")
+        logger.info(f"👉 [{self.__class__.__name__}] [{run_tag}] Block started with [{len(dataloader)}] micro batches, Initial global step: [{self.trainer_status.global_step}]")
 
         start_time = time.time()
         accumulated_loss = 0.0
@@ -719,27 +727,24 @@ async def _train_loop(prefix_tag: str, trainer: BaseTrainer, dataset: Dataset, e
     loop = asyncio.get_event_loop()
 
     # Training loop
+    epoch_id = 0
+    block_id = 0
     while trainer.trainer_status.global_step < trainer.config.training.max_steps:
 
-        # use ceil to calculate the number of blocks
-        num_blocks = math.ceil(len(dataset) / trainer.config.training.block_size)
+        run_tag = f"{prefix_tag}_{epoch_id:03d}_{block_id:02d}"
 
-        for block_idx in range(trainer.trainer_status.block_id, num_blocks):
+        # train the model on the block
+        await loop.run_in_executor(None, trainer.train_block, run_tag, dataset, eval_dataset)
 
-            # extract a block from the dataset by sampling random indices of 8 items
-            block_indices = torch.randperm(len(dataset))[:trainer.config.training.block_size]
-            block_dataset = Subset(dataset, block_indices)
+        # increment the epoch id
+        block_id += 1
+        if block_id >= trainer.config.training.block_size:
+            epoch_id += 1
+            block_id = 0
 
-            run_tag = f"{prefix_tag}_{trainer.trainer_status.epoch_id:03d}_{block_idx:02d}"
-
-            # train the model on the block
-            await loop.run_in_executor(None, trainer.train_block, run_tag, block_dataset, eval_dataset)
-            
-            # Check if training is complete
-            if trainer.trainer_status.global_step >= trainer.config.training.max_steps:
-                break
-
-        trainer.trainer_status.epoch_id += 1
+        # check if training is complete
+        if trainer.trainer_status.global_step >= trainer.config.training.max_steps:
+            break
     
     # Final checkpoint
     trainer._save_checkpoint(trainer.trainer_status.global_step)
@@ -795,7 +800,7 @@ async def main():
     # Load configuration
     try:
         config = TrainerConfig.from_yaml(args.config)
-        logger.info(f"✅ Configuration loaded from {args.config}")
+        logger.info(f"📜 Configuration loaded from {args.config}")
     except Exception as e:
         logger.error(f"❌ Failed to load configuration: {e}")
         sys.exit(1)

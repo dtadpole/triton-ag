@@ -96,49 +96,49 @@ class MessageDataset(Dataset):
 class SFTTrainer(BaseTrainer):
     """Supervised Fine-Tuning trainer for conversational datasets"""
     
-    def __init__(self, prefix_tag: str, sft_config: SFTConfig, base_config: TrainerConfig, status: Optional[TrainerStatus] = None):
+    def __init__(self, prefix_tag: str, sft_config: SFTConfig, base_config: TrainerConfig, status: Optional[TrainerStatus] = None, base_trainer: BaseTrainer = None):
         """Initialize SFT trainer"""
-        super().__init__(prefix_tag, base_config, status)
+        super().__init__(prefix_tag, base_config, status, base_trainer)
         self.sft_config = sft_config
-        logger.info(f"🎯 [SFTTrainer] Initialized for conversational fine-tuning with SFTConfig: {sft_config}")
+        logger.info(f"📜 [SFTTrainer] Initialized for conversational fine-tuning with SFTConfig: {sft_config}")
         
 
-async def main():
-    """Main function for SFT training"""
-    parser = argparse.ArgumentParser(description="Train a model using SFTTrainer")
-    parser.add_argument("--input_dir", type=str, default="~/.critique")
-    parser.add_argument("--run_tag", type=str, default="v0.1_20250725_020900") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
-    parser.add_argument("--base-config", type=str, default="trainerBase.yaml")
-    parser.add_argument("--config", type=str, default="trainerSFT.yaml")
-    args = parser.parse_args()
-    
-    # Load configuration
+def sft_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_file: str = "trainerBase.yaml", sft_config_file: str = "trainerSFT.yaml"):
+    """Get a SFT trainer"""
     try:
-        base_config = TrainerConfig.from_yaml(args.base_config)
-        logger.info(f"✅ [SFTTrainer] Configuration loaded from {args.base_config}")
+        base_config = TrainerConfig.from_yaml(base_config_file)
+        logger.info(f"⚙️ [SFTTrainer] [{prefix_tag}] Base configuration loaded from [{base_config_file}]")
     except Exception as e:
-        logger.error(f"❌ [SFTTrainer] Failed to load Base configuration: {e}")
-        sys.exit(1)
+        logger.error(f"❌ [SFTTrainer] [{prefix_tag}] Failed to load base configuration: {e}")
+        raise e
 
     try:
-        sft_config = SFTConfig.from_yaml(args.config)
-        logger.info(f"✅ [SFTTrainer] Configuration loaded from {args.config}")
+        sft_config = SFTConfig.from_yaml(sft_config_file)
+        logger.info(f"⚙️ [SFTTrainer] [{prefix_tag}] SFT configuration loaded from [{sft_config_file}]")
     except Exception as e:
-        logger.error(f"❌ [SFTTrainer] Failed to load SFT configuration: {e}")
-        sys.exit(1)
-    
+        logger.error(f"❌ [SFTTrainer] [{prefix_tag}] Failed to load SFT configuration: {e}")
+        raise e
+
     try:
-        trainer = SFTTrainer(args.run_tag, sft_config, base_config)
-        logger.info("✅ [SFTTrainer] Trainer initialized")
+        trainer = SFTTrainer(prefix_tag, sft_config, base_config, base_trainer=base_trainer)
+        logger.info(f"⭐ [SFTTrainer] [{prefix_tag}] Trainer initialized")
     except Exception as e:
-        logger.error(f"❌ [SFTTrainer] Initialization failed: {e}")
-        sys.exit(1)
+        logger.error(f"❌ [SFTTrainer] [{prefix_tag}] Initialization failed: {e}")
+        raise e
     
+    return trainer
+
+def sft_train_block(trainer: SFTTrainer, prefix_tag: str, epoch_id: int, block_id: int, input_tag: str, input_dir: str = "~/.critique", base_config_file: str = "trainerBase.yaml", sft_config_file: str = "trainerSFT.yaml"):
+    """Train the model for one block"""
+    run_tag = f"{prefix_tag}_{epoch_id:03d}_{block_id:02d}"
+    logger.info(f"👉 [SFTTrainer] [{run_tag}] Block started with input tag: [{input_tag}]")
+
     # Load or create dataset
-    search_path = os.path.expanduser(f"{args.input_dir}/{args.run_tag}")
+    search_path = os.path.expanduser(f"{input_dir}/{input_tag}")
     if not os.path.exists(search_path):
-        logger.error(f"❌ [SFTTrainer] [{args.run_tag}] Error: Input directory [{search_path}] does not exist")
-        return
+        error_msg = f"❌ [SFTTrainer] [{run_tag}] Error: Input directory [{search_path}] does not exist"
+        logger.error(error_msg)
+        raise FileNotFoundError(error_msg)
 
     # query from search_path folder, find all the conversation_*.json files, and load them into a dataframe
     result = duckdb.sql(f"""SELECT filename, messages, metadata
@@ -148,17 +148,43 @@ async def main():
     
     result_df = result.df()
     # create a dataset from result_df['messages']
-    message_dataset = MessageDataset(result_df['messages'].tolist(), trainer.tokenizer, sft_config)
+    message_dataset = MessageDataset(result_df['messages'].tolist(), trainer.tokenizer, trainer.sft_config)
 
-    logger.info(f"📊 [SFTTrainer] Dataset created - Train: {len(message_dataset)}")
+    logger.info(f"📊 [SFTTrainer] [{run_tag}] Dataset created - Train: {len(message_dataset)}")
     
     # train the block
     try:
-        trainer.train_block(args.run_tag, message_dataset)
-        logger.info("🎉 [SFTTrainer] Training completed successfully!")
+        trainer.train_block(run_tag, message_dataset)
+        logger.info(f"� [SFTTrainer] [{run_tag}] Training completed successfully!")
     except Exception as e:
-        logger.error(f"❌ [SFTTrainer] Training failed: {e}")
-        sys.exit(0)
+        error_msg = f"❌ [SFTTrainer] [{run_tag}] Training failed: {e}"
+        logger.error(error_msg)
+        raise e
+
+
+async def main():
+    """Main function for SFT training"""
+    parser = argparse.ArgumentParser(description="Train a model using SFTTrainer")
+    parser.add_argument("--prefix_tag", type=str, default="KC_0.1.0")
+    parser.add_argument("--epoch_id", type=int, default=0)
+    parser.add_argument("--block_id", type=int, default=0)
+    parser.add_argument("--input_dir", type=str, default="~/.critique")
+    parser.add_argument("--input_tag", type=str, default="v0.1_20250725_020900") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
+    parser.add_argument("--base_config", type=str, default="trainerBase.yaml")
+    parser.add_argument("--sft_config", type=str, default="trainerSFT.yaml")
+    args = parser.parse_args()
+
+    trainer = sft_get_trainer(None, args.prefix_tag, args.base_config, args.sft_config)
+    sft_train_block(
+        trainer=trainer,
+        prefix_tag=args.prefix_tag,
+        epoch_id=args.epoch_id,
+        block_id=args.block_id,
+        input_tag=args.input_tag,
+        input_dir=args.input_dir,
+        base_config_file=args.base_config,
+        sft_config_file=args.sft_config
+    )
     
 if __name__ == "__main__":
     asyncio.run(main())

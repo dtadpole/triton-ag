@@ -19,5 +19,3 @@ class GlobalUtils:
 
     def fastapi(self):
         return self.fastapi
-
-
