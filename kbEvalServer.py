@@ -21,7 +21,7 @@ KB_EVAL_TOKEN = None
 CURR_ERROR_COUNT = 0
 MAX_ERROR_COUNT = 10
 START_TIME = time.time()
-MAX_RUN_TIME = 3600 // 2 # restart periods in seconds
+MAX_RUN_TIME = 2 * 3600 # restart periods in seconds
 
 KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
 
@@ -283,7 +283,7 @@ async def _check_total_error_count():
             ELAPSED_TIME = CURR_TIME - START_TIME
             if ELAPSED_TIME > MAX_RUN_TIME:
                 # add an star emoji
-                logger.error(f"⭐ Elapsed time is greater than 4 hours, exiting... [parent process will restart]")
+                logger.error(f"⭐ Elapsed time is greater than {MAX_RUN_TIME/3600:.2f} hours, exiting... [parent process will restart]")
                 loop = asyncio.get_event_loop()
                 loop.stop()
                 exit(1)
