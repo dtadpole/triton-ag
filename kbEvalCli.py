@@ -502,7 +502,7 @@ if __name__ == "__main__":
     parser.add_argument("--measure_reference", action="store_true")
     parser.add_argument("--measure_both", action="store_true")
     parser.add_argument("--device-list", type=str, default="4")
-    parser.add_argument("--max-jobs", type=int, default=4)
+    parser.add_argument("--max-jobs", type=int, default=2)
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
