@@ -96,22 +96,22 @@ class GenerationResultGroup(BaseModel):
         advantages = [a + np.random.normal(0, config.reward_noise) for a in advantages]
         # return the advantages
         return advantages
-        
+
 class GenerationDataset(Dataset):
     """Dataset for generation results"""
     def __init__(self, result_groups: List[GenerationResultGroup]):
         self.result_groups = result_groups
-    
+
     def __len__(self):
         return len(self.result_groups)
-    
+
     def __getitem__(self, idx):
         return self.result_groups[idx]
 
 
 class GRPOTrainer(BaseTrainer):
     """GRPO (Generalized Preference Optimization) trainer for preference learning"""
-    
+
     def __init__(self, prefix_tag: str, grpo_config: GRPOConfig, base_config: TrainerConfig, status: Optional[TrainerStatus] = None):
         """Initialize GRPO trainer"""
         super().__init__(prefix_tag, base_config, status)
@@ -134,24 +134,24 @@ class GRPOTrainer(BaseTrainer):
     def _reference_exists(self, reference_path: str) -> bool:
         """Check if reference exists"""
         reference_path_obj = Path(reference_path)
-        
+
         # Check for reference_state.pt file
         if reference_path_obj.is_dir():
             return (reference_path_obj / LATEST_REFERENCE_NAME).exists()
         else:
             return reference_path_obj.exists()
-    
+
     def _load_reference(self, reference_location: str):
         """Load reference for resuming training"""
         logger.info(f"🔄 [{self.__class__.__name__}] Loading reference from: {reference_location}")
-        
+
         # Get the training state file path
         reference_path_obj = Path(reference_location)
         reference_state_path = reference_path_obj / LATEST_REFERENCE_NAME if reference_path_obj.is_dir() else reference_path_obj
-        
+
         # Load reference checkpoint
         reference_state = torch.load(reference_state_path, map_location='cpu')
-        
+
         # Load model state
         if self.config.lora.use_lora and 'lora_state_dict' in reference_state:
             set_peft_model_state_dict(self.reference_model, reference_state['lora_state_dict'])
@@ -163,20 +163,20 @@ class GRPOTrainer(BaseTrainer):
         reference_global_step = reference_state.get('global_step', 0)
         reference_epoch_id = reference_state.get('epoch_id', 0)
         reference_block_id = reference_state.get('block_id', 0)
-        
+
         logger.info(f"✅ [{self.__class__.__name__}] Reference loaded - Step: [{reference_global_step}], Epoch: [{reference_epoch_id}], Block: [{reference_block_id}]")
 
         return self.reference_model
-    
+
     def _save_reference(self, global_step: int):
         """Save reference"""
         reference_path = self.checkpoint_path / f"reference-{global_step}"
         reference_path.mkdir(parents=True, exist_ok=True)
-        
+
         # Save model and tokenizer
         self.model.save_pretrained(reference_path)
         self.tokenizer.save_pretrained(reference_path)
-        
+
         # Save reference state
         reference_state = {
             'reference_global_step': global_step,
@@ -184,35 +184,35 @@ class GRPOTrainer(BaseTrainer):
             'reference_block_id': self.trainer_status.block_id,
             'config': self.config.model_dump(),
         }
-        
+
         if self.config.lora.use_lora:
             reference_state['lora_state_dict'] = get_peft_model_state_dict(self.reference_model)
         else:
             reference_state['model_state_dict'] = self.reference_model.state_dict()
-        
+
         reference_state_file = reference_path / f"reference_{global_step:04d}.pt"
         torch.save(reference_state, reference_state_file)
-        
+
         # Save config
         with open(reference_path / f"reference_config_{global_step:04d}.yaml", 'w') as f:
             yaml.dump(self.config.model_dump(), f, default_flow_style=False)
-        
+
         # Update latest reference link
         self._update_latest_reference_link(reference_state_file)
-        
+
         logger.info(f"💾 [{self.__class__.__name__}] Reference saved: {reference_state_file}")
-    
+
     def _update_latest_reference_link(self, reference_state_file: Path):
         """Update latest reference link"""
         latest_path = self.reference_path / LATEST_REFERENCE_NAME
-        
+
         # Remove existing link/directory
         if latest_path.exists():
             if latest_path.is_symlink():
                 latest_path.unlink()
             else:
                 shutil.rmtree(latest_path)
-        
+
         # Create symlink or copy
         try:
             latest_path.symlink_to(reference_state_file.name)
@@ -243,7 +243,7 @@ class GRPOTrainer(BaseTrainer):
             for i in range(1, len(prompt_token_ids)):
                 if prompt_token_ids[i] != prompt_token_ids[0]:
                     raise ValueError(f"❌ [GRPOTrainer] Prompt token ids are not the same: [idx.{i} != idx.{0}]")
-        
+
         # get logits from model
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
         # get the logits for the completion tokens only, remove the prompt tokens
@@ -255,7 +255,7 @@ class GRPOTrainer(BaseTrainer):
             # get log probabilities for the completion tokens
             labels = torch.tensor(completion_token_ids[i], device=self.device)
             new_action_log_probs = new_log_probs[i, :len(completion_token_ids[i]), :].gather(
-                dim=-1, 
+                dim=-1,
                 index=labels.unsqueeze(-1)
             ).squeeze(-1)  # (completion_len)
 
@@ -283,7 +283,7 @@ class GRPOTrainer(BaseTrainer):
                 loss = -torch.sum(final_ratio_advantage) / self.grpo_config.max_seq_length
             else:
                 raise ValueError(f"❌ [GRPOTrainingGroup] Invalid loss type: {self.grpo_config.loss_type}")
-            
+
             batch_loss += loss
 
         return batch_loss
@@ -309,9 +309,9 @@ class GRPOTrainer(BaseTrainer):
                 shuffle=True,
                 num_workers=self.config.training.dataloader_num_workers,
                 pin_memory=True,
-                collate_fn=SimpleCollator(tokenizer=self.tokenizer)
+                collate_fn=SimpleCollator(tokenizer_pad_token_id=self.tokenizer.pad_token_id)
             )
-            
+
             accumulated_loss = 0.0
 
             # group_max_length = max(len(result['input_ids']) for result in group_dataset)
@@ -321,36 +321,36 @@ class GRPOTrainer(BaseTrainer):
             for batch_idx, batch in enumerate(dataloader):
                 # Training step
                 mini_batch_loss = self._compute_mini_batch_loss(batch, group_max_length)
-                
+
                 # Scale loss for gradient accumulation
                 mini_batch_loss = mini_batch_loss / len(dataloader) # divide by the group size
                 mini_batch_loss.backward()
 
                 accumulated_loss += mini_batch_loss.item()
-                
+
             # Optimization step (only after entire group is processed, this changes the model parameters)
             grad_norm = self._optimization_step()
-            
+
             # Calculate average loss
             avg_loss = accumulated_loss
             accumulated_loss = 0.0
-            
+
             # Update step counter
             self.trainer_status.global_step += 1
             progress_bar.update(1)
-            
+
             # Log metrics
             current_lr = self.scheduler.get_last_lr()[0]
             self._log_metrics(avg_loss, current_lr, self.trainer_status.global_step, grad_norm)
-            
+
             # Save checkpoint
             if self.trainer_status.global_step % self.config.training.save_steps == 0:
                 self._save_checkpoint(self.trainer_status.global_step)
-            
+
             # Evaluation
             if eval_dataset and self.trainer_status.global_step % self.config.training.eval_steps == 0:
                 self._evaluate(eval_dataset)
-            
+
             # Check if training is complete
             if self.trainer_status.global_step >= self.config.training.max_steps:
                 break
@@ -464,7 +464,7 @@ async def main():
     parser.add_argument("--base-config", type=str, default="trainerBase.yaml")
     parser.add_argument("--config", type=str, default="trainerGRPO.yaml")
     args = parser.parse_args()
-    
+
     # Load configuration
     try:
         base_config = TrainerConfig.from_yaml(args.base_config)
@@ -479,14 +479,14 @@ async def main():
     except Exception as e:
         logger.error(f"❌ [GRPOTrainer] Failed to load GRPO configuration: {e}")
         sys.exit(1)
-    
+
     try:
         trainer = GRPOTrainer(args.run_tag, grpo_config, base_config)
         logger.info("✅ [GRPOTrainer] Trainer initialized")
     except Exception as e:
         logger.error(f"❌ [GRPOTrainer] Initialization failed: {e}")
         sys.exit(1)
-    
+
     '''
     # Load dataset
     search_path = os.path.expanduser(f"{args.input_dir}/{args.run_tag}")
@@ -496,19 +496,19 @@ async def main():
 
     # Query conversation files
     result = duckdb.sql(f"""SELECT filename, compiled, correctness, metadata, runtime, runtime_stats
-                        FROM read_json_auto('{search_path}/**/reference_eval.json', sample_size=-1, ignore_errors=true) 
+                        FROM read_json_auto('{search_path}/**/reference_eval.json', sample_size=-1, ignore_errors=true)
                         WHERE messages[3]['content'] IS NOT NULL
                     """)
-    
+
     result_df = result.df()
-    
+
     # Create preference dataset
     preference_dataset = ReferenceDataset(result_df.tolist(), trainer.tokenizer, grpo_config)
 
     logger.info(f"📊 [GRPOTrainer] Dataset created - Train: {len(preference_dataset)}")
     '''
     dataset = get_sample_dataset(trainer.tokenizer)
-    
+
     # Train the block
     try:
         trainer.train_block(args.run_tag, dataset)

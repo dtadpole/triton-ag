@@ -216,7 +216,7 @@ class BaseTrainer:
 
         # Initialize data collator
         self.data_collator = SimpleCollator(
-            tokenizer=self.tokenizer,
+            tokenizer_pad_token_id=self.tokenizer.pad_token_id,
             pad_to_multiple_of=8,
         )
 

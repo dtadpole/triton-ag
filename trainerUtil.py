@@ -234,8 +234,8 @@ def _mask_non_assistant_tokens(input_ids, labels, tokenizer, ignore_index) -> to
     return result
 
 class SimpleCollator:
-    def __init__(self, tokenizer, pad_to_multiple_of=8, ignore_index=-100):
-        self.tokenizer = tokenizer
+    def __init__(self, tokenizer_pad_token_id, pad_to_multiple_of=8, ignore_index=-100):
+        self.tokenizer_pad_token_id = tokenizer_pad_token_id  # unsloth tokernizer can't be pickled
         self.pad_to_multiple_of = pad_to_multiple_of
         self.ignore_index = ignore_index
 
@@ -254,7 +254,7 @@ class SimpleCollator:
         input_ids_padded = []
         for seq in input_ids:
             pad_len = max_len - len(seq)
-            padded = torch.cat([seq, torch.full((pad_len,), self.tokenizer.pad_token_id)])
+            padded = torch.cat([seq, torch.full((pad_len,), self.tokenizer_pad_token_id)])
             input_ids_padded.append(padded)
 
         result = {'input_ids': torch.stack(input_ids_padded)}
