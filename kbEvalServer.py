@@ -373,7 +373,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_host", action="store_true")
     parser.add_argument("--port",  type=int, default=8088)
-    parser.add_argument("--workers",  type=int, default=48)
+    parser.add_argument("--workers",  type=int, default=32)
     parser.add_argument("--device",  type=str, default='4')
     args = parser.parse_args()
     asyncio.run(main(args))

@@ -504,7 +504,7 @@ async def main():
     parser.add_argument("--block_id", type=int, default=0)
     parser.add_argument("--simple_mode", type=bool, default=False)
     parser.add_argument("--input_dir", type=str, default="~/.codeGenEval")
-    parser.add_argument("--input_tag", type=str, default="v0.1_20250725_020900")
+    parser.add_argument("--input_tag", type=str, default="v0.1_20250726_113055")
     parser.add_argument("--base_config", type=str, default="trainerBase.yaml")
     parser.add_argument("--grpo_config", type=str, default="trainerGRPO.yaml")
     args = parser.parse_args()
@@ -524,7 +524,7 @@ async def main():
     else:
         trainer = grpo_get_trainer(None, args.prefix_tag, args.base_config, args.grpo_config)
         grpo_train_block(
-            trainer=trainer,
+            trainer=trainer,              
             prefix_tag=args.prefix_tag,
             epoch_id=args.epoch_id,
             block_id=args.block_id,

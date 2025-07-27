@@ -306,8 +306,8 @@ async def critique_mini_batch(run_tag: str, config: InferenceClientConfig, paral
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--provider", type=str, default="fireworks")  # most cost effective models are deepinfra-r1 and fireworks-v3
-    parser.add_argument("--model", type=str, default="kimi-k2")  # most cost effective models are deepseek-v3 and kimi-k2
-    parser.add_argument("--run_tag", type=str, default="v0.1_20250725_020900") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
+    parser.add_argument("--model", type=str, default="deepseek-v3")  # most cost effective models are deepseek-v3 and kimi-k2
+    parser.add_argument("--run_tag", type=str, default="v0.1_20250726_113055") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
     parser.add_argument("--parallel_tasks", type=int, default=16)
     args = parser.parse_args()
 
