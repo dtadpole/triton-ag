@@ -1,3 +1,4 @@
+import copy
 import os
 import sys
 import duckdb
@@ -36,6 +37,7 @@ class GRPOConfig(BaseModel):
     clip_epsilon_lower: float = 0.2
     clip_epsilon_upper: float = 0.3
     beta: float = 0.0  # KL divergence coefficient
+    reference_model_update_steps: int = 100
     reward_scale: bool = True
     reward_epsilon: float = 1e-3
     reward_noise: float = 1e-2
@@ -96,22 +98,22 @@ class GenerationResultGroup(BaseModel):
         advantages = [a + np.random.normal(0, config.reward_noise) for a in advantages]
         # return the advantages
         return advantages
-        
+
 class GenerationDataset(Dataset):
     """Dataset for generation results"""
     def __init__(self, result_groups: List[GenerationResultGroup]):
         self.result_groups = result_groups
-    
+
     def __len__(self):
         return len(self.result_groups)
-    
+
     def __getitem__(self, idx):
         return self.result_groups[idx]
 
 
 class GRPOTrainer(BaseTrainer):
     """GRPO (Generalized Preference Optimization) trainer for preference learning"""
-    
+
     def __init__(self, prefix_tag: str, grpo_config: GRPOConfig, base_config: TrainerConfig, status: Optional[TrainerStatus] = None, base_trainer: BaseTrainer = None):
         """Initialize GRPO trainer"""
         super().__init__(prefix_tag, base_config, status, base_trainer)
@@ -122,11 +124,50 @@ class GRPOTrainer(BaseTrainer):
 
     def compute_ref_log_probs(self, batch: Dict[str, Any]):
         """Compute log probabilities for the generated tokens"""
+        if self.reference_model is None:
+            raise ValueError("The reference_model is None, can't compute log probs for reference model")
         with torch.no_grad():
-            outputs = self.reference_model(batch['input_ids'], batch['attention_mask'])
-            logits = outputs.logits[0]
-            log_probs = F.log_softmax(logits, dim=-1)
+            prompt_token_ids = batch['prompt_token_ids']
+            outputs = self.reference_model(batch['input_ids'].to(self.reference_model.device),
+                                           batch['attention_mask'].to(self.reference_model.device))
+            logits = outputs.logits[:, len(prompt_token_ids)-1:-1, :]
+            log_probs = F.log_softmax(logits, dim=-1).to(self.model.device)
+
             return log_probs # dim: (batch_size, seq_len, vocab_size)
+
+    def _deepcopy_reference_model(self, device=None):
+        self.reference_model = copy.deepcopy(self.model)
+        if device is not None:
+            self.reference_model.to(device)
+        self.reference_model.eval()
+        for param in self.reference_model.parameters():
+            param.requires_grad = False
+
+    def _update_reference_model(self):
+        logger.info(f"🔄 [GRPOTrainer] Updating reference model (LoRA mode)")
+        if self.reference_model is None:
+            logger.info("The reference model is None, no need to update state")
+            return
+
+        if not self.config.lora.use_lora:
+            # Full model case (your existing code handles this)
+            self.reference_model.load_state_dict(self.model.state_dict())
+        else:
+            # Get current LoRA adapter state
+            current_lora_state = get_peft_model_state_dict(self.model)
+
+            # Set the reference model to use the same adapter weights
+            set_peft_model_state_dict(self.reference_model, current_lora_state)
+
+            logger.info(f"✅ [GRPOTrainer] LoRA adapter weights copied to reference model")
+            logger.info(f"📊 [GRPOTrainer] Updated {len(current_lora_state)} adapter parameters")
+
+        # Ensure reference model is in eval mode and frozen
+        self.reference_model.eval()
+        for param in self.reference_model.parameters():
+            param.requires_grad = False
+
+        logger.info(f"🔒 [GRPOTrainer] Reference model frozen and set to eval mode")
 
     def _compute_mini_batch_loss(self, batch: Dict[str, Any], group_max_length: Optional[int] = None):
         """Compute loss for the generated tokens"""
@@ -144,19 +185,32 @@ class GRPOTrainer(BaseTrainer):
             for i in range(1, len(prompt_token_ids)):
                 if prompt_token_ids[i] != prompt_token_ids[0]:
                     raise ValueError(f"❌ [GRPOTrainer] Prompt token ids are not the same: [idx.{i} != idx.{0}]")
-        
+
         # get logits from model
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
         # get the logits for the completion tokens only, remove the prompt tokens
-        output_completion_logits = outputs.logits[:, len(prompt_token_ids)-1:-1, :]
+        output_completion_logits = outputs.logits[:, len(prompt_token_ids)-1:-1, :] # Shape: (batch_size, completion_len, vocab_size)
         new_log_probs = F.log_softmax(output_completion_logits, dim=-1) # dim: (batch_size, completion_len, vocab_size)
 
+        # add kl penalty
+        ref_log_prob = None
+        if self.grpo_config.beta > 0:
+            if self.reference_model is None:
+                logger.info("Making a deep copy of current model for reference")
+                self._deepcopy_reference_model()
+            with torch.no_grad():
+                ref_log_prob = self.compute_ref_log_probs(batch)
+
         batch_loss = 0.0
+        total_kl_divergence = 0.0
+        total_policy_loss = 0.0
+
         for i in range(len(advantages)): # for each generation result in the batch
             # get log probabilities for the completion tokens
             labels = torch.tensor(completion_token_ids[i], device=self.device)
+            completion_length = len(completion_token_ids[i])
             new_action_log_probs = new_log_probs[i, :len(completion_token_ids[i]), :].gather(
-                dim=-1, 
+                dim=-1,
                 index=labels.unsqueeze(-1)
             ).squeeze(-1)  # (completion_len)
 
@@ -175,17 +229,43 @@ class GRPOTrainer(BaseTrainer):
 
             # compute loss
             if self.grpo_config.loss_type == "episode":
-                loss = -final_ratio_advantage.mean()
+                policy_loss = -final_ratio_advantage.mean()
             elif self.grpo_config.loss_type == "token":
-                loss = -torch.sum(final_ratio_advantage) / len(new_action_log_probs)
+                policy_loss = -torch.sum(final_ratio_advantage) / len(new_action_log_probs)
             elif self.grpo_config.loss_type == "group_max":
-                loss = -torch.sum(final_ratio_advantage) / group_max_length
+                policy_loss = -torch.sum(final_ratio_advantage) / group_max_length
             elif self.grpo_config.loss_type == "seq_max":
-                loss = -torch.sum(final_ratio_advantage) / self.grpo_config.max_seq_length
+                policy_loss = -torch.sum(final_ratio_advantage) / self.grpo_config.max_seq_length
             else:
                 raise ValueError(f"❌ [GRPOTrainingGroup] Invalid loss type: {self.grpo_config.loss_type}")
-            
-            batch_loss += loss
+            total_policy_loss += policy_loss
+
+            kl_loss = 0.0
+            if self.grpo_config.beta > 0 and ref_log_prob is not None:
+                # Extract reference model log probabilities for actual completion tokens
+                ref_action_log_probs = ref_log_prob[i, :completion_length, :].gather(
+                    dim=-1,
+                    index=labels.unsqueeze(-1)
+                ).squeeze(-1)  # Shape: (completion_length)
+
+                # KL divergence: KL(π_θ || π_ref) = log π_θ(a|s) - log π_ref(a|s)
+                token_kl_divergences = new_action_log_probs - ref_action_log_probs  # Shape: (completion_length)
+
+                # Aggregate KL divergence based on loss type (same as policy loss)
+                if self.grpo_config.loss_type == "episode":
+                    kl_loss = self.grpo_config.beta * token_kl_divergences.mean()
+                elif self.grpo_config.loss_type == "token":
+                    kl_loss = self.grpo_config.beta * torch.sum(token_kl_divergences) / completion_length
+                elif self.grpo_config.loss_type == "group_max":
+                    kl_loss = self.grpo_config.beta * torch.sum(token_kl_divergences) / group_max_length
+                elif self.grpo_config.loss_type == "seq_max":
+                    kl_loss = self.grpo_config.beta * torch.sum(token_kl_divergences) / self.grpo_config.max_seq_length
+                else:
+                    raise ValueError(f"❌ [GRPOTrainingGroup] Invalid loss type: {self.grpo_config.loss_type}")
+
+                total_kl_divergence += kl_loss.item() if isinstance(kl_loss, torch.Tensor) else kl_loss
+            sample_loss = policy_loss + kl_loss
+            batch_loss += sample_loss
 
         return batch_loss
 
@@ -210,9 +290,9 @@ class GRPOTrainer(BaseTrainer):
                 shuffle=True,
                 num_workers=self.config.training.dataloader_num_workers,
                 pin_memory=True,
-                collate_fn=SimpleCollator(tokenizer=self.tokenizer)
+                collate_fn=SimpleCollator(tokenizer_pad_token_id=self.tokenizer.pad_token_id)
             )
-            
+
             accumulated_loss = 0.0
 
             # group_max_length = max(len(result['input_ids']) for result in group_dataset)
@@ -222,7 +302,7 @@ class GRPOTrainer(BaseTrainer):
             for batch_idx, batch in enumerate(dataloader):
                 # Training step
                 mini_batch_loss = self._compute_mini_batch_loss(batch, group_max_length)
-                
+
                 # Scale loss for gradient accumulation
                 mini_batch_loss = mini_batch_loss / len(dataloader) # divide by the group size
                 mini_batch_loss.backward()
@@ -231,30 +311,34 @@ class GRPOTrainer(BaseTrainer):
                 torch.cuda.empty_cache()
 
                 accumulated_loss += mini_batch_loss.item()
-                
+
             # Optimization step (only after entire group is processed, this changes the model parameters)
             grad_norm = self._optimization_step()
-            
+
             # Calculate average loss
             avg_loss = accumulated_loss
             accumulated_loss = 0.0
-            
+
             # Update step counter
             self.trainer_status.global_step += 1
             progress_bar.update(1)
-            
+
             # Log metrics
             current_lr = self.scheduler.get_last_lr()[0]
             self._log_metrics(avg_loss, current_lr, self.trainer_status.global_step, grad_norm)
-            
+
             # Save checkpoint
             if self.trainer_status.global_step % self.config.training.save_steps == 0:
                 self._save_checkpoint(self.trainer_status.global_step)
-            
+
             # Evaluation
             if eval_dataset and self.trainer_status.global_step % self.config.training.eval_steps == 0:
                 self._evaluate(eval_dataset)
-            
+
+            # update reference model
+            if self.reference_model is not None and self.trainer_status.global_step % self.grpo_config.reference_model_update_steps == 0:
+                self._update_reference_model()
+
             # Check if training is complete
             if self.trainer_status.global_step >= self.config.training.max_steps:
                 break
@@ -278,14 +362,14 @@ def grpo_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_fil
     except Exception as e:
         logger.error(f"❌ [GRPOTrainer] [{prefix_tag}] Failed to load GRPO configuration: {e}")
         raise e
-    
+
     try:
         trainer = GRPOTrainer(prefix_tag, grpo_config, base_config, base_trainer=base_trainer)
         logger.info(f"⭐ [GRPOTrainer] [{prefix_tag}] Trainer initialized")
     except Exception as e:
         logger.error(f"❌ [GRPOTrainer] [{prefix_tag}] Initialization failed: {e}")
         raise e
-    
+
     return trainer
 
 def grpo_train_block(trainer: GRPOTrainer, prefix_tag: str, epoch_id: int, block_id: int, input_tag: str, input_dir: str = "~/.codeGenEval", base_config_file: str = "trainerBase.yaml", grpo_config_file: str = "trainerGRPO.yaml"):
@@ -296,15 +380,15 @@ def grpo_train_block(trainer: GRPOTrainer, prefix_tag: str, epoch_id: int, block
     # Load dataset
     search_path = os.path.expanduser(f"{input_dir}/{input_tag}")
     if not os.path.exists(search_path):
-        error_msg = f"❌ [GRPOTrainer] [{run_tag}] Input directory [{search_path}] does not exist"  
+        error_msg = f"❌ [GRPOTrainer] [{run_tag}] Input directory [{search_path}] does not exist"
         logger.error(error_msg)
         raise FileNotFoundError(error_msg)
 
     # Query conversation files
     result = duckdb.sql(f"""SELECT filename, compiled, correctness, metadata, runtime, runtime_stats
-                        FROM read_json_auto('{search_path}/**/reference_eval.json', sample_size=-1, ignore_errors=true) 
+                        FROM read_json_auto('{search_path}/**/reference_eval.json', sample_size=-1, ignore_errors=true)
                     """)
-    
+
     result_df = result.df()
 
     # for each row in the result_df, create a generation result group
@@ -390,7 +474,7 @@ def grpo_train_block(trainer: GRPOTrainer, prefix_tag: str, epoch_id: int, block
     # Create group dataset
     dataset = GenerationDataset(result_groups)
     logger.info(f"📊 [GRPOTrainer] [{run_tag}] Dataset prepared from [{input_tag}] - loaded [{len(dataset)}] groups")
-    
+
     # Train the block
     try:
         trainer.train_block(run_tag, dataset)
@@ -399,7 +483,7 @@ def grpo_train_block(trainer: GRPOTrainer, prefix_tag: str, epoch_id: int, block
         logger.error(f"❌ [GRPOTrainer] [{run_tag}] Training failed: {e}")
         traceback.print_exc()
         raise e
-    
+
 def grpo_get_sample_dataset(tokenizer: AutoTokenizer, size: int = 20) -> GenerationDataset:
     """Get a sample dataset for testing"""
     prompts = [
@@ -524,7 +608,7 @@ async def main():
     else:
         trainer = grpo_get_trainer(None, args.prefix_tag, args.base_config, args.grpo_config)
         grpo_train_block(
-            trainer=trainer,              
+            trainer=trainer,
             prefix_tag=args.prefix_tag,
             epoch_id=args.epoch_id,
             block_id=args.block_id,
@@ -536,4 +620,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
