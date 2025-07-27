@@ -4,6 +4,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # Import Unsloth first for optimal performance
 from unsloth import FastLanguageModel
+import unsloth
 import asyncio
 import sys
 import torch
@@ -12,8 +13,15 @@ from torch.utils.data import DataLoader, Dataset
 from torch.nn.utils import clip_grad_norm_
 from transformers import (
     get_scheduler,
+    AutoModelForCausalLM,
+    AutoConfig,
+    AutoTokenizer,
 )
+import bitsandbytes as bnb
 from peft import (
+    TaskType,
+    LoraConfig,
+    get_peft_model,
     get_peft_model_state_dict,
     set_peft_model_state_dict,
 )
@@ -37,16 +45,16 @@ from trainerUtil import SimpleCollator
 class TrainerStatus(BaseModel):
     """Running status of the trainer"""
     global_step: int = 0
-    epoch_id: int = 0
-    block_id: int = 0
 
 class ModelConfig(BaseModel):
     """Configuration for model parameters"""
     name: str = 'gpt2'
     tokenizer_name: Optional[str] = None
-    max_seq_length: int = 1024
+    max_seq_length: int = 16384
+    use_unsloth: bool = True
     use_gradient_checkpointing: str = "unsloth"
-    use_4bit_quantization: bool = True
+    load_in_4bit: bool = False
+    load_in_8bit: bool = False
     compute_dtype: str = "bfloat16"
 
 class OptimizerConfig(BaseModel):
@@ -62,21 +70,21 @@ class TrainingConfig(BaseModel):
     """Configuration for training parameters"""
     micro_batch_size: int = 2
     gradient_accumulation_steps: int = 1
-    learning_rate: float = 0.00001
-    block_size: int = 3
-    max_steps: int = 50
-    save_steps: int = 10
-    eval_steps: int = 10
+    learning_rate: float = 0.000005
+    block_size: int = 32
+    max_steps: int = 100000
+    save_steps: int = 20
+    eval_steps: int = 20
     logging_steps: int = 1
     checkpoint_path: str = "~/.trainer"
     latest_checkpoint_name: Optional[str] = "checkpoint-latest"
     max_grad_norm: float = 0.1
     scheduler_type: str = "cosine"
-    num_warmup_steps: int = 10
+    num_warmup_steps: int = 50
     dataloader_num_workers: int = 4
     seed: int = -1
 
-class LoraConfig(BaseModel):
+class TrainerLoraConfig(BaseModel):
     """Configuration for LoRA parameters"""
     use_lora: bool = True
     rank: int = 64
@@ -96,22 +104,22 @@ class TrainerConfig(BaseModel):
     model: ModelConfig = ModelConfig()
     training: TrainingConfig = TrainingConfig()
     optimizer: OptimizerConfig = OptimizerConfig()
-    lora: LoraConfig = LoraConfig()
+    lora: TrainerLoraConfig = TrainerLoraConfig()
     logging: LoggingConfig = LoggingConfig()
-
+    
     @classmethod
     def from_yaml(cls, yaml_path: str) -> 'TrainerConfig':
         """Load configuration from YAML file"""
         with open(yaml_path, 'r') as f:
             config_dict = yaml.safe_load(f)
-
+        
         # Create config objects from sections
         model_config = ModelConfig()
         training_config = TrainingConfig()
         optimizer_config = OptimizerConfig()
-        lora_config = LoraConfig()
+        lora_config = TrainerLoraConfig()
         logging_config = LoggingConfig()
-
+        
         # Update from YAML sections
         if 'model' in config_dict:
             model_data = config_dict['model']
@@ -119,25 +127,27 @@ class TrainerConfig(BaseModel):
                 name=model_data.get('name', 'gpt2'),
                 tokenizer_name=model_data.get('tokenizer_name'),
                 max_seq_length=model_data.get('max_seq_length', 1024),
+                use_unsloth=model_data.get('use_unsloth', True),
                 use_gradient_checkpointing=model_data.get('use_gradient_checkpointing', "unsloth"),
-                use_4bit_quantization=model_data.get('use_4bit_quantization', True),
+                load_in_4bit=model_data.get('load_in_4bit', False),
+                load_in_8bit=model_data.get('load_in_8bit', False),
                 compute_dtype=model_data.get('compute_dtype', 'bfloat16')
             )
-
+        
         if 'training' in config_dict:
             training_data = config_dict['training']
             training_config = TrainingConfig(**training_data)
-
+        
         if 'optimizer' in config_dict:
             optimizer_data = config_dict['optimizer']
             # Convert betas list to tuple if present
             if 'betas' in optimizer_data and isinstance(optimizer_data['betas'], list):
                 optimizer_data['betas'] = tuple(optimizer_data['betas'])
             optimizer_config = OptimizerConfig(**optimizer_data)
-
+        
         if 'lora' in config_dict:
             lora_data = config_dict['lora']
-            lora_config = LoraConfig(
+            lora_config = TrainerLoraConfig(
                 use_lora=lora_data.get('use_lora', True),
                 rank=lora_data.get('rank', 64),
                 alpha=lora_data.get('alpha', 16),
@@ -145,11 +155,11 @@ class TrainerConfig(BaseModel):
                 target_modules=lora_data.get('target_modules'),
                 bias=lora_data.get('bias', 'none')
             )
-
+        
         if 'logging' in config_dict:
             logging_data = config_dict['logging']
             logging_config = LoggingConfig(**logging_data)
-
+        
         return cls(
             model=model_config,
             training=training_config,
@@ -161,27 +171,27 @@ class TrainerConfig(BaseModel):
 
 class TextDataset(Dataset):
     """Simple text dataset for language modeling"""
-
+    
     def __init__(self, texts: List[str], tokenizer, max_length: int = 1024):
         self.texts = texts
         self.tokenizer = tokenizer
         self.max_length = max_length
-
+        
     def __len__(self):
         return len(self.texts)
-
+    
     def __getitem__(self, idx):
         text = self.texts[idx]
-
+        
         # Tokenize the text
         encoded = self.tokenizer(
             text,
             truncation=True,
             max_length=self.max_length,
-            padding='max_length',
+            # padding='max_length',
             return_tensors='pt'
         )
-
+        
         return {
             'input_ids': encoded['input_ids'].squeeze(),
             'attention_mask': encoded['attention_mask'].squeeze(),
@@ -191,51 +201,65 @@ class TextDataset(Dataset):
 
 class BaseTrainer:
     """Base trainer for Hugging Face models with step-by-step training implementation"""
-
-    def __init__(self, prefix_tag: str, config: TrainerConfig, status: Optional[TrainerStatus] = None):
+    
+    def __init__(self, prefix_tag: str, config: TrainerConfig, status: Optional[TrainerStatus] = None, base_trainer = None):
         self.prefix_tag = prefix_tag
         self.config = config
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        self.trainer_status = status if status is not None else TrainerStatus()
-        self.run_tag = f"{prefix_tag}_{self.trainer_status.epoch_id:03d}_{self.trainer_status.block_id:02d}"
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        if base_trainer is None:
+            self.trainer_status = status if status is not None else TrainerStatus()
+        else:
+            self.trainer_status = base_trainer.trainer_status
 
         # Set random seeds for reproducibility
         self._set_seed()
-
+        
         # Initialize model and tokenizer
-        self.base_model, self.tokenizer = self._setup_model_and_tokenizer()
-
-        # Setup LoRA if enabled
-        if self.config.lora.use_lora:
-            self.model = self._setup_lora(self.base_model)
+        if base_trainer is None:
+            self.base_model, self.tokenizer = self._setup_model_and_tokenizer()
         else:
-            self.model = self.base_model
-
+            self.base_model = base_trainer.base_model
+            self.tokenizer = base_trainer.tokenizer
+        
+        # Setup LoRA if enabled
+        if base_trainer is None:
+            if self.config.lora.use_lora:
+                self.model = self._setup_lora()
+            else:
+                self.model = self.base_model
+        else:
+            self.model = base_trainer.model
+        
         # Initialize optimizer and scheduler
-        self.optimizer, self.scheduler = self._setup_optimizer_and_scheduler()
+        if base_trainer is None:
+            self.optimizer, self.scheduler = self._setup_optimizer_and_scheduler()
+        else:
+            self.optimizer = base_trainer.optimizer
+            self.scheduler = base_trainer.scheduler
 
         # Initialize data collator
         self.data_collator = SimpleCollator(
-            tokenizer_pad_token_id=self.tokenizer.pad_token_id,
+            tokenizer=self.tokenizer,
             pad_to_multiple_of=8,
         )
-
+        
         # Setup output directory
         self.checkpoint_path = Path(os.path.expanduser(config.training.checkpoint_path)) / self.prefix_tag
 
         self.checkpoint_path.mkdir(parents=True, exist_ok=True)
-
+        
         # Initialize logging
         self._setup_logging()
-
+        
         # Load checkpoint if specified
-        if config.training.latest_checkpoint_name:
+        if base_trainer is None and config.training.latest_checkpoint_name:
             checkpoint_location = self.checkpoint_path / config.training.latest_checkpoint_name
             if self._checkpoint_exists(checkpoint_location):
                 self._load_checkpoint(checkpoint_location)
             else:
                 logger.warning(f"⚠️ [{self.__class__.__name__}] Checkpoint not found: {checkpoint_location} - Starting fresh training")
-
+    
     def _set_seed(self):
         """Set random seeds for reproducibility"""
         if self.config.training.seed is not None and self.config.training.seed >= 0:
@@ -247,97 +271,116 @@ class BaseTrainer:
             logger.info(f"🎲 [{self.__class__.__name__}] Random seed set to: {self.config.training.seed}")
         else:
             logger.info(f"🎲 [{self.__class__.__name__}] Using random seed (no fixed seed set)")
-
+    
     def _setup_model_and_tokenizer(self):
         """Initialize the model and tokenizer using Unsloth"""
         logger.info(f"🚀 [{self.__class__.__name__}] Loading model: {self.config.model.name}")
-
-        # Load model with Unsloth
-        model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=self.config.model.name,
-            max_seq_length=self.config.model.max_seq_length,
-            dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16),
-            load_in_4bit=self.config.model.use_4bit_quantization,
-            use_gradient_checkpointing=self.config.model.use_gradient_checkpointing,
-            trust_remote_code=True,
-            device_map={"": 0},
-            use_cache=False,
-            # token="hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
-        )
-
+        
+        if self.config.model.use_unsloth:
+            # Load model with Unsloth
+            model, tokenizer = FastLanguageModel.from_pretrained(
+                model_name=self.config.model.name,
+                max_seq_length=self.config.model.max_seq_length,
+                dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16),
+                load_in_4bit=self.config.model.load_in_4bit,
+                use_gradient_checkpointing=self.config.model.use_gradient_checkpointing,
+                # token="hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
+            )
+        else:
+            config = AutoConfig.from_pretrained(self.config.model.name)
+            config.max_position_embeddings = self.config.model.max_seq_length
+            model = AutoModelForCausalLM.from_pretrained(
+                self.config.model.name,
+                config=config,
+                torch_dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16),
+                device_map="auto",
+            )
+            model.gradient_checkpointing_enable()
+            tokenizer = AutoTokenizer.from_pretrained(self.config.model.name if self.config.model.tokenizer_name is None else self.config.model.tokenizer_name)
+        
         # Ensure tokenizer has pad token
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
-
+        
         # Special handling for Qwen models
         is_qwen_model = "qwen" in self.config.model.name.lower()
         if is_qwen_model:
             # Ensure Qwen-specific tokenizer settings
             if hasattr(tokenizer, 'chat_template') and tokenizer.chat_template is None:
                 logger.warning("⚠️ [{self.__class__.__name__}] Qwen model missing chat template, this may cause generation issues")
-
+            
             # Set trust_remote_code for Qwen models if needed
             if hasattr(tokenizer, 'trust_remote_code'):
                 tokenizer.trust_remote_code = True
-
-            logger.info(f"🔧 [{self.__class__.__name__}] Qwen tokenizer configured with chat template: {hasattr(tokenizer, 'chat_template')}")
-
+                
+            logger.info(f"🛠️ [{self.__class__.__name__}] Qwen tokenizer configured with chat template: {hasattr(tokenizer, 'chat_template')}")
+        
         # Log model information
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-        logger.info(f"✅ [{self.__class__.__name__}] Model loaded - Total: {total_params:,}, Trainable: {trainable_params:,} ({100 * trainable_params / total_params:.1f}%)")
+        logger.info(f"📜 [{self.__class__.__name__}] Model loaded - Total: {total_params:,}, Trainable: {trainable_params:,} ({100 * trainable_params / total_params:.1f}%)")
 
         return model, tokenizer
-
-    def _setup_lora(self, model: FastLanguageModel):
+    
+    def _setup_lora(self):
         """Setup LoRA configuration using Unsloth"""
-        logger.info(f"🔧 [{self.__class__.__name__}] Setting up LoRA (rank={self.config.lora.rank}, alpha={self.config.lora.alpha})")
-
+        logger.info(f"🛠️ [{self.__class__.__name__}] Setting up LoRA (rank={self.config.lora.rank}, alpha={self.config.lora.alpha})")
+        
+        if self.config.model.use_unsloth:
         # Apply LoRA with Unsloth
-        lora_model = FastLanguageModel.get_peft_model(
-            model,
-            r=self.config.lora.rank,
-            target_modules=self.config.lora.target_modules,
-            lora_alpha=self.config.lora.alpha,
-            lora_dropout=self.config.lora.dropout,
-            bias=self.config.lora.bias,
-            use_gradient_checkpointing=self.config.model.use_gradient_checkpointing,
-            random_state=self.config.training.seed if self.config.training.seed is not None and self.config.training.seed >= 0 else random.randint(0,2**31),
-            use_rslora=False,  # Use regular LoRA
-            loftq_config=None,
-        )
-
+            lora_model = FastLanguageModel.get_peft_model(
+                self.base_model,
+                r=self.config.lora.rank,
+                target_modules=self.config.lora.target_modules,
+                lora_alpha=self.config.lora.alpha,
+                lora_dropout=self.config.lora.dropout,
+                bias=self.config.lora.bias,
+                use_gradient_checkpointing=self.config.model.use_gradient_checkpointing,
+                random_state=self.config.training.seed if self.config.training.seed is not None and self.config.training.seed >= 0 else random.randint(0,2**31),
+                use_rslora=False,  # Use regular LoRA
+                loftq_config=None,
+            )
+        else:
+            lora_model = get_peft_model(self.base_model, LoraConfig(
+                r=self.config.lora.rank,
+                lora_alpha=self.config.lora.alpha,
+                target_modules=self.config.lora.target_modules,
+                lora_dropout=self.config.lora.dropout,
+                bias=self.config.lora.bias,
+                task_type=TaskType.CAUSAL_LM,
+            ))
+        
         # Log LoRA information
         trainable_params = sum(p.numel() for p in lora_model.parameters() if p.requires_grad)
         total_params = sum(p.numel() for p in lora_model.parameters())
-
-        logger.info(f"🎯 [{self.__class__.__name__}] LoRA applied - Trainable: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)")
-
+        
+        logger.info(f"🛠️ [{self.__class__.__name__}] LoRA applied - Trainable: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)")
+        
         if trainable_params == 0:
             logger.error(f"❌ [{self.__class__.__name__}] No trainable parameters found!")
             raise RuntimeError("No trainable parameters found after LoRA application")
 
         return lora_model
-
+    
     def _setup_optimizer_and_scheduler(self):
         """Setup optimizer and learning rate scheduler"""
         # Group parameters for weight decay
         no_decay = ["bias", "LayerNorm.weight", "layer_norm.weight"]
-
+        
         optimizer_grouped_parameters = [
             {
-                "params": [p for n, p in self.model.named_parameters()
+                "params": [p for n, p in self.model.named_parameters() 
                           if p.requires_grad and not any(nd in n for nd in no_decay)],
                 "weight_decay": self.config.optimizer.weight_decay,
             },
             {
-                "params": [p for n, p in self.model.named_parameters()
+                "params": [p for n, p in self.model.named_parameters() 
                           if p.requires_grad and any(nd in n for nd in no_decay)],
                 "weight_decay": 0.0,
             },
         ]
-
+        
         # Create optimizer based on type (using bitsandbytes paged optimizers)
         optimizer_type = self.config.optimizer.optimizer_type.lower()
         if optimizer_type == "adamw":
@@ -366,7 +409,7 @@ class BaseTrainer:
             )
         else:
             raise ValueError(f"Unsupported optimizer type: {self.config.optimizer.optimizer_type}")
-
+        
         # Setup learning rate scheduler
         scheduler = get_scheduler(
             self.config.training.scheduler_type,
@@ -374,32 +417,32 @@ class BaseTrainer:
             num_warmup_steps=self.config.training.num_warmup_steps,
             num_training_steps=self.config.training.max_steps,
         )
-
+        
         logger.info(f"⚙️ [{self.__class__.__name__}] Paged optimizer ({optimizer_type}) and scheduler initialized")
 
         return optimizer, scheduler
-
+    
     def _checkpoint_exists(self, checkpoint_path: str) -> bool:
         """Check if checkpoint exists"""
         checkpoint_path_obj = Path(checkpoint_path)
-
+        
         # Check for training_state.pt file
         if checkpoint_path_obj.is_dir():
             return (checkpoint_path_obj / "training_state.pt").exists()
         else:
             return checkpoint_path_obj.exists()
-
+    
     def _load_checkpoint(self, checkpoint_location: str):
         """Load checkpoint for resuming training"""
         logger.info(f"🔄 [{self.__class__.__name__}] Loading checkpoint from: {checkpoint_location}")
-
+        
         # Get the training state file path
         checkpoint_path_obj = Path(checkpoint_location)
         training_state_path = checkpoint_path_obj / "training_state.pt" if checkpoint_path_obj.is_dir() else checkpoint_path_obj
-
+        
         # Load checkpoint
         checkpoint = torch.load(training_state_path, map_location='cpu')
-
+        
         # Load model state
         if self.config.lora.use_lora and 'lora_state_dict' in checkpoint:
             set_peft_model_state_dict(self.model, checkpoint['lora_state_dict'])
@@ -407,58 +450,54 @@ class BaseTrainer:
             self.model.load_state_dict(checkpoint['model_state_dict'])
         else:
             logger.warning(f"⚠️ [{self.__class__.__name__}] Model state not found or incompatible in checkpoint")
-
+        
         # Load optimizer and scheduler state
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if 'scheduler_state_dict' in checkpoint:
             self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-
+        
         # Load training state
         self.trainer_status.global_step = checkpoint.get('global_step', 0)
-        self.trainer_status.epoch_id = checkpoint.get('epoch_id', 0)
-        self.trainer_status.block_id = checkpoint.get('block_id', 0)
-
-        logger.info(f"✅ [{self.__class__.__name__}] Checkpoint loaded - Step: [{self.trainer_status.global_step}], Epoch: [{self.trainer_status.epoch_id}], Block: [{self.trainer_status.block_id}]")
-
+        
+        logger.info(f"📜 [{self.__class__.__name__}] Checkpoint loaded - Step: [{self.trainer_status.global_step}]")
+    
     def _save_checkpoint(self, step: int):
         """Save training checkpoint"""
         checkpoint_path = self.checkpoint_path / f"checkpoint-{step}"
         checkpoint_path.mkdir(parents=True, exist_ok=True)
-
+        
         # Save model and tokenizer
         self.model.save_pretrained(checkpoint_path)
         self.tokenizer.save_pretrained(checkpoint_path)
-
+        
         # Save training state
         checkpoint_state = {
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
             'global_step': self.trainer_status.global_step,
-            'epoch_id': self.trainer_status.epoch_id,
-            'block_id': self.trainer_status.block_id,
             'config': self.config.model_dump(),
         }
-
+        
         if self.config.lora.use_lora:
             checkpoint_state['lora_state_dict'] = get_peft_model_state_dict(self.model)
         else:
             checkpoint_state['model_state_dict'] = self.model.state_dict()
-
+        
         torch.save(checkpoint_state, checkpoint_path / "training_state.pt")
-
+        
         # Save config
         with open(checkpoint_path / "training_config.yaml", 'w') as f:
             yaml.dump(self.config.model_dump(), f, default_flow_style=False)
-
+        
         # Update latest checkpoint link
         self._update_latest_checkpoint_link(checkpoint_path)
-
+        
         logger.info(f"💾 [{self.__class__.__name__}] Checkpoint saved: {checkpoint_path}")
-
+    
     def _update_latest_checkpoint_link(self, checkpoint_path: Path):
         """Update latest checkpoint link"""
         latest_path = self.checkpoint_path / self.config.training.latest_checkpoint_name
-
+        
         # Remove existing link/directory
         if latest_path.exists():
             if latest_path.is_symlink():
@@ -466,14 +505,14 @@ class BaseTrainer:
             else:
                 import shutil
                 shutil.rmtree(latest_path)
-
+        
         # Create symlink or copy
         try:
             latest_path.symlink_to(checkpoint_path.name)
         except OSError:
             import shutil
             shutil.copytree(checkpoint_path, latest_path)
-
+    
     def _setup_logging(self):
         """Setup logging and tracking"""
         if self.config.logging.use_wandb:
@@ -483,14 +522,14 @@ class BaseTrainer:
                 config=self.config.model_dump()
             )
             logger.info(f"📈 [{self.__class__.__name__}] W&B logging enabled")
-
+    
     def _compute_loss(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Compute loss for a batch"""
         # Move tensors to device
         input_ids = batch['input_ids'].to(self.device)
         attention_mask = batch['attention_mask'].to(self.device)
         labels = batch['labels'].to(self.device)
-
+        
         # Forward pass
         outputs = self.model(
             input_ids=input_ids,
@@ -498,46 +537,46 @@ class BaseTrainer:
             labels=labels
         )
         loss = outputs.loss
-
+        
         return loss
-
+    
     def _train_step(self, batch: Dict[str, torch.Tensor]) -> float:
         """Execute a single training step"""
         self.model.train()
-
+        
         # Compute loss
         loss = self._compute_loss(batch)
-
+        
         # Scale loss for gradient accumulation
         loss = loss / self.config.training.gradient_accumulation_steps
-
+        
         # Backward pass
         loss.backward()
-
+        
         return loss.item()
-
+    
     def _optimization_step(self):
         """Execute optimization step with gradient clipping"""
         # Clip gradients
         grad_norm = clip_grad_norm_(self.model.parameters(), self.config.training.max_grad_norm)
-        logger.info(f"🔍 [{self.__class__.__name__}] Grad norm: [{grad_norm:.4f}] max grad norm: [{self.config.training.max_grad_norm:.2f}]")
-
+        # logger.info(f"🔍 [{self.__class__.__name__}] Grad norm: [{grad_norm:.4f}] max grad norm: [{self.config.training.max_grad_norm:.2f}]")
+        
         # Update parameters
         self.optimizer.step()
-
+        
         # Update learning rate
         self.scheduler.step()
-
+        
         # Zero gradients
         self.optimizer.zero_grad()
 
         return grad_norm
-
+    
     def _log_metrics(self, loss: float, lr: float, step: int, grad_norm: float):
         """Log training metrics"""
         if step % self.config.training.logging_steps == 0:
-            logger.info(f"�� [{self.__class__.__name__}] Step {step}: Loss = {loss:.4f}, LR = {lr:.2e}, GradNorm = {grad_norm:.4f}")
-
+            logger.info(f"🔍 [{self.__class__.__name__}] [G-Step={step}]: [Loss={loss:.4f}], [LR={lr:.2e}], [GradNorm={grad_norm:.4f}/{self.config.training.max_grad_norm:.2f}]")
+            
             if self.config.logging.use_wandb:
                 wandb.log({
                     "train/loss": loss,
@@ -558,7 +597,7 @@ class BaseTrainer:
             collate_fn=self.data_collator
         )
 
-        logger.info(f"🏋️ [{self.__class__.__name__}] [{run_tag}] Block started with [{len(dataloader)}] micro batches, Initial global step: [{self.trainer_status.global_step}]")
+        logger.info(f"👉 [{self.__class__.__name__}] [{run_tag}] Block started with [{len(dataloader)}] micro batches, Initial global step: [{self.trainer_status.global_step}]")
 
         start_time = time.time()
         accumulated_loss = 0.0
@@ -574,31 +613,31 @@ class BaseTrainer:
             # Training step
             step_loss = self._train_step(batch)
             accumulated_loss += step_loss
-
+            
             # Optimization step (only after accumulation)
             if (batch_idx + 1) % self.config.training.gradient_accumulation_steps == 0:
                 grad_norm = self._optimization_step()
-
+                
                 # Calculate average loss
                 avg_loss = accumulated_loss / self.config.training.gradient_accumulation_steps
                 accumulated_loss = 0.0
-
+                
                 # Update step counter
                 self.trainer_status.global_step += 1
                 progress_bar.update(1)
-
+                
                 # Log metrics
                 current_lr = self.scheduler.get_last_lr()[0]
                 self._log_metrics(avg_loss, current_lr, self.trainer_status.global_step, grad_norm)
-
+                
                 # Save checkpoint
                 if self.trainer_status.global_step % self.config.training.save_steps == 0:
                     self._save_checkpoint(self.trainer_status.global_step)
-
+                
                 # Evaluation
                 if eval_dataset and self.trainer_status.global_step % self.config.training.eval_steps == 0:
                     self._evaluate(eval_dataset)
-
+                
                 # Check if training is complete
                 if self.trainer_status.global_step >= self.config.training.max_steps:
                     break
@@ -610,52 +649,53 @@ class BaseTrainer:
     def _evaluate(self, eval_dataset: Dataset):
         """Evaluate the model on evaluation dataset"""
         logger.info(f"📊 [{self.__class__.__name__}] Running evaluation...")
-
+        
         self.model.eval()
         eval_dataloader = DataLoader(
             eval_dataset,
             batch_size=self.config.training.micro_batch_size,
             shuffle=False,
             num_workers=self.config.training.dataloader_num_workers,
-            pin_memory=True
+            pin_memory=True,
+            collate_fn=self.data_collator
         )
-
+        
         total_loss = 0.0
         num_batches = 0
-
+        
         with torch.no_grad():
             for batch in eval_dataloader:
                 loss = self._compute_loss(batch)
                 total_loss += loss.item()
                 num_batches += 1
-
+        
         avg_eval_loss = total_loss / num_batches
         perplexity = math.exp(avg_eval_loss)
-
+        
         logger.info(f"📊 [{self.__class__.__name__}] Eval Loss: {avg_eval_loss:.4f}, Perplexity: {perplexity:.2f}")
-
+        
         if self.config.logging.use_wandb:
             wandb.log({
                 "eval/loss": avg_eval_loss,
                 "eval/perplexity": perplexity,
                 "eval/step": self.trainer_status.global_step
             })
-
+        
         self.model.train()
-
+    
     def generate_text(self, prompt: str, max_length: int = 100, temperature: float = 0.7) -> str:
         """Generate text using the trained model"""
         self.model.eval()
-
+        
         # Tokenize the prompt
         inputs = self.tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
-
+        
         # Move inputs to device
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
-
+        
         # Store input length for proper output extraction
         input_length = inputs['input_ids'].shape[1]
-
+        
         # Generate text
         with torch.no_grad():
             outputs = self.model.generate(
@@ -670,13 +710,13 @@ class BaseTrainer:
                 eos_token_id=self.tokenizer.eos_token_id,
                 use_cache=True
             )
-
+        
         # Extract only the generated tokens (excluding input)
         generated_tokens = outputs[0][input_length:]
-
+        
         # Decode generated text
         generated_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
-
+        
         return generated_text.strip()
 
 async def _train_loop(prefix_tag: str, trainer: BaseTrainer, dataset: Dataset, eval_dataset: Optional[Dataset] = None):
@@ -687,31 +727,28 @@ async def _train_loop(prefix_tag: str, trainer: BaseTrainer, dataset: Dataset, e
     loop = asyncio.get_event_loop()
 
     # Training loop
+    epoch_id = 0
+    block_id = 0
     while trainer.trainer_status.global_step < trainer.config.training.max_steps:
 
-        # use ceil to calculate the number of blocks
-        num_blocks = math.ceil(len(dataset) / trainer.config.training.block_size)
+        run_tag = f"{prefix_tag}_{epoch_id:03d}_{block_id:02d}"
 
-        for block_idx in range(trainer.trainer_status.block_id, num_blocks):
+        # train the model on the block
+        await loop.run_in_executor(None, trainer.train_block, run_tag, dataset, eval_dataset)
 
-            # extract a block from the dataset by sampling random indices of 8 items
-            block_indices = torch.randperm(len(dataset))[:trainer.config.training.block_size]
-            block_dataset = Subset(dataset, block_indices)
+        # increment the epoch id
+        block_id += 1
+        if block_id >= trainer.config.training.block_size:
+            epoch_id += 1
+            block_id = 0
 
-            run_tag = f"{prefix_tag}_{trainer.trainer_status.epoch_id:03d}_{block_idx:02d}"
-
-            # train the model on the block
-            await loop.run_in_executor(None, trainer.train_block, run_tag, block_dataset, eval_dataset)
-
-            # Check if training is complete
-            if trainer.trainer_status.global_step >= trainer.config.training.max_steps:
-                break
-
-        trainer.trainer_status.epoch_id += 1
-
+        # check if training is complete
+        if trainer.trainer_status.global_step >= trainer.config.training.max_steps:
+            break
+    
     # Final checkpoint
     trainer._save_checkpoint(trainer.trainer_status.global_step)
-
+    
     if trainer.config.logging.use_wandb:
         wandb.finish()
 
@@ -740,7 +777,7 @@ def create_sample_training_dataset(tokenizer, size: int = 100, max_length: int =
         "Human: What is fine-tuning?\nAssistant: Fine-tuning is the process of taking a pre-trained model and further training it on a specific task or dataset to improve its performance on that particular task.",
         "Human: What is LoRA?\nAssistant: LoRA (Low-Rank Adaptation) is a technique that fine-tunes large language models efficiently by updating only a small number of parameters while keeping most of the model frozen.",
     ]
-
+    
     # Repeat to reach desired size
     repeated_conversations = (conversations * (size // len(conversations) + 1))[:size]
     return TextDataset(repeated_conversations, tokenizer, max_length)
@@ -751,35 +788,35 @@ async def main():
     parser = argparse.ArgumentParser(description="Train a model using BaseTrainer")
     parser.add_argument("--prefix-tag", type=str, default="v0.1",
                        help="Prefix tag for the training run")
-    parser.add_argument("--config", type=str, default="trainerBase.yaml",
+    parser.add_argument("--config", type=str, default="trainerBase.yaml", 
                        help="Path to configuration YAML file")
     parser.add_argument("--model-name", type=str, default=None,
                        help="Override model name")
     parser.add_argument("--max-steps", type=int, default=None,
                        help="Override maximum training steps")
-
+    
     args = parser.parse_args()
-
+    
     # Load configuration
     try:
         config = TrainerConfig.from_yaml(args.config)
-        logger.info(f"✅ Configuration loaded from {args.config}")
+        logger.info(f"📜 Configuration loaded from {args.config}")
     except Exception as e:
         logger.error(f"❌ Failed to load configuration: {e}")
         sys.exit(1)
-
+    
     # Apply command line overrides
     if args.model_name:
         config.model.name = args.model_name
     if args.max_steps:
         config.training.max_steps = args.max_steps
-
+    
     # Display configuration summary
     logger.info(f"📊 Training Config - Model: {config.model.name}, Steps: {config.training.max_steps}, Batch: {config.training.micro_batch_size}, LR: {config.training.learning_rate}")
     logger.info(f"⚙️ Optimizer Config - Type: {config.optimizer.optimizer_type}, Weight Decay: {config.optimizer.weight_decay}")
     if config.lora.use_lora:
         logger.info(f"🎯 LoRA Config - Rank: {config.lora.rank}, Alpha: {config.lora.alpha}")
-
+    
     # Initialize trainer
     try:
         trainer = BaseTrainer(args.prefix_tag, config)
@@ -788,26 +825,26 @@ async def main():
         logger.error(f"❌ Trainer initialization failed: {e}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         sys.exit(1)
-
+    
     # Create datasets
     train_dataset = create_sample_training_dataset(trainer.tokenizer, size=20, max_length=trainer.config.model.max_seq_length)
     eval_dataset = create_sample_training_dataset(trainer.tokenizer, size=2, max_length=trainer.config.model.max_seq_length)
-
+    
     logger.info(f"📊 Dataset created - Train: {len(train_dataset)}, Eval: {len(eval_dataset)}")
-
+    
     # Start training
     success = await train_async(args.prefix_tag, trainer, train_dataset, eval_dataset)
     if not success:
         logger.error("❌ Training failed")
         sys.exit(1)
-
+    
     try:
         logger.info("🎉 Training completed successfully!")
     except Exception as e:
         logger.error(f"❌ Training failed: {e}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         sys.exit(1)
-
+    
     # Test generation
     logger.info("🤖 Testing text generation...")
     test_prompts = [
@@ -815,7 +852,7 @@ async def main():
         "How can I improve my programming skills?",
         "Explain machine learning in simple terms.",
     ]
-
+    
     for prompt in test_prompts:
         try:
             logger.info(f"💬 Testing prompt: {prompt}")
@@ -825,7 +862,7 @@ async def main():
         except Exception as e:
             logger.error(f"❌ Generation failed for prompt '{prompt}': {e}")
             logger.error(f"Traceback: {traceback.format_exc()}")
-
+    
     logger.info("🎯 Training completed!")
 
 

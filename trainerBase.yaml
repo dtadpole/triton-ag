@@ -8,11 +8,13 @@
 # MODEL CONFIGURATION
 # ============================================================================
 model:
-  name: "finetune_model_output/sft_t2/qwen3_32b/"  # Model name from Hugging Face
+  name: "Qwen/Qwen3-32B"  # Model name from Hugging Face
   tokenizer_name: null  # If null, uses model name as tokenizer
-  max_seq_length: 8192  # Maximum sequence length for training
+  max_seq_length: 10240  # Maximum sequence length for training
+  use_unsloth: true
   use_gradient_checkpointing: "unsloth"  # Enable gradient checkpointing to save memory
-  use_4bit_quantization: true  # Enable 4-bit quantization for memory efficiency
+  load_in_4bit: true  # Enable 4-bit quantization for memory efficiency
+  load_in_8bit: false  # Enable 8-bit quantization for memory efficiency
   compute_dtype: "bfloat16"  # bfloat16 or float16
 
 # ============================================================================
@@ -20,26 +22,26 @@ model:
 # ============================================================================
 training:
   # Basic training parameters
-  micro_batch_size: 2
+  micro_batch_size: 1
   gradient_accumulation_steps: 1
-  learning_rate: 0.00001
-  max_steps: 50
-  block_size: 8
-
+  learning_rate: 0.000002
+  max_steps: 200000
+  block_size: 32
+  
   # Checkpointing and evaluation
-  save_steps: 10
-  eval_steps: 10
+  save_steps: 20
+  eval_steps: 20
   logging_steps: 1
-
+  
   # Output directory
   checkpoint_path: "~/.trainer"
   latest_checkpoint_name: "checkpoint-latest"
-
+  
   # Optimization settings
   max_grad_norm: 0.1
   scheduler_type: "cosine"
-  num_warmup_steps: 10
-
+  num_warmup_steps: 50
+  
   # Performance settings
   dataloader_num_workers: 4
   seed: -1
@@ -60,7 +62,7 @@ optimizer:
 # ============================================================================
 lora:
   use_lora: true  # Always use LoRA for efficient training
-  rank: 64   # LoRA rank (r)
+  rank: 128   # LoRA rank (r)
   alpha: 32  # LoRA alpha
   dropout: 0.0  # Use 0.0 for optimal Unsloth performance
   target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
@@ -72,4 +74,4 @@ lora:
 logging:
   use_wandb: false
   wandb_project: "unsloth-lora-training"
-  wandb_run_name: null
+  wandb_run_name: null 
