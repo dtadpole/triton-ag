@@ -134,10 +134,10 @@ class KbEvalClient:
 
             except Exception as e:
                 # add retry emoji to beginning and end of the string
-                logger.warning(f"🔍 [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Error calling server: [{e}]")
+                logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Error calling server: [{type(e).__name__}: {str(e)}]")
                 if retry_count < self.num_retries:
                     sleep_seconds = 2 ** retry_count
-                    logger.info(f"🔄 [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Retrying in {sleep_seconds} seconds... ({retry_count}/{self.num_retries})")
+                    logger.info(f"🔄 [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Retrying in {sleep_seconds} seconds... ({retry_count}/{self.num_retries})") # no emoji
                     # exponential backoff
                     time.sleep(sleep_seconds)
                     continue

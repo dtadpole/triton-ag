@@ -169,7 +169,7 @@ async def main():
     parser.add_argument("--epoch_id", type=int, default=0)
     parser.add_argument("--block_id", type=int, default=0)
     parser.add_argument("--input_dir", type=str, default="~/.critique")
-    parser.add_argument("--input_tag", type=str, default="v0.1_20250725_020900") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
+    parser.add_argument("--input_tag", type=str, default="v0.1_20250726_113055") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
     parser.add_argument("--base_config", type=str, default="trainerBase.yaml")
     parser.add_argument("--sft_config", type=str, default="trainerSFT.yaml")
     args = parser.parse_args()

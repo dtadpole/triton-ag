@@ -96,7 +96,7 @@ class CodeGenEvalClient:
             {"role": "user", "content": user_prompt}
         ]
         
-        prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=self.inference_client_config.model.enable_thinking)
 
         # Generate response
         start_time = time.time()
@@ -363,7 +363,7 @@ class CodeGenEvalClient:
                 break
         
         # circle emoji to beginning of the line
-        logger.info(f"🎯 [CodeGenEval Client] [{self.run_tag}] [Task {task_id:02d}] completed")
+        logger.info(f"🎯 [CodeGenEval Client] [{self.run_tag}] [Task {task_id:02d}] completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
 
 
     async def run_block(
@@ -501,7 +501,7 @@ async def code_gen_eval_block(prefix_tag: str, config: InferenceClientConfig, ep
         # now run inference
         codeGenEvalClient = CodeGenEvalClient(run_tag=run_tag, inference_client_config=config, logprobs=logprobs)
         await codeGenEvalClient.run_block(reference_code_contents, task_tags, num_generations, parallel_tasks)
-        logger.info(f"✅ [CodeGenEvalClient] [{run_tag}] Batch completed")
+        logger.info(f"✅ [CodeGenEvalClient] [{run_tag}] Batch completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
 
     except Exception as e:
         logger.error(f"❌ [CodeGenEvalClient] [{run_tag}] Error running batch: [{e}] in [{traceback.format_exc()}]")
