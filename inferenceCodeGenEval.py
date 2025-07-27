@@ -17,9 +17,8 @@ from inferenceClient import InferenceClient, InferenceClientConfig, load_inferen
 from kbEvalClient import KbEvalClient
 from logger import logger
 from kbEvalTest.kbeval import KernelExecResult
-from globalRegistry import GlobalRegistry
-
-CODEGEN_EVAL_FOLDER = Path(os.path.expanduser("~/.codeGenEval"))
+from globalUtils import CodeGenEvalBlock, TrainerGRPOBlock, CritiqueBlock
+from globalRegClient import GlobalRegClient
 
 class CodeGenEvalClient:
     def __init__(
@@ -27,7 +26,8 @@ class CodeGenEvalClient:
             run_tag: str,
             inference_client_config: InferenceClientConfig,
             config_file: str = "inferenceCodeGenEval.yaml",
-            logprobs: bool = True,
+            output_dir: str = "~/.codeGenEval",
+            logprobs: bool = True,         
     ):
         with open(config_file, 'r') as f:
             self.config = yaml.safe_load(f)
@@ -38,14 +38,14 @@ class CodeGenEvalClient:
         self.tokenizer = self.inference_client.tokenizer
         self.model_tag = self.inference_client.model_tag
         self.kb_eval_client = KbEvalClient()
-        self.output_dir = self._get_output_dir()
+        self.output_dir = self._get_output_dir(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info(f"🔍 [CodeGenEvalClient] [{self.run_tag}] [{self.model_tag}] Using logprobs: [{self.inference_client_config.model.logprobs}]")
 
-    def _get_output_dir(self) -> Path:
+    def _get_output_dir(self, output_dir: str) -> Path:
         """Get output sub directory for a task."""
-        return CODEGEN_EVAL_FOLDER / self.run_tag / self.model_tag
+        return Path(os.path.expanduser(output_dir)) / self.run_tag / self.model_tag
 
     def get_system_prompt(self) -> str:
         """Get system prompt from configuration."""
@@ -316,53 +316,37 @@ class CodeGenEvalClient:
                         # Process the inference task
                         gen_conversation, generated_code = await self._process_code_gen(task_tag=task_tag, gen_tag=gen_tag, reference_code=reference_code)
                         
-                        if generated_code:
-                            # we are successful, break the retry loop
-                            break
-                        
-                    except Exception as e:
-                        # add warning emoji to beginning of the line
-                        if retry_count >= max_retries:
-                            logger.error(f"❌ [CodeGenEval Client] [{self.run_tag}] Error generating [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
-                        else:
-                            logger.warning(f"⚠️ [CodeGenEval Client] [{self.run_tag}] Error generating [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
-                        logger.error(traceback.format_exc())
+                        if not generated_code:
+                            logger.warning(f"⚠️ [CodeGenEval Client] [{self.run_tag}] No generated code for [{task_tag}] [{f'{gen_tag}'}]")
+                            continue
 
-                # add info emoji to beginning of the line
-                logger.info(f"🔍 [CodeGenEval Client] [{self.run_tag}] Evaluating [{task_tag}] [{f'{gen_tag}'}]...")
+                        # we are successful, break the retry loop
+                        # add info emoji to beginning of the line
+                        logger.info(f"🔍 [CodeGenEval Client] [{self.run_tag}] Evaluating [{task_tag}] [{f'{gen_tag}'}]...")
 
-                retry_count = 0
-                max_retries = 3
-                while retry_count < max_retries:
-                    retry_count += 1
-                    try:
                         # Process the evaluation task
                         gen_eval_result = await self._process_code_eval(task_tag=task_tag, gen_tag=gen_tag, generated_code=generated_code)
                         
-                        if gen_eval_result:
-                            # we are successful, break the retry loop
-                            break
+                        if not gen_eval_result:
+                            logger.warning(f"⚠️ [CodeGenEval Client] [{self.run_tag}] No evaluation result for [{task_tag}] [{f'{gen_tag}'}]")
+                            continue
                         
+                        # we are successful, break the retry loop
+                        break
+
                     except Exception as e:
                         # add warning emoji to beginning of the line
                         if retry_count >= max_retries:
-                            logger.error(f"❌ [CodeGenEval Client] [{self.run_tag}] Error evaluating [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
+                            logger.error(f"❌ [CodeGenEval Client] [{self.run_tag}] Error generating or evaluating [{task_tag}] [{f'{gen_tag}'}]: {e}. Max retries reached [{retry_count}/{max_retries}]")
                         else:
-                            logger.warning(f"⚠️ [CodeGenEval Client] [{self.run_tag}] Error evaluating [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
+                            logger.warning(f"⚠️ [CodeGenEval Client] [{self.run_tag}] Error generating or evaluating [{task_tag}] [{f'{gen_tag}'}]: {e}. Retrying... [{retry_count}/{max_retries}]")
                         logger.error(traceback.format_exc())
 
-            except asyncio.TimeoutError:
-                # Timeout waiting for queue item, check if queue is empty
-                if queue.empty():
-                    # add info magnifying glass emoji to beginning of the line
-                    logger.info(f"🔍 [CodeGenEval Client] [{self.run_tag}] Queue is empty, terminating")
-                    break
             except Exception as e:
-                logger.error(f"❌ [CodeGenEval Client] [{self.run_tag}] Unexpected error: {e}")
+                logger.error(f"❌ [CodeGenEval Client] [{self.run_tag}] Error processing [{task_tag}] [{f'{gen_tag}'}]: {e}")
                 logger.error(traceback.format_exc())
-                break
-        
-        # circle emoji to beginning of the line
+
+        # task completed
         logger.info(f"🎯 [CodeGenEval Client] [{self.run_tag}] [Task {task_id:02d}] completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
 
 
@@ -442,36 +426,43 @@ class CodeGenEvalClient:
         logger.info(f"Results saved in: {self.output_dir}")
 
         # upload the output directory to s3
-        try:
-            s3_client = boto3.client('s3')
-            # recursively upload folder to s3 (not a file)
-            for root, dirs, files in os.walk(self.output_dir):
-                for file in files:
-                    relative_path = os.path.relpath(os.path.join(root, file), self.output_dir)
-                    s3_client.upload_file(os.path.join(root, file), 'agent-xyz', f'{self.run_tag}/{relative_path}')
-                    # add success emoji to beginning of the line
-            logger.info(f"✅ [CodeGenEvalClient] [{self.run_tag}] Uploaded [{self.output_dir}] to [s3://agent-xyz/{self.run_tag}]")
-        except Exception as e:
-            logger.error(f"❌ [CodeGenEvalClient] [{self.run_tag}] Error uploading to s3: {e}")
-            logger.error(traceback.format_exc())
+        # try:
+        #     s3_client = boto3.client('s3')
+        #     # recursively upload folder to s3 (not a file)
+        #     for root, dirs, files in os.walk(self.output_dir):
+        #         for file in files:
+        #             relative_path = os.path.relpath(os.path.join(root, file), self.output_dir)
+        #             s3_client.upload_file(os.path.join(root, file), 'agent-xyz', f'{self.run_tag}/{relative_path}')
+        #             # add success emoji to beginning of the line
+        #     logger.info(f"✅ [CodeGenEvalClient] [{self.run_tag}] Uploaded [{self.output_dir}] to [s3://agent-xyz/{self.run_tag}]")
+        # except Exception as e:
+        #     logger.error(f"❌ [CodeGenEvalClient] [{self.run_tag}] Error uploading to s3: {e}")
+        #     logger.error(traceback.format_exc())
 
-
-async def code_gen_eval_block(prefix_tag: str, config: InferenceClientConfig, epoch_id: int=-1, block_id: int=-1, num_samples: int=12, num_generations: int=8, parallel_tasks: int=10, input_dir: str="./kernel_bench/", logprobs: bool=False):
+async def code_gen_eval_block(block: CodeGenEvalBlock):
     """
     Run one batch of code generation and evaluation.
     """
     try:
-        # create the codeGenEvalClient
-        if epoch_id < 0 or block_id < 0:
-            run_tag = f"{prefix_tag}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        config = load_inference_client_config(
+            provider_name=block.provider_name,
+            model_short_name=block.model_name,
+        )
+
+        if block.epoch_id < 0 or block.block_id < 0:
+            run_tag = f"{block.prefix_tag}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         else:
-            run_tag = f"{prefix_tag}_{epoch_id:03d}_{block_id:02d}"
+            run_tag = f"{block.prefix_tag}_{block.epoch_id:03d}_{block.block_id:02d}"
+
+        # override the model name
+        if block.model_override:
+            config.model.model_name = block.model_override
 
         # start running the batch
         logger.info(f"🔍 [CodeGenEvalClient] [{run_tag}] Running batch...")
 
         # Set up directories
-        input_dir = Path(input_dir)
+        input_dir = Path(os.path.expanduser(block.input_dir))
         if not input_dir.exists():
             logger.error(f"❌ [CodeGenEvalClient] [{run_tag}] Error: Input directory {input_dir} does not exist")
             return
@@ -493,14 +484,14 @@ async def code_gen_eval_block(prefix_tag: str, config: InferenceClientConfig, ep
 
         # randomly pick args.num_samples files from the list
         random.shuffle(reference_code_json)
-        reference_code_json = reference_code_json[:num_samples]
+        reference_code_json = reference_code_json[:block.num_samples]
 
         reference_code_contents = [item['reference_code'] for item in reference_code_json]
         task_tags = [item['task_tag'] for item in reference_code_json]
 
         # now run inference
-        codeGenEvalClient = CodeGenEvalClient(run_tag=run_tag, inference_client_config=config, logprobs=logprobs)
-        await codeGenEvalClient.run_block(reference_code_contents, task_tags, num_generations, parallel_tasks)
+        codeGenEvalClient = CodeGenEvalClient(run_tag=run_tag, inference_client_config=config, output_dir=block.output_dir, logprobs=block.logprobs)
+        await codeGenEvalClient.run_block(reference_code_contents, task_tags, block.num_generations, block.parallel_tasks)
         logger.info(f"✅ [CodeGenEvalClient] [{run_tag}] Batch completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
 
     except Exception as e:
@@ -508,24 +499,100 @@ async def code_gen_eval_block(prefix_tag: str, config: InferenceClientConfig, ep
         logger.error(traceback.format_exc())
 
 
-if __name__ == "__main__":
+async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="inferenceCodeGenEval.yaml")
-    parser.add_argument("--input-dir", type=str, default="./kernel_bench/", help="Input directory containing Python files")
-    parser.add_argument("--provider", type=str, default="deepinfra")  # most cost effective models are deepinfra-r1 and fireworks-v3
-    parser.add_argument("--model", type=str, default="qwen3-14b")  # most cost effective models are deepinfra-r1 and fireworks-v3
+    parser.add_argument("--prefix_tag", type=str, default="KC_0.1.0_14B")
     parser.add_argument("--epoch_id", type=int, default=-1)
     parser.add_argument("--block_id", type=int, default=-1)
-    parser.add_argument("--prefix_tag", type=str, default="v0.1")
+    parser.add_argument("--input_dir", type=str, default="~/triton-ag/kernel_bench", help="Input directory containing Python files")
+    parser.add_argument("--output_dir", type=str, default="~/.codeGenEval", help="Output directory for the code generation and evaluation results")
+    parser.add_argument("--provider", type=str, default="deepinfra")  # most cost effective models are deepinfra-r1 and fireworks-v3
+    parser.add_argument("--model", type=str, default="qwen3-14b")  # most cost effective models are deepinfra-r1 and fireworks-v3
+    parser.add_argument("--model_override", type=str, default=None) # override the model name, e.g. "KC_0.1.0_14B/checkpoint-200"
     parser.add_argument("--num_samples", type=int, default=12)
-    parser.add_argument("--num_generations", type=int, default=8)
+    parser.add_argument("--num_generations", type=int, default=16)
     parser.add_argument("--parallel_tasks", type=int, default=24)
     parser.add_argument("--logprobs", type=bool, default=True)
+    parser.add_argument("--use_global_registry", action="store_true", default=True)
     args = parser.parse_args()
 
-    config = load_inference_client_config(
-        provider_name=args.provider,
-        model_short_name=args.model,
-    )
+    # class CodeGenEvalBlock(BaseModel):
+    #     prefix_tag: str
+    #     epoch_id: int
+    #     block_id: int
+    #     input_dir: str
+    #     provider_name: str
+    #     model_name: str
+    #     num_samples: int
+    #     num_generations: int
+    #     parallel_tasks: int = Field(default=24)
+    #     model_override: str = Field(default=None)
+    #     logprobs: bool = Field(default=False)
+    #     test_mode: bool = Field(default=False)
 
-    asyncio.run(code_gen_eval_block(args.prefix_tag, config, args.epoch_id, args.block_id, args.num_samples, args.num_generations, args.parallel_tasks, args.input_dir, args.logprobs))
+    try:
+        run_tag = 'unknown'
+        if args.use_global_registry:
+            # get the global registry
+            global_reg_client = GlobalRegClient()
+            # get the codeGenEvalBlock from the global registry
+            block_json = await global_reg_client.dequeue(f"inference.codeGenEval")
+            # convert the block_json to a CodeGenEvalBlock object
+            block = CodeGenEvalBlock(**block_json)
+            # process the model override
+            model_override = await global_reg_client.get(f"inference.codeGenEval.model_override")
+            model_override_value = model_override['value'] if 'value' in model_override else None
+            if model_override_value:
+                logger.info(f"🔍 [CodeGenEvalClient] [{block.prefix_tag}] Using model override: [{model_override_value}]")
+                block.model_override = model_override_value
+        else:
+            block = CodeGenEvalBlock(
+                prefix_tag=args.prefix_tag,
+                epoch_id=args.epoch_id,
+                block_id=args.block_id,
+                provider_name=args.provider,
+                model_name=args.model,
+                num_samples=args.num_samples,
+                num_generations=args.num_generations,
+                parallel_tasks=args.parallel_tasks,
+                model_override=args.model_override,
+                logprobs=args.logprobs,
+                input_dir=args.input_dir,
+                output_dir=args.output_dir,
+            )
+        # run the block
+        await code_gen_eval_block(block)
+
+        """
+        if args.use_global_registry:
+            # put next events into global registry
+            grpo_block = TrainerGRPOBlock(
+                prefix_tag=block.prefix_tag,
+                epoch_id=block.epoch_id,
+                block_id=block.block_id,
+                input_tag=run_tag,
+                input_dir='~/.codeGenEval',
+                output_dir='~/.trainer',
+            )
+            await global_reg_client.enqueue(f"inference.trainerGRPO", grpo_block.model_dump())
+
+            # put the critique block into the global registry
+            critique_block = CritiqueBlock(
+                prefix_tag=block.prefix_tag,
+                epoch_id=block.epoch_id,
+                block_id=block.block_id,
+                input_tag=run_tag,
+                input_dir='~/.codeGenEval',
+                output_dir='~/.critique',
+                provider_name=block.provider_name,
+                model_name=block.model_name,
+            )
+            await global_reg_client.enqueue(f"inference.critique", critique_block.model_dump())
+        """
+
+    except Exception as e:
+        logger.error(f"❌ [CodeGenEvalClient] [{run_tag}] Error running batch: [{e}]")
+        logger.error(traceback.format_exc())
+
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -25,7 +25,7 @@ from peft import (
     get_peft_model_state_dict,
     set_peft_model_state_dict,
 )
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Callable
 import time
 import traceback
 from pathlib import Path
@@ -461,7 +461,7 @@ class BaseTrainer:
         
         logger.info(f"📜 [{self.__class__.__name__}] Checkpoint loaded - Step: [{self.trainer_status.global_step}]")
     
-    def _save_checkpoint(self, step: int):
+    def _save_checkpoint(self, step: int, callback: Optional[Callable] = None):
         """Save training checkpoint"""
         checkpoint_path = self.checkpoint_path / f"checkpoint-{step}"
         checkpoint_path.mkdir(parents=True, exist_ok=True)
@@ -491,6 +491,14 @@ class BaseTrainer:
         
         # Update latest checkpoint link
         self._update_latest_checkpoint_link(checkpoint_path)
+        
+        # Callback
+        if callback:
+            try:
+                callback(checkpoint_path)
+            except Exception as e:
+                logger.error(f"❌ [{self.__class__.__name__}] Error in callback: {e}")
+                logger.error(traceback.format_exc())
         
         logger.info(f"💾 [{self.__class__.__name__}] Checkpoint saved: {checkpoint_path}")
     
@@ -585,7 +593,7 @@ class BaseTrainer:
                     "train/step": step,
                 })
 
-    def train_block(self, run_tag: str, dataset: Dataset, eval_dataset: Optional[Dataset] = None):
+    def train_block(self, run_tag: str, dataset: Dataset, eval_dataset: Optional[Dataset] = None, callback: Optional[Callable] = None):
         """Train the model for one block"""
         # Create data loader
         dataloader = DataLoader(
@@ -632,7 +640,7 @@ class BaseTrainer:
                 
                 # Save checkpoint
                 if self.trainer_status.global_step % self.config.training.save_steps == 0:
-                    self._save_checkpoint(self.trainer_status.global_step)
+                    self._save_checkpoint(self.trainer_status.global_step, callback=callback)
                 
                 # Evaluation
                 if eval_dataset and self.trainer_status.global_step % self.config.training.eval_steps == 0:

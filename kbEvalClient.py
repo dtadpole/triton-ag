@@ -64,7 +64,8 @@ class KbEvalClient:
         while retry_count < self.num_retries:
             try:
                 retry_count += 1
-                async with httpx.AsyncClient() as client:
+                limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
+                async with httpx.AsyncClient(limits=limits, headers={"Connection": "close"}, http2=False) as client:
                     response = await client.post(
                         f"{self.base_url}/kb_eval_ref",
                         json={
@@ -108,7 +109,8 @@ class KbEvalClient:
         while retry_count < self.num_retries:
             try:
                 retry_count += 1
-                async with httpx.AsyncClient() as client:
+                limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
+                async with httpx.AsyncClient(limits=limits, headers={"Connection": "close"}, http2=False) as client:
                     response = await client.post(
                         f"{self.base_url}/kb_eval",
                         json={

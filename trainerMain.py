@@ -17,6 +17,8 @@ async def main_loop(prefix_tag: str, test_mode: bool):
     sft_trainer = sft_get_trainer(None, prefix_tag)
     grpo_trainer = grpo_get_trainer(sft_trainer, prefix_tag)
 
+    callback = lambda checkpoint_path: logger.info(f"📞 [trainerMain] Callback: [{checkpoint_path}]")
+
     while True:
         try:
             sft_qsize = await client.qsize('trainer.sft')
@@ -30,13 +32,15 @@ async def main_loop(prefix_tag: str, test_mode: bool):
                 if not test_mode and 'test_mode' in grpo_item and grpo_item['test_mode']:
                     logger.info(f"🔍 [trainerMain] Skipping test mode item with prefix: {grpo_item['prefix_tag']}")
                     continue
+                logger.info(f"🧊 [trainerMain] Training GRPO block: {grpo_item['prefix_tag']}")
                 grpo_train_block(
                     trainer=grpo_trainer,
                     prefix_tag=grpo_item['prefix_tag'],
                     epoch_id=grpo_item['epoch_id'],
                     block_id=grpo_item['block_id'],
                     input_tag=grpo_item['input_tag'],
-                    input_dir=grpo_item['input_dir']
+                    input_dir=grpo_item['input_dir'],
+                    callback=callback
                 )
             elif sft_qsize['size'] > 0:
                 sft_item = await client.dequeue(queue_name="trainer.sft")
@@ -46,13 +50,15 @@ async def main_loop(prefix_tag: str, test_mode: bool):
                 if not test_mode and 'test_mode' in sft_item and sft_item['test_mode']:
                     logger.info(f"🔍 [trainerMain] Skipping test mode item with prefix: {sft_item['prefix_tag']}")
                     continue
+                logger.info(f"🧊 [trainerMain] Training SFT block: {sft_item['prefix_tag']}")
                 sft_train_block(
                     trainer=sft_trainer,
                     prefix_tag=sft_item['prefix_tag'],
                     epoch_id=sft_item['epoch_id'],
                     block_id=sft_item['block_id'],
                     input_tag=sft_item['input_tag'],
-                    input_dir=sft_item['input_dir']
+                    input_dir=sft_item['input_dir'],
+                    callback=callback
                 )
             else:
                 logger.info(f"🔍 [trainerMain] No items to process, sleeping for [10] seconds")

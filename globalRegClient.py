@@ -18,6 +18,63 @@ class GlobalRegClient:
         with open("globalRegistry.yaml", "r") as f:
             return yaml.safe_load(f)
 
+    async def keys(self):
+        url = f"{self.base_url}/keys"
+        retry_count = 0
+        while retry_count < self.retries:
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(url, timeout=self.timeout)
+                    response.raise_for_status()
+                    return response.json()
+            except Exception as e:
+                retry_count += 1
+                if retry_count < self.retries:
+                    logger.warning(f"Error getting keys: {e}, retrying in {2 ** retry_count} seconds [{retry_count}/{self.retries}]")
+                    await asyncio.sleep(2 ** retry_count)
+                else:
+                    logger.error(f"Error getting keys: [{e}] after [{retry_count}/{self.retries}] retries")
+                    raise e
+        return []
+
+    async def get(self, key: str):
+        url = f"{self.base_url}/get/{key}"
+        retry_count = 0
+        while retry_count < self.retries:
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(url, timeout=self.timeout)  
+                    response.raise_for_status()
+                    return response.json()
+            except Exception as e:
+                retry_count += 1
+                if retry_count < self.retries:
+                    logger.warning(f"Error getting key: {e}, retrying in {2 ** retry_count} seconds [{retry_count}/{self.retries}]")    
+                    await asyncio.sleep(2 ** retry_count)
+                else:
+                    logger.error(f"Error getting key: [{e}] after [{retry_count}/{self.retries}] retries")
+                    raise e
+        return None
+
+    async def put(self, key: str, value: Any):
+        url = f"{self.base_url}/put"
+        retry_count = 0
+        while retry_count < self.retries:
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(url, json={"key": key, "value": value}, timeout=self.timeout)
+                    response.raise_for_status()
+                    return response.json()
+            except Exception as e:
+                retry_count += 1
+                if retry_count < self.retries:
+                    logger.warning(f"Error putting key: {e}, retrying in {2 ** retry_count} seconds [{retry_count}/{self.retries}]")
+                    await asyncio.sleep(2 ** retry_count)
+                else:
+                    logger.error(f"Error putting key: [{e}] after [{retry_count}/{self.retries}] retries")
+                    raise e
+        return None
+
     async def get_queues(self):
         url = f"{self.base_url}/queue/list"
         retry_count = 0

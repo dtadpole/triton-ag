@@ -1,4 +1,5 @@
 import os
+import json
 import yaml
 import asyncio
 import uvicorn
@@ -11,6 +12,7 @@ global_utils = GlobalUtils()
 fastapi = global_utils.fastapi
 
 QUEUE_PREFIX = "queue."
+GLOBAL_REGISTRY_DIR = "globalRegistry"
 
 # create a singleton class to store global variables
 class GlobalRegistry:
@@ -37,33 +39,77 @@ class GlobalRegistry:
         with open("globalRegistry.yaml", "r") as f:
             return yaml.safe_load(f)
 
-    async def _refresh_config(self):
-        interval = self.config.get("_refresh_config", {}).get("interval", 10)
+    async def _refresh_config_task(self):
         while True:
             try:
-                # logger.info("🔄 Refreshing config")
+                interval = self.config.get("_refresh_config_task", {}).get("interval", 10)
+                # logger.info(f"🔄 Refreshing config every {interval} seconds")
                 self.config = self._load_config()
-                await self._update_queues()
+                await self._load_queues()
             except Exception as e:
                 logger.error(f"Error refreshing config: {e}")
             finally:
                 await asyncio.sleep(interval)
 
-    async def _update_queues(self):
+    async def _load_queues(self):
         """
         Update the queues in the config
         """
         try:
+            # load previous queued items from storage
+            queue_storage = {}
+            try:
+                # if globalRegistry/queues.yaml exists, load it
+                if os.path.exists(f"{GLOBAL_REGISTRY_DIR}/queues.json"):
+                    with open(f"{GLOBAL_REGISTRY_DIR}/queues.json", "r") as f:
+                        queue_storage = json.load(f) # queue_storage is a dictionary of queue names and their items
+            except Exception as e:
+                # load from globalRegistry/queues.yaml.bak
+                if os.path.exists(f"{GLOBAL_REGISTRY_DIR}/queues.json.bak"):
+                    with open(f"{GLOBAL_REGISTRY_DIR}/queues.json.bak", "r") as f:
+                        queue_storage = json.load(f)
+            # load the queues from the config
             queues = self.config.get("queues", [])
             for queue in queues:
                 object_name = f"{QUEUE_PREFIX}{queue.get('name')}"
                 if object_name not in self.registry:
                     logger.info(f"🎢 Creating queue [{object_name}]")
                     self.put(object_name, asyncio.Queue())
-                else:
-                    pass
+                    if object_name in queue_storage:
+                        for item in queue_storage[object_name]:
+                            await self.get(object_name).put(item)
+                        logger.info(f"📦 Loaded {len(queue_storage[object_name])} items into queue [{object_name}]")
         except Exception as e:
             logger.error(f"Error updating queues: {e}")
+
+    async def _save_queue_task(self):
+        """
+        Save the queues to the config
+        """
+        while True:
+            try:
+                interval = self.config.get("_save_queue_task", {}).get("interval", 10)
+                queue_storage = {}
+                queues = self.config.get("queues", [])
+                for queue in queues:
+                    queue_name = queue.get("name")
+                    object_name = f"{QUEUE_PREFIX}{queue_name}"
+                    q = self.get(object_name)
+                    if q is not None:
+                        queue_storage[object_name] = list(q._queue)
+                # if folder globalRegistry does not exist, create it
+                if not os.path.exists(GLOBAL_REGISTRY_DIR):
+                    os.makedirs(GLOBAL_REGISTRY_DIR)
+                # if globalRegistry/queues.yaml exists, move it to globalRegistry/queues.yaml.bak
+                if os.path.exists(f"{GLOBAL_REGISTRY_DIR}/queues.json"):
+                    os.rename(f"{GLOBAL_REGISTRY_DIR}/queues.json", f"{GLOBAL_REGISTRY_DIR}/queues.json.bak")
+                # save the queues to the config
+                with open(f"{GLOBAL_REGISTRY_DIR}/queues.json", "w") as f:
+                    json.dump(queue_storage, f, indent=2)
+            except Exception as e:
+                logger.error(f"Error saving queues: {e}")
+            finally:
+                await asyncio.sleep(interval)
 
     def keys(self):
         """
@@ -88,7 +134,7 @@ class GlobalRegistry:
             logger.error(f"Error getting {key}: {e}")
             return None
     
-    def put(self, key, value,):
+    def put(self, key, value):
         """
         Put a value into the object registry
         """
@@ -99,11 +145,14 @@ class GlobalRegistry:
                     "value": value
                 }
                 self.registry[key] = item
+                return None
             else:
                 item = self.registry[key]
+                old_value = item["value"]
                 item["version"] += 1
                 item["value"] = value
                 self.registry[key] = item
+                return old_value
         except Exception as e:
             logger.error(f"Error getting {key}: {e}")
             return None
@@ -181,6 +230,7 @@ class GlobalRegistry:
         Get the working directory of the server
         """
         return os.getcwd()
+
     
     async def run(self):
         """
@@ -196,7 +246,10 @@ class GlobalRegistry:
             self.put_task("reg.fastapi", server.serve())
 
             # create a task to refresh the config
-            self.put_task("reg.refresh_config", self._refresh_config())
+            self.put_task("reg.refresh_config", self._refresh_config_task())
+
+            # create a task to save the queues
+            self.put_task("reg.save_queue", self._save_queue_task())
 
             # now we need to start the asyncio loop
             # by this time, there could be other tasks running in the event loop
@@ -210,6 +263,29 @@ class GlobalRegistry:
         except Exception as e:
             logger.error(f"Error running server: {e}")
             return
+
+@fastapi.get("/keys")
+async def keys():
+    return {
+        "keys": reg.keys()
+    }
+
+@fastapi.get("/get/{key}")
+async def get(key: str):
+    return {
+        "value": reg.get(key)
+    }
+
+@fastapi.post("/put")
+async def put(key: str = Body(...), value: Any = Body(None)):
+    old_value = reg.put(key, value)
+    return {"message": f"Key [{key}] put with value [{value}]", "old_value": old_value}
+
+@fastapi.delete("/delete/{key}")
+async def delete(key: str):
+    reg.delete(key)
+    return {"message": f"Key [{key}] deleted"}
+
 
 @fastapi.get("/queue/list")
 async def qlist():

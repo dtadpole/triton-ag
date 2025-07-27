@@ -8,7 +8,7 @@ import numpy as np
 from pathlib import Path
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Callable
 import yaml
 import asyncio
 import argparse
@@ -189,7 +189,7 @@ class GRPOTrainer(BaseTrainer):
 
         return batch_loss
 
-    def train_block(self, run_tag: str, dataset: GenerationDataset, eval_dataset: Optional[GenerationDataset] = None):
+    def train_block(self, run_tag: str, dataset: GenerationDataset, eval_dataset: Optional[GenerationDataset] = None, callback: Optional[Callable] = None):
         """Train the model for one block"""
         # Create data loader
         logger.info(f"👉 [{self.__class__.__name__}] [{run_tag}] Block started with [{len(dataset.result_groups)}] groups, Initial global step: [{self.trainer_status.global_step}]")
@@ -249,7 +249,7 @@ class GRPOTrainer(BaseTrainer):
             
             # Save checkpoint
             if self.trainer_status.global_step % self.config.training.save_steps == 0:
-                self._save_checkpoint(self.trainer_status.global_step)
+                self._save_checkpoint(self.trainer_status.global_step, callback=callback)
             
             # Evaluation
             if eval_dataset and self.trainer_status.global_step % self.config.training.eval_steps == 0:

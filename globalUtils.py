@@ -1,4 +1,76 @@
 from fastapi import FastAPI
+from pydantic import BaseModel, Field
+from typing import Optional
+
+class TrainerSFTBlock(BaseModel):
+    prefix_tag: str
+    epoch_id: int
+    block_id: int
+    input_tag: str
+    input_dir: str = Field(default="~/.critique")
+    output_dir: str = Field(default="~/.trainer")
+    test_mode: bool = Field(default=False)
+
+class TrainerGRPOBlock(BaseModel):
+    prefix_tag: str
+    epoch_id: int
+    block_id: int
+    input_tag: str
+    input_dir: str = Field(default="~/.codeGenEval")
+    output_dir: str = Field(default="~/.trainer")
+    test_mode: bool = Field(default=False)
+
+class CodeGenEvalBlock(BaseModel):
+    prefix_tag: str
+    epoch_id: int
+    block_id: int
+    provider_name: str
+    model_name: str
+    num_samples: int
+    num_generations: int
+    parallel_tasks: int = Field(default=24)
+    logprobs: bool = Field(default=True)
+    model_override: Optional[str] = Field(default=None)
+    input_dir: str = Field(default="~/triton-ag/kernel_bench")
+    output_dir: str = Field(default="~/.codeGenEval")
+    test_mode: bool = Field(default=False)
+
+class CritiqueBlock(BaseModel):
+    prefix_tag: str
+    epoch_id: int
+    block_id: int
+    input_tag: str
+    provider_name: str
+    model_name: str
+    model_override: Optional[str] = Field(default=None)
+    input_dir: str = Field(default="~/.codeGenEval")
+    output_dir: str = Field(default="~/.critique")
+    test_mode: bool = Field(default=False)
+
+class ExamplarBlock(BaseModel):
+    prefix_tag: str
+    epoch_id: int
+    block_id: int
+    input_tag: str
+    input_dir: str
+    provider_name: str
+    model_name: str
+    model_override: Optional[str] = Field(default=None)
+    input_dir: str = Field(default="~/triton-ag/kernel_bench")
+    output_dir: str = Field(default="~/.examplar")
+    test_mode: bool = Field(default=False)
+
+class ReflectionBlock(BaseModel):
+    prefix_tag: str
+    epoch_id: int
+    block_id: int
+    input_tag: str
+    input_dir: str
+    model_name: str
+    model_override: Optional[str] = Field(default=None)
+    input_dir: str = Field(default="~/.codeGenEval")
+    output_dir: str = Field(default="~/.reflection")
+    test_mode: bool = Field(default=False)
 
 class GlobalUtils:
     _instance = None # class variable to store the instance
