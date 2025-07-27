@@ -1,6 +1,9 @@
 import os
 import sys
+import json
 import numpy as np
+import gc
+from tqdm import tqdm
 from pydantic import BaseModel
 import hashlib
 import multiprocessing as mp
@@ -8,12 +11,13 @@ import unsloth
 import torch
 import asyncio
 from logger import logger
-from trainerGRPO import GRPOTrainer, GRPOConfig
+from trainerGRPO import GRPOTrainer, GRPOConfig, GenerationResultGroup, GenerationResult, GenerationDataset
 from trainerBase import TrainerConfig
 from kbEvalCli import compile_and_eval_kernel, eval_kernel_reference
 from kbEvalTest.kbeval import KernelExecResult
 from typing import DefaultDict, Dict, List, Optional, Any, Tuple
 import argparse
+import pickle
 import yaml
 import re
 
@@ -105,15 +109,21 @@ class PromptManager:
                 with open(level_2_task_files[task_id], 'r', encoding='utf-8') as file:
                     self.task_reference_codes.append(file.read())
 
-
+# This roll out is the bottle neck, should be optimized later
 async def rollout_policy_logproba(trainer: GRPOTrainer, prompts: List[str], num_completion_per_prompt: int=8, max_new_tokens: int=100, temperature: float=0.6) -> List[List[Dict]]:
     """
-    Given the model (current policy) and prompts, roll out the chat completion for code writing and return the dictionary
-    prompt_ids
-    prompt
+    Given the model (current policy) and prompts, roll out the chat completion for code writing and return the List of List of Reponses
+    The 1st list is prompts
+    The 2nd list is num_completion_per_prompt
+    for each response, it is a dictionary
+    sequence_id: id of the current result in num_completion_per_prompt
+    prompt_token_ids: prompt token ids
+    completion_token_ids: the completion token ids
+    completion_log_probs: the log prob of the completion tokens
+    text: the text format of the completion
     """
     response_groups = []
-    for prompt in prompts:
+    for prompt in tqdm(prompts):
         inputs = trainer.tokenizer(prompt, return_tensors="pt").to(trainer.model.device)
         # Generate with token IDs and log probabilities
         with torch.no_grad():
@@ -122,7 +132,7 @@ async def rollout_policy_logproba(trainer: GRPOTrainer, prompts: List[str], num_
                 max_new_tokens=max_new_tokens,
                 do_sample=True,
                 temperature=temperature,
-                num_return_sequences=num_completion_per_prompt,  # Generate 8 different completions
+                num_return_sequences=num_completion_per_prompt,  # Generate 8 different completions, it is much faster than generating 1 by 1
                 return_dict_in_generate=True,
                 output_scores=True,
                 pad_token_id=trainer.tokenizer.eos_token_id if trainer.tokenizer.eos_token_id else trainer.tokenizer.pad_token_id,
@@ -135,11 +145,11 @@ async def rollout_policy_logproba(trainer: GRPOTrainer, prompts: List[str], num_
 
         # Get new tokens for all sequences (remove input prompt)
         input_length = inputs.input_ids.shape[1]
-        all_new_tokens = all_sequences[:, input_length:]  # Shape: [num_completion_per_prompt, new_tokens_length]
+        all_new_tokens = all_sequences[:, input_length:].cpu()  # Shape: [num_completion_per_prompt, new_tokens_length]
 
         # process the socre to get the log prob
         all_scores = torch.stack(scores, dim=0)  # Shape: [num_new_tokens, 8, vocab_size]
-        all_log_probs = torch.log_softmax(all_scores, dim=-1)  # Shape: [num_new_tokens, 8, vocab_size]
+        all_log_probs = torch.log_softmax(all_scores, dim=-1).cpu()  # Shape: [num_new_tokens, 8, vocab_size]
 
         # Extract log probs for each sequence
         results = []
@@ -155,7 +165,15 @@ async def rollout_policy_logproba(trainer: GRPOTrainer, prompts: List[str], num_
                 'text': trainer.tokenizer.decode(sequence_tokens, skip_special_tokens=True),
             })
         response_groups.append(results)
-    torch.cuda.empty_cache()
+
+         # release GPU memory for inputs and outputs
+        del all_sequences
+        del scores
+        del all_scores
+        del outputs
+        del inputs
+        torch.cuda.empty_cache()
+        gc.collect()
     return response_groups
 
 
@@ -199,7 +217,8 @@ def eval_kernel_reference_mp(run_tag: str,
     # Wait for processes to finish
     for p in processes:
         p.join()
-
+    torch.cuda.empty_cache()
+    gc.collect()
     return {c: r for c, r in results}
 
 
@@ -250,7 +269,8 @@ def eval_kernel_reference_generate_mp(run_tag: str,
     # Wait for processes to finish
     for p in processes:
         p.join()
-
+    torch.cuda.empty_cache()
+    gc.collect()
     return {c: r for c, r in results}
 
 
@@ -398,6 +418,9 @@ async def train_grpo(args: argparse.Namespace):
         logger.error(f"❌ [GRPOTrainer] Failed to load base configuration: {e}")
         sys.exit(1)
 
+    base_config.training.checkpoint_path = GRPO_FOLDER + "/lora_adapter/"
+    base_config.training.save_steps = 10e9 # save the checkpoint by epochs
+
     try:
         grpo_config = GRPOConfig.from_yaml(args.grpo_config)
         logger.info(f"✅ [GRPOTrainer] GRPO configuration loaded from {args.grpo_config}")
@@ -440,7 +463,9 @@ async def train_grpo(args: argparse.Namespace):
     max_epochs = online_grpo_config.get("train", {}).get("max_epochs", 2)
     group_size = online_grpo_config.get("train", {}).get("group_size", 4)
     max_new_tokens = online_grpo_config.get("train", {}).get("max_new_tokens", 1500)
+    kb_gpus = online_grpo_config.get("kbtasks", {}).get("kb_gpus", [5, 6])
     reference_update_interval = online_grpo_config.get("train", {}).get("reference_update_interval", 1)
+    save_checkpoint_every_epochs = online_grpo_config.get("train", {}).get("save_checkpoint_every_epochs", 4)
 
     #####
     # TODO check reference model set up. Assuming current reference model is the frozen version of model but not a softlink to model.
@@ -454,14 +479,53 @@ async def train_grpo(args: argparse.Namespace):
             reward_eval_input[reference_code] = [prompt_manger.extract_generated_code(current_gen["text"]) for current_gen in response_group]
 
         logger.info("Evaluating the generated codes and get rewards ...")
-        reward_dict = code_evaluation_local(reward_eval_input, args.run_tag, f"model_{epoch}", "rollout", reward_config, devices=[5, 6])
+        # reward_dict has reward scores and the eval results. The eval results can be used for teacher comments
+        reward_dict = code_evaluation_local(reward_eval_input, args.run_tag, f"model_{epoch}", "rollout", reward_config, devices=kb_gpus)
+
+        #Create GRPO dataset
+        rewards_groups = [reward_dict[reference_code]["reward"] for reference_code in all_reference_codes]
+        rewards_save_path = os.path.join(trainer.checkpoint_path, f"reward_{epoch}.json")
+        with open(rewards_save_path, "w") as f:
+            json.dump({"referece_codes": all_reference_codes, "rewards": rewards_groups}, f, indent=4)
+
+        result_groups = []
+        for response_group, rewards in zip(response_groups, rewards_groups):
+            result_group = GenerationResultGroup(task_tag="{args.run_tage}_{epoch}", results=[])
+            id = 0
+            for response, reward in zip(response_group, rewards):
+                id += 1
+                prompt_token_ids = response["prompt_token_ids"]
+                completion_token_ids = response["completion_token_ids"]
+                completion_log_probs = response["completion_log_probs"]
+                result = GenerationResult(
+                    gen_tag=f"gen_{id:02d}",
+                    reward=reward,
+                    prompt_token_ids=prompt_token_ids,
+                    completion_token_ids=completion_token_ids,
+                    completion_log_probs=completion_log_probs,
+                )
+                # add the result to the result group
+                result_group.results.append(result)
+            # add the result group to the generation dataset
+            result_groups.append(result_group)
+        dataset = GenerationDataset(result_groups)
+
+        # Train the block: TODO Current trainer doesn't have KL divergence
+        try:
+            trainer.train_block(args.run_tag, dataset)
+            logger.info("🎉 [GRPOTrainer] Training completed successfully!")
+            if epoch % save_checkpoint_every_epochs == 0:
+                trainer._save_checkpoint(epoch)
+        except Exception as e:
+            logger.error(f"❌ [GRPOTrainer] Training failed: {e}")
+            sys.exit(1)
 
 
 
 async def main():
     parser = argparse.ArgumentParser(description="Iterate Model by Online GRPO")
-    parser.add_argument("--start_model_path", type=str, default="Qwen/Qwen3-32B-AWQ")
-    parser.add_argument("--run_tag", type=str, default="v0.1_20250714_050308")
+    parser.add_argument("--start_model_path", type=str, default="Qwen/Qwen3-32B")
+    parser.add_argument("--run_tag", type=str, default="v0.1_20250726_t1")
     parser.add_argument("--base-config", type=str, default="trainerBase.yaml")
     parser.add_argument("--grpo-config", type=str, default="trainerGRPO.yaml")
     parser.add_argument("--online-grpo-config", type=str, default="grpo_iterations.yaml")
@@ -470,8 +534,8 @@ async def main():
 
     if args.test:
         await test_rollout_policy_logproba(args)
-        await test_code_evaluation_local()
-        await test_prompt_manager(args)
+        # await test_code_evaluation_local()
+        # await test_prompt_manager(args)
         return
 
     await train_grpo(args)
