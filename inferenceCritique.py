@@ -335,10 +335,9 @@ async def main():
             block = CritiqueBlock(**block_json)
             # process the model override
             model_override = await global_reg_client.get(f"inference.critique.model_override")
-            model_override_value = model_override['value'] if 'value' in model_override else None
-            if model_override_value:
-                logger.info(f"🔍 [Critique] [{block.prefix_tag}] Using model override: [{model_override_value}]")
-                block.model_override = model_override_value
+            if model_override:
+                logger.info(f"🔍 [Critique] [{block.prefix_tag}] Using model override: [{model_override}]")
+                block.model_override = model_override
         else:
             block = CritiqueBlock(
                 prefix_tag=args.prefix_tag,
