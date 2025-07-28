@@ -136,6 +136,8 @@ class GlobalRegistry:
                     return None
                 else:
                     return item["value"]
+            else:
+                return item["value"]
         except Exception as e:
             logger.error(f"Error getting {key}: {e}")
             return None
@@ -278,7 +280,7 @@ async def keys():
 
 @fastapi.get("/get/{key}")
 async def get(key: str,
-              last_modified_within: Annotated[int | None, Query(default=None)]=None,
+              last_modified_within: Annotated[int | None, Query(gt=0)] = None
               ):
     return reg.get(key, last_modified_within)
 

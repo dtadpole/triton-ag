@@ -171,7 +171,8 @@ class RsyncQueue:
                 retry_count += 1
                 # find out all the loaded lora adapters
                 models = await self.vllm_client.get_models()
-                available_lora_adapters = [model['id'] for model in models if "id" in model]
+                models = models.get('data', [])
+                available_lora_adapters = [model['id'] for model in models if model['parent'] is not None]
                 # fine out who is using the lora adapters
                 used_lora_adapters = [lora_path]
                 keys = await self.reg_client.keys()
@@ -209,6 +210,8 @@ class RsyncQueue:
                 # get the last 2 parts of the checkpoint_path
                 lora_path = checkpoint_path.split('/')[-2] + '/' + checkpoint_path.split('/')[-1]
                 await self.vllm_client.load_lora_adapter(lora_path, lora_path)
+                # update the model_override in the global registry
+                await self.reg_client.put(f"inference.codeGenEval.model_override", lora_path)
                 # clean up the unused lora adapters
                 await self.clean_up_lora_adapters(lora_path)
             except asyncio.TimeoutError:

@@ -534,15 +534,16 @@ async def main():
             block = CodeGenEvalBlock(**block_json)
             # process the model override
             model_override = await global_reg_client.get(f"inference.codeGenEval.model_override")
-            model_override_value = model_override['value'] if 'value' in model_override else None
-            if model_override_value:
-                logger.info(f"🔍 [CodeGenEvalClient] [{block.prefix_tag}] Using model override: [{model_override_value}]")
-                block.model_override = model_override_value
+            if model_override:
+                logger.info(f"🔍 [CodeGenEvalClient] [{block.prefix_tag}] Using model override: [{model_override}]")
+                block.model_override = model_override
                 # update model_override in the global registry
                 if PROC_ID is None:
-                    logger.error(f"❌ [CodeGenEvalClient] [{block.prefix_tag}] Unable to get PROC_ID to update model_override [{model_override_value}]")
+                    error_msg = f"❌ [CodeGenEvalClient] [{block.prefix_tag}] Unable to get PROC_ID to update model_override [{model_override}]"
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
                 else:
-                    await global_reg_client.put(f"adapter.codeGenEval.model_override.{PROC_ID}", model_override_value)
+                    await global_reg_client.put(f"adapter.codeGenEval.model_override.{PROC_ID}", model_override)
         else:
             block = CodeGenEvalBlock(
                 prefix_tag=args.prefix_tag,
