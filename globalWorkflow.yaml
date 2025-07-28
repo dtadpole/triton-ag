@@ -1,6 +1,6 @@
 
 global:
-  num_epochs: 100
+  num_epochs: 10
   num_blocks_per_epoch: 16
 
   init_vars:
@@ -8,26 +8,28 @@ global:
 
   init_tasks:
     codeGenEval:
+      type: inference.codeGenEval
       prefix_tag: "{prefix_tag}"
       epoch_id: "{epoch_id}"
       block_id: "{block_id}"
       provider_name: local
       model_name: qwen3-14b
-      num_samples: 12
-      num_generations: 16
-      parallel_tasks: 24
+      num_samples: 2
+      num_generations: 8
+      parallel_tasks: 16
       logprobs: true
       model_override: null
       input_dir: ~/triton-ag/kernel_bench
       output_dir: ~/.codeGenEval
 
-codeGenEval:
+inference.codeGenEval:
   default:
     input_dir: ~/triton-ag/kernel_bench
     output_dir: ~/.codeGenEval
 
   post_tasks:
     critique:
+      type: inference.critique
       prefix_tag: "{prefix_tag}"
       epoch_id: "{epoch_id}"
       block_id: "{block_id}"
@@ -36,7 +38,8 @@ codeGenEval:
       model_name: deepseek-v3
       input_dir: ~/.codeGenEval
       output_dir: ~/.critique
-    trainerGRPO:
+    grpo:
+      type: trainer.grpo
       prefix_tag: "{prefix_tag}"
       epoch_id: "{epoch_id}"
       block_id: "{block_id}"
@@ -44,7 +47,7 @@ codeGenEval:
       input_dir: ~/.codeGenEval
       output_dir: ~/.trainer
 
-critique:
+inference.critique:
   default:
     provider_name: fireworks
     model_name: deepseek-v3
@@ -52,7 +55,8 @@ critique:
     output_dir: ~/.critique
 
   post_tasks:
-    trainerSFT:
+    sft:
+      type: trainer.sft
       prefix_tag: "{prefix_tag}"
       epoch_id: "{epoch_id}"
       block_id: "{block_id}"
@@ -60,3 +64,11 @@ critique:
       input_dir: ~/.codeGenEval
       output_dir: ~/.trainer
 
+
+trainer.grpo:
+  default:
+    output_dir: ~/.trainer
+
+trainer.sft:
+  default:
+    output_dir: ~/.trainer

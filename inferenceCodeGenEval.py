@@ -19,6 +19,7 @@ from logger import logger
 from kbEvalTest.kbeval import KernelExecResult
 from globalUtils import CodeGenEvalBlock, TrainerGRPOBlock, CritiqueBlock
 from globalRegClient import GlobalRegClient
+from globalWorkflow import GlobalWorkflow
 
 class CodeGenEvalClient:
     def __init__(
@@ -167,7 +168,7 @@ class CodeGenEvalClient:
             code_blocks = re.findall(r"```python\n(.*?)\n```", content, re.DOTALL)
             generated_code = code_blocks[-1].strip() if code_blocks else content.strip()
         except (IndexError, AttributeError) as e:
-            logger.error(f"❌ [CodeGenEval Task {task_tag}] Error extracting code [{e}] [{f'{num_tokens}'} tokens] [{f'{num_reasoning_tokens}'} reasoning tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
+            logger.error(f"❌ [CodeGenEval {task_tag}] Error extracting code [{e}] [{f'{num_tokens}'} tokens] [{f'{num_reasoning_tokens}'} reasoning tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
             return conversation, None
         
         # save the generated code to a file
@@ -176,7 +177,7 @@ class CodeGenEvalClient:
             f.write(generated_code)
 
         # use generated emoji to beginning of the line
-        logger.info(f"👏 [CodeGenEval Client] [{self.run_tag}] Generated [{f'{task_tag}'}] [{f'{gen_tag}'}]: [{generated_code_file}] [{f'{num_tokens}'} tokens] [{f'{num_reasoning_tokens}'} reasoning tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
+        logger.info(f"👏 [CodeGenEval] [{self.run_tag}] Generated [{f'{task_tag}'}] [{f'{gen_tag}'}]: [{generated_code_file}] [{f'{num_tokens}'} tokens] [{f'{num_reasoning_tokens}'} reasoning tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
         return conversation, generated_code
 
     async def _process_code_eval(
@@ -202,11 +203,11 @@ class CodeGenEvalClient:
             generated_code_file = self.output_dir / task_tag / f"{gen_tag}_generated_code.py"
             
             if not reference_code_file.exists():
-                logger.error(f"❌ [CodeGenEval Client] [{self.run_tag}] Reference code file not found: {reference_code_file}")
+                logger.error(f"❌ [CodeGenEval] [{self.run_tag}] Reference code file not found: {reference_code_file}")
                 return False
                 
             if not generated_code_file.exists():
-                logger.error(f"❌ [CodeGenEval Client] [{self.run_tag}] Generated code file not found: {generated_code_file}")
+                logger.error(f"❌ [CodeGenEval] [{self.run_tag}] Generated code file not found: {generated_code_file}")
                 return False
             
             # Read the reference and generated code
@@ -233,15 +234,15 @@ class CodeGenEvalClient:
                 f.write(json.dumps(eval_result_json, indent=2, ensure_ascii=False, default=str))
             
             if result.compiled and result.correctness:
-                logger.info(f"✅ [CodeGenEval Client] [{self.run_tag}] Evaluated [{f'{task_tag}'}] [{f'{gen_tag}'}] [{generated_code_file}] [{result.runtime:.3f}ms] in [{evaluation_time:.1f}s]")
+                logger.info(f"✅ [CodeGenEval] [{self.run_tag}] Evaluated [{f'{task_tag}'}] [{f'{gen_tag}'}] [{generated_code_file}] [{result.runtime:.3f}ms] in [{evaluation_time:.1f}s]")
             else:
-                logger.warning(f"⚠️ [CodeGenEval Client] [{self.run_tag}] Evaluated [{f'{task_tag}'}] [{f'{gen_tag}'}] [{generated_code_file}] [{'✅' if result.compiled else '❌'}compiled], [{'✅' if result.correctness else '❌'}correctness] in [{evaluation_time:.2f}s]")
+                logger.warning(f"⚠️ [CodeGenEval] [{self.run_tag}] Evaluated [{f'{task_tag}'}] [{f'{gen_tag}'}] [{generated_code_file}] [{'✅' if result.compiled else '❌'}compiled], [{'✅' if result.correctness else '❌'}correctness] in [{evaluation_time:.2f}s]")
 
             # return json
             return eval_result_json
             
         except Exception as e:
-            logger.error(f"❌ [CodeGenEval Client] [{self.run_tag}] Error in _process_evaluation_task for [{task_tag}]: {e}")
+            logger.error(f"❌ [CodeGenEval] [{self.run_tag}] Error in _process_evaluation_task for [{task_tag}]: {e}")
             logger.error(traceback.format_exc())
             return None
 
@@ -267,12 +268,12 @@ class CodeGenEvalClient:
             reference_eval_file = self.output_dir / task_tag / f"reference_eval.json"
             with open(reference_eval_file, 'w') as f:
                 f.write(json.dumps(result_json, indent=2, ensure_ascii=False, default=str))
-            logger.info(f"✅ [CodeGenEval Client] [{self.run_tag}] Task [{task_tag}] Reference code evaluation result: [{result.runtime:.3f}ms] in [{evaluation_time:.2f}s]")
+            logger.info(f"✅ [CodeGenEval] [{self.run_tag}] Task [{task_tag}] Reference code evaluation result: [{result.runtime:.3f}ms] in [{evaluation_time:.2f}s]")
 
             # return json
             return result_json
         except Exception as e:
-            logger.error(f"❌ [CodeGenEval Client] [{self.run_tag}] Error in _process_ref_eval: [{e}] in [{evaluation_time:.1f}s]")
+            logger.error(f"❌ [CodeGenEval] [{self.run_tag}] Error in _process_ref_eval: [{e}] in [{evaluation_time:.1f}s]")
             logger.error(traceback.format_exc())
             return None
 
@@ -292,7 +293,7 @@ class CodeGenEvalClient:
                 # Get file path from queue (blocking with timeout)
                 item = await asyncio.wait_for(queue.get(), timeout=1.0)
                 if item is None:
-                    logger.info(f"[CodeGenEval Client] [{self.run_tag}] Received termination signal")
+                    logger.info(f"[CodeGenEval] [{self.run_tag}] Received termination signal")
                     break
 
                 is_reference = item['is_reference']
@@ -306,7 +307,7 @@ class CodeGenEvalClient:
                     continue
 
                 # add info emoji to beginning of the line
-                logger.info(f"🔍 [CodeGenEval Client] [{self.run_tag}] Processing [{task_tag}] [{f'{gen_tag}'}]...")
+                logger.info(f"🔍 [CodeGenEval] [{self.run_tag}] Processing [{task_tag}] [{f'{gen_tag}'}]...")
 
                 retry_count = 0
                 max_retries = 3
@@ -317,18 +318,18 @@ class CodeGenEvalClient:
                         gen_conversation, generated_code = await self._process_code_gen(task_tag=task_tag, gen_tag=gen_tag, reference_code=reference_code)
                         
                         if not generated_code:
-                            logger.warning(f"⚠️ [CodeGenEval Client] [{self.run_tag}] No generated code for [{task_tag}] [{f'{gen_tag}'}]")
+                            logger.warning(f"⚠️ [CodeGenEval] [{self.run_tag}] No generated code for [{task_tag}] [{f'{gen_tag}'}]")
                             continue
 
                         # we are successful, break the retry loop
                         # add info emoji to beginning of the line
-                        logger.info(f"🔍 [CodeGenEval Client] [{self.run_tag}] Evaluating [{task_tag}] [{f'{gen_tag}'}]...")
+                        logger.info(f"🔍 [CodeGenEval] [{self.run_tag}] Evaluating [{task_tag}] [{f'{gen_tag}'}]...")
 
                         # Process the evaluation task
                         gen_eval_result = await self._process_code_eval(task_tag=task_tag, gen_tag=gen_tag, generated_code=generated_code)
                         
                         if not gen_eval_result:
-                            logger.warning(f"⚠️ [CodeGenEval Client] [{self.run_tag}] No evaluation result for [{task_tag}] [{f'{gen_tag}'}]")
+                            logger.warning(f"⚠️ [CodeGenEval] [{self.run_tag}] No evaluation result for [{task_tag}] [{f'{gen_tag}'}]")
                             continue
                         
                         # we are successful, break the retry loop
@@ -337,17 +338,17 @@ class CodeGenEvalClient:
                     except Exception as e:
                         # add warning emoji to beginning of the line
                         if retry_count >= max_retries:
-                            logger.error(f"❌ [CodeGenEval Client] [{self.run_tag}] Error generating or evaluating [{task_tag}] [{f'{gen_tag}'}]: {e}. Max retries reached [{retry_count}/{max_retries}]")
+                            logger.error(f"❌ [CodeGenEval] [{self.run_tag}] Error generating or evaluating [{task_tag}] [{f'{gen_tag}'}]: {e}. Max retries reached [{retry_count}/{max_retries}]")
                         else:
-                            logger.warning(f"⚠️ [CodeGenEval Client] [{self.run_tag}] Error generating or evaluating [{task_tag}] [{f'{gen_tag}'}]: {e}. Retrying... [{retry_count}/{max_retries}]")
+                            logger.warning(f"⚠️ [CodeGenEval] [{self.run_tag}] Error generating or evaluating [{task_tag}] [{f'{gen_tag}'}]: {e}. Retrying... [{retry_count}/{max_retries}]")
                         logger.error(traceback.format_exc())
 
             except Exception as e:
-                logger.error(f"❌ [CodeGenEval Client] [{self.run_tag}] Error processing [{task_tag}] [{f'{gen_tag}'}]: {e}")
+                logger.error(f"❌ [CodeGenEval] [{self.run_tag}] Error processing [{task_tag}] [{f'{gen_tag}'}]: {e}")
                 logger.error(traceback.format_exc())
 
         # task completed
-        logger.info(f"🎯 [CodeGenEval Client] [{self.run_tag}] [Task {task_id:02d}] completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
+        logger.info(f"🎯 [CodeGenEval] [{self.run_tag}] [Task {task_id:02d}] completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
 
 
     async def run_block(
@@ -361,7 +362,7 @@ class CodeGenEvalClient:
         Run the code generation and evaluation tasks.
         """
         # add info emoji to beginning of the line
-        logger.info(f"🔍 [CodeGenEvalClient] [{self.run_tag}] [{self.model_tag}] Using [{num_generations}] generations, [{parallel_tasks}] parallel tasks")
+        logger.info(f"🔍 [CodeGenEval] [{self.run_tag}] [{self.model_tag}] Using [{num_generations}] generations, [{parallel_tasks}] parallel tasks")
 
         # Create queue and add all files
         queue = asyncio.Queue()
@@ -405,7 +406,7 @@ class CodeGenEvalClient:
             tasks.append(task)
         
         # Wait for all tasks to complete
-        logger.info(f"🔍 [CodeGenEvalClient] [{self.run_tag}] [{self.model_tag}] Starting [{parallel_tasks}] tasks...")
+        logger.info(f"🔍 [CodeGenEval] [{self.run_tag}] [{self.model_tag}] Starting [{parallel_tasks}] tasks...")
         await asyncio.gather(*tasks)
 
         metadata = {
@@ -459,12 +460,12 @@ async def code_gen_eval_block(block: CodeGenEvalBlock):
             config.model.model_name = block.model_override
 
         # start running the batch
-        logger.info(f"🔍 [CodeGenEvalClient] [{run_tag}] Running batch...")
+        logger.info(f"🔍 [CodeGenEval] [{run_tag}] Starting block...")
 
         # Set up directories
         input_dir = Path(os.path.expanduser(block.input_dir))
         if not input_dir.exists():
-            logger.error(f"❌ [CodeGenEvalClient] [{run_tag}] Error: Input directory {input_dir} does not exist")
+            logger.error(f"❌ [CodeGenEval] [{run_tag}] Error: Input directory {input_dir} does not exist")
             return
 
         # recursively get all the python files under the input directory and store in a list
@@ -492,10 +493,10 @@ async def code_gen_eval_block(block: CodeGenEvalBlock):
         # now run inference
         codeGenEvalClient = CodeGenEvalClient(run_tag=run_tag, inference_client_config=config, output_dir=block.output_dir, logprobs=block.logprobs)
         await codeGenEvalClient.run_block(reference_code_contents, task_tags, block.num_generations, block.parallel_tasks)
-        logger.info(f"✅ [CodeGenEvalClient] [{run_tag}] Batch completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
+        logger.info(f"🎉 [CodeGenEval] [{run_tag}] Block completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
 
     except Exception as e:
-        logger.error(f"❌ [CodeGenEvalClient] [{run_tag}] Error running batch: [{e}] in [{traceback.format_exc()}]")
+        logger.error(f"❌ [CodeGenEval] [{run_tag}] Error running block: [{e}] in [{traceback.format_exc()}]")
         logger.error(traceback.format_exc())
 
 
@@ -513,22 +514,8 @@ async def main():
     parser.add_argument("--num_generations", type=int, default=16)
     parser.add_argument("--parallel_tasks", type=int, default=24)
     parser.add_argument("--logprobs", type=bool, default=True)
-    parser.add_argument("--use_global_registry", action="store_true", default=True)
+    parser.add_argument("--use_global_registry", action="store_true")
     args = parser.parse_args()
-
-    # class CodeGenEvalBlock(BaseModel):
-    #     prefix_tag: str
-    #     epoch_id: int
-    #     block_id: int
-    #     input_dir: str
-    #     provider_name: str
-    #     model_name: str
-    #     num_samples: int
-    #     num_generations: int
-    #     parallel_tasks: int = Field(default=24)
-    #     model_override: str = Field(default=None)
-    #     logprobs: bool = Field(default=False)
-    #     test_mode: bool = Field(default=False)
 
     try:
         run_tag = 'unknown'
@@ -563,35 +550,12 @@ async def main():
         # run the block
         await code_gen_eval_block(block)
 
-        """
         if args.use_global_registry:
-            # put next events into global registry
-            grpo_block = TrainerGRPOBlock(
-                prefix_tag=block.prefix_tag,
-                epoch_id=block.epoch_id,
-                block_id=block.block_id,
-                input_tag=run_tag,
-                input_dir='~/.codeGenEval',
-                output_dir='~/.trainer',
-            )
-            await global_reg_client.enqueue(f"inference.trainerGRPO", grpo_block.model_dump())
-
-            # put the critique block into the global registry
-            critique_block = CritiqueBlock(
-                prefix_tag=block.prefix_tag,
-                epoch_id=block.epoch_id,
-                block_id=block.block_id,
-                input_tag=run_tag,
-                input_dir='~/.codeGenEval',
-                output_dir='~/.critique',
-                provider_name=block.provider_name,
-                model_name=block.model_name,
-            )
-            await global_reg_client.enqueue(f"inference.critique", critique_block.model_dump())
-        """
+            globalWorkflow = GlobalWorkflow(prefix_tag=block.prefix_tag)
+            await globalWorkflow.post_codeGenEval(block)
 
     except Exception as e:
-        logger.error(f"❌ [CodeGenEvalClient] [{run_tag}] Error running batch: [{e}]")
+        logger.error(f"❌ [CodeGenEval] [{run_tag}] Error running block: [{e}]")
         logger.error(traceback.format_exc())
 
 if __name__ == "__main__":

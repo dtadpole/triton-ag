@@ -42,6 +42,7 @@ class CritiqueBlock(BaseModel):
     input_tag: str
     provider_name: str
     model_name: str
+    parallel_tasks: int = Field(default=16)
     model_override: Optional[str] = Field(default=None)
     input_dir: str = Field(default="~/.codeGenEval")
     output_dir: str = Field(default="~/.critique")
@@ -52,9 +53,9 @@ class ExamplarBlock(BaseModel):
     epoch_id: int
     block_id: int
     input_tag: str
-    input_dir: str
     provider_name: str
     model_name: str
+    parallel_tasks: int = Field(default=16)
     model_override: Optional[str] = Field(default=None)
     input_dir: str = Field(default="~/triton-ag/kernel_bench")
     output_dir: str = Field(default="~/.examplar")
@@ -65,8 +66,9 @@ class ReflectionBlock(BaseModel):
     epoch_id: int
     block_id: int
     input_tag: str
-    input_dir: str
+    provider_name: str
     model_name: str
+    parallel_tasks: int = Field(default=16)
     model_override: Optional[str] = Field(default=None)
     input_dir: str = Field(default="~/.codeGenEval")
     output_dir: str = Field(default="~/.reflection")
