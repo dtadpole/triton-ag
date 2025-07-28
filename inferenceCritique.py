@@ -12,13 +12,13 @@ from datetime import datetime
 from typing import List, Dict
 import boto3
 import requests
+import duckdb
 from pathlib import Path
 from transformers import AutoTokenizer
 from inferenceClient import InferenceClient, InferenceClientConfig, load_inference_client_config
 from logger import logger
 from kbEvalTest.kbeval import KernelExecResult
 from globalUtils import CritiqueBlock
-import duckdb
 from globalRegClient import GlobalRegClient
 from globalWorkflow import GlobalWorkflow
 

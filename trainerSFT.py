@@ -4,7 +4,7 @@ import duckdb
 import unsloth
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Callable
 import yaml
 import asyncio
 import argparse
@@ -13,6 +13,9 @@ from trainerBase import BaseTrainer, TrainerConfig, TrainerStatus, train_async
 from trainerUtil import format_conversation
 from logger import logger
 import torch
+from globalUtils import TrainerSFTBlock
+from globalRegClient import GlobalRegClient
+from globalWorkflow import GlobalWorkflow
 
 
 class SFTConfig(BaseModel):
@@ -128,15 +131,14 @@ def sft_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_file
     
     return trainer
 
-def sft_train_block(trainer: SFTTrainer, prefix_tag: str, epoch_id: int, block_id: int, input_tag: str, input_dir: str = "~/.critique", base_config_file: str = "trainerBase.yaml", sft_config_file: str = "trainerSFT.yaml"):
+def sft_train_block(block: TrainerSFTBlock, trainer: SFTTrainer, callback: Optional[Callable] = None):
     """Train the model for one block"""
-    run_tag = f"{prefix_tag}_{epoch_id:03d}_{block_id:02d}"
-    logger.info(f"👉 [SFTTrainer] [{run_tag}] Block started with input tag: [{input_tag}]")
+    logger.info(f"👉 [SFTTrainer] [{block.input_tag}] SFT Training started for block...")
 
     # Load or create dataset
-    search_path = os.path.expanduser(f"{input_dir}/{input_tag}")
+    search_path = os.path.expanduser(f"{block.input_dir}/{block.input_tag}")
     if not os.path.exists(search_path):
-        error_msg = f"❌ [SFTTrainer] [{run_tag}] Error: Input directory [{search_path}] does not exist"
+        error_msg = f"❌ [SFTTrainer] [{block.input_tag}] Error: Input directory [{search_path}] does not exist"
         logger.error(error_msg)
         raise FileNotFoundError(error_msg)
 
@@ -150,14 +152,14 @@ def sft_train_block(trainer: SFTTrainer, prefix_tag: str, epoch_id: int, block_i
     # create a dataset from result_df['messages']
     message_dataset = MessageDataset(result_df['messages'].tolist(), trainer.tokenizer, trainer.sft_config)
 
-    logger.info(f"📊 [SFTTrainer] [{run_tag}] Dataset created - Train: {len(message_dataset)}")
+    logger.info(f"📊 [SFTTrainer] [{block.input_tag}] Dataset created - Train: {len(message_dataset)}")
     
     # train the block
     try:
-        trainer.train_block(run_tag, message_dataset)
-        logger.info(f"🎉 [SFTTrainer] [{run_tag}] Training completed successfully!")
+        trainer.train_block(block.input_tag, message_dataset, callback=callback)
+        logger.info(f"🎉 [SFTTrainer] [{block.input_tag}] Training completed successfully!")
     except Exception as e:
-        error_msg = f"❌ [SFTTrainer] [{run_tag}] Training failed: {e}"
+        error_msg = f"❌ [SFTTrainer] [{block.input_tag}] Training failed: {e}"
         logger.error(error_msg)
         raise e
 
@@ -165,26 +167,26 @@ def sft_train_block(trainer: SFTTrainer, prefix_tag: str, epoch_id: int, block_i
 async def main():
     """Main function for SFT training"""
     parser = argparse.ArgumentParser(description="Train a model using SFTTrainer")
-    parser.add_argument("--prefix_tag", type=str, default="KC_0.1.0")
+    parser.add_argument("--prefix_tag", type=str, default="KC_0.1.0_14B")
     parser.add_argument("--epoch_id", type=int, default=0)
     parser.add_argument("--block_id", type=int, default=0)
     parser.add_argument("--input_dir", type=str, default="~/.critique")
-    parser.add_argument("--input_tag", type=str, default="v0.1_20250726_113055") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
+    parser.add_argument("--output_dir", type=str, default="~/.trainer")
+    parser.add_argument("--input_tag", type=str, default="KC_0.1.0_14B_000_01") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
     parser.add_argument("--base_config", type=str, default="trainerBase.yaml")
     parser.add_argument("--sft_config", type=str, default="trainerSFT.yaml")
     args = parser.parse_args()
 
     trainer = sft_get_trainer(None, args.prefix_tag, args.base_config, args.sft_config)
-    sft_train_block(
-        trainer=trainer,
+    sft_block = TrainerSFTBlock(
         prefix_tag=args.prefix_tag,
         epoch_id=args.epoch_id,
         block_id=args.block_id,
         input_tag=args.input_tag,
         input_dir=args.input_dir,
-        base_config_file=args.base_config,
-        sft_config_file=args.sft_config
+        output_dir=args.output_dir,
     )
+    sft_train_block(sft_block, trainer)
     
 if __name__ == "__main__":
     asyncio.run(main())

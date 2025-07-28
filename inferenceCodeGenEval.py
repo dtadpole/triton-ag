@@ -515,7 +515,13 @@ async def main():
     parser.add_argument("--parallel_tasks", type=int, default=24)
     parser.add_argument("--logprobs", type=bool, default=True)
     parser.add_argument("--use_global_registry", action="store_true")
+    parser.add_argument("--proc_id", type=str, default=None)
     args = parser.parse_args()
+
+    if args.proc_id is not None:
+        PROC_ID = args.proc_id
+    else:
+        PROC_ID = os.environ.get("PROC_ID", None)
 
     try:
         run_tag = 'unknown'
@@ -532,6 +538,11 @@ async def main():
             if model_override_value:
                 logger.info(f"🔍 [CodeGenEvalClient] [{block.prefix_tag}] Using model override: [{model_override_value}]")
                 block.model_override = model_override_value
+                # update model_override in the global registry
+                if PROC_ID is None:
+                    logger.error(f"❌ [CodeGenEvalClient] [{block.prefix_tag}] Unable to get PROC_ID to update model_override [{model_override_value}]")
+                else:
+                    await global_reg_client.put(f"adapter.codeGenEval.model_override.{PROC_ID}", model_override_value)
         else:
             block = CodeGenEvalBlock(
                 prefix_tag=args.prefix_tag,

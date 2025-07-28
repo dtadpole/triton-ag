@@ -1,10 +1,11 @@
 import os
 import json
 import yaml
+import time
 import asyncio
 import uvicorn
-from typing import Any, Dict
-from fastapi import FastAPI, HTTPException, Body
+from typing import Any, Dict, Optional, Annotated
+from fastapi import FastAPI, HTTPException, Body, Query
 from loguru import logger
 from globalUtils import GlobalUtils
 
@@ -121,15 +122,20 @@ class GlobalRegistry:
             logger.error(f"Error getting keys: {e}")
             return []
 
-    def get(self, key):
+    def get(self, key, last_modified_within: Optional[int]=None):
         """
         Get the value of a key in the object registry
+        last_modified_within: if not None, return the value if the last modified time is within the last_modified_within seconds
         """
         try:
             item = self.registry.get(key, None)
             if item is None:
                 return None
-            return item["value"]
+            if last_modified_within is not None:
+                if time.time() - item["timestamp"] > last_modified_within:
+                    return None
+                else:
+                    return item["value"]
         except Exception as e:
             logger.error(f"Error getting {key}: {e}")
             return None
@@ -142,6 +148,7 @@ class GlobalRegistry:
             if key not in self.registry:
                 item = {
                     "version": 1,
+                    "timestamp": time.time(),
                     "value": value
                 }
                 self.registry[key] = item
@@ -150,6 +157,7 @@ class GlobalRegistry:
                 item = self.registry[key]
                 old_value = item["value"]
                 item["version"] += 1
+                item["timestamp"] = time.time()
                 item["value"] = value
                 self.registry[key] = item
                 return old_value
@@ -266,20 +274,18 @@ class GlobalRegistry:
 
 @fastapi.get("/keys")
 async def keys():
-    return {
-        "keys": reg.keys()
-    }
+    return reg.keys()
 
 @fastapi.get("/get/{key}")
-async def get(key: str):
-    return {
-        "value": reg.get(key)
-    }
+async def get(key: str,
+              last_modified_within: Annotated[int | None, Query(default=None)]=None,
+              ):
+    return reg.get(key, last_modified_within)
 
 @fastapi.post("/put")
 async def put(key: str = Body(...), value: Any = Body(None)):
     old_value = reg.put(key, value)
-    return {"message": f"Key [{key}] put with value [{value}]", "old_value": old_value}
+    return old_value
 
 @fastapi.delete("/delete/{key}")
 async def delete(key: str):

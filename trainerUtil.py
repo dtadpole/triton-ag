@@ -4,10 +4,66 @@ from transformers import AutoTokenizer
 from logger import logger
 from typing import List, Dict, Any, Union, Callable
 import warnings
+import asyncio
+import os
+import aiohttp
 
 # Suppress specific warnings (modified by DevMate)
-warnings.filterwarnings("ignore", message=".*To copy construct from a tensor.*")
+# warnings.filterwarnings("ignore", message=".*To copy construct from a tensor.*")
 
+async def read_stream(stream, prefix: str, is_error: bool = False):
+    """Read from a stream and print each line with a prefix."""
+    while True:
+        line = await stream.readline()
+        if not line:
+            break
+        # Decode bytes to string and strip newline
+        output = line.decode("utf-8").rstrip()
+        if is_error:
+            logger.error(f"[{prefix}] {output}")
+        else:
+            logger.info(f"[{prefix}] {output}")
+
+
+async def rsync_file(source_path: str, target_path: str) -> int:
+    """
+    Rsync a file from source to target path
+    """
+    # run command: rsync -azP <source_path> <target_path>
+    command = f"rsync -azP {source_path} {target_path}"
+    process = await asyncio.create_subprocess_shell(
+        command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=os.environ.copy(),
+    )
+
+    logger.info(f"[trainerUtil] [rsync_file] START ====================")
+    logger.info(f"[trainerUtil] [rsync_file] command: {command}")
+
+    # Create tasks to read stdout and stderr concurrently
+    stdout_task = asyncio.create_task(
+        read_stream(process.stdout, "reference", is_error=False)
+    )
+    stderr_task = asyncio.create_task(
+        read_stream(
+            process.stderr, "reference", is_error=True
+        )  # seems taking warning message as error message
+    )
+
+    # Wait for the process to complete
+    return_code = await process.wait()
+
+    # Wait for all output to be processed
+    await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+    if process.returncode != 0:
+        logger.error(f"[KB Eval] [reference] return code: {process.returncode}")
+    else:
+        logger.info(f"[KB Eval] [reference] return code: {process.returncode}")
+
+    logger.info(f"[trainerUtil] [rsync_file] END ====================")
+
+    return return_code
 
 def format_conversation(messages: List[Dict[str, Any]],
                         tokenizer: AutoTokenizer,

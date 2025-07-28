@@ -25,6 +25,9 @@ import time
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import traceback
+from globalUtils import TrainerGRPOBlock
+from globalRegClient import GlobalRegClient
+from globalWorkflow import GlobalWorkflow
 
 LATEST_REFERENCE_NAME = "reference_state_latest.pt"
 
@@ -288,15 +291,14 @@ def grpo_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_fil
     
     return trainer
 
-def grpo_train_block(trainer: GRPOTrainer, prefix_tag: str, epoch_id: int, block_id: int, input_tag: str, input_dir: str = "~/.codeGenEval", base_config_file: str = "trainerBase.yaml", grpo_config_file: str = "trainerGRPO.yaml"):
+def grpo_train_block(block: TrainerGRPOBlock, trainer: GRPOTrainer, callback: Optional[Callable] = None):
     """Train the model for one block"""
-    run_tag = f"{prefix_tag}_{epoch_id:03d}_{block_id:02d}"
-    logger.info(f"👉 [GRPOTrainer] [{run_tag}] Block started with input tag: [{input_tag}]")
+    logger.info(f"👉 [GRPOTrainer] [{block.input_tag}] GRPO Training started for block...")
 
     # Load dataset
-    search_path = os.path.expanduser(f"{input_dir}/{input_tag}")
+    search_path = os.path.expanduser(f"{block.input_dir}/{block.input_tag}")
     if not os.path.exists(search_path):
-        error_msg = f"❌ [GRPOTrainer] [{run_tag}] Input directory [{search_path}] does not exist"  
+        error_msg = f"❌ [GRPOTrainer] [{block.input_tag}] Input directory [{search_path}] does not exist"  
         logger.error(error_msg)
         raise FileNotFoundError(error_msg)
 
@@ -311,7 +313,7 @@ def grpo_train_block(trainer: GRPOTrainer, prefix_tag: str, epoch_id: int, block
     result_groups = []
     for index, row in result_df.iterrows():
         if not row['compiled'] or not row['correctness']:
-            logger.warning(f"⚠️ [GRPOTrainer] [{run_tag}] Skipping [{row['filename']}] Compiled: [{row['compiled']}] Correctness: [{row['correctness']}]")
+            logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] Skipping [{row['filename']}] Compiled: [{row['compiled']}] Correctness: [{row['correctness']}]")
             continue
 
         folder = os.path.dirname(row['filename'])
@@ -319,7 +321,7 @@ def grpo_train_block(trainer: GRPOTrainer, prefix_tag: str, epoch_id: int, block
 
         # get task tag from metadata
         if 'task_tag' not in row['metadata']:
-            logger.warning(f"⚠️ [GRPOTrainer] [{run_tag}] Skipping [{row['filename']}] No task tag in metadata")
+            logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] Skipping [{row['filename']}] No task tag in metadata")
             continue
         task_tag = row['metadata']['task_tag']
 
@@ -335,7 +337,7 @@ def grpo_train_block(trainer: GRPOTrainer, prefix_tag: str, epoch_id: int, block
             # read corresponding gen_xx_eval.json
             eval_file = completion_file.replace('_completion.json', '_eval.json')
             if not os.path.exists(os.path.join(folder, eval_file)):
-                logger.warning(f"⚠️ [GRPOTrainer] [{run_tag}] No eval file found for [{completion_file}]")
+                logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] No eval file found for [{completion_file}]")
                 continue
             with open(os.path.join(folder, eval_file), 'r') as f:
                 eval_data = json.load(f)
@@ -353,7 +355,7 @@ def grpo_train_block(trainer: GRPOTrainer, prefix_tag: str, epoch_id: int, block
                 prompt_token_ids = trainer.tokenizer.encode(prompt)
             else:
                 if prompt != completion_data['prompt']:
-                    logger.error(f"❌ [GRPOTrainer] [{run_tag}] Prompt mismatch for [{gen_tag}] - [{prompt}] != [{completion_data['prompt']}]")
+                    logger.error(f"❌ [GRPOTrainer] [{block.input_tag}] Prompt mismatch for [{gen_tag}] - [{prompt}] != [{completion_data['prompt']}]")
                     # ignore this generation result and continue
                     continue
             # split completion_data['logprobs'] into a list of completion ids and logprobs
@@ -376,11 +378,11 @@ def grpo_train_block(trainer: GRPOTrainer, prefix_tag: str, epoch_id: int, block
 
         # create a generation result group only if we have at least 2 results
         if len(generation_results) < 2:
-            logger.warning(f"⚠️ [GRPOTrainer] [{run_tag}] Skipping [{folder}] that has only [{len(generation_results)}] results")
+            logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] Skipping [{folder}] that has only [{len(generation_results)}] results")
             continue
         # check if all the reward are the same, if so, skip
         if all(result.reward == generation_results[0].reward for result in generation_results):
-            logger.warning(f"⚠️ [GRPOTrainer] [{run_tag}] Skipping [{folder}] All rewards are the same: [{generation_results[0].reward}]")
+            logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] Skipping [{folder}] All rewards are the same: [{generation_results[0].reward}]")
             continue
         # we are here because we have at least 2 results and the rewards are not the same
         # so we can create a generation result group
@@ -389,14 +391,14 @@ def grpo_train_block(trainer: GRPOTrainer, prefix_tag: str, epoch_id: int, block
 
     # Create group dataset
     dataset = GenerationDataset(result_groups)
-    logger.info(f"📊 [GRPOTrainer] [{run_tag}] Dataset prepared from [{input_tag}] - loaded [{len(dataset)}] groups")
+    logger.info(f"📊 [GRPOTrainer] [{block.input_tag}] Dataset prepared - loaded [{len(dataset)}] groups")
     
     # Train the block
     try:
-        trainer.train_block(run_tag, dataset)
-        logger.info(f"🎯 [GRPOTrainer] [{run_tag}] Training completed successfully!")
+        trainer.train_block(block.input_tag, dataset, callback=callback)
+        logger.info(f"🎯 [GRPOTrainer] [{block.input_tag}] Training completed successfully!")
     except Exception as e:
-        logger.error(f"❌ [GRPOTrainer] [{run_tag}] Training failed: {e}")
+        logger.error(f"❌ [GRPOTrainer] [{block.input_tag}] Training failed: {e}")
         traceback.print_exc()
         raise e
     
@@ -499,17 +501,18 @@ def grpo_get_sample_dataset(tokenizer: AutoTokenizer, size: int = 20) -> Generat
 async def main():
     """Main function for GRPO training"""
     parser = argparse.ArgumentParser(description="Train a model using GRPOTrainer")
-    parser.add_argument("--prefix_tag", type=str, default="KC_0.1.0")
+    parser.add_argument("--prefix_tag", type=str, default="KC_0.1.0_14B")
     parser.add_argument("--epoch_id", type=int, default=0)
     parser.add_argument("--block_id", type=int, default=0)
-    parser.add_argument("--simple_mode", type=bool, default=False)
+    parser.add_argument("--input_tag", type=str, default="KC_0.1.0_14B_000_00")
     parser.add_argument("--input_dir", type=str, default="~/.codeGenEval")
-    parser.add_argument("--input_tag", type=str, default="v0.1_20250726_113055")
+    parser.add_argument("--output_dir", type=str, default="~/.trainer")
     parser.add_argument("--base_config", type=str, default="trainerBase.yaml")
     parser.add_argument("--grpo_config", type=str, default="trainerGRPO.yaml")
+    parser.add_argument("--use_sample_dataset", action="store_true")
     args = parser.parse_args()
 
-    if args.simple_mode:
+    if args.use_sample_dataset:
         trainer = grpo_get_trainer(None, args.prefix_tag, args.base_config, args.grpo_config)
         dataset = grpo_get_sample_dataset(trainer.tokenizer)
         logger.info(f"📊 [GRPOTrainer] Use Simple Mode - loaded [{len(dataset)}] groups")
@@ -523,17 +526,15 @@ async def main():
             sys.exit(1)
     else:
         trainer = grpo_get_trainer(None, args.prefix_tag, args.base_config, args.grpo_config)
-        grpo_train_block(
-            trainer=trainer,              
+        grpo_block = TrainerGRPOBlock(
             prefix_tag=args.prefix_tag,
             epoch_id=args.epoch_id,
             block_id=args.block_id,
             input_tag=args.input_tag,
             input_dir=args.input_dir,
-            base_config_file=args.base_config,
-            grpo_config_file=args.grpo_config
+            output_dir=args.output_dir,
         )
+        grpo_train_block(grpo_block, trainer)
 
 if __name__ == "__main__":
     asyncio.run(main())
-

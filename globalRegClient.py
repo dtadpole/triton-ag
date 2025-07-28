@@ -1,7 +1,7 @@
 import yaml
 import asyncio
 import httpx
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from logger import logger
 
 
@@ -37,8 +37,10 @@ class GlobalRegClient:
                     raise e
         return []
 
-    async def get(self, key: str):
+    async def get(self, key: str, last_modified_within: Optional[int]=None):
         url = f"{self.base_url}/get/{key}"
+        if last_modified_within is not None:
+            url += f"?last_modified_within={last_modified_within}"
         retry_count = 0
         while retry_count < self.retries:
             try:
