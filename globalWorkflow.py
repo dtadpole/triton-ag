@@ -3,20 +3,22 @@ import asyncio
 import argparse
 from logger import logger
 from globalRegClient import GlobalRegClient
-from globalUtils import CodeGenEvalBlock, CritiqueBlock, ExamplarBlock, ReflectionBlock, TrainerGRPOBlock, TrainerSFTBlock
+from globalUtils import CodeGenEvalBlock, CritiqueBlock, ExemplarBlock, ReflectionBlock, TrainerSFTBlock, TrainerRFTBlock, TrainerGRPOBlock
 
 TASK_TYPE_CODEGENEVAL = "inference.codeGenEval"
-TASK_TYPE_EXAMPLAR = "inference.examplar"
+TASK_TYPE_EXEMPLAR = "inference.exemplar"
 TASK_TYPE_CRITIQUE = "inference.critique"
 TASK_TYPE_GRPO = "trainer.grpo"
 TASK_TYPE_SFT = "trainer.sft"
+TASK_TYPE_RFT = "trainer.rft"
 
 VALID_TASK_TYPES = [
     TASK_TYPE_CODEGENEVAL,
-    TASK_TYPE_EXAMPLAR,
+    TASK_TYPE_EXEMPLAR,
     TASK_TYPE_CRITIQUE,
     TASK_TYPE_GRPO,
     TASK_TYPE_SFT,
+    TASK_TYPE_RFT,
 ]
 
 class GlobalWorkflow:
@@ -25,9 +27,11 @@ class GlobalWorkflow:
         self.config = self.from_yaml(config_path)
         self.global_config = self.config.get("global", {})
         self.codeGenEval_default = self.config.get(TASK_TYPE_CODEGENEVAL, {}).get("default", {})
+        self.exemplar_default = self.config.get(TASK_TYPE_EXEMPLAR, {}).get("default", {})
         self.critique_default = self.config.get(TASK_TYPE_CRITIQUE, {}).get("default", {})
-        self.trainerGRPO_default = self.config.get(TASK_TYPE_GRPO, {}).get("default", {})
         self.trainerSFT_default = self.config.get(TASK_TYPE_SFT, {}).get("default", {})
+        self.trainerRFT_default = self.config.get(TASK_TYPE_RFT, {}).get("default", {})
+        self.trainerGRPO_default = self.config.get(TASK_TYPE_GRPO, {}).get("default", {})
         self.global_reg_client = GlobalRegClient()
 
     def from_yaml(self, config_path):
@@ -87,18 +91,26 @@ class GlobalWorkflow:
             if isinstance(value, str):
                 task_config[key] = value.format(**env_vars)
         # enqueue the task
-        if task_type == TASK_TYPE_CRITIQUE:
+        if task_type == TASK_TYPE_EXEMPLAR:
+            exemplarBlock = ExemplarBlock(**(self.exemplar_default | task_config))
+            await self.global_reg_client.enqueue(task_type, exemplarBlock.model_dump())
+            logger.info(f"🎢 [GlobalWorkflow] [{self.prefix_tag}] Enqueued to [{task_type}], content: [{exemplarBlock.model_dump()}]")
+        elif task_type == TASK_TYPE_CRITIQUE:
             critiqueBlock = CritiqueBlock(**(self.critique_default | task_config))
             await self.global_reg_client.enqueue(task_type, critiqueBlock.model_dump())
             logger.info(f"🎢 [GlobalWorkflow] [{self.prefix_tag}] Enqueued to [{task_type}], content: [{critiqueBlock.model_dump()}]")
-        elif task_type == TASK_TYPE_GRPO:
-            trainerGRPOBlock = TrainerGRPOBlock(**(self.trainerGRPO_default | task_config))
-            await self.global_reg_client.enqueue(task_type, trainerGRPOBlock.model_dump())
-            logger.info(f"🎢 [GlobalWorkflow] [{self.prefix_tag}] Enqueued to [{task_type}], content: [{trainerGRPOBlock.model_dump()}]")
         elif task_type == TASK_TYPE_SFT:
             trainerSFTBlock = TrainerSFTBlock(**(self.trainerSFT_default | task_config))
             await self.global_reg_client.enqueue(task_type, trainerSFTBlock.model_dump())
             logger.info(f"🎢 [GlobalWorkflow] [{self.prefix_tag}] Enqueued to [{task_type}], content: [{trainerSFTBlock.model_dump()}]")
+        elif task_type == TASK_TYPE_RFT:
+            trainerRFTBlock = TrainerRFTBlock(**(self.trainerRFT_default | task_config))
+            await self.global_reg_client.enqueue(task_type, trainerRFTBlock.model_dump())
+            logger.info(f"🎢 [GlobalWorkflow] [{self.prefix_tag}] Enqueued to [{task_type}], content: [{trainerRFTBlock.model_dump()}]")
+        elif task_type == TASK_TYPE_GRPO:
+            trainerGRPOBlock = TrainerGRPOBlock(**(self.trainerGRPO_default | task_config))
+            await self.global_reg_client.enqueue(task_type, trainerGRPOBlock.model_dump())
+            logger.info(f"🎢 [GlobalWorkflow] [{self.prefix_tag}] Enqueued to [{task_type}], content: [{trainerGRPOBlock.model_dump()}]")
         else:
             raise ValueError(f"Task [{task_name}] has unknown task type: [{task_type}]")
 
@@ -116,14 +128,14 @@ class GlobalWorkflow:
         for task_name, task_config in post_tasks.items():
             await self._enqueue_post_task(task_name, task_config, env_vars)
 
-    async def post_examplar(self, examplarBlock: ExamplarBlock):
+    async def post_exemplar(self, exemplarBlock: ExemplarBlock):
         env_vars = {
             "prefix_tag": self.prefix_tag,
-            "epoch_id": examplarBlock.epoch_id,
-            "block_id": examplarBlock.block_id,
-            "run_tag": self._get_run_tag(examplarBlock.epoch_id, examplarBlock.block_id),
+            "epoch_id": exemplarBlock.epoch_id,
+            "block_id": exemplarBlock.block_id,
+            "run_tag": self._get_run_tag(exemplarBlock.epoch_id, exemplarBlock.block_id),
         }
-        post_tasks = self.config.get(TASK_TYPE_EXAMPLAR, {}).get("post_tasks", {})
+        post_tasks = self.config.get(TASK_TYPE_EXEMPLAR, {}).get("post_tasks", {})
         for task_name, task_config in post_tasks.items():
             await self._enqueue_post_task(task_name, task_config, env_vars)
 

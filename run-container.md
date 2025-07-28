@@ -166,7 +166,7 @@ export VLLM_ATTENTION_BACKEND=FLASHINFER
 
 --enable_prefix_caching --prefix-caching-hash-algo sha256 
 
---enable-lora --max-lora-rank 128 --max-loras 4
+--enable-lora --max-lora-rank 128 --max-loras 8
 
 curl -X POST http://10.12.0.202:8091/v1/load_lora_adapter \
   -H "Authorization: Bearer dummy" \

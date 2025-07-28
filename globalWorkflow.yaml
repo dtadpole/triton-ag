@@ -1,7 +1,7 @@
 
 global:
   num_epochs: 10
-  num_blocks_per_epoch: 16
+  num_blocks_per_epoch: 32
 
   init_vars:
     inference.codeGenEval.model_override: null
@@ -14,9 +14,9 @@ global:
       block_id: "{block_id}"
       provider_name: local
       model_name: qwen3-14b
-      num_samples: 2
+      num_samples: 6
       num_generations: 8
-      parallel_tasks: 16
+      parallel_tasks: 24
       logprobs: true
       model_override: null
       input_dir: ~/triton-ag/kernel_bench
@@ -28,16 +28,17 @@ inference.codeGenEval:
     output_dir: ~/.codeGenEval
 
   post_tasks:
-    examplar.1:
-      type: inference.examplar
+    exemplar.1:
+      type: inference.exemplar
       prefix_tag: "{prefix_tag}"
       epoch_id: "{epoch_id}"
       block_id: "{block_id}"
       input_tag: "{run_tag}"
       provider_name: fireworks
       model_name: deepseek-v3
+      num_generations: 8
+      parallel_tasks: 24
       input_dir: ~/.codeGenEval
-      output_dir: ~/.examplar
     grpo.1:
       type: trainer.grpo
       prefix_tag: "{prefix_tag}"
@@ -45,14 +46,20 @@ inference.codeGenEval:
       block_id: "{block_id}"
       input_tag: "{run_tag}"
       input_dir: ~/.codeGenEval
-      output_dir: ~/.trainer
+    rft.1:
+      type: trainer.rft
+      prefix_tag: "{prefix_tag}"
+      epoch_id: "{epoch_id}"
+      block_id: "{block_id}"
+      input_tag: "{run_tag}"
+      input_dir: ~/.codeGenEval
 
-inference.examplar:
+inference.exemplar:
   default:
     provider_name: fireworks
     model_name: deepseek-v3
     input_dir: ~/.codeGenEval
-    output_dir: ~/.examplar
+    output_dir: ~/.exemplar
 
   post_tasks:
     rft.1:
@@ -61,9 +68,7 @@ inference.examplar:
       epoch_id: "{epoch_id}"
       block_id: "{block_id}"
       input_tag: "{run_tag}"
-      input_dir: ~/.examplar
-      output_dir: ~/.trainer
-
+      input_dir: ~/.exemplar
 
 inference.critique:
   default:
@@ -82,15 +87,14 @@ inference.critique:
       input_dir: ~/.codeGenEval
       output_dir: ~/.trainer
 
-
-trainer.grpo:
-  default:
-    output_dir: ~/.trainer
-
 trainer.sft:
   default:
     output_dir: ~/.trainer
 
 trainer.rft:
+  default:
+    output_dir: ~/.trainer
+
+trainer.grpo:
   default:
     output_dir: ~/.trainer

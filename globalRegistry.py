@@ -329,7 +329,7 @@ async def qsize(queue_name: str):
     queue = reg.get(f"{QUEUE_PREFIX}{queue_name}")
     if queue is None:
         raise HTTPException(status_code=404, detail=f"Queue [{queue_name}] not found")
-    return {"size": queue.qsize()}
+    return queue.qsize()
 
 
 if __name__ == "__main__":

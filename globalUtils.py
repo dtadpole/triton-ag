@@ -7,7 +7,16 @@ class TrainerSFTBlock(BaseModel):
     epoch_id: int
     block_id: int
     input_tag: str
-    input_dir: str = Field(default="~/.critique")
+    input_dir: str = Field(default="~/.exemplar")
+    output_dir: str = Field(default="~/.trainer")
+    test_mode: bool = Field(default=False)
+
+class TrainerRFTBlock(BaseModel):
+    prefix_tag: str
+    epoch_id: int
+    block_id: int
+    input_tag: str
+    input_dir: str = Field(default="~/.codeGenEval")
     output_dir: str = Field(default="~/.trainer")
     test_mode: bool = Field(default=False)
 
@@ -34,7 +43,7 @@ class CodeGenEvalBlock(BaseModel):
     output_dir: str = Field(default="~/.codeGenEval")
     test_mode: bool = Field(default=False)
 
-class ExamplarBlock(BaseModel):
+class ExemplarBlock(BaseModel):
     prefix_tag: str
     epoch_id: int
     block_id: int
@@ -45,7 +54,7 @@ class ExamplarBlock(BaseModel):
     parallel_tasks: int = Field(default=16)
     model_override: Optional[str] = Field(default=None)
     input_dir: str = Field(default="~/.codeGenEval")
-    output_dir: str = Field(default="~/.examplar")
+    output_dir: str = Field(default="~/.exemplar")
     test_mode: bool = Field(default=False)
 
 class CritiqueBlock(BaseModel):

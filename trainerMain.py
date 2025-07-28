@@ -1,13 +1,15 @@
 import asyncio
 import argparse
+import random
 import httpx
 import yaml
 import traceback
 import os
-from globalUtils import TrainerGRPOBlock, TrainerSFTBlock
+from globalUtils import TrainerGRPOBlock, TrainerRFTBlock, TrainerSFTBlock
 from logger import logger
 from globalRegClient import GlobalRegClient
 from trainerSFT import sft_train_block, sft_get_trainer
+from trainerRFT import rft_train_block, rft_get_trainer
 from trainerGRPO import grpo_train_block, grpo_get_trainer
 from trainerUtil import rsync_file
 
@@ -15,6 +17,7 @@ from trainerUtil import rsync_file
 client = GlobalRegClient()
 
 LAST_MODIFIED_WITHIN = 3600
+ALPHA = 1.1
 
 class VLLMClient:
     def __init__(self):
@@ -227,42 +230,65 @@ async def main_loop_task(rsync_queue: RsyncQueue, prefix_tag: str, test_mode: bo
 
     # initialize trainers (for now, we only have sft and grpo)
     sft_trainer = sft_get_trainer(None, prefix_tag)
-    grpo_trainer = grpo_get_trainer(sft_trainer, prefix_tag)
+    rft_trainer = rft_get_trainer(sft_trainer, prefix_tag)
+    grpo_trainer = grpo_get_trainer(rft_trainer, prefix_tag)
 
     loop = asyncio.get_event_loop()
 
     while True:
         try:
             sft_qsize = await client.qsize('trainer.sft')
+            rft_qsize = await client.qsize('trainer.rft')
             grpo_qsize = await client.qsize('trainer.grpo')
 
-            if grpo_qsize['size'] > sft_qsize['size']:
-                grpo_item = await client.dequeue(queue_name="trainer.grpo")
-                if grpo_item['prefix_tag'] != prefix_tag:
-                    logger.error(f"❌ [trainerMain] Skipping item with prefix: {grpo_item['prefix_tag']}")
-                    continue
-                if not test_mode and 'test_mode' in grpo_item and grpo_item['test_mode']:
-                    logger.info(f"🔍 [trainerMain] Skipping test mode item with prefix: {grpo_item['prefix_tag']}")
-                    continue
-                grpo_block = TrainerGRPOBlock(**grpo_item)
-                logger.info(f"🧊 [trainerMain] Training GRPO block: {grpo_block.input_tag}")
-                # run in executor to avoid blocking the event loop
-                await loop.run_in_executor(None, grpo_train_block, grpo_block, grpo_trainer, rsync_queue.enqueue)
-            elif sft_qsize['size'] > 0:
+            # randomly pick a queue to dequeue from based on the qsize as the probability
+            # sft_qsize / (sft_qsize + rft_qsize + grpo_qsize)
+            # rft_qsize / (sft_qsize + rft_qsize + grpo_qsize)
+            # grpo_qsize / (sft_qsize + rft_qsize + grpo_qsize)
+            total_qsize = sft_qsize + rft_qsize + grpo_qsize
+            # randomly pick a queue to dequeue from based on the probability
+            if total_qsize == 0:
+                logger.info(f"🔍 [trainerMain] No items to process, sleeping for [10] seconds")
+                await asyncio.sleep(10)
+                continue
+            else:
+                logger.info(f"🔍 [trainerMain] Queue sizes: sft: [{sft_qsize}], rft: [{rft_qsize}], grpo: [{grpo_qsize}]")
+
+            # calculate the probability for each queue, use ALPHA (>1.0) to enhance the probability for larger queues
+            sft_prob = (sft_qsize / total_qsize) ** ALPHA
+            rft_prob = (rft_qsize / total_qsize) ** ALPHA
+            grpo_prob = (grpo_qsize / total_qsize) ** ALPHA
+
+            if random.random() < sft_prob:
                 sft_item = await client.dequeue(queue_name="trainer.sft")
                 if sft_item['prefix_tag'] != prefix_tag:
                     logger.error(f"❌ [trainerMain] Skipping item with prefix: {sft_item['prefix_tag']}")
-                    continue
-                if not test_mode and 'test_mode' in sft_item and sft_item['test_mode']:
-                    logger.info(f"🔍 [trainerMain] Skipping test mode item with prefix: {sft_item['prefix_tag']}")
                     continue
                 sft_block = TrainerSFTBlock(**sft_item)
                 logger.info(f"🧊 [trainerMain] Training SFT block: {sft_block.input_tag}")
                 # run in executor to avoid blocking the event loop
                 await loop.run_in_executor(None, sft_train_block, sft_block, sft_trainer, rsync_queue.enqueue)
-            else:
-                logger.info(f"🔍 [trainerMain] No items to process, sleeping for [10] seconds")
-                await asyncio.sleep(10)
+
+            if random.random() < rft_prob:
+                rft_item = await client.dequeue(queue_name="trainer.rft")
+                if rft_item['prefix_tag'] != prefix_tag:
+                    logger.error(f"❌ [trainerMain] Skipping item with prefix: {rft_item['prefix_tag']}")
+                    continue
+                rft_block = TrainerRFTBlock(**rft_item)
+                logger.info(f"🧊 [trainerMain] Training RFT block: {rft_block.input_tag}")
+                # run in executor to avoid blocking the event loop
+                await loop.run_in_executor(None, rft_train_block, rft_block, rft_trainer, rsync_queue.enqueue)
+
+            if random.random() < grpo_prob:
+                grpo_item = await client.dequeue(queue_name="trainer.grpo")
+                if grpo_item['prefix_tag'] != prefix_tag:
+                    logger.error(f"❌ [trainerMain] Skipping item with prefix: {grpo_item['prefix_tag']}")
+                    continue
+                grpo_block = TrainerGRPOBlock(**grpo_item)
+                logger.info(f"🧊 [trainerMain] Training GRPO block: {grpo_block.input_tag}")
+                # run in executor to avoid blocking the event loop
+                await loop.run_in_executor(None, grpo_train_block, grpo_block, grpo_trainer, rsync_queue.enqueue)
+
         except Exception as e:
             logger.error(f"❌ [trainerMain] Error: {e}")
             traceback.print_exc()

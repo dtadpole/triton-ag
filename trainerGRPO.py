@@ -345,8 +345,8 @@ def grpo_train_block(block: TrainerGRPOBlock, trainer: GRPOTrainer, callback: Op
             compiled = eval_data['compiled']
             correctness = eval_data['correctness']
             runtime = eval_data['runtime']
-            reward_compiled = 0.0 if compiled else -0.5
-            reward_correctness = 0.0 if correctness else -0.5
+            reward_compiled = 0.0 if compiled else -0.3
+            reward_correctness = 0.0 if correctness else -0.7
             reward_runtime = 0.0 if runtime < 0 else ref_runtime / runtime
             reward = reward_compiled + reward_correctness + reward_runtime
             # create a generation result group
@@ -391,6 +391,10 @@ def grpo_train_block(block: TrainerGRPOBlock, trainer: GRPOTrainer, callback: Op
 
     # Create group dataset
     dataset = GenerationDataset(result_groups)
+    if len(dataset) == 0:
+        logger.warning(f"🗑️ [GRPOTrainer] [{block.input_tag}] No tasks for GRPO in [{search_path}]")
+        return
+    
     logger.info(f"📊 [GRPOTrainer] [{block.input_tag}] Dataset prepared - loaded [{len(dataset)}] groups")
     
     # Train the block

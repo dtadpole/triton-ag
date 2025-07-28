@@ -19,7 +19,7 @@ from inferenceClient import InferenceClient, InferenceClientConfig, load_inferen
 from kbEvalClient import KbEvalClient
 from logger import logger
 from kbEvalTest.kbeval import KernelExecResult
-from globalUtils import CodeGenEvalBlock, ExamplarBlock, CritiqueBlock
+from globalUtils import CodeGenEvalBlock, ExemplarBlock, CritiqueBlock
 from globalRegClient import GlobalRegClient
 from globalWorkflow import GlobalWorkflow
 
@@ -413,6 +413,8 @@ class CodeGenEvalClient:
         queue = asyncio.Queue()
         # for each reference code in reference_code_contents, write file content to relevant path
         # ref_eval_tasks = []
+        if not reference_eval_contents:
+            reference_eval_contents = [None] * len(reference_code_contents)
         for reference_code, reference_eval_content, task_tag in zip(reference_code_contents, reference_eval_contents, task_tags):
             # get the output path
             output_path = self.output_dir / task_tag
@@ -553,7 +555,7 @@ async def code_gen_eval_block(block: CodeGenEvalBlock):
         logger.error(f"❌ [CodeGenEval] [{run_tag}] Error running block: [{e}] in [{traceback.format_exc()}]")
         logger.error(traceback.format_exc())
 
-async def examplar_block(block: ExamplarBlock):
+async def exemplar_block(block: ExemplarBlock):
     """
     Run one batch of code generation and evaluation.
     """
@@ -564,12 +566,12 @@ async def examplar_block(block: ExamplarBlock):
         )
 
         # start running the batch
-        logger.info(f"🔍 [Examplar] [{block.input_tag}] Starting block...")
+        logger.info(f"🔍 [Exemplar] [{block.input_tag}] Starting block...")
 
         # Set up directories
         search_path = Path(os.path.expanduser(block.input_dir)) / block.input_tag
         if not search_path.exists():
-            logger.error(f"❌ [Examplar] [{block.input_tag}] Error: Input directory {search_path} does not exist")
+            logger.error(f"❌ [Exemplar] [{block.input_tag}] Error: Input directory {search_path} does not exist")
             return
 
         # use dockdb to get a list of reference code and generated code
@@ -579,7 +581,7 @@ async def examplar_block(block: ExamplarBlock):
         
         result_df = result.df()
 
-        logger.info(f"🔍 [Examplar] [{block.input_tag}] Found [{len(result_df)}] tasks for examplar in [{search_path}]\n[{result_df}]")
+        logger.info(f"🔍 [Exemplar] [{block.input_tag}] Found [{len(result_df)}] tasks for exemplar in [{search_path}]\n[{result_df}]")
 
         # for each reference code, copy over the reference code to the output directory
         reference_code_contents = []
@@ -600,10 +602,10 @@ async def examplar_block(block: ExamplarBlock):
         # now run inference
         codeGenEvalClient = CodeGenEvalClient(run_tag=block.input_tag, inference_client_config=config, output_dir=block.output_dir, logprobs=False)
         await codeGenEvalClient.run_block(task_tags, reference_code_contents, reference_eval_contents=reference_eval_contents, num_generations=block.num_generations, parallel_tasks=block.parallel_tasks, run_reference=False)
-        logger.info(f"🎉 [Examplar] [{block.input_tag}] Block completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
+        logger.info(f"🎉 [Exemplar] [{block.input_tag}] Block completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
 
     except Exception as e:
-        logger.error(f"❌ [Examplar] [{block.input_tag}] Error running block: [{e}] in [{traceback.format_exc()}]")
+        logger.error(f"❌ [Exemplar] [{block.input_tag}] Error running block: [{e}] in [{traceback.format_exc()}]")
         logger.error(traceback.format_exc())
 
 
@@ -621,7 +623,7 @@ async def main():
     parser.add_argument("--num_samples", type=int, default=12)
     parser.add_argument("--num_generations", type=int, default=16)
     parser.add_argument("--parallel_tasks", type=int, default=24)
-    parser.add_argument("--run_examplar", action="store_true")
+    parser.add_argument("--run_exemplar", action="store_true")
     parser.add_argument("--use_global_registry", action="store_true")
     parser.add_argument("--proc_id", type=str, default=None)
     args = parser.parse_args()
@@ -631,7 +633,7 @@ async def main():
     else:
         PROC_ID = os.environ.get("PROC_ID", None)
 
-    if not args.run_examplar:
+    if not args.run_exemplar:
         try:
             run_tag = 'unknown'
             if args.use_global_registry:
@@ -675,21 +677,21 @@ async def main():
                 await globalWorkflow.post_codeGenEval(block)
 
         except Exception as e:
-            logger.error(f"❌ [CodeGenEval] [{run_tag}] Error running block: [{e}]")
+            logger.error(f"❌ [CodeGenEval] [{run_tag}] Error running block: [{type(e).__name__}: {e}]")
             logger.error(traceback.format_exc())
 
     else:
-        # examplar
+        # exemplar
         try:
             if args.use_global_registry:
                 # get the global registry
                 global_reg_client = GlobalRegClient()
-                # get the ExamplarBlock from the global registry
-                block_json = await global_reg_client.dequeue(f"inference.examplar")
-                # convert the block_json to a ExamplarBlock object
-                block = ExamplarBlock(**block_json)
+                # get the ExemplarBlock from the global registry
+                block_json = await global_reg_client.dequeue(f"inference.exemplar")
+                # convert the block_json to a ExemplarBlock object
+                block = ExemplarBlock(**block_json)
             else:
-                block = ExamplarBlock(
+                block = ExemplarBlock(
                     prefix_tag=args.prefix_tag,
                     epoch_id=args.epoch_id,
                     block_id=args.block_id,
@@ -703,14 +705,14 @@ async def main():
                     output_dir=args.output_dir,
                 )
             # run the block
-            await examplar_block(block)
+            await exemplar_block(block)
 
             if args.use_global_registry:
                 globalWorkflow = GlobalWorkflow(prefix_tag=block.prefix_tag)
-                await globalWorkflow.post_examplar(block)
+                await globalWorkflow.post_exemplar(block)
 
         except Exception as e:
-            logger.error(f"❌ [Examplar] [{block.input_tag}] Error running block: [{e}]")
+            logger.error(f"❌ [Exemplar] Error running block: [{type(e).__name__}: {e}]")
             logger.error(traceback.format_exc())
 
 if __name__ == "__main__":
