@@ -134,6 +134,9 @@ class InferenceClient:
             reasoning_content = ""
             logprobs_content = []
             
+            prompt_tokens = 0
+            completion_tokens = 0
+
             # Process streaming response, including logprobs
             async for chunk in stream:
                 if chunk.choices:
@@ -149,15 +152,25 @@ class InferenceClient:
                     if hasattr(choice.delta, 'logprobs') and choice.delta.logprobs:
                         if 'content' in choice.delta.logprobs:
                             logprobs_content.append(choice.delta.logprobs['content'])
+                if chunk.usage:
+                    prompt_tokens += chunk.usage.prompt_tokens
+                    completion_tokens += chunk.usage.completion_tokens
+                    # logger.info(f"🔍 [InferenceClient] [Chat completion] Usage: {chunk.usage}")
 
-            logger.info(f"🔍 [InferenceClient] [Chat completion] Logprobs: [len={len(logprobs_content)}]")
+            logger.info(f"🔍 [InferenceClient] [Chat completion] [prompt_tokens={prompt_tokens}] [completion_tokens={completion_tokens}]")
 
             # Create a proper ChatCompletionMessage object
             return_message = ChatCompletionMessage(
                 content=generated_content,
                 role="assistant",
                 reasoning_content=reasoning_content if reasoning_content else None,
-            ).model_dump() | {"logprobs": logprobs_content}
+            ).model_dump() | {
+                "logprobs": logprobs_content,
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                   "completion_tokens": completion_tokens,
+                }
+            }
         else:
             # NON-STREAMING MODE: Single response using OpenAI client
             response = await self.openai_client.chat.completions.create(
@@ -179,6 +192,13 @@ class InferenceClient:
                 if hasattr(choice, 'logprobs') and choice.logprobs:
                     logger.info(f"🔍 [InferenceClient] [Chat completion] Logprobs: [len={len(choice.logprobs.content)}]")
                     return_message['logprobs'] = choice.logprobs.model_dump()
+
+            if response.usage:
+                return_message['usage'] = {
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                }
+                logger.info(f"🔍 [InferenceClient] [Chat completion] [prompt_tokens={response.usage.prompt_tokens}] [completion_tokens={response.usage.completion_tokens}]")
 
         # check if return_message['content'] has <think> and </think> using regex
         # matches = re.search(r'<think>(.*?)</think>(.*?)$', return_message['content'].strip(), re.DOTALL)

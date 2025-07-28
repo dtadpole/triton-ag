@@ -28,8 +28,8 @@ inference.codeGenEval:
     output_dir: ~/.codeGenEval
 
   post_tasks:
-    critique.1:
-      type: inference.critique
+    examplar.1:
+      type: inference.examplar
       prefix_tag: "{prefix_tag}"
       epoch_id: "{epoch_id}"
       block_id: "{block_id}"
@@ -37,7 +37,7 @@ inference.codeGenEval:
       provider_name: fireworks
       model_name: deepseek-v3
       input_dir: ~/.codeGenEval
-      output_dir: ~/.critique
+      output_dir: ~/.examplar
     grpo.1:
       type: trainer.grpo
       prefix_tag: "{prefix_tag}"
@@ -46,6 +46,24 @@ inference.codeGenEval:
       input_tag: "{run_tag}"
       input_dir: ~/.codeGenEval
       output_dir: ~/.trainer
+
+inference.examplar:
+  default:
+    provider_name: fireworks
+    model_name: deepseek-v3
+    input_dir: ~/.codeGenEval
+    output_dir: ~/.examplar
+
+  post_tasks:
+    rft.1:
+      type: trainer.rft
+      prefix_tag: "{prefix_tag}"
+      epoch_id: "{epoch_id}"
+      block_id: "{block_id}"
+      input_tag: "{run_tag}"
+      input_dir: ~/.examplar
+      output_dir: ~/.trainer
+
 
 inference.critique:
   default:
@@ -70,5 +88,9 @@ trainer.grpo:
     output_dir: ~/.trainer
 
 trainer.sft:
+  default:
+    output_dir: ~/.trainer
+
+trainer.rft:
   default:
     output_dir: ~/.trainer

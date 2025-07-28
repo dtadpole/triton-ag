@@ -1,5 +1,7 @@
 import os
 import re
+import shutil
+import duckdb
 import json
 import time
 import asyncio
@@ -17,7 +19,7 @@ from inferenceClient import InferenceClient, InferenceClientConfig, load_inferen
 from kbEvalClient import KbEvalClient
 from logger import logger
 from kbEvalTest.kbeval import KernelExecResult
-from globalUtils import CodeGenEvalBlock, TrainerGRPOBlock, CritiqueBlock
+from globalUtils import CodeGenEvalBlock, ExamplarBlock, CritiqueBlock
 from globalRegClient import GlobalRegClient
 from globalWorkflow import GlobalWorkflow
 
@@ -41,6 +43,7 @@ class CodeGenEvalClient:
         self.kb_eval_client = KbEvalClient()
         self.output_dir = self._get_output_dir(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.logprobs = logprobs
 
         logger.info(f"🔍 [CodeGenEvalClient] [{self.run_tag}] [{self.model_tag}] Using logprobs: [{self.inference_client_config.model.logprobs}]")
 
@@ -96,79 +99,119 @@ class CodeGenEvalClient:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ]
-        
-        prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=self.inference_client_config.model.enable_thinking)
 
-        # Generate response
-        start_time = time.time()
-        result = await self.inference_client.completion(prompt)
-        generation_time = time.time() - start_time
-        
-        content = result.get('content', '')
-        reasoning_content = result.get('reasoning_content', '')
-        logprobs = result.get('logprobs', [])
+        if self.logprobs:
+            # use completion api if logprobs is True
+            prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=self.inference_client_config.model.enable_thinking)
 
-        tokens = self.tokenizer.encode(content) if content else []
-        reasoning_tokens = self.tokenizer.encode(reasoning_content) if reasoning_content else []
+            # Generate response
+            start_time = time.time()
+            result = await self.inference_client.completion(prompt)
+            generation_time = time.time() - start_time
+            
+            content = result.get('content', '')
+            logprobs = result.get('logprobs', [])
 
-        num_tokens = len(tokens)
-        num_reasoning_tokens = len(reasoning_tokens)
-        token_per_second = (num_tokens + num_reasoning_tokens) / generation_time
+            tokens = self.tokenizer.encode(content) if content else []
 
-        metadata = {
-            "run_tag": self.run_tag,
-            "model_tag": self.model_tag,
-            "task_tag": task_tag,
-            "gen_tag": gen_tag,
-            "reference_code": reference_code,
-            "num_tokens": num_tokens,
-            "num_reasoning_tokens": num_reasoning_tokens,
-            "generation_time_seconds": generation_time,
-            "token_per_second": token_per_second,
-        }
+            num_tokens = len(tokens)
+            token_per_second = num_tokens / generation_time
 
-        # save response to a
-        conversation_file = self.output_dir / task_tag / f"{gen_tag}_conversation.json"
-        conversation = {
-            "messages": [
-                {
-                    "role": "system",
-                    "content": system_prompt
-                },
-                {
-                    "role": "user",
-                    "content": user_prompt
-                },
-                {
-                    "role": "assistant",
-                    "reasoning_content": reasoning_content,
-                    "content": content
-                }
-            ],
-            "metadata": metadata,
-        }
+            metadata = {
+                "run_tag": self.run_tag,
+                "model_tag": self.model_tag,
+                "task_tag": task_tag,
+                "gen_tag": gen_tag,
+                "reference_code": reference_code,
+                "num_tokens": num_tokens,
+                "generation_time_seconds": generation_time,
+                "token_per_second": token_per_second,
+            }
 
-        with open(conversation_file, 'w') as f:
-            f.write(json.dumps(conversation, indent=2, ensure_ascii=False, default=str))
+            # save response to a
+            conversation_file = self.output_dir / task_tag / f"{gen_tag}_conversation.json"
+            conversation = {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": system_prompt
+                    },
+                    {
+                        "role": "user",
+                        "content": user_prompt
+                    },
+                    {
+                        "role": "assistant",
+                        "content": content
+                    }
+                ],
+                "metadata": metadata,
+            }
 
-        completion_file = self.output_dir / task_tag / f"{gen_tag}_completion.json"
-        completion = {
-            "prompt": prompt,
-            "generation": content,
-            "logprobs": logprobs,
-            "metadata": metadata,
-        }
+            with open(conversation_file, 'w') as f:
+                f.write(json.dumps(conversation, indent=2, ensure_ascii=False, default=str))
 
-        with open(completion_file, 'w') as f:
-            f.write(json.dumps(completion, indent=2, ensure_ascii=False, default=str))
+            completion_file = self.output_dir / task_tag / f"{gen_tag}_completion.json"
+            completion = {
+                "prompt": prompt,
+                "generation": content,
+                "logprobs": logprobs,
+                "metadata": metadata,
+            }
 
-        # extract the generated code from the generated text
+            with open(completion_file, 'w') as f:
+                f.write(json.dumps(completion, indent=2, ensure_ascii=False, default=str))
+
+        else:
+            # use chat completion api if logprobs is False
+            start_time = time.time()
+            result = await self.inference_client.chat_completion(messages)
+            generation_time = time.time() - start_time
+
+            content = result.get('content', '')
+
+            num_tokens = result['usage']['completion_tokens'] if 'usage' in result else 0
+            token_per_second = num_tokens / generation_time
+
+            metadata = {
+                "run_tag": self.run_tag,
+                "model_tag": self.model_tag,
+                "task_tag": task_tag,
+                "gen_tag": gen_tag,
+                "reference_code": reference_code,
+                "num_tokens": num_tokens,
+                "generation_time_seconds": generation_time,
+                "token_per_second": token_per_second,
+            }
+
+            conversation_file = self.output_dir / task_tag / f"{gen_tag}_conversation.json"
+            conversation = {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": system_prompt
+                    },
+                    {
+                        "role": "user",
+                        "content": user_prompt
+                    },
+                    {
+                        "role": "assistant",
+                        "content": content
+                    }
+                ],
+                "metadata": metadata,
+            }
+
+            with open(conversation_file, 'w') as f:
+                f.write(json.dumps(conversation, indent=2, ensure_ascii=False, default=str))
+
         try:
             # find the last Python code block using regex
             code_blocks = re.findall(r"```python\n(.*?)\n```", content, re.DOTALL)
             generated_code = code_blocks[-1].strip() if code_blocks else content.strip()
         except (IndexError, AttributeError) as e:
-            logger.error(f"❌ [CodeGenEval {task_tag}] Error extracting code [{e}] [{f'{num_tokens}'} tokens] [{f'{num_reasoning_tokens}'} reasoning tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
+            logger.error(f"❌ [CodeGenEval {task_tag}] Error extracting code [{e}] [{f'{num_tokens}'} tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
             return conversation, None
         
         # save the generated code to a file
@@ -177,7 +220,7 @@ class CodeGenEvalClient:
             f.write(generated_code)
 
         # use generated emoji to beginning of the line
-        logger.info(f"👏 [CodeGenEval] [{self.run_tag}] Generated [{f'{task_tag}'}] [{f'{gen_tag}'}]: [{generated_code_file}] [{f'{num_tokens}'} tokens] [{f'{num_reasoning_tokens}'} reasoning tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
+        logger.info(f"👏 [CodeGenEval] [{self.run_tag}] Generated [{f'{task_tag}'}] [{f'{gen_tag}'}]: [{generated_code_file}] [{f'{num_tokens}'} tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
         return conversation, generated_code
 
     async def _process_code_eval(
@@ -353,10 +396,12 @@ class CodeGenEvalClient:
 
     async def run_block(
         self,
-        reference_code_contents: List[str],
         task_tags: List[str],
+        reference_code_contents: List[str],
+        reference_eval_contents: List[str] = None,
         num_generations: int=8,
         parallel_tasks: int=8,
+        run_reference: bool=True,
     ):
         """
         Run the code generation and evaluation tasks.
@@ -368,7 +413,7 @@ class CodeGenEvalClient:
         queue = asyncio.Queue()
         # for each reference code in reference_code_contents, write file content to relevant path
         # ref_eval_tasks = []
-        for reference_code, task_tag in zip(reference_code_contents, task_tags):
+        for reference_code, reference_eval_content, task_tag in zip(reference_code_contents, reference_eval_contents, task_tags):
             # get the output path
             output_path = self.output_dir / task_tag
             output_path.mkdir(parents=True, exist_ok=True)
@@ -377,13 +422,21 @@ class CodeGenEvalClient:
             with open(output_file, 'w') as f_out:
                 f_out.write(reference_code)
 
-            await queue.put({
-                "is_reference": True,
-                "task_tag": task_tag,
-                "gen_tag": f"reference",
-                "reference_code": reference_code,
-            })
+            if run_reference:
+                # add reference tasks to the queue
+                await queue.put({
+                    "is_reference": True,
+                    "task_tag": task_tag,
+                    "gen_tag": f"reference",
+                    "reference_code": reference_code,
+                })
+            else:
+                # write the reference eval to the output directory
+                reference_eval_file = self.output_dir / task_tag / f"reference_eval.json"
+                with open(reference_eval_file, 'w') as f:
+                    f.write(reference_eval_content)
 
+        # add generation tasks to the queue
         for reference_code, task_tag in zip(reference_code_contents, task_tags):
             for gen_id in range(num_generations):
                 await queue.put({
@@ -416,6 +469,7 @@ class CodeGenEvalClient:
             "num_samples": len(reference_code_contents),
             "num_generations": num_generations,
             "parallel_tasks": parallel_tasks,
+            "run_reference": run_reference,
         }
 
         # write the metadata to the output directory
@@ -491,12 +545,65 @@ async def code_gen_eval_block(block: CodeGenEvalBlock):
         task_tags = [item['task_tag'] for item in reference_code_json]
 
         # now run inference
-        codeGenEvalClient = CodeGenEvalClient(run_tag=run_tag, inference_client_config=config, output_dir=block.output_dir, logprobs=block.logprobs)
-        await codeGenEvalClient.run_block(reference_code_contents, task_tags, block.num_generations, block.parallel_tasks)
+        codeGenEvalClient = CodeGenEvalClient(run_tag=run_tag, inference_client_config=config, output_dir=block.output_dir, logprobs=True)
+        await codeGenEvalClient.run_block(task_tags, reference_code_contents, num_generations=block.num_generations, parallel_tasks=block.parallel_tasks)
         logger.info(f"🎉 [CodeGenEval] [{run_tag}] Block completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
 
     except Exception as e:
         logger.error(f"❌ [CodeGenEval] [{run_tag}] Error running block: [{e}] in [{traceback.format_exc()}]")
+        logger.error(traceback.format_exc())
+
+async def examplar_block(block: ExamplarBlock):
+    """
+    Run one batch of code generation and evaluation.
+    """
+    try:
+        config = load_inference_client_config(
+            provider_name=block.provider_name,
+            model_short_name=block.model_name,
+        )
+
+        # start running the batch
+        logger.info(f"🔍 [Examplar] [{block.input_tag}] Starting block...")
+
+        # Set up directories
+        search_path = Path(os.path.expanduser(block.input_dir)) / block.input_tag
+        if not search_path.exists():
+            logger.error(f"❌ [Examplar] [{block.input_tag}] Error: Input directory {search_path} does not exist")
+            return
+
+        # use dockdb to get a list of reference code and generated code
+        result = duckdb.sql(f"""SELECT filename, compiled, correctness, metadata, runtime, runtime_stats
+                            FROM read_json_auto('{search_path}/**/reference_eval.json', sample_size=-1, ignore_errors=true) 
+                        """)
+        
+        result_df = result.df()
+
+        logger.info(f"🔍 [Examplar] [{block.input_tag}] Found [{len(result_df)}] tasks for examplar in [{search_path}]\n[{result_df}]")
+
+        # for each reference code, copy over the reference code to the output directory
+        reference_code_contents = []
+        reference_eval_contents = []
+        task_tags = []
+        for index, row in result_df.iterrows():
+            # copy the reference code to the output directory
+            reference_eval_filename = row['filename']
+            reference_code_filename = reference_eval_filename.replace("reference_eval.json", "reference_code.py")
+            with open(reference_code_filename, 'r') as f:
+                reference_code = f.read()
+            reference_code_contents.append(reference_code)
+            with open(reference_eval_filename, 'r') as f:
+                reference_eval_content = f.read()
+            reference_eval_contents.append(reference_eval_content)
+            task_tags.append(row['metadata']['task_tag'])
+
+        # now run inference
+        codeGenEvalClient = CodeGenEvalClient(run_tag=block.input_tag, inference_client_config=config, output_dir=block.output_dir, logprobs=False)
+        await codeGenEvalClient.run_block(task_tags, reference_code_contents, reference_eval_contents=reference_eval_contents, num_generations=block.num_generations, parallel_tasks=block.parallel_tasks, run_reference=False)
+        logger.info(f"🎉 [Examplar] [{block.input_tag}] Block completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
+
+    except Exception as e:
+        logger.error(f"❌ [Examplar] [{block.input_tag}] Error running block: [{e}] in [{traceback.format_exc()}]")
         logger.error(traceback.format_exc())
 
 
@@ -505,6 +612,7 @@ async def main():
     parser.add_argument("--prefix_tag", type=str, default="KC_0.1.0_14B")
     parser.add_argument("--epoch_id", type=int, default=-1)
     parser.add_argument("--block_id", type=int, default=-1)
+    parser.add_argument("--input_tag", type=str, default="KC_0.1.0_14B_000_00")
     parser.add_argument("--input_dir", type=str, default="~/triton-ag/kernel_bench", help="Input directory containing Python files")
     parser.add_argument("--output_dir", type=str, default="~/.codeGenEval", help="Output directory for the code generation and evaluation results")
     parser.add_argument("--provider", type=str, default="deepinfra")  # most cost effective models are deepinfra-r1 and fireworks-v3
@@ -513,7 +621,7 @@ async def main():
     parser.add_argument("--num_samples", type=int, default=12)
     parser.add_argument("--num_generations", type=int, default=16)
     parser.add_argument("--parallel_tasks", type=int, default=24)
-    parser.add_argument("--logprobs", type=bool, default=True)
+    parser.add_argument("--run_examplar", action="store_true")
     parser.add_argument("--use_global_registry", action="store_true")
     parser.add_argument("--proc_id", type=str, default=None)
     args = parser.parse_args()
@@ -523,52 +631,87 @@ async def main():
     else:
         PROC_ID = os.environ.get("PROC_ID", None)
 
-    try:
-        run_tag = 'unknown'
-        if args.use_global_registry:
-            # get the global registry
-            global_reg_client = GlobalRegClient()
-            # get the codeGenEvalBlock from the global registry
-            block_json = await global_reg_client.dequeue(f"inference.codeGenEval")
-            # convert the block_json to a CodeGenEvalBlock object
-            block = CodeGenEvalBlock(**block_json)
-            # process the model override
-            model_override = await global_reg_client.get(f"inference.codeGenEval.model_override")
-            if model_override:
-                logger.info(f"🔍 [CodeGenEvalClient] [{block.prefix_tag}] Using model override: [{model_override}]")
-                block.model_override = model_override
-                # update model_override in the global registry
-                if PROC_ID is None:
-                    error_msg = f"❌ [CodeGenEvalClient] [{block.prefix_tag}] Unable to get PROC_ID to update model_override [{model_override}]"
-                    logger.error(error_msg)
-                    raise Exception(error_msg)
-                else:
-                    await global_reg_client.put(f"adapter.codeGenEval.model_override.{PROC_ID}", model_override)
-        else:
-            block = CodeGenEvalBlock(
-                prefix_tag=args.prefix_tag,
-                epoch_id=args.epoch_id,
-                block_id=args.block_id,
-                provider_name=args.provider,
-                model_name=args.model,
-                num_samples=args.num_samples,
-                num_generations=args.num_generations,
-                parallel_tasks=args.parallel_tasks,
-                model_override=args.model_override,
-                logprobs=args.logprobs,
-                input_dir=args.input_dir,
-                output_dir=args.output_dir,
-            )
-        # run the block
-        await code_gen_eval_block(block)
+    if not args.run_examplar:
+        try:
+            run_tag = 'unknown'
+            if args.use_global_registry:
+                # get the global registry
+                global_reg_client = GlobalRegClient()
+                # get the codeGenEvalBlock from the global registry
+                block_json = await global_reg_client.dequeue(f"inference.codeGenEval")
+                # convert the block_json to a CodeGenEvalBlock object
+                block = CodeGenEvalBlock(**block_json)
+                # process the model override
+                model_override = await global_reg_client.get(f"inference.codeGenEval.model_override")
+                if model_override:
+                    logger.info(f"🔍 [CodeGenEvalClient] [{block.prefix_tag}] Using model override: [{model_override}]")
+                    block.model_override = model_override
+                    # update model_override in the global registry
+                    if PROC_ID is None:
+                        error_msg = f"❌ [CodeGenEvalClient] [{block.prefix_tag}] Unable to get PROC_ID to update model_override [{model_override}]"
+                        logger.error(error_msg)
+                        raise Exception(error_msg)
+                    else:
+                        await global_reg_client.put(f"adapter.codeGenEval.model_override.{PROC_ID}", model_override)
+            else:
+                block = CodeGenEvalBlock(
+                    prefix_tag=args.prefix_tag,
+                    epoch_id=args.epoch_id,
+                    block_id=args.block_id,
+                    provider_name=args.provider,
+                    model_name=args.model,
+                    num_samples=args.num_samples,
+                    num_generations=args.num_generations,
+                    parallel_tasks=args.parallel_tasks,
+                    model_override=args.model_override,
+                    input_dir=args.input_dir,
+                    output_dir=args.output_dir,
+                )
+            # run the block
+            await code_gen_eval_block(block)
 
-        if args.use_global_registry:
-            globalWorkflow = GlobalWorkflow(prefix_tag=block.prefix_tag)
-            await globalWorkflow.post_codeGenEval(block)
+            if args.use_global_registry:
+                globalWorkflow = GlobalWorkflow(prefix_tag=block.prefix_tag)
+                await globalWorkflow.post_codeGenEval(block)
 
-    except Exception as e:
-        logger.error(f"❌ [CodeGenEval] [{run_tag}] Error running block: [{e}]")
-        logger.error(traceback.format_exc())
+        except Exception as e:
+            logger.error(f"❌ [CodeGenEval] [{run_tag}] Error running block: [{e}]")
+            logger.error(traceback.format_exc())
+
+    else:
+        # examplar
+        try:
+            if args.use_global_registry:
+                # get the global registry
+                global_reg_client = GlobalRegClient()
+                # get the ExamplarBlock from the global registry
+                block_json = await global_reg_client.dequeue(f"inference.examplar")
+                # convert the block_json to a ExamplarBlock object
+                block = ExamplarBlock(**block_json)
+            else:
+                block = ExamplarBlock(
+                    prefix_tag=args.prefix_tag,
+                    epoch_id=args.epoch_id,
+                    block_id=args.block_id,
+                    input_tag=args.input_tag,
+                    provider_name=args.provider,
+                    model_name=args.model,
+                    num_generations=args.num_generations,
+                    parallel_tasks=args.parallel_tasks,
+                    model_override=args.model_override,
+                    input_dir=args.input_dir,
+                    output_dir=args.output_dir,
+                )
+            # run the block
+            await examplar_block(block)
+
+            if args.use_global_registry:
+                globalWorkflow = GlobalWorkflow(prefix_tag=block.prefix_tag)
+                await globalWorkflow.post_examplar(block)
+
+        except Exception as e:
+            logger.error(f"❌ [Examplar] [{block.input_tag}] Error running block: [{e}]")
+            logger.error(traceback.format_exc())
 
 if __name__ == "__main__":
     asyncio.run(main())

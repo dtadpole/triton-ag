@@ -325,7 +325,6 @@ async def main():
     args = parser.parse_args()
 
     try:
-        run_tag = 'unknown'
         if args.use_global_registry:
             # get the global registry
             global_reg_client = GlobalRegClient()
@@ -333,11 +332,6 @@ async def main():
             block_json = await global_reg_client.dequeue(f"inference.critique")
             # convert the block_json to a CritiqueBlock object
             block = CritiqueBlock(**block_json)
-            # process the model override
-            model_override = await global_reg_client.get(f"inference.critique.model_override")
-            if model_override:
-                logger.info(f"🔍 [Critique] [{block.prefix_tag}] Using model override: [{model_override}]")
-                block.model_override = model_override
         else:
             block = CritiqueBlock(
                 prefix_tag=args.prefix_tag,
@@ -359,7 +353,7 @@ async def main():
             await globalWorkflow.post_critique(block)
 
     except Exception as e:
-        logger.error(f"❌ [Critique] [{run_tag}] Error running block: [{e}]")
+        logger.error(f"❌ [Critique] [{block.input_tag}] Error running block: [{e}]")
         logger.error(traceback.format_exc())
 
 if __name__ == "__main__":

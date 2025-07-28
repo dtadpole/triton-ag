@@ -29,10 +29,23 @@ class CodeGenEvalBlock(BaseModel):
     num_samples: int
     num_generations: int
     parallel_tasks: int = Field(default=24)
-    logprobs: bool = Field(default=True)
     model_override: Optional[str] = Field(default=None)
     input_dir: str = Field(default="~/triton-ag/kernel_bench")
     output_dir: str = Field(default="~/.codeGenEval")
+    test_mode: bool = Field(default=False)
+
+class ExamplarBlock(BaseModel):
+    prefix_tag: str
+    epoch_id: int
+    block_id: int
+    input_tag: str
+    provider_name: str
+    model_name: str
+    num_generations: int
+    parallel_tasks: int = Field(default=16)
+    model_override: Optional[str] = Field(default=None)
+    input_dir: str = Field(default="~/.codeGenEval")
+    output_dir: str = Field(default="~/.examplar")
     test_mode: bool = Field(default=False)
 
 class CritiqueBlock(BaseModel):
@@ -46,19 +59,6 @@ class CritiqueBlock(BaseModel):
     model_override: Optional[str] = Field(default=None)
     input_dir: str = Field(default="~/.codeGenEval")
     output_dir: str = Field(default="~/.critique")
-    test_mode: bool = Field(default=False)
-
-class ExamplarBlock(BaseModel):
-    prefix_tag: str
-    epoch_id: int
-    block_id: int
-    input_tag: str
-    provider_name: str
-    model_name: str
-    parallel_tasks: int = Field(default=16)
-    model_override: Optional[str] = Field(default=None)
-    input_dir: str = Field(default="~/triton-ag/kernel_bench")
-    output_dir: str = Field(default="~/.examplar")
     test_mode: bool = Field(default=False)
 
 class ReflectionBlock(BaseModel):

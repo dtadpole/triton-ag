@@ -6,12 +6,14 @@ from globalRegClient import GlobalRegClient
 from globalUtils import CodeGenEvalBlock, CritiqueBlock, ExamplarBlock, ReflectionBlock, TrainerGRPOBlock, TrainerSFTBlock
 
 TASK_TYPE_CODEGENEVAL = "inference.codeGenEval"
+TASK_TYPE_EXAMPLAR = "inference.examplar"
 TASK_TYPE_CRITIQUE = "inference.critique"
 TASK_TYPE_GRPO = "trainer.grpo"
 TASK_TYPE_SFT = "trainer.sft"
 
 VALID_TASK_TYPES = [
     TASK_TYPE_CODEGENEVAL,
+    TASK_TYPE_EXAMPLAR,
     TASK_TYPE_CRITIQUE,
     TASK_TYPE_GRPO,
     TASK_TYPE_SFT,
@@ -111,6 +113,17 @@ class GlobalWorkflow:
             "run_tag": self._get_run_tag(codeGenEvalBlock.epoch_id, codeGenEvalBlock.block_id),
         }
         post_tasks = self.config.get(TASK_TYPE_CODEGENEVAL, {}).get("post_tasks", {})
+        for task_name, task_config in post_tasks.items():
+            await self._enqueue_post_task(task_name, task_config, env_vars)
+
+    async def post_examplar(self, examplarBlock: ExamplarBlock):
+        env_vars = {
+            "prefix_tag": self.prefix_tag,
+            "epoch_id": examplarBlock.epoch_id,
+            "block_id": examplarBlock.block_id,
+            "run_tag": self._get_run_tag(examplarBlock.epoch_id, examplarBlock.block_id),
+        }
+        post_tasks = self.config.get(TASK_TYPE_EXAMPLAR, {}).get("post_tasks", {})
         for task_name, task_config in post_tasks.items():
             await self._enqueue_post_task(task_name, task_config, env_vars)
 
