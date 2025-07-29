@@ -96,7 +96,7 @@ async def check_disconnect_and_kill_child_process(request: Request, process: asy
             if process.returncode is not None:
                 logger.info(f"Child process [{process.pid}] completed with return code: {process.returncode}")
                 return
-            elif await request.is_disconnected():
+            elif request._is_disconnected or await request.is_disconnected():
                 logger.error(f"Client disconnected, terminating child process [{process.pid}]")
                 # process.terminate()
                 os.killpg(process.pid, signal.SIGTERM)
