@@ -1,4 +1,6 @@
 import argparse
+import socket
+import yaml
 import asyncio
 import json
 import os
@@ -15,13 +17,20 @@ import os
 import json
 import psutil
 from datetime import datetime
-from util import logger
+from logger import logger
 import random
 # from filelock import FileLock, Timeout
 
 KB_EVAL_DIR = os.path.expanduser("~/.kbeval")
 
 MAX_LOCK_AGE = 15 # seconds
+
+def from_yaml(yaml_file: str="kbEval.yaml"):
+    with open(yaml_file, 'r') as f:
+        yaml_data = yaml.safe_load(f)
+    # get my hostname
+    hostname = socket.gethostname()
+    return yaml_data.get("kbEvalCli", {}).get(hostname, {})
 
 class FileLock:
     def __init__(self, lock_file):
@@ -491,7 +500,7 @@ def eval_kernel_against_ref_new(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--wd", type=str, default="./kbEvalTest")
-    parser.add_argument("--run_tag", type=str, default="run_tag")
+    parser.add_argument("--run_tag", type=str, default="auto")
     parser.add_argument("--model_tag", type=str, default="model_tag")
     parser.add_argument("--task_tag", type=str, default="task_tag")
     parser.add_argument("--eval_tag", type=str, default="eval_tag")
@@ -501,12 +510,13 @@ if __name__ == "__main__":
     parser.add_argument("--generated_code", type=str, default="elemAddCuda.py")
     parser.add_argument("--measure_reference", action="store_true")
     parser.add_argument("--measure_both", action="store_true")
-    parser.add_argument("--device-list", type=str, default="4")
-    parser.add_argument("--max-jobs", type=int, default=4)
+    parser.add_argument("--device-list", type=str, default="1")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
-    os.environ["MAX_JOBS"] = str(args.max_jobs)
+    cli_config = from_yaml()
+    for key, value in cli_config.get("env_vars", {}).items():
+        os.environ[key] = str(value)
 
     # temp_dir is {HOME}/.kbeval/{run_tag}/{model_tag}/{task_tag}/{eval_tag}
     run_tag = args.run_tag if args.run_tag != "auto" else f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
