@@ -11,7 +11,7 @@ import argparse
 import asyncio
 import yaml
 import uuid
-from fastapi import FastAPI, Body, HTTPException, Header, Depends
+from fastapi import FastAPI, Body, HTTPException, Header, Depends, Request
 from kbEvalTest.kbeval import KernelExecResult
 from logger import logger
 from pydantic import BaseModel, Field
@@ -74,6 +74,41 @@ async def read_stream(stream, prefix: str, is_error: bool = False):
             logger.error(f"[{prefix}] {output}")
         else:
             logger.info(f"[{prefix}] {output}")
+
+async def check_return_code(process: asyncio.subprocess.Process):
+    while True:
+        try:
+            return await process.wait(timeout=1)
+        except asyncio.TimeoutError:
+            continue
+        except Exception as e:
+            logger.error(f"Error checking return code: {e}")
+        finally:
+            await asyncio.sleep(1)
+
+async def check_disconnect_and_kill_child_process(request: Request, process: asyncio.subprocess.Process):
+    while True:
+        try:
+            if await request.is_disconnected():
+                logger.error("Client disconnected, killing child process")
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=3)
+                except asyncio.TimeoutError:
+                    logger.error(f"Child process [{process.pid}] timed out, killing it")
+                    process.kill()
+                    return
+                except Exception as e:
+                    logger.error(f"Error killing child process: {e}")
+                return
+            elif process.returncode is not None:
+                logger.error(f"Child process [{process.pid}] completed with return code: {process.returncode}")
+                return
+        except Exception as e:
+            logger.error(f"Error checking disconnect status: {e}")
+            return
+        finally:
+            await asyncio.sleep(1)
 
 
 async def get_pending_task_count():
@@ -182,6 +217,7 @@ async def kb_eval_ref(
 
 @app.post("/kb_eval")
 async def kb_eval(
+    request: Request, # injected by fastapi
     run_tag: str = Body(...),
     model_tag: str = Body(...),
     task_tag: str = Body(...),
@@ -227,12 +263,11 @@ async def kb_eval(
         stderr_task = asyncio.create_task(
             read_stream(process.stderr, eval_tag, is_error=True)
         )
-
-        # Wait for the process to complete
-        return_code = await process.wait()
+        check_return_code_task = asyncio.create_task(check_return_code(process))
+        check_disconnect_task = asyncio.create_task(check_disconnect_and_kill_child_process(request, process))
 
         # Wait for all output to be processed
-        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        await asyncio.gather(stdout_task, stderr_task, check_return_code_task, check_disconnect_task, return_exceptions=True)
         if process.returncode != 0:
             logger.error(f"[KB Eval] [{eval_tag}] return code: {process.returncode}")
         else:
