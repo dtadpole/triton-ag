@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import signal
 import concurrent.futures
 import json
 import os
@@ -94,12 +95,14 @@ async def check_disconnect_and_kill_child_process(request: Request, process: asy
         try:
             if await request.is_disconnected():
                 logger.error(f"Client disconnected, terminating child process [{process.pid}]")
-                process.terminate()
+                # process.terminate()
+                os.killpg(process.pid, signal.SIGTERM)
                 try:
                     await asyncio.wait_for(process.wait(), timeout=3)
                 except asyncio.TimeoutError:
                     logger.error(f"Child process [{process.pid}] termination timed out, killing it")
-                    process.kill()
+                    # process.kill()
+                    os.killpg(process.pid, signal.SIGKILL)
                     # return
                 except Exception as e:
                     logger.error(f"Error killing child process [{process.pid}]: {e}")
