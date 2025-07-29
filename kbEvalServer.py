@@ -78,7 +78,7 @@ async def read_stream(stream, prefix: str, is_error: bool = False):
 async def check_return_code(process: asyncio.subprocess.Process):
     while True:
         try:
-            return await process.wait(timeout=1)
+            return await process.wait()
         except asyncio.TimeoutError:
             continue
         except Exception as e:
