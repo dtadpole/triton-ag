@@ -13,7 +13,7 @@ import json
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
 import sys
-
+from kbEvalUtil import KernelExecResult, graceful_eval_cleanup, load_model_and_inputs, load_custom_model, set_seed, get_timing_stats, time_execution_with_cuda_event
 from . import utils
 
 REPO_TOP_PATH = os.path.abspath(
@@ -68,75 +68,6 @@ def fetch_ref_arch_from_level_problem_id(level, problem_id, with_name=False):
     return fetch_ref_arch_from_problem_id(problem_id, dataset, with_name)
 
 
-def set_seed(seed: int):
-    torch.manual_seed(seed)
-    # NOTE: this only sets on current cuda device
-    torch.cuda.manual_seed(seed)
-
-
-class KernelExecResult(BaseModel):
-    """
-    Single Kernel Execution
-    """
-
-    compiled: bool = False
-    correctness: bool = False
-    metadata: dict = {}
-    runtime: float = -1.0  # in us, only recorded if we decide to measure performance
-    runtime_stats: dict = {}  # only recorded if we decide to measure performance
-
-
-def load_original_model_and_inputs(
-    model_original_src: str, context: dict
-) -> tuple[nn.Module, callable, callable]:
-    """
-    Load class from original NN.module pytorch code
-    this is pytorch reference and we feed that to model to see if there will be any improvement
-    """
-
-    try:
-        compile(model_original_src, "<string>", "exec")
-    except SyntaxError as e:
-        print(f"Syntax Error in original code {e}")
-        return None
-
-    try:
-        exec(model_original_src, context)  # expose to current namespace
-    except Exception as e:
-        print(f"Error in executing original code {e}")
-        return None
-
-    # these should be defined in the original model code and present in the context
-    get_init_inputs_fn = context.get("get_init_inputs")
-    get_inputs_fn = context.get("get_inputs")
-    Model = context.get("Model")
-    return (Model, get_init_inputs_fn, get_inputs_fn)
-
-
-def load_custom_model(
-    model_custom_src: str, context: dict, build_directory: str = None
-) -> nn.Module:
-    """
-    Load class from custom NN.module pytorch code
-    this is the code output by LLM with calls to custom cuda kernels
-    """
-    if build_directory:
-        context["BUILD_DIRECTORY"] = build_directory
-        # Add import at the start of the source code
-        model_custom_src = (
-            "import os\n" f"os.environ['TORCH_EXTENSIONS_DIR'] = '{build_directory}'\n"
-        ) + model_custom_src
-
-    try:
-        compile(model_custom_src, "<string>", "exec")
-        exec(model_custom_src, context)
-        # DANGER: need to delete refernece from global namespace
-    except SyntaxError as e:
-        raise e
-
-    ModelNew = context.get("ModelNew")
-    return ModelNew
-
 
 def _cleanup_cuda_extensions():
     """Helper function to cleanup compiled CUDA extensions"""
@@ -149,25 +80,6 @@ def _cleanup_cuda_extensions():
     if os.path.exists(torch_extensions_path):
         shutil.rmtree(torch_extensions_path)
 
-
-def graceful_eval_cleanup(curr_context: dict, device: torch.device):
-    """
-    Clean up env, gpu cache, and compiled CUDA extensions after evaluation
-    """  # delete ran-specific function definitions before next eval run
-    del curr_context
-    # Clear CUDA cache and reset GPU state
-    if device is not None:
-        with torch.cuda.device(device):
-            torch.cuda.empty_cache()
-
-            # does this help?
-            torch.cuda.reset_peak_memory_stats(device=device)
-
-            torch.cuda.synchronize(
-                device=device
-            )  # Wait for all CUDA operations to complete
-
-    # _cleanup_cuda_extensions() # SIMON NOTE: is this necessary?
 
 def build_compile_cache_legacy(
     custom_model_src: str,
@@ -328,7 +240,7 @@ def eval_kernel_against_ref(
         print(f"[Eval] Start Evalulation! on device: {device}")
         print("[Eval] Loading Original Model")
 
-    Model, get_init_inputs, get_inputs = load_original_model_and_inputs(
+    Model, get_init_inputs, get_inputs = load_model_and_inputs(
         original_model_src, context
     )
     set_seed(seed_num)  # set seed for reproducible input
@@ -497,66 +409,6 @@ def register_and_format_exception(
 
     return metadata
 
-
-def time_execution_with_cuda_event(
-    kernel_fn: callable,
-    *args,
-    num_warmup: int = 25,
-    num_trials: int = 100,
-    verbose: bool = True,
-    device: torch.device = None,
-) -> list[float]:
-    """
-    Time a CUDA kernel function over multiple trials using torch.cuda.Event
-
-    Args:
-        kernel_fn: Function to time
-        *args: Arguments to pass to kernel_fn
-        num_trials: Number of timing trials to run
-        verbose: Whether to print per-trial timing info
-        device: CUDA device to use, if None, use current device
-
-    Returns:
-        List of elapsed times in milliseconds
-    """
-    if device is None:
-        if verbose:
-            print(f"Using current device: {torch.cuda.current_device()}")
-        device = torch.cuda.current_device()
-
-    # Warm ups
-    for _ in range(num_warmup):
-        kernel_fn(*args)
-        torch.cuda.synchronize(device=device)
-
-    print(
-        f"[Profiling] Using device: {device} {torch.cuda.get_device_name(device)}, warm up {num_warmup}, trials {num_trials}"
-    )
-    elapsed_times = []
-
-    with torch.cuda.device(device):
-        # Actual trials
-        for trial in range(num_trials):
-            # create event marker default is not interprocess
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-            # start_event.device = device
-            # end_event.device = device
-
-            start_event.record()
-            kernel_fn(*args)
-            end_event.record()
-
-            # Synchronize to ensure the events have completed
-            torch.cuda.synchronize(device=device)
-
-            # Calculate the elapsed time in milliseconds
-            elapsed_time_ms = start_event.elapsed_time(end_event)
-            if verbose:
-                print(f"Trial {trial + 1}: {elapsed_time_ms:.3g} ms")
-            elapsed_times.append(elapsed_time_ms)
-
-    return elapsed_times
 
 
 def run_and_check_correctness(
@@ -748,30 +600,4 @@ def fetch_baseline_time(
     problem_name = dataset[problem_id].split("/")[-1]
     baseline_time = baseline_json[level_name].get(problem_name, None)
     return baseline_time
-
-
-def get_timing_stats(elapsed_times: list[float], device: torch.device = None) -> dict:
-    """Get timing statistics from a list of elapsed times.
-
-    Args:
-        elapsed_times: List of elapsed times in milliseconds
-        device: CUDA device, record device info
-    Returns:
-        Dict containing mean, std, min, max and num_trials
-        all timing are in ms
-    """
-
-    stats = {
-        "mean": float(f"{np.mean(elapsed_times):.3g}"),
-        "std": float(f"{np.std(elapsed_times):.3g}"),
-        "min": float(f"{np.min(elapsed_times):.3g}"),
-        "max": float(f"{np.max(elapsed_times):.3g}"),
-        "num_trials": len(elapsed_times),
-    }
-
-    if device:
-        stats["hardware"] = torch.cuda.get_device_name(device=device)
-        stats["device"] = str(device)  # for debugging
-
-    return stats
 

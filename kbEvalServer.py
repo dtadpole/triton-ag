@@ -157,8 +157,9 @@ async def kb_eval_ref(
         with open(reference_file_path, "w") as f:
             f.write(reference_code)
 
+        eval_tag = "reference"
         # pre-compile the reference code
-        command = f"python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --reference_code {reference_file_path} --measure_reference --device-list {','.join([str(device) for device in DEVICES])}"
+        command = f"python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code {reference_file_path} --measure_reference --device-list {','.join([str(device) for device in DEVICES])} --quiet"
         process = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
@@ -191,18 +192,24 @@ async def kb_eval_ref(
 
         logger.info(f"[KB Eval] [reference] END ====================")
 
-        # read the result from {temp_dir}/kbeval_{eval_tag}.json
-        result_json_path = os.path.join(temp_dir, f"reference_kbeval.json")
+        # read the result from {temp_dir}/{eval_tag}_kbeval.json
+        result_json_path = os.path.join(temp_dir, f"{eval_tag}_kbeval.json")
+        if not os.path.exists(result_json_path):
+            logger.error(f"[KB Eval] [reference] result file [{result_json_path}] not found")
+            raise FileNotFoundError(f"[KB Eval] [reference] result file [{result_json_path}] not found")
+        
         with open(result_json_path, "r") as f:
-            result_text = f.read()
+            result_json = json.load(f)
+            logger.info(f"[KB Eval] [reference] retrieved result json from [{result_json_path}]\n{json.dumps(result_json, indent=4)}")
 
-        result = KernelExecResult.model_validate_json(result_text)
+        result = KernelExecResult.model_validate(result_json)
 
         return result
 
     except Exception as e:
         global CURR_ERROR_COUNT
         CURR_ERROR_COUNT += 1
+        logger.error(f"❌ [KB Eval] [reference] error: {e}")
         result = KernelExecResult(
             compiled=False,
             correctness=False,
@@ -232,6 +239,7 @@ async def kb_eval(
     eval_tag: str = Body(...),
     reference_code: str = Body(...),
     generated_code: str = Body(...),
+    code_type: str = Body(default="cuda"),
     authenticated: bool = Depends(verify_token)
 ) -> KernelExecResult:
     global request_counter, request_counter_lock, DEVICES
@@ -253,7 +261,7 @@ async def kb_eval(
             f.write(generated_code)
 
         # pre-compile the generated code
-        command = f"python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code {reference_file_path} --generated_code {generated_file_path} --device-list {','.join([str(device) for device in DEVICES])}"
+        command = f"python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code {reference_file_path} --generated_code {generated_file_path} --device-list {','.join([str(device) for device in DEVICES])} --code_type {code_type} --quiet"
         process = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
@@ -281,20 +289,26 @@ async def kb_eval(
         else:
             logger.info(f"[KB Eval] [{eval_tag}] return code: {process.returncode}")
 
+        result_json_path = os.path.join(temp_dir, f"{eval_tag}_kbeval.json")
+        if not os.path.exists(result_json_path):
+            logger.error(f"[KB Eval] [{eval_tag}] result file [{result_json_path}] not found")
+            raise FileNotFoundError(f"[KB Eval] [{eval_tag}] result file [{result_json_path}] not found")
+        
+        # read the result from {temp_dir}/kbeval_{eval_tag}.json
+        with open(result_json_path, "r") as f:
+            result_json = json.load(f)
+            logger.info(f"[KB Eval] [{eval_tag}] retrieved result json from [{result_json_path}]\n{json.dumps(result_json, indent=4)}")
+
         logger.info(f"[KB Eval] [{eval_tag}] END ====================")
 
-        # read the result from {temp_dir}/kbeval_{eval_tag}.json
-        result_json_path = os.path.join(temp_dir, f"{eval_tag}_kbeval.json")
-        with open(result_json_path, "r") as f:
-            result_text = f.read()
-
-        result = KernelExecResult.model_validate_json(result_text)
+        result = KernelExecResult.model_validate(result_json)
 
         return result
 
     except Exception as e:
         global CURR_ERROR_COUNT
         CURR_ERROR_COUNT += 1
+        logger.error(f"❌ [KB Eval] [{eval_tag}] error: {e}")
         result = KernelExecResult(
             compiled=False,
             correctness=False,
