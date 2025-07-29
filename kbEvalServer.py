@@ -90,16 +90,16 @@ async def check_disconnect_and_kill_child_process(request: Request, process: asy
     while True:
         try:
             if await request.is_disconnected():
-                logger.error("Client disconnected, killing child process")
+                logger.error(f"Client disconnected, killing child process [{process.pid}]")
                 process.terminate()
                 try:
                     await asyncio.wait_for(process.wait(), timeout=3)
                 except asyncio.TimeoutError:
-                    logger.error(f"Child process [{process.pid}] timed out, killing it")
+                    logger.error(f"Child process [{process.pid}] termination timed out, killing it")
                     process.kill()
                     return
                 except Exception as e:
-                    logger.error(f"Error killing child process: {e}")
+                    logger.error(f"Error killing child process [{process.pid}]: {e}")
                 return
             elif process.returncode is not None:
                 logger.error(f"Child process [{process.pid}] completed with return code: {process.returncode}")
