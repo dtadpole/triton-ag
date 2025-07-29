@@ -79,7 +79,7 @@ async def read_stream(stream, prefix: str, is_error: bool = False):
 async def check_return_code(process: asyncio.subprocess.Process):
     while True:
         try:
-            return_code = await process.wait(timeout=1)
+            return_code = await process.wait()
             if return_code is not None:
                 logger.info(f"Child process [{process.pid}] completed with return code: {return_code}")
                 return
