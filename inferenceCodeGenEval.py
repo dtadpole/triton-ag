@@ -311,7 +311,7 @@ class CodeGenEvalClient:
             reference_eval_file = self.output_dir / task_tag / f"reference_eval.json"
             with open(reference_eval_file, 'w') as f:
                 f.write(json.dumps(result_json, indent=2, ensure_ascii=False, default=str))
-            logger.info(f"✅ [CodeGenEval] [{self.run_tag}] Task [{task_tag}] Reference code evaluation result: [{result.runtime:.3f}ms] in [{evaluation_time:.2f}s]")
+            logger.info(f"📚 [CodeGenEval] [{self.run_tag}] Task [{task_tag}] Reference code evaluation result: [{result.runtime:.3f}ms] in [{evaluation_time:.2f}s]")
 
             # return json
             return result_json
