@@ -108,10 +108,13 @@ async def check_disconnect_and_kill_child_process(request: Request, process: asy
                     os.killpg(process.pid, signal.SIGKILL)
                     # return
                 except Exception as e:
-                    logger.error(f"Error killing child process [{process.pid}]: {e}")
+                    logger.error(f"Error killing child process [{process.pid}]: [{type(e)}]: {e}")
                 # return
+        except ProcessLookupError:
+            logger.error(f"Child process [{process.pid}] not found, exiting")
+            return
         except Exception as e:
-            logger.error(f"Error checking disconnect status: {e}")
+            logger.error(f"Error checking disconnect status: [{type(e)}]: {e}")
         finally:
             await asyncio.sleep(1)
 
