@@ -78,11 +78,14 @@ async def read_stream(stream, prefix: str, is_error: bool = False):
 async def check_return_code(process: asyncio.subprocess.Process):
     while True:
         try:
-            return await process.wait()
+            return_code = await process.wait(timeout=1)
+            if return_code is not None:
+                logger.info(f"Child process [{process.pid}] completed with return code: {return_code}")
+                return
         except asyncio.TimeoutError:
             continue
         except Exception as e:
-            logger.error(f"Error checking return code: {e}")
+            logger.error(f"Error checking return code of child process [{process.pid}]: {e}")
         finally:
             await asyncio.sleep(1)
 
@@ -102,7 +105,7 @@ async def check_disconnect_and_kill_child_process(request: Request, process: asy
                     logger.error(f"Error killing child process [{process.pid}]: {e}")
                 # return
             elif process.returncode is not None:
-                logger.error(f"Child process [{process.pid}] completed with return code: {process.returncode}")
+                logger.info(f"Child process [{process.pid}] completed with return code: {process.returncode}")
                 return
         except Exception as e:
             logger.error(f"Error checking disconnect status: {e}")
