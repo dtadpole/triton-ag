@@ -93,7 +93,10 @@ async def check_return_code(process: asyncio.subprocess.Process):
 async def check_disconnect_and_kill_child_process(request: Request, process: asyncio.subprocess.Process):
     while True:
         try:
-            if await request.is_disconnected():
+            if process.returncode is not None:
+                logger.info(f"Child process [{process.pid}] completed with return code: {process.returncode}")
+                return
+            elif await request.is_disconnected():
                 logger.error(f"Client disconnected, terminating child process [{process.pid}]")
                 # process.terminate()
                 os.killpg(process.pid, signal.SIGTERM)
@@ -107,12 +110,8 @@ async def check_disconnect_and_kill_child_process(request: Request, process: asy
                 except Exception as e:
                     logger.error(f"Error killing child process [{process.pid}]: {e}")
                 # return
-            elif process.returncode is not None:
-                logger.info(f"Child process [{process.pid}] completed with return code: {process.returncode}")
-                return
         except Exception as e:
             logger.error(f"Error checking disconnect status: {e}")
-            return
         finally:
             await asyncio.sleep(1)
 
