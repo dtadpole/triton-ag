@@ -73,6 +73,16 @@ class CompileModifiedComponentError(CompileError):
         self.message = message or f"Component has been modified"
         super().__init__(self.message)          # pass text to base class
 
+class CompileInstantiationError(CompileError):
+    def __init__(self, message: str | None = None) -> None:
+        self.message = message or f"Could not instantiate custom model"
+        super().__init__(self.message)          # pass text to base class
+
+class CompileRuntimeError(CompileError):
+    def __init__(self, message: str | None = None) -> None:
+        self.message = message or f"Could not run custom model"
+        super().__init__(self.message)          # pass text to base class
+
 class CorrectnessError(Exception):
     def __init__(self, message: str | None = None) -> None:
         self.message = message or f"Correctness error"

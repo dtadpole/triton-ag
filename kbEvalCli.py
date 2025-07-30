@@ -12,7 +12,7 @@ import errno
 import traceback
 from pydantic import BaseModel
 from torch import nn
-from kbEvalUtil import KernelExecResult, from_kbEval_yaml, format_exception, CorrectnessResult, CorrectnessError, CorrectnessShapeMismatchError, CorrectnessValueMismatchError, CorrectnessProcessingError, CompileError, FileLock, cleanup_lockfile, set_seed, get_timing_stats, time_execution_with_cuda_event, load_model_and_inputs, load_custom_model, graceful_eval_cleanup
+from kbEvalUtil import KernelExecResult, from_kbEval_yaml, format_exception, CorrectnessResult, CorrectnessError, CorrectnessShapeMismatchError, CorrectnessValueMismatchError, CorrectnessProcessingError, CompileError, CompileInstantiationError, CompileRuntimeError, FileLock, cleanup_lockfile, set_seed, get_timing_stats, time_execution_with_cuda_event, load_model_and_inputs, load_custom_model, graceful_eval_cleanup
 import torch
 import asyncio
 import os
@@ -74,11 +74,17 @@ def verify_correctness(
             try:
                 output_new = model_new(*inputs)
                 torch.cuda.synchronize(device=device)
+            except Exception as e:
+                raise CompileRuntimeError(f"Error in running custom model: [{type(e)}] [{e}]") from e
 
+            try:
                 output = model(*inputs)
                 torch.cuda.synchronize(device=device)
+            except Exception as e:
                 # ensure all GPU operations are completed before checking results
+                raise CompileRuntimeError(f"Error in running original model: [{type(e)}] [{e}]") from e
 
+            try:
                 if output.shape != output_new.shape:
                     raise CorrectnessShapeMismatchError(f"Output shape mismatch: Expected {output.shape}, got {output_new.shape}")
 
@@ -202,10 +208,13 @@ def eval_kernel_custom(
                 ]
 
                 with torch.no_grad():
-                    set_seed(seed_num)  # set seed for reproducible weights
-                    original_model = Model(*init_inputs)
-                    original_model = original_model.cuda(device=device)
-                    assert hasattr(original_model, "forward")
+                    try:
+                        set_seed(seed_num)  # set seed for reproducible weights
+                        original_model = Model(*init_inputs)
+                        original_model = original_model.cuda(device=device)
+                        assert hasattr(original_model, "forward")
+                    except Exception as e:
+                        raise CompileInstantiationError(f"Error in instantiating original model: [{type(e)}] [{e}]") from e
 
                     if measure_reference:
                         elapsed_times_ref = time_execution_with_cuda_event(
@@ -226,9 +235,12 @@ def eval_kernel_custom(
                         )
                     
                     else:
-                        custom_model = ModelNew(*init_inputs)
-                        custom_model = custom_model.cuda(device=device)
-                        assert hasattr(custom_model, "forward")
+                        try:
+                            custom_model = ModelNew(*init_inputs)
+                            custom_model = custom_model.cuda(device=device)
+                            assert hasattr(custom_model, "forward")
+                        except Exception as e:
+                            raise CompileInstantiationError(f"Error in instantiating custom model: [{type(e)}] [{e}]") from e
 
                         correctness_result = verify_correctness(
                             original_model,
@@ -275,6 +287,16 @@ def eval_kernel_custom(
             time.sleep(2)
             continue
 
+        except CompileError as e:
+            logger.error(f"❌ [KB_Eval_Triton] [{task_tag}/{eval_tag}] Error in code compilation: {e}")
+            return KernelExecResult(
+                compiled=False,
+                correctness=False,
+                metadata=metadata | {
+                    "compilation_error": format_exception(e),
+                },
+            )
+        
         except CorrectnessError as e:
             logger.warning(f"[KB_Eval_Triton] [{task_tag}/{eval_tag}] Correctness error: {e}")
             return KernelExecResult(
