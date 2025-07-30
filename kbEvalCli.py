@@ -11,6 +11,7 @@ import time
 import fcntl
 import errno
 import traceback
+from threading import Timer
 from pydantic import BaseModel
 from torch import nn
 from kbEvalUtil import KernelExecResult, from_kbEval_yaml, format_exception, CorrectnessResult, CorrectnessError, CorrectnessShapeMismatchError, CorrectnessValueMismatchError, CorrectnessProcessingError, CompileError, CompileInstantiationError, CompileRuntimeError, FileLock, cleanup_lockfile, set_seed, get_timing_stats, time_execution_with_cuda_event, load_model_and_inputs, load_custom_model, graceful_eval_cleanup
@@ -28,9 +29,13 @@ KB_EVAL_DIR = os.path.expanduser("~/.kbeval")
 
 MAX_LOCK_AGE = 45 # seconds
 
-def on_timeout(signum, frame):
-    logger.error(f"⏰ Timeout reached [{signum}] [{frame.f_code.co_name}], exiting.")
+def on_critical_timeout(signum, frame):
+    logger.error(f"⏰ Critical timeout reached [{signum}] [{frame.f_code.co_name}], exiting.")
     sys.exit(5) # exit with code 5 to indicate timer expired
+
+def on_process_timeout():
+    logger.error(f"⛔ Process timeout reached, exiting.")
+    sys.exit(6) # exit with code 6 to indicate process timeout
 
 
 def verify_correctness(
@@ -133,7 +138,7 @@ def eval_kernel_custom(
     num_warmups: int = 25,
     measure_reference: bool = False,
     code_type: str = "triton",
-    max_run_time: int = 3600,
+    max_critical_time: int = 3600,
 ) -> KernelExecResult:
     """
     Evaluate the reference code against the original model
@@ -201,14 +206,14 @@ def eval_kernel_custom(
         correctness = False
         try:
             with FileLock(lock_file):
-                logger.warning(f"[KB_Eval_Triton] [{task_tag}/{eval_tag}] Acquired lock {lock_file}")
+                logger.warning(f"[KB_Eval_Triton] [{task_tag}/{eval_tag}] Acquired lock [{lock_file}]")
 
                 # verify lock is working by sleeping randome between 10 and 20 seconds
                 # time.sleep(random.randint(3, 5)) # verified lock is working
 
                 # Install the handler and arm the timer (in seconds)
-                signal.signal(signal.SIGALRM, on_timeout)
-                signal.alarm(max_run_time)  # exit after max_run_time seconds
+                signal.signal(signal.SIGALRM, on_critical_timeout)
+                signal.alarm(max_critical_time)  # exit after max_critical_time seconds
 
                 init_inputs = get_init_inputs()
                 init_inputs = [
@@ -351,9 +356,15 @@ def main():
     parser.add_argument("--generated_code", type=str, default="elemAddTriton.py")
     parser.add_argument("--measure_reference", action="store_true")
     parser.add_argument("--device-list", type=str, default="1")
-    parser.add_argument("--max_run_time", type=int, default=10)
+    parser.add_argument("--max_critical_time", type=int, default=10)
+    parser.add_argument("--max_process_time", type=int, default=240)
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
+
+    # Install the handler and arm the timer (in seconds)
+    timer = Timer(args.max_process_time, on_process_timeout)
+    timer.daemon = True
+    timer.start()
 
     cli_config = from_kbEval_yaml()
     for key, value in cli_config.get("env_vars", {}).items():
@@ -405,7 +416,7 @@ def main():
                 device=device,
                 work_dir=work_dir,
                 measure_reference=True,
-                max_run_time=args.max_run_time,
+                max_critical_time=args.max_critical_time,
             )
         else:
             result = eval_kernel_custom(
@@ -420,7 +431,7 @@ def main():
                 device=device,
                 work_dir=work_dir,
                 code_type=args.code_type,
-                max_run_time=args.max_run_time,
+                max_critical_time=args.max_critical_time,
             )
     except Exception as exception:
         exit_code = 1
