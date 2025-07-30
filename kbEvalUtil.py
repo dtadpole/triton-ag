@@ -358,5 +358,8 @@ def cleanup_lockfile(lock_file: str):
                 if lock_modified_time < time.time() - MAX_LOCK_AGE:
                     # safety net: if modified time is more than MAX_LOCK_AGE, delete lock file
                     logger.error(f"[{my_pid}] Lock file [{lock_file}] older than [{MAX_LOCK_AGE}s], deleting...")
-                    os.remove(lock_file)
+                    try:
+                        os.remove(lock_file)
+                    except Exception as e:
+                        pass
 

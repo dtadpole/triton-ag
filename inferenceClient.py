@@ -125,8 +125,8 @@ class InferenceClient:
                 stream=True,
                 timeout=self.timeout,
                 logprobs=self.logprobs,
-                top_p=self.top_p,
-                extra_body={"top_k": self.top_k}
+                # top_p=self.top_p,
+                # extra_body={"top_k": self.top_k}
             )
             
             # Initialize variables to accumulate streaming response
@@ -181,8 +181,8 @@ class InferenceClient:
                 stream=False,
                 timeout=self.timeout,
                 logprobs=self.logprobs,
-                top_p=self.top_p,
-                extra_body={"top_k": self.top_k}
+                # top_p=self.top_p,
+                # extra_body={"top_k": self.top_k}
             )
             
             # Extract text from response
@@ -254,9 +254,8 @@ class InferenceClient:
                 stream=True,
                 timeout=self.timeout,
                 logprobs=1 if self.logprobs else NOT_GIVEN,
-                top_p=self.top_p,
-                # seed=42,
-                extra_body={"top_k": self.top_k}
+                # top_p=self.top_p,
+                # extra_body={"top_k": self.top_k}
             )
             
             # Process streaming response
@@ -283,9 +282,8 @@ class InferenceClient:
                 stream=False,
                 timeout=self.timeout,
                 logprobs=1 if self.logprobs else NOT_GIVEN,
-                top_p=self.top_p,
-                # seed=42,
-                extra_body={"top_k": self.top_k}
+                # top_p=self.top_p,
+                # extra_body={"top_k": self.top_k}
             )
             
             # Extract text from response

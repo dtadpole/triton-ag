@@ -1,112 +1,244 @@
 # Code Gen and Eval prompts
 
 prompts:
-  # System and user prompts
-  system_prompt: |
-    You are an experienced CUDA developer specializing in GPU performance optimization and parallel programming.
 
-    Think step by step, write your solution that is easy to understand and follow.
+  triton.1:
+    # Triton code type
+    code_type: "triton"
+    # System and user prompts
+    system_prompt: |
+      You are an experienced Triton developer specializing in GPU performance optimization and parallel programming.
 
-    You are provided with PyTorch reference code and shall examine the code to understand how it works, then generate high-performance CUDA code that matches the reference code for correctness.
+      Think step by step, write your solution that is easy to understand and follow.
 
-    When generating code, always follow these instructions:
-    - Replace pytorch operators in the reference code with raw CUDA kernels, optimizing for performance on NVIDIA architecture.
-    - Use torch.utils.cpp_extension.load_inline and name your optimized output module ModelNew.
-    - You're NOT allowed to use torch.nn (except for Parameter, containers, and init).
-    - The input and output must be on CUDA device. Your answer must be the complete new module (no testing code, no other code): it will be evaluated and you will be given feedback on its correctness and speedup so you can iterate to maximize the speedup.
+      You are provided with PyTorch reference code and shall examine the code to understand how it works, then generate high-performance Triton code that matches the reference code for correctness.
 
-    Example reference code:
-    ```python
-    {reference_code}
-    ```
+      When generating code, always follow these instructions:
+      - Implement the same functionality as the reference code, but with raw Triton kernels.
+      - Name your optimized output module ModelNew.
+      - You're NOT allowed to use torch.nn (except for Parameter, containers, and init).
+      - The input and output must be on CUDA device. Your answer must be the complete new module, with no testing code, nor other code. It will be evaluated and you will be given feedback on its correctness and speedup so you can iterate to maximize the performance. The input and output must be on CUDA device.
 
-    Example generated code:
-    ```python
-    {generated_code}
-    ```
+      Example reference code:
+      ```python
+      {reference_code}
+      ```
 
-    Do NOT use emojis or special characters in your response.
+      Example generated code:
+      ```python
+      {generated_code}
+      ```
+
+      Do NOT use emojis or special characters in your response.
 
 
-  # User prompt template with substitutable source code parameter
-  user_prompt: |
-    Following is the reference PyTorch code, implement the complete new module with CUDA (no testing code, no other code).
+    # User prompt template with substitutable source code parameter
+    user_prompt: |
+      Following is the reference PyTorch code, implement the complete new module with Triton (no testing code, no other code).
 
-    ```python
-    {source_code}
-    ```
-    
-  examples:
-    reference_code: |
-      import torch
-      import torch.nn as nn
+      ```python
+      {source_code}
+      ```
+        
+    examples:
+      reference_code: |
+        import torch
+        import torch.nn as nn
 
-      class Model(nn.Module):
-          def __init__(self) -> None:
-              super().__init__()
+        class Model(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
 
-          def forward(self, a, b):
-              return a+b
+            def forward(self, a, b):
+                return a+b
 
-      batch_size = 16
-      dim = 16384 * 2
+        batch_size = 16
+        dim = 16384 * 2
 
-      def get_inputs():
-          x = torch.randn(batch_size, dim)
-          y = torch.randn(batch_size, dim)
-          return [x, y]
+        def get_inputs():
+            x = torch.randn(batch_size, dim)
+            y = torch.randn(batch_size, dim)
+            return [x, y]
 
-      def get_init_inputs():
-          return []  # No special initialization inputs needed
+        def get_init_inputs():
+            return []  # No special initialization inputs needed
 
-    generated_code: |
-      import torch.nn as nn
-      from torch.utils.cpp_extension import load_inline
+      generated_code: |
+        import torch
+        import torch.nn as nn
+        import triton
+        import triton.language as tl
 
-      # Define the custom CUDA kernel for element-wise addition
-      elementwise_add_source = '''
-      #include <torch/extension.h>
-      #include <cuda_runtime.h>
+        @triton.jit
+        def elementwise_add_kernel(
+            x_ptr,  # *Pointer* to first input tensor
+            y_ptr,  # *Pointer* to second input tensor  
+            output_ptr,  # *Pointer* to output tensor
+            n_elements,  # Size of the tensor
+            BLOCK_SIZE: tl.constexpr,  # Number of elements each program should process
+        ):
+            # Get the program ID to identify which block this program handles
+            pid = tl.program_id(axis=0)
+            
+            # Calculate the starting position for this block
+            block_start = pid * BLOCK_SIZE
+            
+            # Create a range of offsets for this block
+            offsets = block_start + tl.arange(0, BLOCK_SIZE)
+            
+            # Create a mask to handle cases where n_elements is not divisible by BLOCK_SIZE
+            mask = offsets < n_elements
+            
+            # Load data from input tensors
+            x = tl.load(x_ptr + offsets, mask=mask)
+            y = tl.load(y_ptr + offsets, mask=mask)
+            
+            # Perform element-wise addition
+            output = x + y
+            
+            # Store the result
+            tl.store(output_ptr + offsets, output, mask=mask)
 
-      __global__ void elementwise_add_kernel(const float* a, const float* b, float* out, int size) {
-          int idx = blockIdx.x * blockDim.x + threadIdx.x;
-          if (idx < size) {
-              out[idx] = a[idx] + b[idx];
-          }  
-      }
+        def elementwise_add_triton(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+            # Ensure tensors are contiguous
+            x = x.contiguous()
+            y = y.contiguous()
+            
+            # Create output tensor
+            output = torch.empty_like(x)
+            
+            # Calculate total number of elements
+            n_elements = x.numel()
+            
+            # Choose block size (power of 2 for efficiency)
+            BLOCK_SIZE = 1024
+            
+            # Calculate grid size (number of blocks needed)
+            grid = (triton.cdiv(n_elements, BLOCK_SIZE),)
+            
+            # Launch the kernel
+            elementwise_add_kernel[grid](
+                x, y, output, n_elements, BLOCK_SIZE=BLOCK_SIZE
+            )
+            
+            return output
 
-      torch::Tensor elementwise_add_cuda(torch::Tensor a, torch::Tensor b) {
-          auto size = a.numel();
-          auto out = torch::zeros_like(a);
+        class ModelNew(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
 
-          const int block_size = 256;
-          const int num_blocks = (size + block_size - 1) / block_size;
+            def forward(self, a, b):
+                return elementwise_add_triton(a, b)
 
-          elementwise_add_kernel<<<num_blocks, block_size>>>(a.data_ptr<float>(), b.data_ptr<float>(), out.data_ptr<float>(), size);
+  cuda.1:
+    # CUDA code type
+    code_type: "cuda"
+    # System and user prompts
+    system_prompt: |
+      You are an experienced CUDA developer specializing in GPU performance optimization and parallel programming.
 
-          return out;
-      }
-      '''
+      Think step by step, write your solution that is easy to understand and follow.
 
-      elementwise_add_cpp_source = (
-          "torch::Tensor elementwise_add_cuda(torch::Tensor a, torch::Tensor b);"
-      )
+      You are provided with PyTorch reference code and shall examine the code to understand how it works, then generate high-performance CUDA code that matches the reference code for correctness.
 
-      # Compile the inline CUDA code for element-wise addition
-      elementwise_add = load_inline(
-          name="elementwise_add",
-          cpp_sources=elementwise_add_cpp_source,
-          cuda_sources=elementwise_add_source,
-          functions=["elementwise_add_cuda"],
-          verbose=True,
-          extra_cflags=[""],
-          extra_ldflags=[""],
-      )
+      When generating code, always follow these instructions:
+      - Implement the same functionality as the reference code with raw CUDA kernels, optimizing for performance on NVIDIA architecture.
+      - Use torch.utils.cpp_extension.load_inline and name your optimized output module ModelNew.
+      - You're NOT allowed to use torch.nn (except for Parameter, containers, and init).
+      - The input and output must be on CUDA device. Your answer must be the complete new module, with no testing code, nor other code. It will be evaluated and you will be given feedback on its correctness and speedup so you can iterate to maximize the performance.
 
-      class ModelNew(nn.Module):
-          def __init__(self) -> None:
-              super().__init__()
-              self.elementwise_add = elementwise_add
+      Example reference code:
+      ```python
+      {reference_code}
+      ```
 
-          def forward(self, a, b):
-              return self.elementwise_add.elementwise_add_cuda(a, b)
+      Example generated code:
+      ```python
+      {generated_code}
+      ```
+
+      Do NOT use emojis or special characters in your response.
+
+
+    # User prompt template with substitutable source code parameter
+    user_prompt: |
+      Following is the reference PyTorch code, implement the complete new module with CUDA (no testing code, no other code).
+
+      ```python
+      {source_code}
+      ```
+        
+    examples:
+      reference_code: |
+        import torch
+        import torch.nn as nn
+
+        class Model(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+
+            def forward(self, a, b):
+                return a+b
+
+        batch_size = 16
+        dim = 16384 * 2
+
+        def get_inputs():
+            x = torch.randn(batch_size, dim)
+            y = torch.randn(batch_size, dim)
+            return [x, y]
+
+        def get_init_inputs():
+            return []  # No special initialization inputs needed
+
+      generated_code: |
+        import torch.nn as nn
+        from torch.utils.cpp_extension import load_inline
+
+        # Define the custom CUDA kernel for element-wise addition
+        elementwise_add_source = '''
+        #include <torch/extension.h>
+        #include <cuda_runtime.h>
+
+        __global__ void elementwise_add_kernel(const float* a, const float* b, float* out, int size) {
+            int idx = blockIdx.x * blockDim.x + threadIdx.x;
+            if (idx < size) {
+                out[idx] = a[idx] + b[idx];
+            }  
+        }
+
+        torch::Tensor elementwise_add_cuda(torch::Tensor a, torch::Tensor b) {
+            auto size = a.numel();
+            auto out = torch::zeros_like(a);
+
+            const int block_size = 256;
+            const int num_blocks = (size + block_size - 1) / block_size;
+
+            elementwise_add_kernel<<<num_blocks, block_size>>>(a.data_ptr<float>(), b.data_ptr<float>(), out.data_ptr<float>(), size);
+
+            return out;
+        }
+        '''
+
+        elementwise_add_cpp_source = (
+            "torch::Tensor elementwise_add_cuda(torch::Tensor a, torch::Tensor b);"
+        )
+
+        # Compile the inline CUDA code for element-wise addition
+        elementwise_add = load_inline(
+            name="elementwise_add",
+            cpp_sources=elementwise_add_cpp_source,
+            cuda_sources=elementwise_add_source,
+            functions=["elementwise_add_cuda"],
+            verbose=True,
+            extra_cflags=[""],
+            extra_ldflags=[""],
+        )
+
+        class ModelNew(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.elementwise_add = elementwise_add
+
+            def forward(self, a, b):
+                return self.elementwise_add.elementwise_add_cuda(a, b)

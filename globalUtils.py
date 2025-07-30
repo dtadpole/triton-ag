@@ -41,6 +41,8 @@ class CodeGenEvalBlock(BaseModel):
     model_override: Optional[str] = Field(default=None)
     input_dir: str = Field(default="~/triton-ag/kernel_bench")
     output_dir: str = Field(default="~/.codeGenEval")
+    template: str = Field(default="triton.1")
+    logprobs: bool = Field(default=True)
     test_mode: bool = Field(default=False)
 
 class ExemplarBlock(BaseModel):
@@ -55,6 +57,7 @@ class ExemplarBlock(BaseModel):
     model_override: Optional[str] = Field(default=None)
     input_dir: str = Field(default="~/.codeGenEval")
     output_dir: str = Field(default="~/.exemplar")
+    template: str = Field(default="triton.1")
     test_mode: bool = Field(default=False)
 
 class CritiqueBlock(BaseModel):

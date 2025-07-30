@@ -135,6 +135,7 @@ async def stats():
 
 @app.post("/kb_eval_ref")
 async def kb_eval_ref(
+    request: Request, # injected by fastapi
     run_tag: str = Body(...),
     model_tag: str = Body(...),
     task_tag: str = Body(...),
@@ -156,6 +157,8 @@ async def kb_eval_ref(
         reference_file_path = os.path.join(temp_dir, f"reference_code.py")
         with open(reference_file_path, "w") as f:
             f.write(reference_code)
+
+        logger.info(f"[KB Eval] [reference] reference_file_path: [{reference_file_path}]")
 
         eval_tag = "reference"
         # pre-compile the reference code
@@ -180,17 +183,15 @@ async def kb_eval_ref(
             )  # seems taking warning message as error message
         )
 
-        # Wait for the process to complete
-        return_code = await process.wait()
+        check_return_code_task = asyncio.create_task(check_return_code(process))
+        check_disconnect_task = asyncio.create_task(check_disconnect_and_kill_child_process(request, process))
 
         # Wait for all output to be processed
-        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        await asyncio.gather(stdout_task, stderr_task, check_return_code_task, check_disconnect_task, return_exceptions=True)
         if process.returncode != 0:
-            logger.error(f"[KB Eval] [reference] return code: {process.returncode}")
+            logger.error(f"[KB Eval] [{eval_tag}] return code: {process.returncode}")
         else:
-            logger.info(f"[KB Eval] [reference] return code: {process.returncode}")
-
-        logger.info(f"[KB Eval] [reference] END ====================")
+            logger.info(f"[KB Eval] [{eval_tag}] return code: {process.returncode}")
 
         # read the result from {temp_dir}/{eval_tag}_kbeval.json
         result_json_path = os.path.join(temp_dir, f"{eval_tag}_kbeval.json")
@@ -201,6 +202,8 @@ async def kb_eval_ref(
         with open(result_json_path, "r") as f:
             result_json = json.load(f)
             logger.info(f"[KB Eval] [reference] retrieved result json from [{result_json_path}]\n{json.dumps(result_json, indent=4)}")
+
+        logger.info(f"[KB Eval] [reference] END ====================")
 
         result = KernelExecResult.model_validate(result_json)
 
@@ -259,6 +262,9 @@ async def kb_eval(
         generated_file_path = os.path.join(temp_dir, f"generated_code.py")
         with open(generated_file_path, "w") as f:
             f.write(generated_code)
+
+        logger.info(f"[KB Eval] [{eval_tag}] reference_file_path: [{reference_file_path}]")
+        logger.info(f"[KB Eval] [{eval_tag}] generated_file_path: [{generated_file_path}]")
 
         # pre-compile the generated code
         command = f"python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code {reference_file_path} --generated_code {generated_file_path} --device-list {','.join([str(device) for device in DEVICES])} --code_type {code_type} --quiet"

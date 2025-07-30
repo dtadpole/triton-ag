@@ -30,7 +30,8 @@ class CodeGenEvalClient:
             inference_client_config: InferenceClientConfig,
             config_file: str = "inferenceCodeGenEval.yaml",
             output_dir: str = "~/.codeGenEval",
-            logprobs: bool = True,         
+            logprobs: bool = True,
+            template: str="triton.1",
     ):
         with open(config_file, 'r') as f:
             self.config = yaml.safe_load(f)
@@ -44,34 +45,47 @@ class CodeGenEvalClient:
         self.output_dir = self._get_output_dir(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.logprobs = logprobs
+        self.template = template
 
-        logger.info(f"🔍 [CodeGenEvalClient] [{self.run_tag}] [{self.model_tag}] Using logprobs: [{self.inference_client_config.model.logprobs}]")
+        logger.info(f"🔍 [CodeGenEvalClient] [{self.run_tag}] [{self.model_tag}] Using logprobs: [{self.inference_client_config.model.logprobs}] [{self.template}]")
 
     def _get_output_dir(self, output_dir: str) -> Path:
         """Get output sub directory for a task."""
         return Path(os.path.expanduser(output_dir)) / self.run_tag / self.model_tag
 
+    def get_prompt_template(self) -> str:
+        """Get prompt template from configuration."""
+        prompts_config = self.config.get('prompts', {})
+        if self.template not in prompts_config:
+            raise ValueError(f"Template [{self.template}] not found in prompts config")
+        return prompts_config[self.template]
+
+    def get_code_type(self) -> str:
+        """Get code type from configuration."""
+        prompts_config = self.get_prompt_template()
+        return prompts_config.get('code_type', 'triton')
+
     def get_system_prompt(self) -> str:
         """Get system prompt from configuration."""
-        prompts_config = self.config.get('prompts', {})
+        prompts_config = self.get_prompt_template()
         reference_code = self.get_example_reference_code()
         generated_code = self.get_example_generated_code()
         return prompts_config.get('system_prompt', 'You are a helpful assistant.').format(reference_code=reference_code, generated_code=generated_code)
 
     def get_user_prompt(self, source_code: str) -> str:
         """Get user prompt from configuration with source code substituted."""
-        prompts_config = self.config.get('prompts', {})
+        prompts_config = self.get_prompt_template()
         user_prompt_template = prompts_config.get('user_prompt', 'Analyze this code: {source_code}')
         return user_prompt_template.format(source_code=source_code)
 
     def get_example_reference_code(self) -> str:
         """Get example reference code from configuration."""
-        prompts_config = self.config.get('prompts', {}).get('examples', {})
+        prompts_config = self.get_prompt_template()
         return prompts_config.get('reference_code', '')
 
     def get_example_generated_code(self) -> str:
         """Get example generated code from configuration."""
-        prompts_config = self.config.get('prompts', {}).get('examples', {})
+        prompts_config = self.get_prompt_template()
         return prompts_config.get('generated_code', '')
 
     async def _process_code_gen(
@@ -122,6 +136,7 @@ class CodeGenEvalClient:
                 "model_tag": self.model_tag,
                 "task_tag": task_tag,
                 "gen_tag": gen_tag,
+                "code_type": self.get_code_type(),
                 "reference_code": reference_code,
                 "num_tokens": num_tokens,
                 "generation_time_seconds": generation_time,
@@ -178,6 +193,7 @@ class CodeGenEvalClient:
                 "model_tag": self.model_tag,
                 "task_tag": task_tag,
                 "gen_tag": gen_tag,
+                "code_type": self.get_code_type(),
                 "reference_code": reference_code,
                 "num_tokens": num_tokens,
                 "generation_time_seconds": generation_time,
@@ -262,12 +278,13 @@ class CodeGenEvalClient:
             
             # Call the evaluation server
             start_time = time.time()
-            result = await self.kb_eval_client.kb_eval(run_tag=self.run_tag, model_tag=self.model_tag, task_tag=task_tag, eval_tag=gen_tag, reference_code=reference_code, generated_code=generated_code)
+            result = await self.kb_eval_client.kb_eval(run_tag=self.run_tag, model_tag=self.model_tag, task_tag=task_tag, eval_tag=gen_tag, reference_code=reference_code, generated_code=generated_code, code_type=self.get_code_type())
             eval_result_json = result.model_dump()
             eval_result_json['metadata'] = {
                 "run_tag": self.run_tag,
                 "model_tag": self.model_tag,
-                "task_tag": task_tag
+                "task_tag": task_tag,
+                "code_type": self.get_code_type(),
             } | eval_result_json['metadata']
             evaluation_time = time.time() - start_time
             
@@ -279,7 +296,7 @@ class CodeGenEvalClient:
             if result.compiled and result.correctness:
                 logger.info(f"✅ [CodeGenEval] [{self.run_tag}] Evaluated [{f'{task_tag}'}] [{f'{gen_tag}'}] [{generated_code_file}] [{result.runtime:.3f}ms] in [{evaluation_time:.1f}s]")
             else:
-                logger.warning(f"⚠️ [CodeGenEval] [{self.run_tag}] Evaluated [{f'{task_tag}'}] [{f'{gen_tag}'}] [{generated_code_file}] [{'✅' if result.compiled else '❌'}compiled], [{'✅' if result.correctness else '❌'}correctness] in [{evaluation_time:.2f}s]")
+                logger.warning(f"⚠️ [CodeGenEval] [{self.run_tag}] Evaluated [{f'{task_tag}'}] [{f'{gen_tag}'}] [{generated_code_file}] [{'🟢' if result.compiled else '🔴'}compiled], [{'🟢' if result.correctness else '🔴'}correctness] in [{evaluation_time:.2f}s]")
 
             # return json
             return eval_result_json
@@ -304,7 +321,7 @@ class CodeGenEvalClient:
             result_json['metadata'] = {
                 "run_tag": self.run_tag,
                 "model_tag": self.model_tag,
-                "task_tag": task_tag
+                "task_tag": task_tag,
             } | result_json['metadata']
 
             # write the result to the output path
@@ -472,6 +489,7 @@ class CodeGenEvalClient:
             "num_generations": num_generations,
             "parallel_tasks": parallel_tasks,
             "run_reference": run_reference,
+            "template": self.template,
         }
 
         # write the metadata to the output directory
@@ -547,7 +565,7 @@ async def code_gen_eval_block(block: CodeGenEvalBlock):
         task_tags = [item['task_tag'] for item in reference_code_json]
 
         # now run inference
-        codeGenEvalClient = CodeGenEvalClient(run_tag=run_tag, inference_client_config=config, output_dir=block.output_dir, logprobs=True)
+        codeGenEvalClient = CodeGenEvalClient(run_tag=run_tag, inference_client_config=config, output_dir=block.output_dir, logprobs=block.logprobs, template=block.template)
         await codeGenEvalClient.run_block(task_tags, reference_code_contents, num_generations=block.num_generations, parallel_tasks=block.parallel_tasks)
         logger.info(f"🎉 [CodeGenEval] [{run_tag}] Block completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
 
@@ -600,7 +618,7 @@ async def exemplar_block(block: ExemplarBlock):
             task_tags.append(row['metadata']['task_tag'])
 
         # now run inference
-        codeGenEvalClient = CodeGenEvalClient(run_tag=block.input_tag, inference_client_config=config, output_dir=block.output_dir, logprobs=False)
+        codeGenEvalClient = CodeGenEvalClient(run_tag=block.input_tag, inference_client_config=config, output_dir=block.output_dir, logprobs=False, template=block.template)
         await codeGenEvalClient.run_block(task_tags, reference_code_contents, reference_eval_contents=reference_eval_contents, num_generations=block.num_generations, parallel_tasks=block.parallel_tasks, run_reference=False)
         logger.info(f"🎉 [Exemplar] [{block.input_tag}] Block completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
 
@@ -617,12 +635,14 @@ async def main():
     parser.add_argument("--input_tag", type=str, default="KC_0.1.0_14B_000_00")
     parser.add_argument("--input_dir", type=str, default="~/triton-ag/kernel_bench", help="Input directory containing Python files")
     parser.add_argument("--output_dir", type=str, default="~/.codeGenEval", help="Output directory for the code generation and evaluation results")
-    parser.add_argument("--provider", type=str, default="deepinfra")  # most cost effective models are deepinfra-r1 and fireworks-v3
-    parser.add_argument("--model", type=str, default="qwen3-14b")  # most cost effective models are deepinfra-r1 and fireworks-v3
+    parser.add_argument("--provider", type=str, default="fireworks")  # most cost effective models are deepinfra-r1 and fireworks-v3
+    parser.add_argument("--model", type=str, default="deepseek-v3")  # most cost effective models are deepinfra-r1 and fireworks-v3
     parser.add_argument("--model_override", type=str, default=None) # override the model name, e.g. "KC_0.1.0_14B/checkpoint-200"
     parser.add_argument("--num_samples", type=int, default=12)
     parser.add_argument("--num_generations", type=int, default=16)
     parser.add_argument("--parallel_tasks", type=int, default=24)
+    parser.add_argument("--template", type=str, default="triton.1")
+    parser.add_argument("--logprobs", action="store_true")
     parser.add_argument("--run_exemplar", action="store_true")
     parser.add_argument("--use_global_registry", action="store_true")
     parser.add_argument("--proc_id", type=str, default=None)
@@ -668,6 +688,8 @@ async def main():
                     model_override=args.model_override,
                     input_dir=args.input_dir,
                     output_dir=args.output_dir,
+                    template=args.template,
+                    logprobs=args.logprobs,
                 )
             # run the block
             await code_gen_eval_block(block)
@@ -703,6 +725,7 @@ async def main():
                     model_override=args.model_override,
                     input_dir=args.input_dir,
                     output_dir=args.output_dir,
+                    template=args.template,
                 )
             # run the block
             await exemplar_block(block)
