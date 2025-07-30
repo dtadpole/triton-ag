@@ -335,6 +335,7 @@ class FileLock:
         except BlockingIOError as e:
             self.lock_fd.close()
             raise TimeoutError("Could not acquire lock")
+        logger.warning(f"Lock [{self.lock_file}] acquired.")
         return self
 
     def __exit__(self, type, value, traceback):
@@ -342,6 +343,7 @@ class FileLock:
             self.lock_fd.write('\n[done]\n')
             fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_UN)
             self.lock_fd.close()
+            logger.warning(f"Lock [{self.lock_file}] released.")
 
 def cleanup_lockfile(lock_file: str):
     if os.path.exists(lock_file):
