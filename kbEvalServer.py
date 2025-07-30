@@ -16,13 +16,14 @@ from fastapi import FastAPI, Body, HTTPException, Header, Depends, Request
 from kbEvalTest.kbeval import KernelExecResult
 from logger import logger
 from pydantic import BaseModel, Field
+from kbEvalUtil import on_process_timeout
 
 KB_EVAL_TOKEN = None
 
 CURR_ERROR_COUNT = 0
 MAX_ERROR_COUNT = 10
 START_TIME = time.time()
-MAX_RUN_TIME = 2 * 3600 # restart periods in seconds
+MAX_RUN_TIME = 1 * 3600 # restart periods in seconds
 
 KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
 
@@ -444,5 +445,10 @@ if __name__ == "__main__":
     parser.add_argument("--port",  type=int, default=8088)
     parser.add_argument("--workers",  type=int, default=32)
     parser.add_argument("--device",  type=str, default='4')
+    parser.add_argument("--max_process_time", type=int, default=3600)
     args = parser.parse_args()
+
+    signal.signal(signal.SIGALRM, on_process_timeout)
+    signal.alarm(args.max_process_time)  # exit after max_process_time seconds
+
     asyncio.run(main(args))
