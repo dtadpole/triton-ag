@@ -67,7 +67,10 @@ class GlobalRegistry:
             else:
                 adapters = {}
             for adapter_name, adapter_value in adapters.items():
-                self.put(f"{ADAPTER_PREFIX}{adapter_name}", adapter_value)
+                object_name = f"{ADAPTER_PREFIX}{adapter_name}"
+                if object_name not in self.registry:
+                    self.put(object_name, adapter_value)
+                    logger.info(f"🔑 [GlobalRegistry] Loaded [{object_name}] with value [{adapter_value}]")
         except Exception as e:
             logger.error(f"Error loading adapters: {e}")
 

@@ -266,7 +266,7 @@ class GRPOTrainer(BaseTrainer):
                 mini_batch_loss = self._compute_mini_batch_loss(batch, clip_metrics, group_max_length=group_max_length)
                 
                 # Scale loss for gradient accumulation
-                mini_batch_loss = mini_batch_loss / len(dataloader) # divide by the group size
+                mini_batch_loss = mini_batch_loss * self.config.training.loss_multiplier / len(dataloader) # divide by the group size
                 mini_batch_loss.backward()
 
                 # del outputs
@@ -321,7 +321,7 @@ class GRPOTrainer(BaseTrainer):
 def grpo_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_file: str = "trainerBase.yaml", grpo_config_file: str = "trainerGRPO.yaml"):
     """Get a GRPO trainer"""
     try:
-        base_config = TrainerConfig.from_yaml(base_config_file)
+        base_config = TrainerConfig.from_yaml(base_config_file, override_yaml_path=grpo_config_file)
         logger.info(f"⚙️ [GRPOTrainer] [{prefix_tag}] Base configuration loaded from [{base_config_file}]")
     except Exception as e:
         logger.error(f"❌ [GRPOTrainer] [{prefix_tag}] Failed to load base configuration: {e}")

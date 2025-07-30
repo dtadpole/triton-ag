@@ -107,7 +107,7 @@ class SFTTrainer(BaseTrainer):
 def sft_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_file: str = "trainerBase.yaml", sft_config_file: str = "trainerSFT.yaml"):
     """Get a SFT trainer"""
     try:
-        base_config = TrainerConfig.from_yaml(base_config_file)
+        base_config = TrainerConfig.from_yaml(base_config_file, override_yaml_path=sft_config_file)
         logger.info(f"⚙️ [SFTTrainer] [{prefix_tag}] Base configuration loaded from [{base_config_file}]")
     except Exception as e:
         logger.error(f"❌ [SFTTrainer] [{prefix_tag}] Failed to load base configuration: {e}")

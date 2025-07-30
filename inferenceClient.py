@@ -25,7 +25,7 @@ class ProviderConfig(BaseModel):
     api_key_path: str = Field()
     streaming: bool = Field(default=True)
     max_retries: int = Field(default=3)
-    timeout: int = Field(default=600)
+    timeout: int = Field(default=300)
     trust_remote_code: bool = Field(default=False)
 
 class ModelConfig(BaseModel):
