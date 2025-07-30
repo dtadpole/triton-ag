@@ -12,8 +12,11 @@ from globalUtils import GlobalUtils
 global_utils = GlobalUtils()
 fastapi = global_utils.fastapi
 
-QUEUE_PREFIX = "queue."
 GLOBAL_REGISTRY_DIR = "globalRegistry"
+
+QUEUE_PREFIX = "queue."
+ADAPTER_PREFIX = "adapter."
+
 
 # create a singleton class to store global variables
 class GlobalRegistry:
@@ -47,10 +50,26 @@ class GlobalRegistry:
                 # logger.info(f"🔄 Refreshing config every {interval} seconds")
                 self.config = self._load_config()
                 await self._load_queues()
+                await self._load_adapters()
             except Exception as e:
                 logger.error(f"Error refreshing config: {e}")
             finally:
                 await asyncio.sleep(interval)
+
+    async def _load_adapters(self):
+        """
+        Load the adapters from the config
+        """
+        try:
+            if os.path.exists(f"{GLOBAL_REGISTRY_DIR}/adapters.json"):
+                with open(f"{GLOBAL_REGISTRY_DIR}/adapters.json", "r") as f:
+                    adapters = json.load(f)
+            else:
+                adapters = {}
+            for adapter_name, adapter_value in adapters.items():
+                self.put(adapter_name, adapter_value)
+        except Exception as e:
+            logger.error(f"Error loading adapters: {e}")
 
     async def _load_queues(self):
         """
@@ -82,6 +101,26 @@ class GlobalRegistry:
                         logger.info(f"📦 Loaded {len(queue_storage[object_name])} items into queue [{object_name}]")
         except Exception as e:
             logger.error(f"Error updating queues: {e}")
+
+    async def _save_adapter_task(self):
+        """
+        Save the adapters to the config
+        """
+        while True:
+            try:
+                interval = self.config.get("_save_adapter_task", {}).get("interval", 10)
+                adapters = {}
+                with open(f"{GLOBAL_REGISTRY_DIR}/adapters.json", "w") as f:
+                    for key in self.keys():
+                        if key.startswith(ADAPTER_PREFIX):
+                            adapter_name = key.replace(ADAPTER_PREFIX, "")
+                            adapter_value = self.get(key)
+                            adapters[adapter_name] = adapter_value
+                    json.dump(adapters, f, indent=2)
+            except Exception as e:
+                logger.error(f"Error saving adapters: {e}")
+            finally:
+                await asyncio.sleep(interval)
 
     async def _save_queue_task(self):
         """
@@ -260,6 +299,9 @@ class GlobalRegistry:
 
             # create a task to save the queues
             self.put_task("reg.save_queue", self._save_queue_task())
+
+            # create a task to save the adapters
+            self.put_task("reg.save_adapter", self._save_adapter_task())
 
             # now we need to start the asyncio loop
             # by this time, there could be other tasks running in the event loop

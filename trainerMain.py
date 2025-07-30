@@ -6,7 +6,7 @@ import httpx
 import yaml
 import traceback
 import os
-from globalUtils import TrainerGRPOBlock, TrainerRFTBlock, TrainerSFTBlock
+from globalUtils import MODEL_OVERRIDE_KEY, TrainerGRPOBlock, TrainerRFTBlock, TrainerSFTBlock
 from logger import logger
 from globalRegClient import GlobalRegClient
 from trainerSFT import sft_train_block, sft_get_trainer
@@ -215,7 +215,7 @@ class RsyncQueue:
                 lora_path = checkpoint_path.split('/')[-2] + '/' + checkpoint_path.split('/')[-1]
                 await self.vllm_client.load_lora_adapter(lora_path, lora_path)
                 # update the model_override in the global registry
-                await self.reg_client.put(f"inference.codeGenEval.model_override", lora_path)
+                await self.reg_client.put(f"{MODEL_OVERRIDE_KEY}", lora_path)
                 # clean up the unused lora adapters
                 await self.clean_up_lora_adapters(lora_path)
             except asyncio.TimeoutError:
@@ -297,8 +297,8 @@ async def main_loop_task(rsync_queue: RsyncQueue, prefix_tag: str, test_mode: bo
 
 async def main():
     parser = argparse.ArgumentParser(description="Train a model using mixed SFT and GRPO trainers")
-    parser.add_argument("--prefix_tag", type=str, default="KC_0.1.0_14B")
-    parser.add_argument("--test_mode", action="store_true", default=True)
+    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B")
+    parser.add_argument("--test_mode", action="store_true")
     args = parser.parse_args()
 
     if args.test_mode:

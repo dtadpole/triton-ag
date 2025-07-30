@@ -2,6 +2,8 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 from typing import Optional
 
+MODEL_OVERRIDE_KEY = "adapter.codeGenEval.model_override"
+
 class TrainerSFTBlock(BaseModel):
     prefix_tag: str
     epoch_id: int

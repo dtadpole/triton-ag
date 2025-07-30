@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import shutil
 import duckdb
 import json
@@ -19,7 +20,7 @@ from inferenceClient import InferenceClient, InferenceClientConfig, load_inferen
 from kbEvalClient import KbEvalClient
 from logger import logger
 from kbEvalTest.kbeval import KernelExecResult
-from globalUtils import CodeGenEvalBlock, ExemplarBlock, CritiqueBlock
+from globalUtils import MODEL_OVERRIDE_KEY, CodeGenEvalBlock, ExemplarBlock, CritiqueBlock
 from globalRegClient import GlobalRegClient
 from globalWorkflow import GlobalWorkflow
 
@@ -629,10 +630,10 @@ async def exemplar_block(block: ExemplarBlock):
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prefix_tag", type=str, default="KC_0.1.0_14B")
+    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B")
     parser.add_argument("--epoch_id", type=int, default=-1)
     parser.add_argument("--block_id", type=int, default=-1)
-    parser.add_argument("--input_tag", type=str, default="KC_0.1.0_14B_000_00")
+    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B_000_00")
     parser.add_argument("--input_dir", type=str, default="~/triton-ag/kernel_bench", help="Input directory containing Python files")
     parser.add_argument("--output_dir", type=str, default="~/.codeGenEval", help="Output directory for the code generation and evaluation results")
     parser.add_argument("--provider", type=str, default="fireworks")  # most cost effective models are deepinfra-r1 and fireworks-v3
@@ -653,6 +654,14 @@ async def main():
     else:
         PROC_ID = os.environ.get("PROC_ID", None)
 
+    if args.use_global_registry and not args.run_exemplar:
+        if not PROC_ID:
+            error_msg = f"❌ [CodeGenEvalClient] [{args.prefix_tag}] Unable to get PROC_ID to update model_override"
+            logger.error(error_msg)
+            sys.exit(1)
+        else:
+            logger.info(f"🔍 [CodeGenEvalClient] [{args.prefix_tag}] Using PROC_ID: [{PROC_ID}]")
+
     if not args.run_exemplar:
         try:
             run_tag = 'unknown'
@@ -664,7 +673,7 @@ async def main():
                 # convert the block_json to a CodeGenEvalBlock object
                 block = CodeGenEvalBlock(**block_json)
                 # process the model override
-                model_override = await global_reg_client.get(f"inference.codeGenEval.model_override")
+                model_override = await global_reg_client.get(f"{MODEL_OVERRIDE_KEY}")
                 if model_override:
                     logger.info(f"🔍 [CodeGenEvalClient] [{block.prefix_tag}] Using model override: [{model_override}]")
                     block.model_override = model_override
