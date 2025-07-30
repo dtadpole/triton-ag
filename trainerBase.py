@@ -40,7 +40,7 @@ import wandb
 import yaml
 import argparse
 from logger import logger
-from trainerUtil import SimpleCollator
+from trainerUtil import SimpleCollator, merge_dicts
 
 
 class TrainerStatus(BaseModel):
@@ -83,6 +83,7 @@ class TrainingConfig(BaseModel):
     scheduler_type: str = "cosine"
     num_warmup_steps: int = 50
     dataloader_num_workers: int = 4
+    loss_multiplier: float = 1.0
     seed: int = -1
 
 class TrainerLoraConfig(BaseModel):
@@ -110,10 +111,16 @@ class TrainerConfig(BaseModel):
     logging: LoggingConfig = LoggingConfig()
     
     @classmethod
-    def from_yaml(cls, yaml_path: str) -> 'TrainerConfig':
+    def from_yaml(cls, yaml_path: str, override_yaml_path: Optional[str] = None) -> 'TrainerConfig':
         """Load configuration from YAML file"""
         with open(yaml_path, 'r') as f:
             config_dict = yaml.safe_load(f)
+
+        if override_yaml_path is not None:
+            with open(override_yaml_path, 'r') as f:
+                override_config_dict = yaml.safe_load(f)
+            # do a recursive merge of the two dictionaries
+            config_dict = merge_dicts(config_dict, override_config_dict)
         
         # Create config objects from sections
         model_config = ModelConfig()
@@ -259,6 +266,8 @@ class BaseTrainer:
         else:
             self.config.logging.wandb_run_id = base_trainer.config.logging.wandb_run_id
             self.config.logging.wandb_run_name = base_trainer.config.logging.wandb_run_name
+        
+        logger.info(f"🔍 [{self.__class__.__name__}] Config: {self.config.model_dump_json()}")
         
         # Load checkpoint if specified
         if base_trainer is None and config.training.latest_checkpoint_name:
@@ -566,7 +575,7 @@ class BaseTrainer:
         loss = self._compute_loss(batch)
         
         # Scale loss for gradient accumulation
-        loss = loss / self.config.training.gradient_accumulation_steps
+        loss = loss * self.config.training.loss_multiplier / self.config.training.gradient_accumulation_steps
         
         # Backward pass
         loss.backward()

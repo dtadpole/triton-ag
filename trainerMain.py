@@ -211,13 +211,17 @@ class RsyncQueue:
                     logger.info(f"🔍 [RsyncQueue] Skipping [{checkpoint_path}] because queue size: [{self.rsync_queue.qsize()}]")
                     continue
                 await self.upload_lora_adapter(checkpoint_path)
+                logger.info(f"🔍 [RsyncQueue] Uploaded lora adapter: [{checkpoint_path}]")
                 # get the last 2 parts of the checkpoint_path
                 lora_path = checkpoint_path.split('/')[-2] + '/' + checkpoint_path.split('/')[-1]
                 await self.vllm_client.load_lora_adapter(lora_path, lora_path)
+                logger.info(f"🔍 [RsyncQueue] Loaded lora adapter: [{lora_path}]")
                 # update the model_override in the global registry
-                await self.reg_client.put(f"{MODEL_OVERRIDE_KEY}", lora_path)
+                await self.reg_client.put(MODEL_OVERRIDE_KEY, lora_path)
+                logger.info(f"🔍 [RsyncQueue] Model override [{MODEL_OVERRIDE_KEY}] updated to [{lora_path}]")
                 # clean up the unused lora adapters
                 await self.clean_up_lora_adapters(lora_path)
+                logger.info(f"🔍 [RsyncQueue] Cleaned up lora adapters: [{lora_path}]")
             except asyncio.TimeoutError:
                 pass
             except Exception as e:
@@ -297,7 +301,7 @@ async def main_loop_task(rsync_queue: RsyncQueue, prefix_tag: str, test_mode: bo
 
 async def main():
     parser = argparse.ArgumentParser(description="Train a model using mixed SFT and GRPO trainers")
-    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B")
+    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.a")
     parser.add_argument("--test_mode", action="store_true")
     args = parser.parse_args()
 

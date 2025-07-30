@@ -110,7 +110,7 @@ class RFTTrainer(BaseTrainer):
 def rft_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_file: str = "trainerBase.yaml", rft_config_file: str = "trainerRFT.yaml"):
     """Get a RFT trainer"""
     try:
-        base_config = TrainerConfig.from_yaml(base_config_file)
+        base_config = TrainerConfig.from_yaml(base_config_file, override_yaml_path=rft_config_file)
         logger.info(f"⚙️ [RFTTrainer] [{prefix_tag}] Base configuration loaded from [{base_config_file}]")
     except Exception as e:
         logger.error(f"❌ [RFTTrainer] [{prefix_tag}] Failed to load base configuration: {e}")
