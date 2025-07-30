@@ -247,7 +247,6 @@ class GRPOTrainer(BaseTrainer):
                     dim=-1,
                     index=labels.unsqueeze(-1)
                 ).squeeze(-1)  # Shape: (completion_length)
-
                 # KL divergence: KL(π_θ || π_ref) = log π_θ(a|s) - log π_ref(a|s)
                 token_kl_divergences = new_action_log_probs - ref_action_log_probs  # Shape: (completion_length)
 
