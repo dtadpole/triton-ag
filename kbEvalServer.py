@@ -23,7 +23,7 @@ KB_EVAL_TOKEN = None
 CURR_ERROR_COUNT = 0
 MAX_ERROR_COUNT = 10
 START_TIME = time.time()
-MAX_RUN_TIME = 1 * 3600 # restart periods in seconds
+MAX_RUN_TIME = 2 * 3600 # restart periods in seconds
 
 KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
 
@@ -354,14 +354,14 @@ async def _check_total_error_count():
             if ELAPSED_TIME > MAX_RUN_TIME:
                 # add an star emoji
                 logger.error(f"⭐ Elapsed time is greater than {MAX_RUN_TIME/3600:.2f} hours, exiting... [parent process will restart]")
-                loop = asyncio.get_event_loop()
-                loop.stop()
-                exit(1)
+                # loop = asyncio.get_event_loop()
+                # loop.stop()
+                # exit(1)
             if CURR_ERROR_COUNT > MAX_ERROR_COUNT:
                 logger.error(f"❌ Total error count is greater than {MAX_ERROR_COUNT}, exiting")
-                loop = asyncio.get_event_loop()
-                loop.stop()
-                exit(1)
+                # loop = asyncio.get_event_loop()
+                # loop.stop()
+                # exit(1)
             elif CURR_ERROR_COUNT > 0 and counter % print_interval == 0:
                 logger.warning(f"⚠️ Total error count is {CURR_ERROR_COUNT}, continuing...")
         finally:
@@ -445,10 +445,10 @@ if __name__ == "__main__":
     parser.add_argument("--port",  type=int, default=8088)
     parser.add_argument("--workers",  type=int, default=32)
     parser.add_argument("--device",  type=str, default='4')
-    parser.add_argument("--max_process_time", type=int, default=3600)
+    parser.add_argument("--max_process_time", type=int, default=7200)
     args = parser.parse_args()
 
-    signal.signal(signal.SIGALRM, on_process_timeout)
-    signal.alarm(args.max_process_time)  # exit after max_process_time seconds
+    # signal.signal(signal.SIGALRM, on_process_timeout)
+    # signal.alarm(args.max_process_time)  # exit after max_process_time seconds
 
     asyncio.run(main(args))
