@@ -282,6 +282,7 @@ def eval_kernel_custom(
                         )
 
         except TimeoutError:
+            graceful_eval_cleanup(context, device)
             logger.info(f"⏳ [KB_Eval_Triton] [{task_tag}/{eval_tag}] Waiting for lock to be released {lock_file}")
             time.sleep(2)
             continue
@@ -426,4 +427,7 @@ if __name__ == "__main__":
             logger.info(f"🔍 Evaluation result stored in [{work_dir}]")
         else:
             logger.info(f"🔍 Evaluation result stored in [{work_dir}]\n{json.dumps(result.model_dump(), indent=4)}")
+
+        # exit with exit_code
+        sys.exit(exit_code)
 

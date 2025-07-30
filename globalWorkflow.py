@@ -43,6 +43,7 @@ class GlobalWorkflow:
         init_vars = self.global_config.get("init_vars", {})
         for key, value in init_vars.items():
             await self.global_reg_client.put(key, value)
+            logger.info(f"🔢 [GlobalWorkflow] [{self.prefix_tag}] Initialized [{key}] = [{value}]")
 
     async def init_tasks(self, start_epoch: int = 0, start_block: int = 0):
         global_config = self.config.get("global", {})
@@ -77,6 +78,7 @@ class GlobalWorkflow:
                         # use self.codeGenEval_config as default
                         codeGenEvalBlock = CodeGenEvalBlock(**(self.codeGenEval_default | task_config))
                         await self.global_reg_client.enqueue(task_type, codeGenEvalBlock.model_dump())
+                        logger.info(f"🎢 [GlobalWorkflow] [{self.prefix_tag}] Enqueued [{task_type}] [{codeGenEvalBlock.epoch_id:03d}_{codeGenEvalBlock.block_id:02d}], content: [{codeGenEvalBlock.model_dump()}]")
                     else:
                         raise ValueError(f"Task [{task_name}] has unknown task type: [{task_type}]")
 
@@ -153,7 +155,7 @@ class GlobalWorkflow:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prefix_tag", type=str, default="KC_0.1.0_14B")
+    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B")
     parser.add_argument("--start_epoch", type=int, default=0)
     parser.add_argument("--start_block", type=int, default=0)
     args = parser.parse_args()
