@@ -63,7 +63,7 @@ async def get_with_timeout(queue, timeout):
         return None  # Or raise an exception, or handle it as needed
 
 
-async def read_stream(stream, prefix: str, is_error: bool = False):
+async def read_stream(stream, work_dir: str, eval_tag: str, is_error: bool = False):
     """Read from a stream and print each line with a prefix."""
     while True:
         line = await stream.readline()
@@ -72,9 +72,15 @@ async def read_stream(stream, prefix: str, is_error: bool = False):
         # Decode bytes to string and strip newline
         output = line.decode("utf-8").rstrip()
         if is_error:
-            logger.error(f"[{prefix}] {output}")
+            # logger.error(f"[{prefix}] {output}")
+            # append to {work_dir}/{prefix).stderr
+            with open(os.path.join(work_dir, f"{eval_tag}.stderr"), "a") as f:
+                f.write(output + "\n")
         else:
-            logger.info(f"[{prefix}] {output}")
+            # logger.info(f"[{prefix}] {output}")
+            # append to {work_dir}/{prefix}.stdout
+            with open(os.path.join(work_dir, f"{eval_tag}.stdout"), "a") as f:
+                f.write(output + "\n")
 
 async def check_return_code(process: asyncio.subprocess.Process):
     while True:
@@ -175,11 +181,11 @@ async def kb_eval_ref(
 
         # Create tasks to read stdout and stderr concurrently
         stdout_task = asyncio.create_task(
-            read_stream(process.stdout, "reference", is_error=False)
+            read_stream(process.stdout, temp_dir, eval_tag, is_error=False)
         )
         stderr_task = asyncio.create_task(
             read_stream(
-                process.stderr, "reference", is_error=True
+                process.stderr, temp_dir, eval_tag, is_error=True
             )  # seems taking warning message as error message
         )
 
@@ -280,10 +286,10 @@ async def kb_eval(
 
         # Create tasks to read stdout and stderr concurrently
         stdout_task = asyncio.create_task(
-            read_stream(process.stdout, eval_tag, is_error=False)
+            read_stream(process.stdout, temp_dir, eval_tag, is_error=False)
         )
         stderr_task = asyncio.create_task(
-            read_stream(process.stderr, eval_tag, is_error=True)
+            read_stream(process.stderr, temp_dir, eval_tag, is_error=True)
         )
         check_return_code_task = asyncio.create_task(check_return_code(process))
         check_disconnect_task = asyncio.create_task(check_disconnect_and_kill_child_process(request, process))
@@ -436,7 +442,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_host", action="store_true")
     parser.add_argument("--port",  type=int, default=8088)
-    parser.add_argument("--workers",  type=int, default=32)
+    parser.add_argument("--workers",  type=int, default=48)
     parser.add_argument("--device",  type=str, default='4')
     args = parser.parse_args()
     asyncio.run(main(args))

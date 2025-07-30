@@ -25,7 +25,7 @@ import random
 
 KB_EVAL_DIR = os.path.expanduser("~/.kbeval")
 
-MAX_LOCK_AGE = 15 # seconds
+MAX_LOCK_AGE = 30 # seconds
 
 
 def verify_correctness(
