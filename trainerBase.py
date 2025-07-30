@@ -30,6 +30,7 @@ import time
 import traceback
 from pathlib import Path
 import math
+from datetime import datetime
 import random
 import numpy as np
 from torch.utils.data import Subset
@@ -95,9 +96,10 @@ class TrainerLoraConfig(BaseModel):
 
 class LoggingConfig(BaseModel):
     """Configuration for logging parameters"""
-    use_wandb: bool = False
-    wandb_project: str = "unsloth-lora-training"
+    use_wandb: bool = True
+    wandb_project: str = "kb_trainer"
     wandb_run_name: Optional[str] = None
+    wandb_run_id: Optional[str] = None
 
 class TrainerConfig(BaseModel):
     """Main configuration class containing all training parameters"""
@@ -250,7 +252,13 @@ class BaseTrainer:
         self.checkpoint_path.mkdir(parents=True, exist_ok=True)
         
         # Initialize logging
-        self._setup_logging()
+        self.config.logging.wandb_run_id = self.prefix_tag
+        self.config.logging.wandb_run_name = self.prefix_tag + "_" + datetime.now().strftime("%m%d_%H%M%S")
+        if base_trainer is None:
+            self._setup_logging()
+        else:
+            self.config.logging.wandb_run_id = base_trainer.config.logging.wandb_run_id
+            self.config.logging.wandb_run_name = base_trainer.config.logging.wandb_run_name
         
         # Load checkpoint if specified
         if base_trainer is None and config.training.latest_checkpoint_name:
@@ -526,10 +534,12 @@ class BaseTrainer:
         if self.config.logging.use_wandb:
             wandb.init(
                 project=self.config.logging.wandb_project,
+                id=self.config.logging.wandb_run_id,
                 name=self.config.logging.wandb_run_name,
-                config=self.config.model_dump()
+                config=self.config.model_dump(),
+                resume="allow",
             )
-            logger.info(f"📈 [{self.__class__.__name__}] W&B logging enabled")
+            logger.info(f"📊 [{self.__class__.__name__}] W&B logging enabled")
     
     def _compute_loss(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Compute loss for a batch"""
@@ -580,18 +590,16 @@ class BaseTrainer:
 
         return grad_norm
     
-    def _log_metrics(self, loss: float, lr: float, step: int, grad_norm: float):
+    def _log_metrics(self, metrics: Dict[str, float], step: int):
         """Log training metrics"""
+        step = self.trainer_status.global_step
         if step % self.config.training.logging_steps == 0:
-            logger.info(f"🔍 [{self.__class__.__name__}] [G-Step={step}]: [Loss={loss:.4f}], [LR={lr:.2e}], [GradNorm={grad_norm:.4f}/{self.config.training.max_grad_norm:.2f}]")
+            # format metrics into a string with .4f format
+            formatted_metrics = {k: f"{v:.4f}" for k, v in metrics.items()}
+            logger.info(f"🔍 [{self.__class__.__name__}] [G-Step={step}] {formatted_metrics}")
             
             if self.config.logging.use_wandb:
-                wandb.log({
-                    "train/loss": loss,
-                    "train/learning_rate": lr,
-                    "train/grad_norm": grad_norm,
-                    "train/step": step,
-                })
+                wandb.log(metrics, step=step)
 
     def train_block(self, run_tag: str, dataset: Dataset, eval_dataset: Optional[Dataset] = None, callback: Optional[Callable] = None):
         """Train the model for one block"""
@@ -636,7 +644,11 @@ class BaseTrainer:
                 
                 # Log metrics
                 current_lr = self.scheduler.get_last_lr()[0]
-                self._log_metrics(avg_loss, current_lr, self.trainer_status.global_step, grad_norm)
+                self._log_metrics({
+                    "train/loss": avg_loss,
+                    "train/learning_rate": current_lr,
+                    "train/grad_norm": grad_norm,
+                }, self.trainer_status.global_step)
                 
                 # Save checkpoint
                 if self.trainer_status.global_step % self.config.training.save_steps == 0:

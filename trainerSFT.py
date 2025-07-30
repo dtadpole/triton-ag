@@ -135,24 +135,30 @@ def sft_train_block(block: TrainerSFTBlock, trainer: SFTTrainer, callback: Optio
     """Train the model for one block"""
     logger.info(f"👉 [SFTTrainer] [{block.input_tag}] SFT Training started for block...")
 
-    # Load or create dataset
-    search_path = os.path.expanduser(f"{block.input_dir}/{block.input_tag}")
-    if not os.path.exists(search_path):
-        error_msg = f"❌ [SFTTrainer] [{block.input_tag}] Error: Input directory [{search_path}] does not exist"
-        logger.error(error_msg)
-        raise FileNotFoundError(error_msg)
+    try:
+        # Load or create dataset
+        search_path = os.path.expanduser(f"{block.input_dir}/{block.input_tag}")
+        if not os.path.exists(search_path):
+            error_msg = f"❌ [SFTTrainer] [{block.input_tag}] Error: Input directory [{search_path}] does not exist"
+            logger.error(error_msg)
+            raise FileNotFoundError(error_msg)
 
-    # query from search_path folder, find all the conversation_*.json files, and load them into a dataframe
-    result = duckdb.sql(f"""SELECT filename, messages, metadata
-                        FROM read_json_auto('{search_path}/**/*_conversation.json', sample_size=-1, ignore_errors=true) 
-                        WHERE messages[3]['content'] IS NOT NULL
-                    """)
+        # query from search_path folder, find all the conversation_*.json files, and load them into a dataframe
+        result = duckdb.sql(f"""SELECT filename, messages, metadata
+                            FROM read_json_auto('{search_path}/**/*_conversation.json', sample_size=-1, ignore_errors=true) 
+                            WHERE messages[3]['content'] IS NOT NULL
+                        """)
+        
+        result_df = result.df()
+        # create a dataset from result_df['messages']
+        message_dataset = MessageDataset(result_df['messages'].tolist(), trainer.tokenizer, trainer.sft_config)
+
+        logger.info(f"📊 [SFTTrainer] [{block.input_tag}] Dataset created - Train: {len(message_dataset)}")
     
-    result_df = result.df()
-    # create a dataset from result_df['messages']
-    message_dataset = MessageDataset(result_df['messages'].tolist(), trainer.tokenizer, trainer.sft_config)
-
-    logger.info(f"📊 [SFTTrainer] [{block.input_tag}] Dataset created - Train: {len(message_dataset)}")
+    except Exception as e:
+        error_msg = f"❌ [SFTTrainer] [{block.input_tag}] Failed to load dataset: [{type(e)}: {e}]"
+        logger.error(error_msg)
+        raise e
     
     # train the block
     try:

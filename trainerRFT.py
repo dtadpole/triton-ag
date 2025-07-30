@@ -136,42 +136,48 @@ def rft_train_block(block: TrainerRFTBlock, trainer: RFTTrainer, callback: Optio
     """Train the model for one block"""
     logger.info(f"👉 [RFTTrainer] [{block.input_tag}] RFT Training started for block...")
 
-    # Load or create dataset
-    search_path = os.path.expanduser(f"{block.input_dir}/{block.input_tag}")
-    if not os.path.exists(search_path):
-        error_msg = f"❌ [RFTTrainer] [{block.input_tag}] Error: Input directory [{search_path}] does not exist"
-        logger.error(error_msg)
-        raise FileNotFoundError(error_msg)
+    try:
+        # Load or create dataset
+        search_path = os.path.expanduser(f"{block.input_dir}/{block.input_tag}")
+        if not os.path.exists(search_path):
+            error_msg = f"❌ [RFTTrainer] [{block.input_tag}] Error: Input directory [{search_path}] does not exist"
+            logger.error(error_msg)
+            raise FileNotFoundError(error_msg)
 
-    # query from search_path folder, find all the conversation_*.json files, and load them into a dataframe
-    result = duckdb.sql(f"""SELECT filename, compiled, correctness, metadata, runtime, runtime_stats
-                        FROM read_json_auto('{search_path}/**/gen_*_eval.json', sample_size=-1, ignore_errors=true) 
-                    """)
+        # query from search_path folder, find all the conversation_*.json files, and load them into a dataframe
+        result = duckdb.sql(f"""SELECT filename, compiled, correctness, metadata, runtime, runtime_stats
+                            FROM read_json_auto('{search_path}/**/gen_*_eval.json', sample_size=-1, ignore_errors=true) 
+                        """)
+        
+        result_df = result.df()
+
+        # filter out the rows where compiled or correctness not True
+        filtered_df = result_df[(result_df['compiled'] == True) & (result_df['correctness'] == True)]
+        filtered_length = len(filtered_df)
+
+        # for each filtered row, load the messages from corresponding *_conversation.json file
+        filtered_df['messages'] = None
+        filtered_df['metadata'] = None
+        for index, row in filtered_df.iterrows():
+            conversation_filename = row['filename'].replace("_eval.json", "_conversation.json")
+            with open(conversation_filename, 'r') as f:
+                messages = json.load(f)
+            # add a new column 'messages' to the filtered_df
+            filtered_df.at[index, 'messages'] = messages['messages']
+            filtered_df.at[index, 'metadata'] = messages['metadata']
+
+        # create a dataset from result_df['messages']
+        rft_dataset = RFTDataset(filtered_df['messages'].tolist(), trainer.tokenizer, trainer.rft_config)
+        if len(rft_dataset) == 0:
+            logger.warning(f"🗑️ [RFTTrainer] [{block.input_tag}] No tasks for RFT in [{search_path}]")
+            return
+
+        logger.info(f"🔍 [RFTTrainer] [{block.input_tag}] Loaded [{len(rft_dataset)}/{filtered_length}] tasks for RFT in [{search_path}]\n[{filtered_df}]")
     
-    result_df = result.df()
-
-    # filter out the rows where compiled or correctness not True
-    filtered_df = result_df[(result_df['compiled'] == True) & (result_df['correctness'] == True)]
-    filtered_length = len(filtered_df)
-
-    # for each filtered row, load the messages from corresponding *_conversation.json file
-    filtered_df['messages'] = None
-    filtered_df['metadata'] = None
-    for index, row in filtered_df.iterrows():
-        conversation_filename = row['filename'].replace("_eval.json", "_conversation.json")
-        with open(conversation_filename, 'r') as f:
-            messages = json.load(f)
-        # add a new column 'messages' to the filtered_df
-        filtered_df.at[index, 'messages'] = messages['messages']
-        filtered_df.at[index, 'metadata'] = messages['metadata']
-
-    # create a dataset from result_df['messages']
-    rft_dataset = RFTDataset(filtered_df['messages'].tolist(), trainer.tokenizer, trainer.rft_config)
-    if len(rft_dataset) == 0:
-        logger.warning(f"🗑️ [RFTTrainer] [{block.input_tag}] No tasks for RFT in [{search_path}]")
-        return
-
-    logger.info(f"🔍 [RFTTrainer] [{block.input_tag}] Loaded [{len(rft_dataset)}/{filtered_length}] tasks for RFT in [{search_path}]\n[{filtered_df}]")
+    except Exception as e:
+        error_msg = f"❌ [RFTTrainer] [{block.input_tag}] Failed to load dataset: [{type(e)}: {e}]"
+        logger.error(error_msg)
+        raise e
     
     # train the block
     try:

@@ -1,5 +1,6 @@
 import asyncio
 import argparse
+import sys
 import random
 import httpx
 import yaml
@@ -290,42 +291,48 @@ async def main_loop_task(rsync_queue: RsyncQueue, prefix_tag: str, test_mode: bo
                 await loop.run_in_executor(None, grpo_train_block, grpo_block, grpo_trainer, rsync_queue.enqueue)
 
         except Exception as e:
-            logger.error(f"❌ [trainerMain] Error: {e}")
+            logger.error(f"❌ [trainerMain] Error: [{type(e)}: {e}]")
             traceback.print_exc()
             await asyncio.sleep(5)
 
 async def main():
     parser = argparse.ArgumentParser(description="Train a model using mixed SFT and GRPO trainers")
     parser.add_argument("--prefix_tag", type=str, default="KC_0.1.0_14B")
-    parser.add_argument("--test_mode", action="store_true")
+    parser.add_argument("--test_mode", action="store_true", default=True)
     args = parser.parse_args()
 
     if args.test_mode:
-        await client.enqueue('trainer.sft', {
-            'prefix_tag': args.prefix_tag,
-            'epoch_id': 0,
-            'block_id': 0,
-            'input_tag': 'v0.1_20250725_020900',
-            'input_dir': '~/.critique',
-            'test_mode': args.test_mode
-        })
-        await client.enqueue('trainer.grpo', {
-            'prefix_tag': args.prefix_tag,
-            'epoch_id': 0,
-            'block_id': 0,
-            'input_tag': 'v0.1_20250725_020900',
-            'input_dir': '~/.codeGenEval',
-            'test_mode': args.test_mode
-        })
+        # read from trainerMain.yaml
+        with open("trainerMain.yaml", "r") as f:
+            test_config = yaml.safe_load(f).get('test', {})
+        prefix_tag = test_config.get('prefix_tag', 'test_0.1.0')
+        sft_trainer = sft_get_trainer(None, prefix_tag)
+        rft_trainer = rft_get_trainer(sft_trainer, prefix_tag)
+        grpo_trainer = grpo_get_trainer(rft_trainer, prefix_tag)
+        for item in test_config.get('loop', []):
+            try:
+                if item['type'] == 'trainer.grpo':
+                    grpo_block = TrainerGRPOBlock(prefix_tag=prefix_tag, **item)
+                    grpo_train_block(grpo_block, grpo_trainer)
+                elif item['type'] == 'trainer.rft':
+                    rft_block = TrainerRFTBlock(prefix_tag=prefix_tag, **item)
+                    rft_train_block(rft_block, rft_trainer)
+                elif item['type'] == 'trainer.sft':
+                    sft_block = TrainerSFTBlock(prefix_tag=prefix_tag, **item)
+                    sft_train_block(sft_block, sft_trainer)
+            except Exception as e:
+                logger.error(f"❌ [trainerMain] Error: [{type(e)}: {e}]")
+                traceback.print_exc()
+                continue
+    else:
+        rsync_queue = RsyncQueue()
 
-    rsync_queue = RsyncQueue()
+        # create tasks: 1/ main loop, 2/ rsync_queue
+        rsync_task = asyncio.create_task(rsync_queue.rsync_task())
+        main_task = asyncio.create_task(main_loop_task(rsync_queue, args.prefix_tag, args.test_mode))
 
-    # create tasks: 1/ main loop, 2/ rsync_queue
-    rsync_task = asyncio.create_task(rsync_queue.rsync_task())
-    main_task = asyncio.create_task(main_loop_task(rsync_queue, args.prefix_tag, args.test_mode))
-
-    # wait for the tasks to complete
-    await asyncio.gather(rsync_task, main_task)
+        # wait for the tasks to complete
+        await asyncio.gather(rsync_task, main_task)
 
 if __name__ == "__main__":
     # test

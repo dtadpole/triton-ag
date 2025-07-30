@@ -31,13 +31,19 @@ from globalWorkflow import GlobalWorkflow
 
 LATEST_REFERENCE_NAME = "reference_state_latest.pt"
 
+CLIP_RATIO_LOWER_PERCENTAGE = "clip_ratio_lower_pct"
+CLIP_RATIO_UPPER_PERCENTAGE = "clip_ratio_upper_pct"
+BOUND_ADVANTAGE_LOWER_PERCENTAGE = "bound_adv_lower_pct"
+BOUND_ADVANTAGE_UPPER_PERCENTAGE = "bound_adv_upper_pct"
+
 class GRPOConfig(BaseModel):
     """GRPO configuration"""
     max_seq_length: int = 16384
     mask_non_assistant_tokens: bool = True
     discard_long_conversations: bool = True
-    clip_epsilon_lower: float = 0.2
-    clip_epsilon_upper: float = 0.3
+    clip_ratio_epsilon_lower: float = 0.2
+    clip_ratio_epsilon_upper: float = 0.3
+    bound_advantage_range: float = 2.0
     beta: float = 0.0  # KL divergence coefficient
     reward_scale: bool = True
     reward_epsilon: float = 1e-3
@@ -131,7 +137,7 @@ class GRPOTrainer(BaseTrainer):
             log_probs = F.log_softmax(logits, dim=-1)
             return log_probs # dim: (batch_size, seq_len, vocab_size)
 
-    def _compute_mini_batch_loss(self, batch: Dict[str, Any], group_max_length: Optional[int] = None):
+    def _compute_mini_batch_loss(self, batch: Dict[str, Any], clip_metrics: Dict[str, List[float]], group_max_length: Optional[int] = None):
         """Compute loss for the generated tokens"""
         # gen_tags = batch['gen_tag']
         # rewards = batch['reward']
@@ -143,15 +149,19 @@ class GRPOTrainer(BaseTrainer):
         attention_mask = batch['attention_mask'].to(self.device)
 
         # check that all the prompt_token_ids are the same
+        prompt_token_ids_0 = prompt_token_ids[0]
+        prompt_token_len = len(prompt_token_ids_0)
         if len(prompt_token_ids) > 1:
             for i in range(1, len(prompt_token_ids)):
-                if prompt_token_ids[i] != prompt_token_ids[0]:
+                if len(prompt_token_ids[i]) != prompt_token_len:
+                    raise ValueError(f"❌ [GRPOTrainer] Prompt token ids are not the same length: [idx.{i} != idx.{0}]")
+                elif prompt_token_ids[i] != prompt_token_ids_0:
                     raise ValueError(f"❌ [GRPOTrainer] Prompt token ids are not the same: [idx.{i} != idx.{0}]")
         
         # get logits from model
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
         # get the logits for the completion tokens only, remove the prompt tokens
-        output_completion_logits = outputs.logits[:, len(prompt_token_ids)-1:-1, :]
+        output_completion_logits = outputs.logits[:, prompt_token_len-1:-1, :]
         new_log_probs = F.log_softmax(output_completion_logits, dim=-1) # dim: (batch_size, completion_len, vocab_size)
 
         batch_loss = 0.0
@@ -171,10 +181,21 @@ class GRPOTrainer(BaseTrainer):
             log_ratio = new_action_log_probs - completion_log_probs_tensor
             ratio = torch.exp(log_ratio)
 
-            ratio_advantage = ratio * advantages[i]
-            clamped_ratio_advantage = torch.clamp(ratio_advantage, 1-self.grpo_config.clip_epsilon_lower, 1+self.grpo_config.clip_epsilon_upper)
-            # final ratio advantage is min of ratio_advantage and clamped_ratio_advantage
-            final_ratio_advantage = torch.min(ratio_advantage, clamped_ratio_advantage) # dim: (completion_len)
+            # calculate clipped upper and lower percentage
+            clip_metrics[CLIP_RATIO_UPPER_PERCENTAGE].append(torch.sum(ratio > 1+self.grpo_config.clip_ratio_epsilon_upper).item() * 100.0 / len(new_action_log_probs))
+            clip_metrics[CLIP_RATIO_LOWER_PERCENTAGE].append(torch.sum(ratio < 1-self.grpo_config.clip_ratio_epsilon_lower).item() * 100.0 / len(new_action_log_probs))
+
+            clamped_ratio = torch.clamp(ratio, 1-self.grpo_config.clip_ratio_epsilon_lower, 1+self.grpo_config.clip_ratio_epsilon_upper)
+
+            # min ratio advantage is min of ratio_advantage and clamped_ratio_advantage
+            ratio_advantage = torch.min(ratio * advantages[i], clamped_ratio * advantages[i]) # dim: (completion_len)
+
+            # calculate clipped upper and lower percentage
+            clip_metrics[BOUND_ADVANTAGE_UPPER_PERCENTAGE].append(torch.sum(ratio_advantage > self.grpo_config.bound_advantage_range).item() * 100.0 / len(new_action_log_probs))
+            clip_metrics[BOUND_ADVANTAGE_LOWER_PERCENTAGE].append(torch.sum(ratio_advantage < -self.grpo_config.bound_advantage_range).item() * 100.0 / len(new_action_log_probs))
+
+            # calculate clipped upper and lower percentage
+            final_ratio_advantage = torch.clamp(ratio_advantage, -self.grpo_config.bound_advantage_range, self.grpo_config.bound_advantage_range)
 
             # compute loss
             if self.grpo_config.loss_type == "episode":
@@ -218,13 +239,31 @@ class GRPOTrainer(BaseTrainer):
             
             accumulated_loss = 0.0
 
+            group_reward_mean = np.mean([result.reward for result in group.results])
+            group_reward_std = np.std([result.reward for result in group.results])
+
+            group_reward_items = {}
+            for result in group.results:
+                for key, value in result.reward_items.items():
+                    if key not in group_reward_items:
+                        group_reward_items[key] = []
+                    group_reward_items[key].append(value)
+            group_reward_items_mean = {k: np.mean(v) for k, v in group_reward_items.items()}
+            group_reward_items_std = {k: np.std(v) for k, v in group_reward_items.items()}
+
             # group_max_length = max(len(result['input_ids']) for result in group_dataset)
             group_max_length = max(len(result['completion_token_ids']) for result in group_dataset)
 
             self.model.train()
+            clip_metrics = {
+                CLIP_RATIO_UPPER_PERCENTAGE: [],
+                CLIP_RATIO_LOWER_PERCENTAGE: [],
+                BOUND_ADVANTAGE_UPPER_PERCENTAGE: [],
+                BOUND_ADVANTAGE_LOWER_PERCENTAGE: [],
+            }
             for batch_idx, batch in enumerate(dataloader):
                 # Training step
-                mini_batch_loss = self._compute_mini_batch_loss(batch, group_max_length)
+                mini_batch_loss = self._compute_mini_batch_loss(batch, clip_metrics, group_max_length=group_max_length)
                 
                 # Scale loss for gradient accumulation
                 mini_batch_loss = mini_batch_loss / len(dataloader) # divide by the group size
@@ -248,7 +287,20 @@ class GRPOTrainer(BaseTrainer):
             
             # Log metrics
             current_lr = self.scheduler.get_last_lr()[0]
-            self._log_metrics(avg_loss, current_lr, self.trainer_status.global_step, grad_norm)
+            metrics = {
+                "train/loss": avg_loss,
+                "train/learning_rate": current_lr,
+                "train/grad_norm": grad_norm,
+                "reward/total_mean": group_reward_mean,
+                "reward/total_std": group_reward_std,
+            }
+            for key, value in group_reward_items_mean.items():
+                metrics[f"reward/item_{key}_mean"] = value
+            for key, value in group_reward_items_std.items():
+                metrics[f"reward/item_{key}_std"] = value
+            for key, value in clip_metrics.items():
+                metrics[f"clip/{key}"] = np.mean(value)
+            self._log_metrics(metrics, self.trainer_status.global_step)
             
             # Save checkpoint
             if self.trainer_status.global_step % self.config.training.save_steps == 0:
