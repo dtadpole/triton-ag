@@ -196,7 +196,6 @@ def eval_kernel_custom(
                 # verify lock is working by sleeping randome between 10 and 20 seconds
                 # time.sleep(random.randint(3, 5)) # verified lock is working
 
-
                 init_inputs = get_init_inputs()
                 init_inputs = [
                     x.cuda(device=device) if isinstance(x, torch.Tensor) else x for x in init_inputs
@@ -288,7 +287,7 @@ def eval_kernel_custom(
             continue
 
         except CompileError as e:
-            logger.error(f"❌ [KB_Eval_Triton] [{task_tag}/{eval_tag}] Error in code compilation: {e}")
+            logger.warning(f"[KB_Eval_Triton] [{task_tag}/{eval_tag}] Error in code compilation: [{type(e)}] [{e}]")
             return KernelExecResult(
                 compiled=False,
                 correctness=False,
@@ -298,7 +297,7 @@ def eval_kernel_custom(
             )
         
         except CorrectnessError as e:
-            logger.warning(f"[KB_Eval_Triton] [{task_tag}/{eval_tag}] Correctness error: {e}")
+            logger.warning(f"[KB_Eval_Triton] [{task_tag}/{eval_tag}] Correctness error: [{type(e)}] [{e}]")
             return KernelExecResult(
                 compiled=True,
                 correctness=False,
@@ -308,7 +307,7 @@ def eval_kernel_custom(
             )
 
         except Exception as e:
-            logger.warning(f"[KB_Eval_Triton] [{task_tag}/{eval_tag}] Error acquiring lock: {e}")
+            logger.warning(f"[KB_Eval_Triton] [{task_tag}/{eval_tag}] Error acquiring lock: [{type(e)}] [{e}]")
             result = KernelExecResult(
                 compiled=True,
                 correctness=correctness,
