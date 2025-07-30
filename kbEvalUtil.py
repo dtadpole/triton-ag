@@ -43,6 +43,7 @@ class CorrectnessResult(BaseModel):
     trials: str = "unknown"
     total_trials: int = 0
     passed_trials: int = 0
+    output_shape: str = "unknown"
     max_diff: float = -1.0
     avg_diff: float = -1.0
 

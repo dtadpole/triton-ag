@@ -99,6 +99,7 @@ def verify_correctness(
         trials=f"{passed_trials}/{total_trials}",
         total_trials=total_trials,
         passed_trials=passed_trials,
+        output_shape=f"{output.shape}",
         max_diff=max_diff,
         avg_diff=avg_diff,
     )
