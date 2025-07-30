@@ -10,8 +10,18 @@ import time
 import psutil
 from logger import logger
 import numpy as np
+import sys
 
-MAX_LOCK_AGE = 15 # seconds
+MAX_LOCK_AGE = 45 # seconds
+
+def on_critical_timeout(signum, frame):
+    logger.error(f"⏰ Critical timeout reached [{signum}] [{frame.f_code.co_name}], exiting.")
+    sys.exit(5) # exit with code 5 to indicate timer expired
+
+def on_process_timeout():
+    logger.error(f"⛔ Process timeout reached, exiting.")
+    sys.exit(6) # exit with code 6 to indicate process timeout
+
 
 def from_kbEval_yaml(yaml_file: str="kbEval.yaml"):
     with open(yaml_file, 'r') as f:

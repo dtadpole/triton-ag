@@ -14,7 +14,7 @@ import traceback
 from threading import Timer
 from pydantic import BaseModel
 from torch import nn
-from kbEvalUtil import KernelExecResult, from_kbEval_yaml, format_exception, CorrectnessResult, CorrectnessError, CorrectnessShapeMismatchError, CorrectnessValueMismatchError, CorrectnessProcessingError, CompileError, CompileInstantiationError, CompileRuntimeError, FileLock, cleanup_lockfile, set_seed, get_timing_stats, time_execution_with_cuda_event, load_model_and_inputs, load_custom_model, graceful_eval_cleanup
+from kbEvalUtil import KernelExecResult, from_kbEval_yaml, format_exception, CorrectnessResult, CorrectnessError, CorrectnessShapeMismatchError, CorrectnessValueMismatchError, CorrectnessProcessingError, CompileError, CompileInstantiationError, CompileRuntimeError, FileLock, cleanup_lockfile, set_seed, get_timing_stats, time_execution_with_cuda_event, load_model_and_inputs, load_custom_model, graceful_eval_cleanup, on_critical_timeout, on_process_timeout
 import torch
 import asyncio
 import os
@@ -26,17 +26,6 @@ import random
 # from filelock import FileLock, Timeout
 
 KB_EVAL_DIR = os.path.expanduser("~/.kbeval")
-
-MAX_LOCK_AGE = 45 # seconds
-
-def on_critical_timeout(signum, frame):
-    logger.error(f"⏰ Critical timeout reached [{signum}] [{frame.f_code.co_name}], exiting.")
-    sys.exit(5) # exit with code 5 to indicate timer expired
-
-def on_process_timeout():
-    logger.error(f"⛔ Process timeout reached, exiting.")
-    sys.exit(6) # exit with code 6 to indicate process timeout
-
 
 def verify_correctness(
     original_model_instance: nn.Module,
@@ -138,7 +127,7 @@ def eval_kernel_custom(
     num_warmups: int = 25,
     measure_reference: bool = False,
     code_type: str = "triton",
-    max_critical_time: int = 3600,
+    max_critical_time: int = 10,
 ) -> KernelExecResult:
     """
     Evaluate the reference code against the original model
