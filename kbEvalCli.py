@@ -4,6 +4,7 @@ import yaml
 import asyncio
 import json
 import os
+import signal
 import random
 import sys
 import time
@@ -25,7 +26,11 @@ import random
 
 KB_EVAL_DIR = os.path.expanduser("~/.kbeval")
 
-MAX_LOCK_AGE = 30 # seconds
+MAX_LOCK_AGE = 45 # seconds
+
+def on_timeout(signum, frame):
+    logger.error(f"⏰ Timeout reached [{signum}] [{frame.f_code.co_name}], exiting.")
+    sys.exit(5) # exit with code 5 to indicate timer expired
 
 
 def verify_correctness(
@@ -128,10 +133,15 @@ def eval_kernel_custom(
     num_warmups: int = 25,
     measure_reference: bool = False,
     code_type: str = "triton",
+    max_run_time: int = 3600,
 ) -> KernelExecResult:
     """
     Evaluate the reference code against the original model
     """
+    # test code
+    # signal.signal(signal.SIGALRM, on_timeout)
+    # signal.alarm(max_run_time)  # exit after max_run_time seconds
+
     context = {}
     if measure_reference:
         metadata = {
@@ -195,6 +205,10 @@ def eval_kernel_custom(
 
                 # verify lock is working by sleeping randome between 10 and 20 seconds
                 # time.sleep(random.randint(3, 5)) # verified lock is working
+
+                # Install the handler and arm the timer (in seconds)
+                signal.signal(signal.SIGALRM, on_timeout)
+                signal.alarm(max_run_time)  # exit after max_run_time seconds
 
                 init_inputs = get_init_inputs()
                 init_inputs = [
@@ -323,8 +337,7 @@ def eval_kernel_custom(
             graceful_eval_cleanup(context, device)
             cleanup_lockfile(lock_file)
 
-
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--wd", type=str, default="./kbEvalTest")
     parser.add_argument("--run_tag", type=str, default="auto")
@@ -338,6 +351,7 @@ if __name__ == "__main__":
     parser.add_argument("--generated_code", type=str, default="elemAddTriton.py")
     parser.add_argument("--measure_reference", action="store_true")
     parser.add_argument("--device-list", type=str, default="1")
+    parser.add_argument("--max_run_time", type=int, default=10)
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
@@ -391,6 +405,7 @@ if __name__ == "__main__":
                 device=device,
                 work_dir=work_dir,
                 measure_reference=True,
+                max_run_time=args.max_run_time,
             )
         else:
             result = eval_kernel_custom(
@@ -405,6 +420,7 @@ if __name__ == "__main__":
                 device=device,
                 work_dir=work_dir,
                 code_type=args.code_type,
+                max_run_time=args.max_run_time,
             )
     except Exception as exception:
         exit_code = 1
@@ -416,18 +432,20 @@ if __name__ == "__main__":
             metadata={"processing_error": exception_traceback_str},
         )
     finally:
-        # write to file
-        if args.measure_reference:
-            with open(reference_eval_path, "w") as f:
-                f.write(json.dumps(result.model_dump(), indent=4))
-        else:
-            with open(generated_eval_path, "w") as f:
-                f.write(json.dumps(result.model_dump(), indent=4))
-        if args.quiet:
-            logger.info(f"🔍 Evaluation result stored in [{work_dir}]")
-        else:
-            logger.info(f"🔍 Evaluation result stored in [{work_dir}]\n{json.dumps(result.model_dump(), indent=4)}")
+        if result is not None:
+            # write to file
+            if args.measure_reference:
+                with open(reference_eval_path, "w") as f:
+                    f.write(json.dumps(result.model_dump(), indent=4))
+            else:
+                with open(generated_eval_path, "w") as f:
+                    f.write(json.dumps(result.model_dump(), indent=4))
+            if args.quiet:
+                logger.info(f"🔍 Evaluation result stored in [{work_dir}]")
+            else:
+                logger.info(f"🔍 Evaluation result stored in [{work_dir}]\n{json.dumps(result.model_dump(), indent=4)}")
+            # exit with exit_code
+            sys.exit(exit_code)
 
-        # exit with exit_code
-        sys.exit(exit_code)
-
+if __name__ == "__main__":
+    main()
