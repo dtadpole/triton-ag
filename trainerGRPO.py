@@ -2,7 +2,6 @@ import copy
 import os
 import sys
 import duckdb
-import unsloth
 import torch
 import torch.nn.functional as F
 import numpy as np
