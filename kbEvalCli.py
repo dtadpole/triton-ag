@@ -346,7 +346,7 @@ def main():
     parser.add_argument("--measure_reference", action="store_true")
     parser.add_argument("--device-list", type=str, default="1")
     parser.add_argument("--max_critical_time", type=int, default=10)
-    parser.add_argument("--max_process_time", type=int, default=240)
+    parser.add_argument("--max_process_time", type=int, default=270)
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 

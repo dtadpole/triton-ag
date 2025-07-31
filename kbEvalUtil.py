@@ -385,3 +385,17 @@ def cleanup_lockfile(lock_file: str):
                     except Exception as e:
                         pass
 
+def verify_triton_code(code: str):
+    """
+    Verify if the triton code is valid
+    """
+    # check if the code is valid
+    try:
+        compile(code, "<string>", "exec")
+    except SyntaxError as e:
+        raise CompileSyntaxError(str(e)) from e
+
+    return True
+
+if __name__ == "__main__":
+    pass
