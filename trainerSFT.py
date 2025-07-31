@@ -102,7 +102,10 @@ class SFTTrainer(BaseTrainer):
         super().__init__(prefix_tag, base_config, status, base_trainer)
         self.sft_config = sft_config
         logger.info(f"📜 [SFTTrainer] Initialized for conversational fine-tuning with SFTConfig: {sft_config}")
-        
+
+    def short_name(self):
+        return 'sft'
+
     def _update_sft_config(self, sft_config: SFTConfig):
         """Update SFT config"""
         self.sft_config = sft_config

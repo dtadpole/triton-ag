@@ -277,6 +277,9 @@ class BaseTrainer:
             else:
                 logger.warning(f"⚠️ [{self.__class__.__name__}] Checkpoint not found: {checkpoint_location} - Starting fresh training")
 
+    def short_name(self):
+        return 'base'
+
     def _update_config(self, config: TrainerConfig):
         """Update config"""
         self.config = config
@@ -661,6 +664,9 @@ class BaseTrainer:
                     "train/loss": avg_loss,
                     "train/learning_rate": current_lr,
                     "train/grad_norm": grad_norm,
+                    f"train_{self.short_name()}/loss": avg_loss,
+                    f"train_{self.short_name()}/learning_rate": current_lr,
+                    f"train_{self.short_name()}/grad_norm": grad_norm,
                 }, self.trainer_status.global_step)
                 
                 # Save checkpoint

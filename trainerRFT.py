@@ -105,7 +105,10 @@ class RFTTrainer(BaseTrainer):
         super().__init__(prefix_tag, base_config, status, base_trainer)
         self.rft_config = rft_config
         logger.info(f"📜 [RFTTrainer] Initialized for conversational fine-tuning with RFTConfig: {rft_config}")
-        
+
+    def short_name(self):
+        return 'rft'
+
     def _update_rft_config(self, rft_config: RFTConfig):
         """Update RFT config"""
         self.rft_config = rft_config

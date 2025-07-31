@@ -129,6 +129,9 @@ class GRPOTrainer(BaseTrainer):
 
         logger.info(f"⭐ [GRPOTrainer] Initialized with GRPOConfig: {grpo_config}")
 
+    def short_name(self):
+        return 'grpo'
+
     def _update_grpo_config(self, grpo_config: GRPOConfig):
         """Update GRPO config"""
         self.grpo_config = grpo_config
@@ -295,8 +298,13 @@ class GRPOTrainer(BaseTrainer):
                 "train/loss": avg_loss,
                 "train/learning_rate": current_lr,
                 "train/grad_norm": grad_norm,
-                "reward/total_mean": group_reward_mean,
-                "reward/total_std": group_reward_std,
+                f"train_{self.short_name()}/loss": avg_loss,
+                f"train_{self.short_name()}/learning_rate": current_lr,
+                f"train_{self.short_name()}/grad_norm": grad_norm,
+                f"train_{self.short_name()}/num_trainable_groups": len(dataset.result_groups),
+                f"train_{self.short_name()}/num_group_results": len(group.results),
+                f"reward/total_mean": group_reward_mean,
+                f"reward/total_std": group_reward_std,
             }
             for key, value in group_reward_items_mean.items():
                 metrics[f"reward/item_{key}_mean"] = value
