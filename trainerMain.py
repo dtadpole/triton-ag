@@ -6,9 +6,10 @@ import httpx
 import yaml
 import traceback
 import os
-from globalUtils import MODEL_OVERRIDE_KEY, TrainerGRPOBlock, TrainerRFTBlock, TrainerSFTBlock, TrainerConfig
+from globalUtils import MODEL_OVERRIDE_KEY, TrainerGRPOBlock, TrainerRFTBlock, TrainerSFTBlock
 from logger import logger
 from globalRegClient import GlobalRegClient
+from trainerBase import TrainerConfig
 from trainerSFT import sft_train_block, sft_get_trainer, SFTConfig
 from trainerRFT import rft_train_block, rft_get_trainer, RFTConfig
 from trainerGRPO import grpo_train_block, grpo_get_trainer, GRPOConfig
