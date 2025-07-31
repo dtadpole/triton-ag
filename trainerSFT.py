@@ -103,6 +103,9 @@ class SFTTrainer(BaseTrainer):
         self.sft_config = sft_config
         logger.info(f"📜 [SFTTrainer] Initialized for conversational fine-tuning with SFTConfig: {sft_config}")
         
+    def _update_sft_config(self, sft_config: SFTConfig):
+        """Update SFT config"""
+        self.sft_config = sft_config
 
 def sft_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_file: str = "trainerBase.yaml", sft_config_file: str = "trainerSFT.yaml"):
     """Get a SFT trainer"""

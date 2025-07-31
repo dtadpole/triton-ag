@@ -276,6 +276,10 @@ class BaseTrainer:
                 self._load_checkpoint(checkpoint_location)
             else:
                 logger.warning(f"⚠️ [{self.__class__.__name__}] Checkpoint not found: {checkpoint_location} - Starting fresh training")
+
+    def _update_config(self, config: TrainerConfig):
+        """Update config"""
+        self.config = config
     
     def _set_seed(self):
         """Set random seeds for reproducibility"""

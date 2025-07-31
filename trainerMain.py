@@ -6,12 +6,12 @@ import httpx
 import yaml
 import traceback
 import os
-from globalUtils import MODEL_OVERRIDE_KEY, TrainerGRPOBlock, TrainerRFTBlock, TrainerSFTBlock
+from globalUtils import MODEL_OVERRIDE_KEY, TrainerGRPOBlock, TrainerRFTBlock, TrainerSFTBlock, TrainerConfig
 from logger import logger
 from globalRegClient import GlobalRegClient
-from trainerSFT import sft_train_block, sft_get_trainer
-from trainerRFT import rft_train_block, rft_get_trainer
-from trainerGRPO import grpo_train_block, grpo_get_trainer
+from trainerSFT import sft_train_block, sft_get_trainer, SFTConfig
+from trainerRFT import rft_train_block, rft_get_trainer, RFTConfig
+from trainerGRPO import grpo_train_block, grpo_get_trainer, GRPOConfig
 from trainerUtil import rsync_file, VLLMClient
 
 
@@ -129,10 +129,14 @@ async def main_loop_task(rsync_queue: RsyncQueue, prefix_tag: str, test_mode: bo
 
     logger.info(f"🌀 [trainerMain] Main loop started for prefix: {prefix_tag}")
 
+    base_config_file = "trainerBase.yaml"
+    sft_config_file = "trainerSFT.yaml"
+    rft_config_file = "trainerRFT.yaml"
+    grpo_config_file = "trainerGRPO.yaml"
     # initialize trainers (for now, we only have sft and grpo)
-    sft_trainer = sft_get_trainer(None, prefix_tag)
-    rft_trainer = rft_get_trainer(sft_trainer, prefix_tag)
-    grpo_trainer = grpo_get_trainer(rft_trainer, prefix_tag)
+    sft_trainer = sft_get_trainer(None, prefix_tag, base_config_file, sft_config_file)
+    rft_trainer = rft_get_trainer(sft_trainer, prefix_tag, base_config_file, rft_config_file)
+    grpo_trainer = grpo_get_trainer(rft_trainer, prefix_tag, base_config_file, grpo_config_file)
 
     loop = asyncio.get_event_loop()
 
@@ -167,6 +171,11 @@ async def main_loop_task(rsync_queue: RsyncQueue, prefix_tag: str, test_mode: bo
                     continue
                 sft_block = TrainerSFTBlock(**sft_item)
                 logger.info(f"🧊 [trainerMain] Training SFT block: {sft_block.input_tag}")
+                # update config before running
+                base_config = TrainerConfig.from_yaml(base_config_file, override_yaml_path=sft_config_file)
+                sft_config = SFTConfig.from_yaml(sft_config_file)
+                sft_trainer._update_config(base_config)
+                sft_trainer._update_sft_config(sft_config)
                 # run in executor to avoid blocking the event loop
                 await loop.run_in_executor(None, sft_train_block, sft_block, sft_trainer, rsync_queue.enqueue)
 
@@ -177,6 +186,11 @@ async def main_loop_task(rsync_queue: RsyncQueue, prefix_tag: str, test_mode: bo
                     continue
                 rft_block = TrainerRFTBlock(**rft_item)
                 logger.info(f"🧊 [trainerMain] Training RFT block: {rft_block.input_tag}")
+                # update config before running
+                base_config = TrainerConfig.from_yaml(base_config_file, override_yaml_path=rft_config_file)
+                rft_config = RFTConfig.from_yaml(rft_config_file)
+                rft_trainer._update_config(base_config)
+                rft_trainer._update_rft_config(rft_config)
                 # run in executor to avoid blocking the event loop
                 await loop.run_in_executor(None, rft_train_block, rft_block, rft_trainer, rsync_queue.enqueue)
 
@@ -187,6 +201,11 @@ async def main_loop_task(rsync_queue: RsyncQueue, prefix_tag: str, test_mode: bo
                     continue
                 grpo_block = TrainerGRPOBlock(**grpo_item)
                 logger.info(f"🧊 [trainerMain] Training GRPO block: {grpo_block.input_tag}")
+                # update config before running
+                base_config = TrainerConfig.from_yaml(base_config_file, override_yaml_path=grpo_config_file)
+                grpo_config = GRPOConfig.from_yaml(grpo_config_file)
+                grpo_trainer._update_config(base_config)
+                grpo_trainer._update_grpo_config(grpo_config)
                 # run in executor to avoid blocking the event loop
                 await loop.run_in_executor(None, grpo_train_block, grpo_block, grpo_trainer, rsync_queue.enqueue)
 

@@ -106,6 +106,9 @@ class RFTTrainer(BaseTrainer):
         self.rft_config = rft_config
         logger.info(f"📜 [RFTTrainer] Initialized for conversational fine-tuning with RFTConfig: {rft_config}")
         
+    def _update_rft_config(self, rft_config: RFTConfig):
+        """Update RFT config"""
+        self.rft_config = rft_config
 
 def rft_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_file: str = "trainerBase.yaml", rft_config_file: str = "trainerRFT.yaml"):
     """Get a RFT trainer"""

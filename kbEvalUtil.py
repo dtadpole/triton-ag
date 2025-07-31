@@ -11,6 +11,9 @@ import psutil
 from logger import logger
 import numpy as np
 import sys
+import ast
+import argparse
+from collections import defaultdict
 
 MAX_LOCK_AGE = 45 # seconds
 
@@ -74,6 +77,11 @@ class CompileLoadError(CompileError):
         super().__init__(self.message)          # pass text to base class
 
 class CompileMissingComponentError(CompileError):
+    def __init__(self, message: str | None = None) -> None:
+        self.message = message or f"Could not find component in code"
+        super().__init__(self.message)          # pass text to base class
+
+class CompileResolveComponentError(CompileError):
     def __init__(self, message: str | None = None) -> None:
         self.message = message or f"Could not find component in code"
         super().__init__(self.message)          # pass text to base class
@@ -385,17 +393,136 @@ def cleanup_lockfile(lock_file: str):
                     except Exception as e:
                         pass
 
-def verify_triton_code(code: str):
+class FunctionCallMapper(ast.NodeVisitor):
+    def __init__(self):
+        self.scope_stack = ['__global__']  # Tracks class/function nesting
+        self.call_graph = defaultdict(set)  # caller → set of callees
+        self.defined_functions = {}  # name → fully qualified name (e.g., helper → MyClass.helper)
+        self.triton_jit_functions = set()
+        self.model_new_class_count = 0
+        self.model_new_forward_count = 0
+        print(f"Processing Function Call Mapper [{self._current_scope()}]...")
+
+    def _current_scope(self):
+        return ".".join(self.scope_stack)
+
+    def visit_ClassDef(self, node):
+        print(f"{"  "*len(self.scope_stack)} Inside class: [{".".join(self.scope_stack + [node.name])}]")
+        self.scope_stack.append(node.name)
+        if node.name == "ModelNew":
+            self.model_new_class_count += 1
+        self.generic_visit(node)
+        self.scope_stack.pop()
+
+    def visit_FunctionDef(self, node):
+        print(f"{"  "*len(self.scope_stack)} Inside function: [{".".join(self.scope_stack + [node.name])}]")
+        full_name = ".".join(self.scope_stack + [node.name])
+        self.defined_functions[node.name] = full_name  # record mapping for function lookup
+        self.scope_stack.append(node.name)
+        if node.name == "forward" and len(self.scope_stack) >= 2 and self.scope_stack[-2] == "ModelNew":
+            self.model_new_forward_count += 1
+        for dec in node.decorator_list:
+            if isinstance(dec, ast.Attribute) and \
+            isinstance(dec.value, ast.Name) and \
+            dec.value.id == 'triton' and dec.attr == 'jit':
+                self.triton_jit_functions.add(full_name)
+                print(f"{"  "*len(self.scope_stack)} Function [{full_name}] is [@triton.jit]")
+        self.generic_visit(node)
+        self.scope_stack.pop()
+
+    def visit_AsyncFunctionDef(self, node):
+        print(f"{"  "*len(self.scope_stack)} Inside async function: [{".".join(self.scope_stack + [node.name])}]")
+        full_name = ".".join(self.scope_stack + [node.name])
+        self.defined_functions[node.name] = full_name
+        self.scope_stack.append(node.name)
+        self.generic_visit(node)
+        self.scope_stack.pop()
+
+    def visit_Call(self, node):
+        func_name = self._get_call_name(node.func)
+        caller = self._current_scope()
+        if caller and func_name:
+            # Upgrade to full qualified name if we know it
+            qualified_callee = self.defined_functions.get(func_name, func_name)
+            self.call_graph[caller].add(qualified_callee)
+            print(f"{"  "*len(self.scope_stack)} Found function call: [{qualified_callee}]")
+        self.generic_visit(node)
+
+    def _get_call_name(self, node):
+        """Extract base name from the called function expression."""
+        if isinstance(node, ast.Name):
+            return node.id
+        elif isinstance(node, ast.Attribute):
+            # e.g., self.helper → helper
+            return node.attr
+        elif isinstance(node, ast.Subscript):
+            return self._get_call_name(node.value)
+        elif isinstance(node, ast.Call):
+            return self._get_call_name(node.func)
+        return None
+
+def resolve_triton_code(code: str):
     """
-    Verify if the triton code is valid
+    Resolve the triton code, check there is function call from ModelNew.forward to @triton.jit function(s)
     """
     # check if the code is valid
     try:
-        compile(code, "<string>", "exec")
-    except SyntaxError as e:
+        tree = ast.parse(code)
+        # print(ast.dump(tree, indent=2))
+    except Exception as e:
         raise CompileSyntaxError(str(e)) from e
 
+    mapper = FunctionCallMapper()
+    mapper.visit(tree)
+    if len(mapper.call_graph) == 0:
+        raise CompileResolveComponentError("No function calls found")
+    if len(mapper.triton_jit_functions) == 0:
+        raise CompileResolveComponentError("No @triton.jit functions found")
+    logger.info(f"Found [{len(mapper.triton_jit_functions)}] @triton.jit functions: {mapper.triton_jit_functions}")
+    # check that ModelNew is defined as a class, and only one ModelNew is defined
+    # check that ModelNew has a forward method, and only one forward method is defined
+    if mapper.model_new_class_count == 0:
+        raise CompileResolveComponentError("ModelNew is not defined as a class")
+    if mapper.model_new_class_count != 1:
+        raise CompileResolveComponentError(f"ModelNew is defined multiple times: [{mapper.model_new_class_count}]")
+    logger.info(f"Class [ModelNew] is defined [{mapper.model_new_class_count}] time(s)")
+    if mapper.model_new_forward_count == 0:
+        raise CompileResolveComponentError("ModelNew does not have a forward method")
+    if mapper.model_new_forward_count != 1:
+        raise CompileResolveComponentError(f"ModelNew has multiple forward methods: [{mapper.model_new_forward_count}]")
+    logger.info(f"Method [ModelNew.forward] is defined [{mapper.model_new_forward_count}] time(s)")
+
+    # check ModelNew.forward calls at least one triton.jit function, using call_graph
+    forward_method = "__global__.ModelNew.forward"
+    if forward_method not in mapper.call_graph:
+        raise CompileResolveComponentError(f"Forward method [{forward_method}] is not found in call graph")
+    # recursivel wall through the call graph, check all function call names
+    def get_function_call_recursive(func_name: str, parent_path: list[str] = [], visited: dict = {}) -> dict:
+        if func_name in visited:
+            return visited
+        visited[func_name] = parent_path.copy()
+        for callee in mapper.call_graph[func_name]:
+            visited = get_function_call_recursive(callee, parent_path + [func_name], visited)
+        return visited
+    function_calls = get_function_call_recursive(forward_method)
+    jit_triton_function_called = 0
+    for func_name, path in function_calls.items():
+        if func_name in mapper.triton_jit_functions:
+            logger.info(f"Function [@triton.jit] [{func_name}] is called by [{' -> '.join(path)}]")
+            jit_triton_function_called += 1
+    if jit_triton_function_called == 0:
+        raise CompileResolveComponentError("ModelNew.forward does not call any @triton.jit functions")
+
+    # we are here if everything checks out
     return True
 
 if __name__ == "__main__":
-    pass
+    argparser = argparse.ArgumentParser()
+    argparser.add_argument("--code", type=str, required=True)
+    args = argparser.parse_args()
+
+    # read code from file
+    with open(args.code, "r") as f:
+        code = f.read()
+
+    print(resolve_triton_code(code))

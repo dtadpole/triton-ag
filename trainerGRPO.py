@@ -43,7 +43,7 @@ class GRPOConfig(BaseModel):
     discard_long_conversations: bool = True
     clip_ratio_epsilon_lower: float = 0.2
     clip_ratio_epsilon_upper: float = 0.3
-    bound_advantage_range: float = 2.0
+    bound_advantage_range: float = 2.5
     beta: float = 0.0  # KL divergence coefficient
     reward_scale: bool = True
     reward_epsilon: float = 1e-3
@@ -128,6 +128,10 @@ class GRPOTrainer(BaseTrainer):
         self.reference_model = None
 
         logger.info(f"⭐ [GRPOTrainer] Initialized with GRPOConfig: {grpo_config}")
+
+    def _update_grpo_config(self, grpo_config: GRPOConfig):
+        """Update GRPO config"""
+        self.grpo_config = grpo_config
 
     def compute_ref_log_probs(self, batch: Dict[str, Any]):
         """Compute log probabilities for the generated tokens"""

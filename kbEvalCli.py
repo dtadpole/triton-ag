@@ -14,7 +14,7 @@ import traceback
 from threading import Timer
 from pydantic import BaseModel
 from torch import nn
-from kbEvalUtil import KernelExecResult, from_kbEval_yaml, format_exception, CorrectnessResult, CorrectnessError, CorrectnessShapeMismatchError, CorrectnessValueMismatchError, CorrectnessProcessingError, CompileError, CompileInstantiationError, CompileRuntimeError, FileLock, cleanup_lockfile, set_seed, get_timing_stats, time_execution_with_cuda_event, load_model_and_inputs, load_custom_model, graceful_eval_cleanup, on_critical_timeout, on_process_timeout
+from kbEvalUtil import KernelExecResult, from_kbEval_yaml, format_exception, CorrectnessResult, CorrectnessError, CorrectnessShapeMismatchError, CorrectnessValueMismatchError, CorrectnessProcessingError, CompileError, CompileInstantiationError, CompileRuntimeError, FileLock, cleanup_lockfile, set_seed, get_timing_stats, time_execution_with_cuda_event, load_model_and_inputs, load_custom_model, graceful_eval_cleanup, on_critical_timeout, on_process_timeout, resolve_triton_code
 import torch
 import asyncio
 import os
@@ -166,6 +166,10 @@ def eval_kernel_custom(
                 build_directory=work_dir,
                 filename=generated_path,
             )
+
+            if code_type == "triton":
+                # check there is function call from ModelNew.forward to @triton.jit function(s)
+                resolve_triton_code(generated_code)
 
     except CompileError as e:
         formatted_error = format_exception(e)
