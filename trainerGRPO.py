@@ -377,7 +377,8 @@ def grpo_train_block(block: TrainerGRPOBlock, trainer: GRPOTrainer, callback: Op
     result_groups = []
     for index, row in result_df.iterrows():
         if not row['compiled'] or not row['correctness']:
-            logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] Skipping [{row['filename']}] Compiled: [{row['compiled']}] Correctness: [{row['correctness']}]")
+            # this should not happen, but just in case
+            logger.error(f"❌ [GRPOTrainer] [{block.input_tag}] Invalid Reference Evaluation - Skipping [{row['filename']}] Compiled: [{row['compiled']}] Correctness: [{row['correctness']}]")
             continue
 
         folder = os.path.dirname(row['filename'])
