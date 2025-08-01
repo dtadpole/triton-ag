@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 import argparse
 import sys
 import random
@@ -220,7 +221,7 @@ async def main_loop_task(rsync_queue: RsyncQueue, prefix_tag: str, test_mode: bo
 
 async def main():
     parser = argparse.ArgumentParser(description="Train a model using mixed SFT and GRPO trainers")
-    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_32B.a")
+    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.b")
     parser.add_argument("--test_mode", action="store_true")
     args = parser.parse_args()
 
@@ -228,7 +229,7 @@ async def main():
         # read from trainerMain.yaml
         with open("trainerMain.yaml", "r") as f:
             test_config = yaml.safe_load(f).get('test', {})
-        prefix_tag = test_config.get('prefix_tag', 'test_0.1.0')
+        prefix_tag = test_config.get('prefix_tag', 'test_0.1.0') + '_' + datetime.now().strftime("%Y%m%d_%H%M%S")
         sft_trainer = sft_get_trainer(None, prefix_tag)
         rft_trainer = rft_get_trainer(sft_trainer, prefix_tag)
         grpo_trainer = grpo_get_trainer(rft_trainer, prefix_tag)

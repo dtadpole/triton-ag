@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 EOS_TOKENS = ["<|endoftext|>", "<|end▁of▁sentence|>", "<｜end▁of▁sentence｜>", "<|im_end|>", "<|im_start|>"]
 
-REQUIRED_MATCHED_RATIO = 99.75
+REQUIRED_MATCHED_RATIO = 99.9
 
 class ProviderConfig(BaseModel):
     provider_name: str = Field()

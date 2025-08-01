@@ -82,9 +82,10 @@ class GlobalRegistry:
             # load previous queued items from storage
             queue_storage = {}
             try:
-                # if globalRegistry/queues.yaml exists, load it
-                if os.path.exists(f"{GLOBAL_REGISTRY_DIR}/queues.json"):
-                    with open(f"{GLOBAL_REGISTRY_DIR}/queues.json", "r") as f:
+                # if globalRegistry/queues.json exists, load it
+                queue_filename = f"{GLOBAL_REGISTRY_DIR}/queues.json"
+                if os.path.exists(queue_filename):
+                    with open(queue_filename, "r") as f:
                         queue_storage = json.load(f) # queue_storage is a dictionary of queue names and their items
             except Exception as e:
                 # load from globalRegistry/queues.yaml.bak
@@ -113,7 +114,15 @@ class GlobalRegistry:
             try:
                 interval = self.config.get("_save_adapter_task", {}).get("interval", 10)
                 adapters = {}
-                with open(f"{GLOBAL_REGISTRY_DIR}/adapters.json", "w") as f:
+                # if folder globalRegistry does not exist, create it
+                if not os.path.exists(GLOBAL_REGISTRY_DIR):
+                    os.makedirs(GLOBAL_REGISTRY_DIR)
+                adapter_filename = f"{GLOBAL_REGISTRY_DIR}/adapters.json"
+                # if globalRegistry/adapters.json exists, move it to globalRegistry/adapters.json.bak
+                if os.path.exists(adapter_filename):
+                    os.rename(adapter_filename, f"{adapter_filename}.bak")
+                # save the adapters to the config
+                with open(adapter_filename, "w") as f:
                     for key in self.keys():
                         if key.startswith(ADAPTER_PREFIX):
                             adapter_name = key.replace(ADAPTER_PREFIX, "")
@@ -133,6 +142,13 @@ class GlobalRegistry:
             try:
                 interval = self.config.get("_save_queue_task", {}).get("interval", 10)
                 queue_storage = {}
+                # if folder globalRegistry does not exist, create it
+                if not os.path.exists(GLOBAL_REGISTRY_DIR):
+                    os.makedirs(GLOBAL_REGISTRY_DIR)
+                # if globalRegistry/queues.json exists, move it to globalRegistry/queues.json.bak
+                queue_filename = f"{GLOBAL_REGISTRY_DIR}/queues.json"
+                if os.path.exists(queue_filename):
+                    os.rename(queue_filename, f"{queue_filename}.bak")
                 queues = self.config.get("queues", [])
                 for queue in queues:
                     queue_name = queue.get("name")
@@ -140,14 +156,8 @@ class GlobalRegistry:
                     q = self.get(object_name)
                     if q is not None:
                         queue_storage[object_name] = list(q._queue)
-                # if folder globalRegistry does not exist, create it
-                if not os.path.exists(GLOBAL_REGISTRY_DIR):
-                    os.makedirs(GLOBAL_REGISTRY_DIR)
-                # if globalRegistry/queues.yaml exists, move it to globalRegistry/queues.yaml.bak
-                if os.path.exists(f"{GLOBAL_REGISTRY_DIR}/queues.json"):
-                    os.rename(f"{GLOBAL_REGISTRY_DIR}/queues.json", f"{GLOBAL_REGISTRY_DIR}/queues.json.bak")
                 # save the queues to the config
-                with open(f"{GLOBAL_REGISTRY_DIR}/queues.json", "w") as f:
+                with open(queue_filename, "w") as f:
                     json.dump(queue_storage, f, indent=2)
             except Exception as e:
                 logger.error(f"Error saving queues: {e}")

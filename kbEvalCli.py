@@ -342,7 +342,7 @@ def main():
     parser.add_argument("--model_tag", type=str, default="model_tag")
     parser.add_argument("--task_tag", type=str, default="task_tag")
     parser.add_argument("--eval_tag", type=str, default="eval_tag")
-    parser.add_argument("--code_type", type=str, default="triton", choices=["triton", "cuda"]) # add rocm support later
+    parser.add_argument("--code_type", type=str, required=True, choices=["triton", "cuda", "pytorch"]) # add rocm support later
     parser.add_argument("--reference_code", type=str,
                         # default="/home/centos/.kbeval/Qwen/Qwen3-8B-FP8/86_conv_depthwise_separable_2D/20250629_050843/reference_code.py")
                         default="elemAddRef.py")

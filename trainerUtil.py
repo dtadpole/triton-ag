@@ -403,7 +403,7 @@ class VLLMClient:
                         },
                         timeout=self.timeout
                     )
-                    logger.warning(f"🔍 [VLLMClient] Response: {response.json()}")
+                    logger.warning(f"🔍 [VLLMClient] Response: {response.text}") # use text instead of json
                     response.raise_for_status()
                     logger.info(f"🔍 [VLLMClient] Loaded lora adapter from [{lora_path}]")
                     return
@@ -432,7 +432,7 @@ class VLLMClient:
                         },
                         timeout=self.timeout
                     )
-                    logger.warning(f"🔍 [VLLMClient] Response: {response.json()}")
+                    logger.warning(f"🔍 [VLLMClient] Response: {response.text}") # use text instead of json
                     response.raise_for_status()
                     logger.info(f"🔍 [VLLMClient] Unloaded lora adapter from [{lora_name}]")
                     return
