@@ -43,7 +43,7 @@ class GRPOConfig(BaseModel):
     discard_long_conversations: bool = True
     clip_ratio_epsilon_lower: float = 0.2
     clip_ratio_epsilon_upper: float = 0.3
-    bound_advantage_range: float = 2.5
+    bound_advantage_range: float = 3.0
     beta: float = 0.0  # KL divergence coefficient
     reward_scale: bool = True
     reward_epsilon: float = 1e-3

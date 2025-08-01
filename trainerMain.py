@@ -181,6 +181,8 @@ async def main_loop_task(rsync_queue: RsyncQueue, prefix_tag: str, test_mode: bo
                 sft_config = SFTConfig.from_yaml(sft_config_file)
                 sft_trainer._update_config(base_config)
                 sft_trainer._update_sft_config(sft_config)
+                logger.info(f"🔍 [trainerMain] Base config: {sft_trainer.config.model_dump_json()}")
+                logger.info(f"🔍 [trainerMain] SFT config: {sft_trainer.sft_config.model_dump_json()}")
                 # run in executor to avoid blocking the event loop
                 await loop.run_in_executor(None, sft_train_block, sft_block, sft_trainer, rsync_queue.enqueue)
 
@@ -196,6 +198,8 @@ async def main_loop_task(rsync_queue: RsyncQueue, prefix_tag: str, test_mode: bo
                 rft_config = RFTConfig.from_yaml(rft_config_file)
                 rft_trainer._update_config(base_config)
                 rft_trainer._update_rft_config(rft_config)
+                logger.info(f"🔍 [trainerMain] Base config: {rft_trainer.config.model_dump_json()}")
+                logger.info(f"🔍 [trainerMain] RFT config: {rft_trainer.rft_config.model_dump_json()}")
                 # run in executor to avoid blocking the event loop
                 await loop.run_in_executor(None, rft_train_block, rft_block, rft_trainer, rsync_queue.enqueue)
 
@@ -211,6 +215,8 @@ async def main_loop_task(rsync_queue: RsyncQueue, prefix_tag: str, test_mode: bo
                 grpo_config = GRPOConfig.from_yaml(grpo_config_file)
                 grpo_trainer._update_config(base_config)
                 grpo_trainer._update_grpo_config(grpo_config)
+                logger.info(f"🔍 [trainerMain] Base config: {grpo_trainer.config.model_dump_json()}")
+                logger.info(f"🔍 [trainerMain] GRPO config: {grpo_trainer.grpo_config.model_dump_json()}")
                 # run in executor to avoid blocking the event loop
                 await loop.run_in_executor(None, grpo_train_block, grpo_block, grpo_trainer, rsync_queue.enqueue)
 
