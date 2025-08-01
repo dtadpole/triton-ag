@@ -148,9 +148,11 @@ export VLLM_ATTENTION_BACKEND=FLASHINFER
 
 ###
 
-/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-32B --port 8091 --host 0.0.0.0 --api-key dummy --dtype bfloat16 --kv-cache-dtype auto --enable-lora --max-lora-rank 128 --max-loras 8 --gpu-memory-utilization 0.95 --max_model_len 16384 --load_format safetensors --guided_decoding_backend guidance --enable_auto_tool_choice --tool_call_parser hermes --scheduling_policy fcfs --enable_prefix_caching --prefix-caching-hash-algo sha256 --enable_chunked_prefill --max_num_batched_tokens 2048 --max_num_seqs 16 --max_log_len 0 --trust_remote_code --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":0.95,"top_k":0,"repetition_penalty":1.05}' --enforce-eager
+/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-32B --port 8091 --host 0.0.0.0 --api-key dummy --enable-lora --max-lora-rank 128 --max-loras 8 --gpu-memory-utilization 0.95 --max_model_len 16384 --load_format safetensors --guided_decoding_backend guidance --guided-decoding-disable-fallback --enable_auto_tool_choice --tool_call_parser hermes --scheduling_policy fcfs --enable_chunked_prefill --max_num_batched_tokens 2048 --max_num_seqs 16 --max_log_len 0 --trust_remote_code --enable_prefix_caching --prefix-caching-hash-algo sha256 --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' --enforce-eager
 
 --no-enable-prefix-caching 
+
+--dtype bfloat16 --kv-cache-dtype auto 
 
 --enable_prefix_caching --prefix-caching-hash-algo sha256 
 

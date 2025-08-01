@@ -48,6 +48,9 @@ class RsyncQueue:
         self.rsync_queue.put_nowait(checkpoint_path)
 
     async def upload_lora_adapter(self, checkpoint_path: str):
+        if not self.rsync_config.get('run_upload', False):
+            logger.info(f"🔍 [RsyncQueue] Skipping upload because [run_upload] is [false]")
+            return
         # get with timeout
         source_prefix = os.path.expanduser(self.rsync_config.get('rsync_source_prefix', '~/.trainer'))
         target_prefix = self.rsync_config.get('rsync_target_prefix', '192.168.1.205:.trainer')
@@ -217,7 +220,7 @@ async def main_loop_task(rsync_queue: RsyncQueue, prefix_tag: str, test_mode: bo
 
 async def main():
     parser = argparse.ArgumentParser(description="Train a model using mixed SFT and GRPO trainers")
-    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.a")
+    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_32B.a")
     parser.add_argument("--test_mode", action="store_true")
     args = parser.parse_args()
 
