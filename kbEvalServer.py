@@ -157,6 +157,8 @@ async def kb_eval_ref(
         async with request_counter_lock:
             request_counter += 1
 
+        start_time = time.time()
+
         # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}/{eval_tag}/{time_tag}
         temp_dir = os.path.join(KB_EVAL_DIR, run_tag, model_tag, task_tag)
         os.makedirs(temp_dir, exist_ok=True)
@@ -203,8 +205,10 @@ async def kb_eval_ref(
         # read the result from {temp_dir}/{eval_tag}_kbeval.json
         result_json_path = os.path.join(temp_dir, f"{eval_tag}_kbeval.json")
         if not os.path.exists(result_json_path):
-            logger.error(f"[KB Eval] [reference] result file [{result_json_path}] not found")
-            raise FileNotFoundError(f"[KB Eval] [reference] result file [{result_json_path}] not found")
+            elapsed_time = time.time() - start_time
+            error_msg = f"[KB Eval] [reference] kbEvalCli.py could not generate the result file in time [{elapsed_time:.2f}s]. Missing file [{result_json_path}]"
+            logger.error(error_msg)
+            raise FileNotFoundError(error_msg)
         
         with open(result_json_path, "r") as f:
             result_json = json.load(f)
@@ -219,12 +223,12 @@ async def kb_eval_ref(
     except Exception as e:
         global CURR_ERROR_COUNT
         CURR_ERROR_COUNT += 1
-        logger.error(f"❌ [KB Eval] [reference] error: {e}")
+        logger.error(f"❌ [KB Eval] [reference] error: {type(e).__name__}: {str(e)}")
         result = KernelExecResult(
             compiled=False,
             correctness=False,
             metadata={
-                "processing_error": str(e),
+                "processing_error": f"Unexpected error: {type(e).__name__}: {str(e)}",
                 "retriable": True, # if the error is retriable, the client will retry the request
             },
             runtime=-1.0,
@@ -258,6 +262,8 @@ async def kb_eval(
     try:
         async with request_counter_lock:
             request_counter += 1
+
+        start_time = time.time()
 
         # temp_dir is {HOME}/.kbeval/{run_tag}/{model_tag}/{task_tag}/{eval_tag}
         temp_dir = os.path.join(KB_EVAL_DIR, run_tag, model_tag, task_tag, eval_tag)
@@ -305,8 +311,10 @@ async def kb_eval(
 
         result_json_path = os.path.join(temp_dir, f"{eval_tag}_kbeval.json")
         if not os.path.exists(result_json_path):
-            logger.error(f"[KB Eval] [{eval_tag}] result file [{result_json_path}] not found")
-            raise FileNotFoundError(f"[KB Eval] [{eval_tag}] result file [{result_json_path}] not found")
+            elapsed_time = time.time() - start_time
+            error_msg = f"[KB Eval] [{eval_tag}] kbEvalCli.py could not generate the result file in time [{elapsed_time:.2f}s]. Missing file [{result_json_path}]"
+            logger.error(error_msg)
+            raise FileNotFoundError(error_msg)
         
         # read the result from {temp_dir}/kbeval_{eval_tag}.json
         with open(result_json_path, "r") as f:
@@ -322,12 +330,12 @@ async def kb_eval(
     except Exception as e:
         global CURR_ERROR_COUNT
         CURR_ERROR_COUNT += 1
-        logger.error(f"❌ [KB Eval] [{eval_tag}] error: {e}")
+        logger.error(f"❌ [KB Eval] [{eval_tag}] error: {type(e).__name__}: {str(e)}")
         result = KernelExecResult(
             compiled=False,
             correctness=False,
             metadata={
-                "processing_error": str(e),
+                "processing_error": f"Unexpected error: {type(e).__name__}: {str(e)}",
                 "retriable": True, # if the error is retriable, the client will retry the request
             },
             runtime=-1.0,

@@ -97,12 +97,14 @@ class CodeGenEvalClient:
     def get_example_reference_code(self) -> str:
         """Get example reference code from configuration."""
         prompts_config = self.get_prompt_template()
-        return prompts_config.get('reference_code', '')
+        example_prompt = prompts_config.get('examples', {})
+        return example_prompt.get('reference_code', '')
 
     def get_example_generated_code(self) -> str:
         """Get example generated code from configuration."""
         prompts_config = self.get_prompt_template()
-        return prompts_config.get('generated_code', '')
+        example_prompt = prompts_config.get('examples', {})
+        return example_prompt.get('generated_code', '')
 
     async def _process_code_gen(
         self,
@@ -247,6 +249,7 @@ class CodeGenEvalClient:
         task_tag: str,
         turn_tag: str,
         generated_code: str,
+        reference_eval: Optional[Dict] = None,
     ) -> Dict:
         """
         Process a single evaluation task for a generated file.
@@ -283,11 +286,33 @@ class CodeGenEvalClient:
             start_time = time.time()
             result = await self.kb_eval_client.kb_eval(run_tag=self.run_tag, model_tag=self.model_tag, task_tag=task_tag, eval_tag=turn_tag, reference_code=reference_code, generated_code=generated_code, code_type=self.get_code_type())
             eval_result_json = result.model_dump()
+            # compare generated performance to reference performance
+            if reference_eval and 'runtime' in reference_eval:
+                reference_runtime = reference_eval['runtime']
+                if 'runtime' in eval_result_json and eval_result_json['runtime'] > 0.0:
+                    generated_runtime = eval_result_json['runtime']
+                    speedup = reference_runtime / generated_runtime
+                    speed_emoji = '🚀' if speedup > 1.0 else ('🦙' if speedup > 0.5 else '🐢')
+                else:
+                    generated_runtime = eval_result_json['runtime']
+                    speedup = 0.0
+                    speed_emoji = '🐢'
+            else:
+                reference_runtime = 0.0
+                generated_runtime = eval_result_json['runtime']
+                speedup = 0.0
+                speed_emoji = '🐢'
+
             eval_result_json['metadata'] = {
                 "run_tag": self.run_tag,
                 "model_tag": self.model_tag,
                 "task_tag": task_tag,
                 "code_type": self.get_code_type(),
+                "performance": {
+                    "reference_runtime": reference_runtime,
+                    "generated_runtime": generated_runtime,
+                    "speedup": speedup,
+                },
             } | eval_result_json['metadata']
             evaluation_time = time.time() - start_time
             
@@ -295,11 +320,10 @@ class CodeGenEvalClient:
             evaluation_file = self.output_dir / task_tag / f"{turn_tag}_eval.json"
             with open(evaluation_file, 'w') as f:
                 f.write(json.dumps(eval_result_json, indent=2, ensure_ascii=False, default=str))
-            
             if result.compiled and result.correctness:
-                logger.info(f"✅ [CodeGenEval] [{self.run_tag}] Evaluated [{f'{task_tag}'}] [{f'{turn_tag}'}] [{generated_code_file}] [{result.runtime:.3f}ms] in [{evaluation_time:.1f}s]")
+                logger.info(f"✅ [CodeGenEval] [{self.run_tag}] Evaluated [{f'{task_tag}'}] [{f'{turn_tag}'}] [{generated_code_file}] [{result.runtime:.3f}ms] in [{evaluation_time:.1f}s] [{f'{speed_emoji}'} {f'{speedup:.2f}x'}]")
             else:
-                logger.warning(f"⚠️ [CodeGenEval] [{self.run_tag}] Evaluated [{f'{task_tag}'}] [{f'{turn_tag}'}] [{generated_code_file}] [{'🟢' if result.compiled else '🔴'}compiled], [{'🟢' if result.correctness else '🔴'}correctness] in [{evaluation_time:.2f}s]")
+                logger.warning(f"⚠️ [CodeGenEval] [{self.run_tag}] Evaluated [{f'{task_tag}'}] [{f'{turn_tag}'}] [{generated_code_file}] [{'🟢' if result.compiled else '🔴'} compiled], [{'🟢' if result.correctness else '🔴'} correctness] in [{evaluation_time:.2f}s]")
 
             # return json
             return eval_result_json
@@ -377,7 +401,7 @@ class CodeGenEvalClient:
 
                 while task_tag not in self.reference_eval_cache:
                     sleep_time = random.uniform(1, 10) # sleep randomly between 1 and 5 seconds, using float to avoid blocking
-                    logger.warning(f"⚠️ [CodeGenEval] [{self.run_tag}] Waiting for reference eval for [{task_tag}] [{f'{gen_tag}'}], sleeping for [{f'{sleep_time:.2f}s'}]")
+                    logger.info(f"⏳ [CodeGenEval] [{self.run_tag}] Waiting for reference eval for [{task_tag}] [{f'{gen_tag}'}], sleeping for [{f'{sleep_time:.2f}s'}]")
                     await asyncio.sleep(sleep_time)
                     
                 if not self.reference_eval_cache[task_tag]['compiled'] or not self.reference_eval_cache[task_tag]['correctness']:
@@ -409,17 +433,26 @@ class CodeGenEvalClient:
                             # add info emoji to beginning of the line
                             logger.info(f"🔍 [CodeGenEval] [{self.run_tag}] Evaluating code for [{task_tag}] [{f'{turn_tag}'}] [{f'{retry_count}/{max_retries}'}]...")
                             # Process the evaluation task
-                            generated_eval = await self._process_code_eval(task_tag=task_tag, turn_tag=turn_tag, generated_code=generated_code)
+                            generated_eval = await self._process_code_eval(task_tag=task_tag, turn_tag=turn_tag, generated_code=generated_code, reference_eval=reference_eval)
                             # if failed try again until max retries
                             if not generated_eval:
                                 logger.warning(f"⚠️ [CodeGenEval] [{self.run_tag}] No evaluation result for [{task_tag}] [{f'{turn_tag}'}] [{f'{retry_count}/{max_retries}'}]")
                                 continue
                             
                             # update the message history only if both generated code and evaluation steps have completed successfully
-                            message_history = gen_conversation['messages']
+                            modified_history = gen_conversation['messages']
+                            if modified_history[-1]['role'] == 'assistant':
+                                # remove all other generated content but only keep the generated code
+                                modified_history[-1]['content'] = generated_code
+                            else:
+                                # log an error
+                                logger.error(f"⚠️ [CodeGenEval] [{self.run_tag}] Error updating message history for [{task_tag}] [{f'{turn_tag}'}] [{f'{retry_count}/{max_retries}'}]")
+                                logger.error(traceback.format_exc())
+                                continue
+                            # we are successful, update the message history and break the retry loop
+                            message_history = modified_history
                             prev_generated_code = generated_code
                             prev_generated_eval = generated_eval
-                            # we are successful, break the retry loop
                             break
 
                         except Exception as e:
@@ -666,12 +699,13 @@ async def main():
     parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B_000_00")
     parser.add_argument("--input_dir", type=str, default="~/triton-ag/kernel_bench", help="Input directory containing Python files")
     parser.add_argument("--output_dir", type=str, default="~/.codeGenEval", help="Output directory for the code generation and evaluation results")
-    parser.add_argument("--provider", type=str, default="deepinfra")  # most cost effective models are deepinfra-r1 and fireworks-v3
+    parser.add_argument("--provider", type=str, default="fireworks")  # most cost effective models are deepinfra-r1 and fireworks-v3
     parser.add_argument("--model", type=str, default="deepseek-v3")  # most cost effective models are deepinfra-r1 and fireworks-v3
     parser.add_argument("--model_override", type=str, default=None) # override the model name, e.g. "KC_0.1.0_14B/checkpoint-200"
     parser.add_argument("--num_samples", type=int, default=2)
     parser.add_argument("--num_generations", type=int, default=2)
-    parser.add_argument("--parallel_tasks", type=int, default=2)
+    parser.add_argument("--num_turns_per_generation", type=int, default=4)
+    parser.add_argument("--parallel_tasks", type=int, default=4)
     parser.add_argument("--template", type=str, default="triton.1")
     parser.add_argument("--logprobs", action="store_true")
     parser.add_argument("--run_exemplar", action="store_true")
@@ -723,6 +757,7 @@ async def main():
                     model_name=args.model,
                     num_samples=args.num_samples,
                     num_generations=args.num_generations,
+                    num_turns_per_generation=args.num_turns_per_generation,
                     parallel_tasks=args.parallel_tasks,
                     model_override=args.model_override,
                     input_dir=args.input_dir,
@@ -760,6 +795,7 @@ async def main():
                     provider_name=args.provider,
                     model_name=args.model,
                     num_generations=args.num_generations,
+                    num_turns_per_generation=args.num_turns_per_generation,
                     parallel_tasks=args.parallel_tasks,
                     model_override=args.model_override,
                     input_dir=args.input_dir,
