@@ -443,7 +443,7 @@ class CodeGenEvalClient:
                             modified_history = gen_conversation['messages']
                             if modified_history[-1]['role'] == 'assistant':
                                 # remove all other generated content but only keep the generated code
-                                modified_history[-1]['content'] = generated_code
+                                modified_history[-1]['content'] = f"```python\n{generated_code}\n```"
                             else:
                                 # log an error
                                 logger.error(f"⚠️ [CodeGenEval] [{self.run_tag}] Error updating message history for [{task_tag}] [{f'{turn_tag}'}] [{f'{retry_count}/{max_retries}'}]")
