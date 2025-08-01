@@ -142,8 +142,16 @@ class CodeGenEvalClient:
             ]
 
         if self.logprobs:
+            # configure prompt tokenization parameters
+            add_generation_prompt = True
+            enable_thinking = self.inference_client_config.model.enable_thinking
             # use completion api if logprobs is True
-            prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=self.inference_client_config.model.enable_thinking)
+            prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=add_generation_prompt,
+                enable_thinking=enable_thinking,
+            )
 
             # Generate response
             start_time = time.time()
@@ -153,10 +161,14 @@ class CodeGenEvalClient:
             content = result.get('content', '')
             logprobs = result.get('logprobs', [])
 
-            tokens = self.tokenizer.encode(content) if content else []
-
-            num_tokens = len(tokens)
-            token_per_second = num_tokens / generation_time
+            # prompt token ids and completion token ids can only be an estimate, not accurate
+            # prompt_token_ids = self.tokenizer.encode(prompt)
+            # num_prompt_tokens = len(prompt_token_ids)
+            # completion_token_ids = self.tokenizer.encode(content) if content else []
+            # num_completion_tokens = len(completion_token_ids)
+            guessed_completion_tokens = self.tokenizer.encode(content) if content else []
+            num_completion_tokens = len(guessed_completion_tokens)
+            token_per_second = num_completion_tokens / generation_time
 
             metadata = {
                 "run_tag": self.run_tag,
@@ -165,7 +177,7 @@ class CodeGenEvalClient:
                 "gen_tag": turn_tag,
                 "code_type": self.get_code_type(),
                 "reference_code": reference_code,
-                "num_tokens": num_tokens,
+                "num_completion_tokens": num_completion_tokens,
                 "generation_time_seconds": generation_time,
                 "token_per_second": token_per_second,
             }
@@ -200,9 +212,10 @@ class CodeGenEvalClient:
             generation_time = time.time() - start_time
 
             content = result.get('content', '')
-
-            num_tokens = result['usage']['completion_tokens'] if 'usage' in result else 0
-            token_per_second = num_tokens / generation_time
+            # we do not have access to the model's tokenizer, so we cannot get the number of prompt tokens
+            # we can only rely on the usage attribute to get the number of completion tokens
+            num_completion_tokens = result['usage']['completion_tokens'] if 'usage' in result else 0
+            token_per_second = num_completion_tokens / generation_time
 
             metadata = {
                 "run_tag": self.run_tag,
@@ -211,7 +224,7 @@ class CodeGenEvalClient:
                 "gen_tag": turn_tag,
                 "code_type": self.get_code_type(),
                 "reference_code": reference_code,
-                "num_tokens": num_tokens,
+                "num_completion_tokens": num_completion_tokens,
                 "generation_time_seconds": generation_time,
                 "token_per_second": token_per_second,
             }
@@ -232,7 +245,7 @@ class CodeGenEvalClient:
             code_blocks = re.findall(r"```python\n(.*?)\n```", content, re.DOTALL)
             generated_code = code_blocks[-1].strip() if code_blocks else content.strip()
         except (IndexError, AttributeError) as e:
-            logger.error(f"❌ [CodeGenEval {task_tag}] Error extracting code [{e}] [{f'{num_tokens}'} tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
+            logger.error(f"❌ [CodeGenEval {task_tag}] Error extracting code [{e}] [{f'{num_completion_tokens}'} tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
             return conversation, None
         
         # save the generated code to a file
@@ -241,7 +254,7 @@ class CodeGenEvalClient:
             f.write(generated_code)
 
         # use generated emoji to beginning of the line
-        logger.info(f"👏 [CodeGenEval] [{self.run_tag}] Generated [{f'{task_tag}'}] [{f'{turn_tag}'}]: [{generated_code_file}] [{f'{num_tokens}'} tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
+        logger.info(f"👏 [CodeGenEval] [{self.run_tag}] Generated [{f'{task_tag}'}] [{f'{turn_tag}'}]: [{generated_code_file}] [{f'{num_completion_tokens}'} tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
         return conversation, generated_code
 
     async def _process_code_eval(
