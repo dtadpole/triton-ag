@@ -204,12 +204,12 @@ def rft_train_block(block: TrainerRFTBlock, trainer: RFTTrainer, callback: Optio
 async def main():
     """Main function for RFT training"""
     parser = argparse.ArgumentParser(description="Train a model using RFTTrainer")
-    parser.add_argument("--prefix_tag", type=str, default="KC_0.1.0_14B")
+    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_0.6B.a")
     parser.add_argument("--epoch_id", type=int, default=0)
     parser.add_argument("--block_id", type=int, default=0)
-    parser.add_argument("--input_dir", type=str, default="~/.exemplar")
+    parser.add_argument("--input_dir", type=str, default="~/.codeGenEval")
     parser.add_argument("--output_dir", type=str, default="~/.trainer")
-    parser.add_argument("--input_tag", type=str, default="KC_0.1.0_14B_000_00") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
+    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B_20250801_211407") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
     parser.add_argument("--base_config", type=str, default="trainerBase.yaml")
     parser.add_argument("--rft_config", type=str, default="trainerRFT.yaml")
     args = parser.parse_args()

@@ -183,12 +183,12 @@ def sft_train_block(block: TrainerSFTBlock, trainer: SFTTrainer, callback: Optio
 async def main():
     """Main function for SFT training"""
     parser = argparse.ArgumentParser(description="Train a model using SFTTrainer")
-    parser.add_argument("--prefix_tag", type=str, default="KC_0.1.0_14B")
+    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_0.6B.a")
     parser.add_argument("--epoch_id", type=int, default=0)
     parser.add_argument("--block_id", type=int, default=0)
-    parser.add_argument("--input_dir", type=str, default="~/.critique")
+    parser.add_argument("--input_dir", type=str, default="~/.codeGenEval")
     parser.add_argument("--output_dir", type=str, default="~/.trainer")
-    parser.add_argument("--input_tag", type=str, default="KC_0.1.0_14B_000_01") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
+    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B_20250801_211407") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
     parser.add_argument("--base_config", type=str, default="trainerBase.yaml")
     parser.add_argument("--sft_config", type=str, default="trainerSFT.yaml")
     args = parser.parse_args()
