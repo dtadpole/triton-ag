@@ -378,7 +378,7 @@ class CodeGenEvalClient:
                 while task_tag not in self.reference_eval_cache:
                     sleep_time = random.uniform(1, 10) # sleep randomly between 1 and 5 seconds, using float to avoid blocking
                     logger.warning(f"⚠️ [CodeGenEval] [{self.run_tag}] Waiting for reference eval for [{task_tag}] [{f'{gen_tag}'}], sleeping for [{f'{sleep_time:.2f}s'}]")
-                    time.sleep(sleep_time)
+                    await asyncio.sleep(sleep_time)
                     
                 if not self.reference_eval_cache[task_tag]['compiled'] or not self.reference_eval_cache[task_tag]['correctness']:
                     logger.warning(f"⚠️ [CodeGenEval] [{self.run_tag}] Skipping generation [{f'{gen_tag}'}] as reference code is not correct for [{task_tag}]")
