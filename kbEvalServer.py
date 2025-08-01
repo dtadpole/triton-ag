@@ -165,7 +165,7 @@ async def kb_eval_ref(
         with open(reference_file_path, "w") as f:
             f.write(reference_code)
 
-        logger.info(f"[KB Eval] [reference] reference_file_path: [{reference_file_path}]")
+        # logger.info(f"[KB Eval] [reference] reference_file_path: [{reference_file_path}]")
 
         eval_tag = "reference"
         # pre-compile the reference code
@@ -270,8 +270,8 @@ async def kb_eval(
         with open(generated_file_path, "w") as f:
             f.write(generated_code)
 
-        logger.info(f"[KB Eval] [{eval_tag}] reference_file_path: [{reference_file_path}]")
-        logger.info(f"[KB Eval] [{eval_tag}] generated_file_path: [{generated_file_path}]")
+        # logger.info(f"[KB Eval] [{eval_tag}] reference_file_path: [{reference_file_path}]")
+        # logger.info(f"[KB Eval] [{eval_tag}] generated_file_path: [{generated_file_path}]")
 
         # pre-compile the generated code
         command = f"python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code {reference_file_path} --generated_code {generated_file_path} --device-list {','.join([str(device) for device in DEVICES])} --code_type {code_type} --quiet"

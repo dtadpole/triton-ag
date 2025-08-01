@@ -18,7 +18,8 @@ from collections import defaultdict
 MAX_LOCK_AGE = 45 # seconds
 
 def on_critical_timeout(signum, frame):
-    logger.error(f"⏰ Critical timeout reached [{signum}] [{frame.f_code.co_name}], exiting.")
+    # logger.error(f"⏰ Critical timeout reached [{signum}] [{frame.f_code.co_name}], exiting.")
+    logger.error(f"⏰ Critical timeout reached [{signum}] [{frame}], exiting.")
     sys.exit(5) # exit with code 5 to indicate timer expired
 
 def on_process_timeout():

@@ -173,7 +173,7 @@ def eval_kernel_custom(
 
     except CompileError as e:
         formatted_error = format_exception(e)
-        logger.warning(f"[KB_Eval_Triton] [{task_tag}/{eval_tag}] {formatted_error}")
+        logger.warning(f"[KB_Eval_Cli] [{task_tag}/{eval_tag}] {formatted_error}")
         return KernelExecResult(
             compiled=False,
             correctness=False,
@@ -182,7 +182,7 @@ def eval_kernel_custom(
             },
         )
     except Exception as e:
-        logger.warning(f"[KB_Eval_Triton] [{task_tag}/{eval_tag}] Error in code compilation: {e}")
+        logger.warning(f"[KB_Eval_Cli] [{task_tag}/{eval_tag}] Error in code compilation: {e}")
         traceback.print_exc()
         return KernelExecResult(
             compiled=False,
@@ -199,7 +199,7 @@ def eval_kernel_custom(
         correctness = False
         try:
             with FileLock(lock_file):
-                logger.warning(f"[KB_Eval_Triton] [{task_tag}/{eval_tag}] Acquired lock [{lock_file}]")
+                logger.warning(f"[KB_Eval_Cli] [{task_tag}/{eval_tag}] Acquired lock [{lock_file}]")
 
                 # verify lock is working by sleeping randome between 10 and 20 seconds
                 # time.sleep(random.randint(3, 5)) # verified lock is working
@@ -207,6 +207,7 @@ def eval_kernel_custom(
                 # Install the handler and arm the timer (in seconds)
                 signal.signal(signal.SIGALRM, on_critical_timeout)
                 signal.alarm(max_critical_time)  # exit after max_critical_time seconds
+                logger.warning(f"[KB_Eval_Cli] [{task_tag}/{eval_tag}] Alarm set for Critical Section with [{max_critical_time}] seconds")
 
                 init_inputs = get_init_inputs()
                 init_inputs = [
@@ -295,12 +296,12 @@ def eval_kernel_custom(
 
         except TimeoutError:
             graceful_eval_cleanup(context, device)
-            logger.info(f"⏳ [KB_Eval_Triton] [{task_tag}/{eval_tag}] Waiting for lock to be released {lock_file}")
+            logger.info(f"⏳ [KB_Eval_Cli] [{task_tag}/{eval_tag}] Waiting for lock to be released {lock_file}")
             time.sleep(2)
             continue
 
         except CompileError as e:
-            logger.warning(f"[KB_Eval_Triton] [{task_tag}/{eval_tag}] Error in code compilation: [{type(e)}] [{e}]")
+            logger.warning(f"[KB_Eval_Cli] [{task_tag}/{eval_tag}] Error in code compilation: [{type(e)}] [{e}]")
             return KernelExecResult(
                 compiled=False,
                 correctness=False,
@@ -310,7 +311,7 @@ def eval_kernel_custom(
             )
         
         except CorrectnessError as e:
-            logger.warning(f"[KB_Eval_Triton] [{task_tag}/{eval_tag}] Correctness error: [{type(e)}] [{e}]")
+            logger.warning(f"[KB_Eval_Cli] [{task_tag}/{eval_tag}] Correctness error: [{type(e)}] [{e}]")
             return KernelExecResult(
                 compiled=True,
                 correctness=False,
@@ -320,7 +321,7 @@ def eval_kernel_custom(
             )
 
         except Exception as e:
-            logger.warning(f"[KB_Eval_Triton] [{task_tag}/{eval_tag}] Error acquiring lock: [{type(e)}] [{e}]")
+            logger.warning(f"[KB_Eval_Cli] [{task_tag}/{eval_tag}] Error acquiring lock: [{type(e)}] [{e}]")
             result = KernelExecResult(
                 compiled=True,
                 correctness=correctness,
