@@ -440,15 +440,15 @@ def main():
         if result is not None:
             # write to file
             if args.measure_reference:
-                with open(reference_eval_path, "w") as f:
-                    f.write(json.dumps(result.model_dump(), indent=4))
+                output_path = reference_eval_path
             else:
-                with open(generated_eval_path, "w") as f:
-                    f.write(json.dumps(result.model_dump(), indent=4))
+                output_path = generated_eval_path
+            with open(output_path, "w") as f:
+                f.write(json.dumps(result.model_dump(), indent=4))
             if args.quiet:
-                logger.info(f"🔍 Evaluation result stored in [{work_dir}]")
+                logger.info(f"🔍 Evaluation result stored in [{output_path}]")
             else:
-                logger.info(f"🔍 Evaluation result stored in [{work_dir}]\n{json.dumps(result.model_dump(), indent=4)}")
+                logger.info(f"🔍 Evaluation result stored in [{output_path}]\n{json.dumps(result.model_dump(), indent=4)}")
             # exit with exit_code
             sys.exit(exit_code)
 
