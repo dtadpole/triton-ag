@@ -94,3 +94,4 @@ RUN pip install together==1.5.8
 RUN pip install wandb
 RUN pip install duckdb
 RUN pip install autoawq
+RUN pip install unsloth==2025.7.8

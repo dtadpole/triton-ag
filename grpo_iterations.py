@@ -1,32 +1,164 @@
 import copy
+import concurrent.futures
+from concurrent.futures import ProcessPoolExecutor
+import threading
+import subprocess
 import os
 import sys
 import json
 import numpy as np
+from pathlib import Path
 import gc
 from tqdm import tqdm
 from pydantic import BaseModel
-from unsloth import FastLanguageModel
 import hashlib
 import multiprocessing as mp
-import unsloth
+import time
 import torch
 import asyncio
 from logger import logger
-from trainerGRPO import GRPOTrainer, GRPOConfig, GenerationResultGroup, GenerationResult, GenerationDataset
-from trainerBase import TrainerConfig
 from kbEvalCli import compile_and_eval_kernel, eval_kernel_reference
 from kbEvalTest.kbeval import KernelExecResult
-from typing import DefaultDict, Dict, List, Optional, Any, Tuple
+from typing import DefaultDict, Dict, List, Optional, Any, Tuple, Callable
 import argparse
-import pickle
 import yaml
 import re
+from unsloth_parallel import ThreadSafeModelPool, load_pickle
 
 
 GRPO_FOLDER = "grpo_artifacts/"
 # Set multiprocessing start method (important for CUDA)
 mp.set_start_method('spawn', force=True)
+
+
+###### Copied from trainerBase to avoid direct import them and cause unsloth error
+class TrainerStatus(BaseModel):
+    """Running status of the trainer"""
+    global_step: int = 0
+
+class ModelConfig(BaseModel):
+    """Configuration for model parameters"""
+    name: str = 'gpt2'
+    tokenizer_name: Optional[str] = None
+    max_seq_length: int = 16384
+    use_unsloth: bool = True
+    use_gradient_checkpointing: str = "unsloth"
+    load_in_4bit: bool = False
+    load_in_8bit: bool = False
+    compute_dtype: str = "bfloat16"
+
+class OptimizerConfig(BaseModel):
+    """Configuration for optimizer parameters"""
+    optimizer_type: str = "AdamW"  # AdamW, Adam, SGD
+    betas: tuple = (0.9, 0.99)
+    eps: float = 1e-8
+    weight_decay: float = 0.01
+    momentum: float = 0.9  # For SGD
+    nesterov: bool = False  # For SGD
+
+class TrainingConfig(BaseModel):
+    """Configuration for training parameters"""
+    micro_batch_size: int = 2
+    gradient_accumulation_steps: int = 1
+    learning_rate: float = 0.000005
+    block_size: int = 32
+    max_steps: int = 100000
+    save_steps: int = 20
+    eval_steps: int = 20
+    logging_steps: int = 1
+    checkpoint_path: str = "~/.trainer"
+    latest_checkpoint_name: Optional[str] = "checkpoint-latest"
+    max_grad_norm: float = 0.1
+    scheduler_type: str = "cosine"
+    num_warmup_steps: int = 50
+    dataloader_num_workers: int = 4
+    seed: int = -1
+
+class TrainerLoraConfig(BaseModel):
+    """Configuration for LoRA parameters"""
+    use_lora: bool = True
+    rank: int = 64
+    alpha: int = 32
+    dropout: float = 0.0
+    target_modules: Optional[List[str]] = None
+    bias: str = "none"
+
+class LoggingConfig(BaseModel):
+    """Configuration for logging parameters"""
+    use_wandb: bool = False
+    wandb_project: str = "unsloth-lora-training"
+    wandb_run_name: Optional[str] = None
+
+
+class TrainerConfig(BaseModel):
+    """Main configuration class containing all training parameters"""
+    model: ModelConfig = ModelConfig()
+    training: TrainingConfig = TrainingConfig()
+    optimizer: OptimizerConfig = OptimizerConfig()
+    lora: TrainerLoraConfig = TrainerLoraConfig()
+    logging: LoggingConfig = LoggingConfig()
+
+    @classmethod
+    def from_yaml(cls, yaml_path: str) -> 'TrainerConfig':
+        """Load configuration from YAML file"""
+        with open(yaml_path, 'r') as f:
+            config_dict = yaml.safe_load(f)
+
+        # Create config objects from sections
+        model_config = ModelConfig()
+        training_config = TrainingConfig()
+        optimizer_config = OptimizerConfig()
+        lora_config = TrainerLoraConfig()
+        logging_config = LoggingConfig()
+
+        # Update from YAML sections
+        if 'model' in config_dict:
+            model_data = config_dict['model']
+            model_config = ModelConfig(
+                name=model_data.get('name', 'gpt2'),
+                tokenizer_name=model_data.get('tokenizer_name'),
+                max_seq_length=model_data.get('max_seq_length', 1024),
+                use_unsloth=model_data.get('use_unsloth', True),
+                use_gradient_checkpointing=model_data.get('use_gradient_checkpointing', "unsloth"),
+                load_in_4bit=model_data.get('load_in_4bit', False),
+                load_in_8bit=model_data.get('load_in_8bit', False),
+                compute_dtype=model_data.get('compute_dtype', 'bfloat16')
+            )
+
+        if 'training' in config_dict:
+            training_data = config_dict['training']
+            training_config = TrainingConfig(**training_data)
+
+        if 'optimizer' in config_dict:
+            optimizer_data = config_dict['optimizer']
+            # Convert betas list to tuple if present
+            if 'betas' in optimizer_data and isinstance(optimizer_data['betas'], list):
+                optimizer_data['betas'] = tuple(optimizer_data['betas'])
+            optimizer_config = OptimizerConfig(**optimizer_data)
+
+        if 'lora' in config_dict:
+            lora_data = config_dict['lora']
+            lora_config = TrainerLoraConfig(
+                use_lora=lora_data.get('use_lora', True),
+                rank=lora_data.get('rank', 64),
+                alpha=lora_data.get('alpha', 16),
+                dropout=lora_data.get('dropout', 0.0),
+                target_modules=lora_data.get('target_modules'),
+                bias=lora_data.get('bias', 'none')
+            )
+
+        if 'logging' in config_dict:
+            logging_data = config_dict['logging']
+            logging_config = LoggingConfig(**logging_data)
+
+        return cls(
+            model=model_config,
+            training=training_config,
+            optimizer=optimizer_config,
+            lora=lora_config,
+            logging=logging_config
+        )
+###############################
 
 class RewardConfig(BaseModel):
     """Result of a single generation"""
@@ -112,6 +244,105 @@ class PromptManager:
                     self.task_reference_codes.append(file.read())
 
 
+# This roll out is the bottle neck, should be optimized later
+# async def rollout_policy_logproba(trainer: GRPOTrainer, prompts: List[str], num_completion_per_prompt: int=8, max_new_tokens: int=100, temperature: float=0.6) -> List[List[Dict]]:
+#     """
+#     Given the model (current policy) and prompts, roll out the chat completion for code writing and return the List of List of Reponses
+#     The 1st list is prompts
+#     The 2nd list is num_completion_per_prompt
+#     for each response, it is a dictionary
+#     sequence_id: id of the current result in num_completion_per_prompt
+#     prompt_token_ids: prompt token ids
+#     completion_token_ids: the completion token ids
+#     completion_log_probs: the log prob of the completion tokens
+#     text: the text format of the completion
+#     """
+#     response_groups = []
+#     for prompt in tqdm(prompts):
+#         inputs = trainer.tokenizer(prompt, return_tensors="pt").to(trainer.model.device)
+#         # Generate with token IDs and log probabilities
+#         with torch.no_grad():
+#             outputs = trainer.model.generate(
+#                 **inputs,
+#                 max_new_tokens=max_new_tokens,
+#                 do_sample=True,
+#                 temperature=temperature,
+#                 num_return_sequences=num_completion_per_prompt,  # Generate 8 different completions, it is much faster than generating 1 by 1
+#                 return_dict_in_generate=True,
+#                 output_scores=True,
+#                 pad_token_id=trainer.tokenizer.eos_token_id if trainer.tokenizer.eos_token_id else trainer.tokenizer.pad_token_id,
+#                 eos_token_id=trainer.tokenizer.eos_token_id,
+#                 use_cache=True,
+#                 num_beams=1
+#             )
+#         all_sequences = outputs.sequences  # Shape: [num_completion_per_prompt, sequence_length]
+#         scores = outputs.scores  # List of tensors, each with shape [num_completion_per_prompt, vocab_size]
+
+#         # Get new tokens for all sequences (remove input prompt)
+#         input_length = inputs.input_ids.shape[1]
+#         all_new_tokens = all_sequences[:, input_length:].cpu()  # Shape: [num_completion_per_prompt, new_tokens_length]
+
+#         # process the socre to get the log prob
+#         all_scores = torch.stack(scores, dim=0).cpu()  # Shape: [num_new_tokens, 8, vocab_size]
+
+#         del scores # score is a big tensor
+#         torch.cuda.empty_cache()
+#         gc.collect()
+
+#         all_log_probs = torch.log_softmax(all_scores, dim=-1).cpu()  # Shape: [num_new_tokens, 8, vocab_size]
+#         del all_scores # all_scores score is a big tensor
+#         torch.cuda.empty_cache()
+#         gc.collect()
+
+#         # Extract log probs for each sequence
+#         results = []
+#         for seq_idx in range(num_completion_per_prompt):
+#             sequence_tokens = all_new_tokens[seq_idx]
+#             # Get log probs for this specific sequence
+
+#             # Remove padding tokens (including EOS used as padding)
+#             # Find the first occurrence of EOS/pad token
+#             pad_token_id = trainer.tokenizer.eos_token_id if trainer.tokenizer.eos_token_id else trainer.tokenizer.pad_token_id
+#             eos_token_id = trainer.tokenizer.eos_token_id
+
+#             # Find where to truncate (first EOS or pad token)
+#             truncate_idx = len(sequence_tokens)  # Default to full length
+
+#             for i, token_id in enumerate(sequence_tokens):
+#                 if token_id == pad_token_id or (eos_token_id and token_id == eos_token_id):
+#                     truncate_idx = i + 1  # Include the EOS token itself
+#                     break
+
+#             # Truncate tokens and corresponding log probs
+#             valid_tokens = sequence_tokens[:truncate_idx]
+
+#             # Get log probs for this specific sequence (only for valid tokens)
+#             if len(valid_tokens) > 0:
+#                 sequence_log_probs = all_log_probs[torch.arange(len(valid_tokens)), seq_idx, valid_tokens]
+#             else:
+#                 sequence_log_probs = torch.tensor([])
+
+#             results.append({
+#                 'sequence_id': seq_idx,
+#                 'prompt_token_ids': inputs["input_ids"].cpu().tolist()[0], # all input ids are the same, save the 1st element
+#                 'completion_token_ids': valid_tokens.tolist(),
+#                 'completion_log_probs': sequence_log_probs.tolist(),
+#                 'text': trainer.tokenizer.decode(sequence_tokens, skip_special_tokens=True),
+#                 'original_length': len(sequence_tokens),  # For debugging
+#                 'valid_length': len(valid_tokens),        # For debugging
+#             })
+#             del valid_tokens
+#             del sequence_log_probs
+
+#         response_groups.append(results)
+#          # release GPU memory for inputs and outputs
+#         del all_sequences
+#         del outputs
+#         del inputs
+#         torch.cuda.empty_cache()
+#         gc.collect()
+#     return response_groups
+
 def rollout_policy_logproba_sp(lora_adapter_path: str, prompts: List[str], result_queue: mp.Queue, base_config: TrainerConfig, num_completion_per_prompt: int=8, max_new_tokens: int=100, temperature: float=0.6, device: int=0, batch_size: int=2):
     """
     Given the model (current policy) and prompts, roll out the chat completion for code writing and return the List of List of Reponses
@@ -124,6 +355,7 @@ def rollout_policy_logproba_sp(lora_adapter_path: str, prompts: List[str], resul
     completion_log_probs: the log prob of the completion tokens
     text: the text format of the completion
     """
+    from unsloth import FastLanguageModel
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=lora_adapter_path,  # LoRA adapter path
         max_seq_length=base_config.model.max_seq_length,
@@ -163,8 +395,8 @@ def rollout_policy_logproba_sp(lora_adapter_path: str, prompts: List[str], resul
         scores = [s_.cpu() for s_ in outputs.scores]  # List of tensors, each with shape [num_completion_per_prompt, vocab_size]
 
         # process the socre to get the log prob
-        all_scores = torch.stack(scores, dim=0).cpu()  # Shape: [num_new_tokens, 8, vocab_size]
-        all_log_probs = torch.log_softmax(all_scores, dim=-1).cpu()  # Shape: [num_new_tokens, 8, vocab_size]
+        all_scores = torch.stack(scores, dim=0).cpu()  # Shape: [num_new_tokens, n_prompts*num_completion_per_prompt, vocab_size]
+        all_log_probs = torch.log_softmax(all_scores, dim=-1).cpu()  # Shape: [num_new_tokens, n_prompts*num_completion_per_prompt, vocab_size]
         del scores
         del all_scores
         torch.cuda.empty_cache()
@@ -176,6 +408,7 @@ def rollout_policy_logproba_sp(lora_adapter_path: str, prompts: List[str], resul
             prompt_end_idx = (cur_id + 1) * num_completion_per_prompt
             prompt_sequences = all_sequences[prompt_start_idx:prompt_end_idx]
             prompt_new_tokens = prompt_sequences[:, max_input_length:].cpu()
+            prompt_log_probs = all_log_probs[:, prompt_start_idx:prompt_end_idx, :]
             # Extract log probs for each sequence
             results = []
             for seq_idx in range(num_completion_per_prompt):
@@ -199,14 +432,15 @@ def rollout_policy_logproba_sp(lora_adapter_path: str, prompts: List[str], resul
 
                 # Get log probs for this specific sequence (only for valid tokens)
                 if len(valid_tokens) > 0:
-                    sequence_log_probs = all_log_probs[torch.arange(len(valid_tokens)), seq_idx, valid_tokens]
+                    sequence_log_probs = prompt_log_probs[torch.arange(len(valid_tokens)), seq_idx, valid_tokens]
                 else:
                     sequence_log_probs = torch.tensor([])
 
+                assert len(valid_tokens) == len(sequence_log_probs), "Error: completion_token_ids and completion_log_probs have different length"
                 results.append({
                     'sequence_id': seq_idx,
                     'prompt_token_ids': inputs["input_ids"][cur_id, :input_length].cpu().tolist(), # all input ids are the same, save the 1st element
-                    'completion_token_ids': sequence_tokens.tolist(),
+                    'completion_token_ids': valid_tokens.tolist(),
                     'completion_log_probs': sequence_log_probs.tolist(),
                     'text': tokenizer.decode(sequence_tokens, skip_special_tokens=True),
                 })
@@ -219,7 +453,6 @@ def rollout_policy_logproba_sp(lora_adapter_path: str, prompts: List[str], resul
         torch.cuda.empty_cache()
         gc.collect()
     return
-
 
 def rollout_policy_logproba_mp(lora_adapter_path: str, prompts: List[str], base_config: TrainerConfig, devices: List[int], num_completion_per_prompt: int=8, max_new_tokens: int=100, temperature: float=0.6, batch_size: int=2) -> List[List[Dict]]:
     n_gpus = len(devices)
@@ -248,105 +481,277 @@ def rollout_policy_logproba_mp(lora_adapter_path: str, prompts: List[str], base_
     return response_groups
 
 
-# This roll out is the bottle neck, should be optimized later
-async def rollout_policy_logproba(trainer: GRPOTrainer, prompts: List[str], num_completion_per_prompt: int=8, max_new_tokens: int=100, temperature: float=0.6) -> List[List[Dict]]:
-    """
-    Given the model (current policy) and prompts, roll out the chat completion for code writing and return the List of List of Reponses
-    The 1st list is prompts
-    The 2nd list is num_completion_per_prompt
-    for each response, it is a dictionary
-    sequence_id: id of the current result in num_completion_per_prompt
-    prompt_token_ids: prompt token ids
-    completion_token_ids: the completion token ids
-    completion_log_probs: the log prob of the completion tokens
-    text: the text format of the completion
-    """
-    response_groups = []
-    for prompt in tqdm(prompts):
-        inputs = trainer.tokenizer(prompt, return_tensors="pt").to(trainer.model.device)
-        # Generate with token IDs and log probabilities
-        with torch.no_grad():
-            outputs = trainer.model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=True,
-                temperature=temperature,
-                num_return_sequences=num_completion_per_prompt,  # Generate 8 different completions, it is much faster than generating 1 by 1
-                return_dict_in_generate=True,
-                output_scores=True,
-                pad_token_id=trainer.tokenizer.eos_token_id if trainer.tokenizer.eos_token_id else trainer.tokenizer.pad_token_id,
-                eos_token_id=trainer.tokenizer.eos_token_id,
-                use_cache=True,
-                num_beams=1
-            )
-        all_sequences = outputs.sequences  # Shape: [num_completion_per_prompt, sequence_length]
-        scores = outputs.scores  # List of tensors, each with shape [num_completion_per_prompt, vocab_size]
+def rollout_policy_logproba_safeworker(prompts, pool, result_queue, batch_size=4, max_new_tokens=3000, temperature=0.6, num_completion_per_prompt=8):
+    model_instance = pool.get_model()
+    try:
+        model = model_instance['model']
+        tokenizer = model_instance['tokenizer']
+        device_ = model.device
+        n_prompts = len(prompts)
+        n_batches = (n_prompts + batch_size - 1) // batch_size
 
-        # Get new tokens for all sequences (remove input prompt)
-        input_length = inputs.input_ids.shape[1]
-        all_new_tokens = all_sequences[:, input_length:].cpu()  # Shape: [num_completion_per_prompt, new_tokens_length]
+        for batch_i in tqdm(range(n_batches)):
+            current_prompts = prompts[batch_i * batch_size : (batch_i + 1) * batch_size]
+            inputs = tokenizer(current_prompts, return_tensors="pt", padding=True, truncation=True).to(device_)
+            batch_input_lengths = inputs.attention_mask.sum(dim=1)
+            max_input_length = max(batch_input_lengths).item()
+            # Generate with token IDs and log probabilities
+            with torch.no_grad():
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=True,
+                    temperature=temperature,
+                    num_return_sequences=num_completion_per_prompt,  # Generate 8 different completions, it is much faster than generating 1 by 1
+                    return_dict_in_generate=True,
+                    output_scores=True,
+                    pad_token_id=tokenizer.eos_token_id if tokenizer.eos_token_id else tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
+                    use_cache=True,
+                    num_beams=1
+                )
+            all_sequences = outputs.sequences  # Shape: [num_completion_per_prompt, sequence_length]
+            scores = [s_.cpu() for s_ in outputs.scores]  # List of tensors, each with shape [num_completion_per_prompt, vocab_size]
 
-        # process the socre to get the log prob
-        all_scores = torch.stack(scores, dim=0).cpu()  # Shape: [num_new_tokens, 8, vocab_size]
+            # process the socre to get the log prob
+            all_scores = torch.stack(scores, dim=0).cpu()  # Shape: [num_new_tokens, n_prompts*num_completion_per_prompt, vocab_size]
+            all_log_probs = torch.log_softmax(all_scores, dim=-1).cpu()  # Shape: [num_new_tokens, n_prompts*num_completion_per_prompt, vocab_size]
+            del scores
+            del all_scores
+            torch.cuda.empty_cache()
+            gc.collect()
 
-        del scores # score is a big tensor
-        torch.cuda.empty_cache()
-        gc.collect()
+            for cur_id, prompt in enumerate(current_prompts):
+                input_length = batch_input_lengths[cur_id].item()
+                prompt_start_idx = cur_id * num_completion_per_prompt
+                prompt_end_idx = (cur_id + 1) * num_completion_per_prompt
+                prompt_sequences = all_sequences[prompt_start_idx:prompt_end_idx]
+                prompt_new_tokens = prompt_sequences[:, max_input_length:].cpu()
+                prompt_log_probs = all_log_probs[:, prompt_start_idx:prompt_end_idx, :]
+                # Extract log probs for each sequence
+                results = []
+                for seq_idx in range(num_completion_per_prompt):
+                    sequence_tokens = prompt_new_tokens[seq_idx]
+                    # Get log probs for this specific sequence
+                    # Remove padding tokens (including EOS used as padding)
+                    # Find the first occurrence of EOS/pad token
+                    pad_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id else tokenizer.pad_token_id
+                    eos_token_id = tokenizer.eos_token_id
 
-        all_log_probs = torch.log_softmax(all_scores, dim=-1).cpu()  # Shape: [num_new_tokens, 8, vocab_size]
-        del all_scores # all_scores score is a big tensor
-        torch.cuda.empty_cache()
-        gc.collect()
+                    # Find where to truncate (first EOS or pad token)
+                    truncate_idx = len(sequence_tokens)  # Default to full length
 
-        # Extract log probs for each sequence
-        results = []
-        for seq_idx in range(num_completion_per_prompt):
-            sequence_tokens = all_new_tokens[seq_idx]
-            # Get log probs for this specific sequence
+                    for i, token_id in enumerate(sequence_tokens):
+                        if token_id == pad_token_id or (eos_token_id and token_id == eos_token_id):
+                            truncate_idx = i + 1  # Include the EOS token itself
+                            break
 
-            # Remove padding tokens (including EOS used as padding)
-            # Find the first occurrence of EOS/pad token
-            pad_token_id = trainer.tokenizer.eos_token_id if trainer.tokenizer.eos_token_id else trainer.tokenizer.pad_token_id
-            eos_token_id = trainer.tokenizer.eos_token_id
+                    # Truncate tokens and corresponding log probs
+                    valid_tokens = sequence_tokens[:truncate_idx]
 
-            # Find where to truncate (first EOS or pad token)
-            truncate_idx = len(sequence_tokens)  # Default to full length
+                    # Get log probs for this specific sequence (only for valid tokens)
+                    if len(valid_tokens) > 0:
+                        sequence_log_probs = prompt_log_probs[torch.arange(len(valid_tokens)), seq_idx, valid_tokens]
+                    else:
+                        sequence_log_probs = torch.tensor([])
 
-            for i, token_id in enumerate(sequence_tokens):
-                if token_id == pad_token_id or (eos_token_id and token_id == eos_token_id):
-                    truncate_idx = i + 1  # Include the EOS token itself
-                    break
+                    assert len(valid_tokens) == len(sequence_log_probs), "Error: completion_token_ids and completion_log_probs have different length"
+                    results.append({
+                        'sequence_id': seq_idx,
+                        'prompt_token_ids': inputs["input_ids"][cur_id, :input_length].cpu().tolist(), # all input ids are the same, save the 1st element
+                        'completion_token_ids': valid_tokens.tolist(),
+                        'completion_log_probs': sequence_log_probs.tolist(),
+                        'text': tokenizer.decode(sequence_tokens, skip_special_tokens=True),
+                    })
+                result_queue.put((prompt, results))
 
-            # Truncate tokens and corresponding log probs
-            valid_tokens = sequence_tokens[:truncate_idx]
+            # release GPU memory for inputs and outputs
+            del all_sequences
+            del outputs
+            del inputs
+            torch.cuda.empty_cache()
+            gc.collect()
+        return
+    finally:
+        pool.return_model(model_instance)
 
-            # Get log probs for this specific sequence (only for valid tokens)
-            if len(valid_tokens) > 0:
-                sequence_log_probs = all_log_probs[torch.arange(len(valid_tokens)), seq_idx, valid_tokens]
-            else:
-                sequence_log_probs = torch.tensor([])
+def rollout_policy_logproba_safethreading(lora_adapter_path: str, prompts: List[str], base_config: TrainerConfig, devices: List[int], num_completion_per_prompt: int=8, max_new_tokens: int=100, temperature: float=0.6, batch_size: int=2) -> List[List[Dict]]:
+    '''
+    unsloth has issues with mp, and this is an safe multithreading option for unsloth
+    '''
+    start_time = time.time()
+    n_gpus = len(devices)
+    unsloth_configs = [
+        {
+        'model_name': lora_adapter_path,
+        'max_seq_length': base_config.model.max_seq_length,
+        'dtype': getattr(torch, base_config.model.compute_dtype, torch.bfloat16),
+        'load_in_4bit': base_config.model.load_in_4bit,
+        "use_cache": True,
+        "device_map" :{"": device},
+        }
+        for device in devices
+    ]
 
-            results.append({
-                'sequence_id': seq_idx,
-                'prompt_token_ids': inputs["input_ids"].cpu().tolist()[0], # all input ids are the same, save the 1st element
-                'completion_token_ids': valid_tokens.tolist(),
-                'completion_log_probs': sequence_log_probs.tolist(),
-                'text': trainer.tokenizer.decode(sequence_tokens, skip_special_tokens=True),
-                'original_length': len(sequence_tokens),  # For debugging
-                'valid_length': len(valid_tokens),        # For debugging
-            })
-            del valid_tokens
-            del sequence_log_probs
+    pool = ThreadSafeModelPool(unsloth_configs, max_workers=n_gpus)
+    task_splits = [prompts[i::n_gpus] for i in range(n_gpus)]
+    result_queue = mp.Queue()
 
-        response_groups.append(results)
-         # release GPU memory for inputs and outputs
-        del all_sequences
-        del outputs
-        del inputs
-        torch.cuda.empty_cache()
-        gc.collect()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n_gpus) as executor:
+        futures = [executor.submit(rollout_policy_logproba_safeworker,
+                                   task_prompts,
+                                   pool,
+                                   result_queue,
+                                   batch_size=batch_size,
+                                   max_new_tokens=max_new_tokens,
+                                   temperature=temperature,
+                                   num_completion_per_prompt=num_completion_per_prompt)
+                        for task_prompts in task_splits]
+        _ = [future.result() for future in concurrent.futures.as_completed(futures)]
+
+    # Collect results
+    results_prompt_dict = {}
+    for _ in range(len(prompts)):  # We know how many results to expect
+        result = result_queue.get()
+        results_prompt_dict[result[0]] = result[1]
+    # clean cache again
+    del pool
+    torch.cuda.empty_cache()
+    gc.collect()
+    logger.info("Delete the unslot model pool for next iterations ...")
+
+    response_groups = [results_prompt_dict[prompt] for prompt in prompts]
+
+    end_time = time.time()
+    logger.info(f"roll out current policy takes {end_time - start_time} seconds")
     return response_groups
 
+
+def run_process_with_retry(command: str, result_file: str, max_retries: int = 3) -> bool:
+    """Run a subprocess with retry logic. Returns True if successful, False otherwise."""
+    for attempt in range(max_retries):
+        try:
+            process = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            stdout, stderr = process.communicate()
+
+            if process.returncode == 0 and os.path.exists(result_file):
+                return True
+            else:
+                print(f"Attempt {attempt + 1} failed for {result_file}: return code {process.returncode}")
+                if stderr:
+                    print(f"Error: {stderr}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+
+        except Exception as e:
+            print(f"Attempt {attempt + 1} exception for {result_file}: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2)
+
+    print(f"All {max_retries} attempts failed for {result_file}")
+    return False
+
+def rollout_policy_logproba_shellprocess(lora_adapter_path: str, prompts: List[str], base_config, devices: List[int], num_completion_per_prompt: int=8, max_new_tokens: int=100, temperature: float=0.6, batch_size: int=2) -> List[List[Dict]]:
+    start_time = time.time()
+    n_gpus = len(devices)
+    unsloth_configs = [
+        {
+        'model_name': lora_adapter_path,
+        'max_seq_length': base_config.model.max_seq_length,
+        'dtype': base_config.model.compute_dtype,
+        'load_in_4bit': base_config.model.load_in_4bit,
+        "use_cache": True,
+        "device_map" :{"": device},
+        }
+        for device in devices
+    ]
+    task_splits = [prompts[i::n_gpus] for i in range(n_gpus)]
+
+    # Store job info for parallel execution with retry
+    jobs = []
+
+    for i, task in enumerate(task_splits):
+        config_file = f"temp/config_{i}.json"
+        result_file = f"temp/result_{i}.pkl"
+        prompts_file = f"temp/prompts_{i}.json"
+
+        # dump config to disk
+        with open(config_file, 'w') as f:
+            json.dump(unsloth_configs[i], f)
+
+        with open(prompts_file, 'w') as f:
+            json.dump(task, f)
+
+        command = f"python unsloth_parallel.py --unsloth_config_file {config_file} --prompts_file {prompts_file} --batch_size {batch_size} --max_new_tokens {max_new_tokens} --temperature {temperature} --num_completion_per_prompt {num_completion_per_prompt} --result_path {result_file}"
+
+        jobs.append((command, result_file))
+
+    # Run all jobs in parallel with retry logic
+    def run_job(command, result_file, results_dict):
+        success = run_process_with_retry(command, result_file, max_retries=3)
+        results_dict[result_file] = success
+
+    # Track results and threads
+    results_dict = {}
+    threads = []
+
+    # Start all jobs
+    for command, result_file in jobs:
+        thread = threading.Thread(target=run_job, args=(command, result_file, results_dict))
+        thread.start()
+        threads.append(thread)
+
+    # Wait for all jobs to complete
+    for thread in threads:
+        thread.join()
+
+    # Collect results from successful jobs
+    all_results = []
+    failed_jobs = []
+
+    for command, result_file in jobs:
+        if results_dict.get(result_file, False) and os.path.exists(result_file):
+            results = load_pickle(result_file)  # Assuming this function exists
+            all_results.extend(results)
+        else:
+            failed_jobs.append(result_file)
+
+    if failed_jobs:
+        print(f"Warning: {len(failed_jobs)} jobs failed after all retries: {failed_jobs}")
+
+    # Build response groups
+    results_prompt_dict = {}
+    for prompt, result in all_results:
+        results_prompt_dict[prompt] = result
+
+    response_groups = []
+    for prompt in prompts:
+        if prompt in results_prompt_dict:
+            response_groups.append(results_prompt_dict[prompt])
+        else:
+            print(f"Warning: No results found for prompt: {prompt[:50]}...")
+            response_groups.append([])  # or handle missing results as needed
+
+    # remove generated files in the temp/ folder
+    for filename in os.listdir("temp/"):
+        file_path = os.path.join("temp/", filename)
+        if os.path.isfile(file_path):
+            os.remove(file_path)
+            logger.info(f"Removed: {file_path}")  # Uncomment if logger is available
+    logger.info("All temp files removed successfully!")  # Uncomment if logger is available
+
+    end_time = time.time()
+    # logger.info(f"roll out current policy takes {end_time - start_time} seconds")  # Uncomment if logger is available
+    print(f"Rollout completed in {end_time - start_time:.2f} seconds")
+
+    return response_groups
 
 def eval_kernel_reference_sp(
     run_tag: str,
@@ -512,7 +917,48 @@ def hash_string_short(text: str, length: int = 8) -> str:
     return full_hash[:length]
 
 
-async def test_rollout_policy_logproba(args):
+# async def test_rollout_policy_logproba(args):
+
+#     try:
+#         base_config = TrainerConfig.from_yaml(args.base_config)
+#         logger.info(f"✅ [GRPOTrainer] Base configuration loaded from {args.base_config}")
+#     except Exception as e:
+#         logger.error(f"❌ [GRPOTrainer] Failed to load base configuration: {e}")
+#         sys.exit(1)
+
+#     try:
+#         grpo_config = GRPOConfig.from_yaml(args.grpo_config)
+#         logger.info(f"✅ [GRPOTrainer] GRPO configuration loaded from {args.grpo_config}")
+#     except Exception as e:
+#         logger.error(f"❌ [GRPOTrainer] Failed to load GRPO configuration: {e}")
+#         sys.exit(1)
+
+#     try:
+#         trainer = GRPOTrainer(args.run_tag, grpo_config, base_config) # trainer.model is the current policy
+#         logger.info("✅ [GRPOTrainer] Trainer initialized")
+#     except Exception as e:
+#         logger.error(f"❌ [GRPOTrainer] Initialization failed: {e}")
+#         sys.exit(1)
+
+#     prompt_manger = PromptManager("grpo_iterations.yaml")
+#     system_prompt = prompt_manger.get_system_prompt()
+#     user_prompt = prompt_manger.get_user_prompt(prompt_manger.reference_generated_pairs[0][0])
+#     messages = [
+#         {"role": "system", "content": system_prompt},
+#         {"role": "user", "content": user_prompt}
+#     ]
+#     prompt = trainer.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+#     prompts = [prompt] * 2
+#     response_groups = await rollout_policy_logproba(trainer, prompts, num_completion_per_prompt=2, max_new_tokens=1000)
+#     assert len(response_groups) == 2
+#     assert len(response_groups[0]) == 2
+#     generated_texts = [[trainer.tokenizer.decode(response["completion_token_ids"]) for response in response_group] for response_group in response_groups]
+#     logger.info(f"The test responses from base model {generated_texts}")
+
+
+async def test_rollout_policy_logproba_shellprocess(args):
+    from trainerGRPO import GRPOTrainer, GRPOConfig, GenerationResultGroup, GenerationResult, GenerationDataset
+    from trainerBase import TrainerConfig
 
     try:
         base_config = TrainerConfig.from_yaml(args.base_config)
@@ -520,6 +966,7 @@ async def test_rollout_policy_logproba(args):
     except Exception as e:
         logger.error(f"❌ [GRPOTrainer] Failed to load base configuration: {e}")
         sys.exit(1)
+    base_config.model.name = "unsloth/Qwen3-8B-unsloth-bnb-4bit"
 
     try:
         grpo_config = GRPOConfig.from_yaml(args.grpo_config)
@@ -544,14 +991,56 @@ async def test_rollout_policy_logproba(args):
     ]
     prompt = trainer.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     prompts = [prompt] * 2
-    response_groups = await rollout_policy_logproba(trainer, prompts, num_completion_per_prompt=2, max_new_tokens=1000)
+    response_groups = rollout_policy_logproba_shellprocess("unsloth/Qwen3-8B-unsloth-bnb-4bit", prompts, base_config, devices=[1, 2], num_completion_per_prompt=8, max_new_tokens=1000, batch_size=4)
     assert len(response_groups) == 2
-    assert len(response_groups[0]) == 2
+    assert len(response_groups[0]) == 8
     generated_texts = [[trainer.tokenizer.decode(response["completion_token_ids"]) for response in response_group] for response_group in response_groups]
     logger.info(f"The test responses from base model {generated_texts}")
 
+async def test_rollout_policy_logproba_safethreading(args):
+    from trainerGRPO import GRPOTrainer, GRPOConfig, GenerationResultGroup, GenerationResult, GenerationDataset
+    from trainerBase import TrainerConfig
+
+    try:
+        base_config = TrainerConfig.from_yaml(args.base_config)
+        logger.info(f"✅ [GRPOTrainer] Base configuration loaded from {args.base_config}")
+    except Exception as e:
+        logger.error(f"❌ [GRPOTrainer] Failed to load base configuration: {e}")
+        sys.exit(1)
+    base_config.model.name = "unsloth/Qwen3-8B-unsloth-bnb-4bit"
+
+    try:
+        grpo_config = GRPOConfig.from_yaml(args.grpo_config)
+        logger.info(f"✅ [GRPOTrainer] GRPO configuration loaded from {args.grpo_config}")
+    except Exception as e:
+        logger.error(f"❌ [GRPOTrainer] Failed to load GRPO configuration: {e}")
+        sys.exit(1)
+
+    try:
+        trainer = GRPOTrainer(args.run_tag, grpo_config, base_config) # trainer.model is the current policy
+        logger.info("✅ [GRPOTrainer] Trainer initialized")
+    except Exception as e:
+        logger.error(f"❌ [GRPOTrainer] Initialization failed: {e}")
+        sys.exit(1)
+
+    prompt_manger = PromptManager("grpo_iterations.yaml")
+    system_prompt = prompt_manger.get_system_prompt()
+    user_prompt = prompt_manger.get_user_prompt(prompt_manger.reference_generated_pairs[0][0])
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt}
+    ]
+    prompt = trainer.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    prompts = [prompt] * 2
+    response_groups = rollout_policy_logproba_safethreading("unsloth/Qwen3-8B-unsloth-bnb-4bit", prompts, base_config, devices=[1, 2], num_completion_per_prompt=8, max_new_tokens=1000, batch_size=4)
+    assert len(response_groups) == 2
+    assert len(response_groups[0]) == 8
+    generated_texts = [[trainer.tokenizer.decode(response["completion_token_ids"]) for response in response_group] for response_group in response_groups]
+    logger.info(f"The test responses from base model {generated_texts}")
 
 async def test_rollout_policy_logproba_mp(args):
+    from trainerGRPO import GRPOTrainer, GRPOConfig, GenerationResultGroup, GenerationResult, GenerationDataset
+    from trainerBase import TrainerConfig
 
     try:
         base_config = TrainerConfig.from_yaml(args.base_config)
@@ -621,6 +1110,8 @@ async def train_grpo(args: argparse.Namespace):
     #  https://docs.google.com/document/d/1r5Dl6L5kAFmYaKY1eqONfMsUQmbZof-Pfdr4XPNCu58/edit?tab=t.0#bookmark=id.236s9naq0h9n
 
     # load config
+    from trainerGRPO import GRPOTrainer, GRPOConfig, GenerationResultGroup, GenerationResult, GenerationDataset
+    from trainerBase import TrainerConfig
     reward_config = RewardConfig.from_yaml(args.online_grpo_config)
     with open(os.path.expanduser(args.online_grpo_config), 'r') as f:
             online_grpo_config = yaml.safe_load(f)
@@ -646,6 +1137,8 @@ async def train_grpo(args: argparse.Namespace):
 
     grpo_config.beta = online_grpo_config["train"]["grpo_beta"]
     grpo_config.reference_model_update_steps = online_grpo_config["train"]["grpo_reference_model_update_steps"]
+    grpo_config.clip_epsilon_lower = online_grpo_config["train"]["grpo_clip_epsilon_lower"]
+    grpo_config.clip_epsilon_upper = online_grpo_config["train"]["grpo_clip_epsilon_upper"]
 
     try:
         trainer = GRPOTrainer(args.run_tag, grpo_config, base_config) # trainer.model is the current policy
@@ -689,8 +1182,6 @@ async def train_grpo(args: argparse.Namespace):
     kb_gpus = online_grpo_config.get("kbtasks", {}).get("kb_gpus", [5, 6])
     save_checkpoint_every_epochs = online_grpo_config.get("train", {}).get("save_checkpoint_every_epochs", 4)
 
-    #####
-    # TODO check reference model set up. Assuming current reference model is the frozen version of model but not a softlink to model.
     logger.info("Start training")
 
     inference_model_path = args.start_model_path
@@ -698,15 +1189,23 @@ async def train_grpo(args: argparse.Namespace):
     for epoch in range(1, 1 + max_epochs):
 
         logger.info("Rolling out current policy ...")
-        response_groups = rollout_policy_logproba_mp(inference_model_path,
-                                                     all_prompts,
-                                                     base_config,
-                                                     inference_gpus,
-                                                     num_completion_per_prompt=group_size,
-                                                     max_new_tokens=max_new_tokens,
-                                                     batch_size=inferece_batch_size)
+        if isinstance(inference_model_path, Path):
+            inference_model_path = str(inference_model_path)
+        response_groups = rollout_policy_logproba_shellprocess(inference_model_path,
+                                                                all_prompts,
+                                                                base_config,
+                                                                inference_gpus,
+                                                                num_completion_per_prompt=group_size,
+                                                                max_new_tokens=max_new_tokens,
+                                                                batch_size=inferece_batch_size)
         reward_eval_input = {}
+        evaluated_reference_codes = []
+        evaluated_response_groups = []
         for reference_code, response_group in zip(all_reference_codes, response_groups):
+            if response_group == []: ## The case roll out policy failed for the reference code
+                continue
+            evaluated_reference_codes.append(reference_code)
+            evaluated_response_groups.append(response_group)
             reward_eval_input[reference_code] = [prompt_manger.extract_generated_code(current_gen["text"]) for current_gen in response_group]
 
         logger.info("Evaluating the generated codes and get rewards ...")
@@ -714,13 +1213,13 @@ async def train_grpo(args: argparse.Namespace):
         reward_dict = code_evaluation_local(reward_eval_input, args.run_tag, f"model_{epoch}", "rollout", reward_config, devices=kb_gpus)
 
         #Create GRPO dataset
-        rewards_groups = [reward_dict[reference_code]["reward"] for reference_code in all_reference_codes]
+        rewards_groups = [reward_dict[reference_code]["reward"] for reference_code in evaluated_reference_codes]
         rewards_save_path = os.path.join(trainer.checkpoint_path, f"reward_{epoch}.json")
         with open(rewards_save_path, "w") as f:
-            json.dump({"referece_codes": all_reference_codes, "rewards": rewards_groups}, f, indent=4)
+            json.dump({"referece_codes": evaluated_reference_codes, "rewards": rewards_groups}, f, indent=4)
 
         result_groups = []
-        for response_group, rewards in zip(response_groups, rewards_groups):
+        for response_group, rewards in zip(evaluated_response_groups, rewards_groups):
             result_group = GenerationResultGroup(task_tag="{args.run_tage}_{epoch}", results=[])
             id = 0
             for response, reward in zip(response_group, rewards):
@@ -752,11 +1251,10 @@ async def train_grpo(args: argparse.Namespace):
             logger.error(f"❌ [GRPOTrainer] Training failed: {e}")
             sys.exit(1)
 
-
 async def main():
     parser = argparse.ArgumentParser(description="Iterate Model by Online GRPO")
     parser.add_argument("--start_model_path", type=str, default="finetune_model_output/sft_t2/qwen3_32b/")
-    parser.add_argument("--run_tag", type=str, default="v0.1_20250727_grpot3")
+    parser.add_argument("--run_tag", type=str, default="v0.1_20250731_grpot3")
     parser.add_argument("--base-config", type=str, default="trainerBase.yaml")
     parser.add_argument("--grpo-config", type=str, default="trainerGRPO.yaml")
     parser.add_argument("--online-grpo-config", type=str, default="grpo_iterations.yaml")
@@ -764,14 +1262,16 @@ async def main():
     args = parser.parse_args()
 
     if args.test:
-        await test_rollout_policy_logproba(args)
-        await test_rollout_policy_logproba_mp(args) # unsloth is not pickable
-        await test_code_evaluation_local()
-        await test_prompt_manager(args)
+        logger.info("Running test only ... ")
+        # await test_rollout_policy_logproba(args)
+        # await test_rollout_policy_logproba_mp(args) # unsloth is not pickable
+        # await test_rollout_policy_logproba_safethreading(args) # safethreading is still slow
+        await test_rollout_policy_logproba_shellprocess(args)
+        # await test_code_evaluation_local()
+        # await test_prompt_manager(args)
         return
 
     await train_grpo(args)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
