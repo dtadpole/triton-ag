@@ -225,6 +225,7 @@ async def kb_eval_ref(
             correctness=False,
             metadata={
                 "processing_error": str(e),
+                "retriable": True, # if the error is retriable, the client will retry the request
             },
             runtime=-1.0,
         )
@@ -325,6 +326,10 @@ async def kb_eval(
         result = KernelExecResult(
             compiled=False,
             correctness=False,
+            metadata={
+                "processing_error": str(e),
+                "retriable": True, # if the error is retriable, the client will retry the request
+            },
             runtime=-1.0,
         )
         return result
@@ -452,3 +457,4 @@ if __name__ == "__main__":
     # signal.alarm(args.max_process_time)  # exit after max_process_time seconds
 
     asyncio.run(main(args))
+total

@@ -16,12 +16,12 @@ import signal
 import argparse
 from collections import defaultdict
 
-MAX_LOCK_AGE = 45 # seconds
+MAX_LOCK_AGE = 30 # seconds
 
-def on_critical_timeout(signum, frame):
+def on_critical_alarm(signum, frame):
     # logger.error(f"⏰ Critical timeout reached [{signum}] [{frame.f_code.co_name}], exiting.")
-    logger.error(f"⏰ Critical timeout reached")
-    logger.error(f"⏰ [{signum}] [{frame.f_code.co_name}]")
+    logger.error(f"⏰ Critical alarm invoked")
+    logger.error(f"⏰ [signal={signum}] [function={frame.f_code.co_name}] [file={frame.f_code.co_filename}:{frame.f_lineno}]")
     # kill the process
     os.kill(os.getpid(), signal.SIGKILL)
     # sleep for 1 second
@@ -29,8 +29,16 @@ def on_critical_timeout(signum, frame):
     # exit with code 5 to indicate timer expired
     os._exit(5)
 
+def on_critical_timeout():
+    logger.error(f"⏰ Critical timeout invoked")
+    os.kill(os.getpid(), signal.SIGKILL)
+    # sleep for 1 second
+    time.sleep(1)
+    # exit with code 5 to indicate timer expired
+    os._exit(5)
+
 def on_process_timeout():
-    logger.error(f"⛔ Process timeout reached, exiting.")
+    logger.error(f"⛔ Process timeout invoked, exiting.")
     os.kill(os.getpid(), signal.SIGKILL)
     # sleep for 1 second
     time.sleep(1)

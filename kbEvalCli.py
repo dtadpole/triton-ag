@@ -14,7 +14,7 @@ import traceback
 from threading import Timer
 from pydantic import BaseModel
 from torch import nn
-from kbEvalUtil import KernelExecResult, from_kbEval_yaml, format_exception, CorrectnessResult, CorrectnessError, CorrectnessShapeMismatchError, CorrectnessValueMismatchError, CorrectnessProcessingError, CompileError, CompileInstantiationError, CompileRuntimeError, FileLock, cleanup_lockfile, set_seed, get_timing_stats, time_execution_with_cuda_event, load_model_and_inputs, load_custom_model, graceful_eval_cleanup, on_critical_timeout, on_process_timeout, resolve_triton_code
+from kbEvalUtil import KernelExecResult, from_kbEval_yaml, format_exception, CorrectnessResult, CorrectnessError, CorrectnessShapeMismatchError, CorrectnessValueMismatchError, CorrectnessProcessingError, CompileError, CompileInstantiationError, CompileRuntimeError, FileLock, cleanup_lockfile, set_seed, get_timing_stats, time_execution_with_cuda_event, load_model_and_inputs, load_custom_model, graceful_eval_cleanup, on_critical_alarm, on_critical_timeout, on_process_timeout, resolve_triton_code
 import torch
 import asyncio
 import os
@@ -205,8 +205,11 @@ def eval_kernel_custom(
                 # time.sleep(random.randint(3, 5)) # verified lock is working
 
                 # Install the handler and arm the timer (in seconds)
-                signal.signal(signal.SIGALRM, on_critical_timeout)
+                signal.signal(signal.SIGALRM, on_critical_alarm)
                 signal.alarm(max_critical_time)  # exit after max_critical_time seconds
+                critical_timer = Timer(max_critical_time * 1.5, on_critical_timeout) # insurance policy for critical timeout
+                critical_timer.daemon = True
+                critical_timer.start()
                 logger.warning(f"[KB_Eval_Cli] [{task_tag}/{eval_tag}] Alarm set for Critical Section with [{max_critical_time}] seconds")
 
                 init_inputs = get_init_inputs()
@@ -297,7 +300,7 @@ def eval_kernel_custom(
         except TimeoutError:
             graceful_eval_cleanup(context, device)
             logger.info(f"⏳ [KB_Eval_Cli] [{task_tag}/{eval_tag}] Waiting for lock to be released {lock_file}")
-            time.sleep(2)
+            time.sleep(random.uniform(0.5, 1.5)) # sleep randomly between 0.5 and 1.5 seconds, using float to avoid blocking
             continue
 
         except CompileError as e:
@@ -350,7 +353,7 @@ def main():
     parser.add_argument("--generated_code", type=str, default="elemAddTriton.py")
     parser.add_argument("--measure_reference", action="store_true")
     parser.add_argument("--device-list", type=str, default="1")
-    parser.add_argument("--max_critical_time", type=int, default=10)
+    parser.add_argument("--max_critical_time", type=int, default=5)
     parser.add_argument("--max_process_time", type=int, default=270)
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()

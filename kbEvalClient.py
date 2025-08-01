@@ -84,6 +84,9 @@ class KbEvalClient:
                     response.raise_for_status()
 
                     result = KernelExecResult(**response.json())
+                    if "retriable" in result.metadata and result.metadata["retriable"]:
+                        logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Retriable error, retrying...")
+                        continue
 
                     return result
 
@@ -132,6 +135,9 @@ class KbEvalClient:
                     response.raise_for_status()
 
                     result = KernelExecResult(**response.json())
+                    if "retriable" in result.metadata and result.metadata["retriable"]:
+                        logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Retriable error, retrying...")
+                        continue
 
                     return result
 

@@ -39,6 +39,7 @@ class CodeGenEvalBlock(BaseModel):
     model_name: str
     num_samples: int
     num_generations: int
+    num_turns_per_generation: int = Field(default=4)
     parallel_tasks: int = Field(default=24)
     model_override: Optional[str] = Field(default=None)
     input_dir: str = Field(default="~/triton-ag/kernel_bench")
