@@ -23,6 +23,7 @@ class RFTConfig(BaseModel):
     """RFT configuration"""
     max_seq_length: int = 4096
     mask_non_assistant_tokens: bool = True
+    mask_non_last_assistant_tokens: bool = True
     discard_long_conversations: bool = True
 
     @classmethod
@@ -59,7 +60,12 @@ class RFTDataset(Dataset):
 
         self.messages_list = []
         for messages in messages_list:
-            formatted_data = format_conversation(messages, tokenizer, rft_config.mask_non_assistant_tokens)
+            formatted_data = format_conversation(
+                messages,
+                tokenizer,
+                mask_non_assistant_tokens=rft_config.mask_non_assistant_tokens,
+                mask_non_last_assistant_tokens=rft_config.mask_non_last_assistant_tokens,
+            )
             
             # Convert tensors to lists for the data collator
             assert isinstance(formatted_data['input_ids'], torch.Tensor)
