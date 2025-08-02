@@ -45,7 +45,7 @@ async def rsync_file(source_path: str, target_path: str, rsync_path: str = "rsyn
     Rsync a file from source to target path
     """
     # run command: rsync -azP <source_path> <target_path>
-    command = f"rsync -azP --rsync-path {rsync_path} {source_path} {target_path}"
+    command = f"rsync -azP --rsync-path '{rsync_path}' '{source_path}' '{target_path}'"
     process = await asyncio.create_subprocess_shell(
         command,
         stdout=asyncio.subprocess.PIPE,
