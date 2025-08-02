@@ -1,6 +1,7 @@
 import yaml
 import asyncio
 import argparse
+from datetime import datetime
 from logger import logger
 from globalRegClient import GlobalRegClient
 from globalUtils import CodeGenEvalBlock, CritiqueBlock, ExemplarBlock, ReflectionBlock, TrainerSFTBlock, TrainerRFTBlock, TrainerGRPOBlock
@@ -23,8 +24,11 @@ VALID_TASK_TYPES = [
 
 class GlobalWorkflow:
     def __init__(self, prefix_tag: str, config_path: str = "globalWorkflow.yaml"):
-        self.prefix_tag = prefix_tag
         self.config = self.from_yaml(config_path)
+        if prefix_tag == "auto":
+            self.prefix_tag = self.config.get("global", {}).get("prefix_tag", f"auto_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        else:
+            self.prefix_tag = prefix_tag
         self.global_config = self.config.get("global", {})
         self.codeGenEval_default = self.config.get(TASK_TYPE_CODEGENEVAL, {}).get("default", {})
         self.exemplar_default = self.config.get(TASK_TYPE_EXEMPLAR, {}).get("default", {})
@@ -155,7 +159,7 @@ class GlobalWorkflow:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.e")
+    parser.add_argument("--prefix_tag", type=str, default="auto")
     parser.add_argument("--start_epoch", type=int, default=0)
     parser.add_argument("--start_block", type=int, default=0)
     args = parser.parse_args()
