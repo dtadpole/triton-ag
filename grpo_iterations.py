@@ -13,6 +13,7 @@ from tqdm import tqdm
 from pydantic import BaseModel
 import hashlib
 import multiprocessing as mp
+import shutil
 import time
 import torch
 import asyncio
@@ -1124,9 +1125,18 @@ async def train_grpo(args: argparse.Namespace):
         logger.error(f"❌ [GRPOTrainer] Failed to load base configuration: {e}")
         sys.exit(1)
 
+    # overwrite the base parameters
     base_config.training.checkpoint_path = GRPO_FOLDER + "/lora_adapter/"
     base_config.model.name = args.start_model_path
     base_config.training.save_steps = 10e9 # save the checkpoint by epochs
+    base_config.training.micro_batch_size = online_grpo_config["train"]["micro_batch_size"]
+    base_config.training.gradient_accumulation_steps = online_grpo_config["train"]["gradient_accumulation_steps"]
+    base_config.training.learning_rate = online_grpo_config["train"]["learning_rate"]
+    base_config.training.max_steps = online_grpo_config["train"]["max_steps"]
+    base_config.training.max_grad_norm = online_grpo_config["train"]["max_grad_norm"]
+    base_config.training.scheduler_type = online_grpo_config["train"]["scheduler_type"]
+    base_config.training.num_warmup_steps = online_grpo_config["train"]["num_warmup_steps"]
+
 
     try:
         grpo_config = GRPOConfig.from_yaml(args.grpo_config)
@@ -1148,6 +1158,21 @@ async def train_grpo(args: argparse.Namespace):
         sys.exit(1)
     ref_device = online_grpo_config["train"]["grpo_reference_model_device"]
     trainer._deepcopy_reference_model(f"cuda:{ref_device}")
+
+    # save config files into the checkpoint folder
+    shutil.copy(args.base_config, trainer.checkpoint_path)
+    shutil.copy(args.grpo_config, trainer.checkpoint_path)
+    shutil.copy(args.online_grpo_config, trainer.checkpoint_path)
+
+    # get the current epoch from the last check point if exists
+    inference_model_path = args.start_model_path
+    current_epoch = 0
+    checkpoint_location = trainer.checkpoint_path / base_config.training.latest_checkpoint_name
+    if trainer._checkpoint_exists(checkpoint_location):
+        logger.info(f"Starting from the latest checkpoint {checkpoint_location}")
+        inference_model_path = str(checkpoint_location)
+        checkpoint_path = os.readlink(checkpoint_location)
+        current_epoch = int(checkpoint_path.split("-")[1])
 
     # setup prompt manager
     logger.info("Set up prompt manager")
@@ -1184,9 +1209,7 @@ async def train_grpo(args: argparse.Namespace):
 
     logger.info("Start training")
 
-    inference_model_path = args.start_model_path
-
-    for epoch in range(1, 1 + max_epochs):
+    for epoch in range(current_epoch, 1 + max_epochs):
 
         logger.info("Rolling out current policy ...")
         if isinstance(inference_model_path, Path):
@@ -1240,7 +1263,7 @@ async def train_grpo(args: argparse.Namespace):
             result_groups.append(result_group)
         dataset = GenerationDataset(result_groups)
 
-        # Train the block: TODO Current trainer doesn't have KL divergence
+        # Train the block:
         try:
             trainer.train_block(args.run_tag, dataset)
             logger.info("🎉 [GRPOTrainer] Training completed successfully!")
@@ -1254,7 +1277,7 @@ async def train_grpo(args: argparse.Namespace):
 async def main():
     parser = argparse.ArgumentParser(description="Iterate Model by Online GRPO")
     parser.add_argument("--start_model_path", type=str, default="finetune_model_output/sft_t2/qwen3_32b/")
-    parser.add_argument("--run_tag", type=str, default="v0.1_20250731_grpot3")
+    parser.add_argument("--run_tag", type=str, default="v0.1_20250801_grpot4")
     parser.add_argument("--base-config", type=str, default="trainerBase.yaml")
     parser.add_argument("--grpo-config", type=str, default="trainerGRPO.yaml")
     parser.add_argument("--online-grpo-config", type=str, default="grpo_iterations.yaml")
