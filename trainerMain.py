@@ -9,6 +9,7 @@ import traceback
 import os
 from globalUtils import MODEL_OVERRIDE_KEY, TrainerGRPOBlock, TrainerRFTBlock, TrainerSFTBlock
 from logger import logger
+from globalWorkflow import GlobalWorkflow
 from globalRegClient import GlobalRegClient
 from trainerBase import TrainerConfig
 from trainerSFT import sft_train_block, sft_get_trainer, SFTConfig
@@ -55,17 +56,20 @@ class RsyncQueue:
         # get with timeout
         source_prefix = os.path.expanduser(self.rsync_config.get('rsync_source_prefix', '~/.trainer'))
         target_prefix = self.rsync_config.get('rsync_target_prefix', '192.168.1.205:.trainer')
+        rsync_name = checkpoint_path.split('/')[-2] + '/' + checkpoint_path.split('/')[-1]
         if checkpoint_path.startswith(source_prefix):
             target_path = checkpoint_path.replace(source_prefix, target_prefix)
         else:
             target_path = target_prefix + checkpoint_path
+        # rsync_path is the path to the rsync command
+        rsync_path = self.rsync_config.get('rsync_path', 'rsync').format(rsync_name=rsync_name)
         # get a list of files to rsync
         file_list = self.rsync_config.get('file_list', [])
         for file in file_list:
             source_file = os.path.join(checkpoint_path, file)
             # target_file = os.path.join(target_path, file)
             logger.info(f"📞 [RsyncQueue] Rsyncing: [{source_file}] to [{target_path}]")
-            await rsync_file(source_file, target_path + '/')
+            await rsync_file(source_file, target_path + '/', rsync_path=rsync_path)
         # we are here if rsync is successful
         logger.info(f"🌐 [RsyncQueue] Rsynced: [{checkpoint_path}] to [{target_path}]")
 
@@ -130,18 +134,18 @@ class RsyncQueue:
                 traceback.print_exc()
                 await asyncio.sleep(5)
 
-async def main_loop_task(rsync_queue: RsyncQueue, prefix_tag: str, test_mode: bool):
+async def main_loop_task(rsync_queue: RsyncQueue, trainer_prefix_tag: str, test_mode: bool):
 
-    logger.info(f"🌀 [trainerMain] Main loop started for prefix: {prefix_tag}")
+    logger.info(f"🌀 [trainerMain] Main loop started for prefix: {trainer_prefix_tag}")
 
     base_config_file = "trainerBase.yaml"
     sft_config_file = "trainerSFT.yaml"
     rft_config_file = "trainerRFT.yaml"
     grpo_config_file = "trainerGRPO.yaml"
     # initialize trainers (for now, we only have sft and grpo)
-    sft_trainer = sft_get_trainer(None, prefix_tag, base_config_file, sft_config_file)
-    rft_trainer = rft_get_trainer(sft_trainer, prefix_tag, base_config_file, rft_config_file)
-    grpo_trainer = grpo_get_trainer(rft_trainer, prefix_tag, base_config_file, grpo_config_file)
+    sft_trainer = sft_get_trainer(None, trainer_prefix_tag, base_config_file, sft_config_file)
+    rft_trainer = rft_get_trainer(sft_trainer, trainer_prefix_tag, base_config_file, rft_config_file)
+    grpo_trainer = grpo_get_trainer(rft_trainer, trainer_prefix_tag, base_config_file, grpo_config_file)
 
     loop = asyncio.get_event_loop()
 
@@ -171,7 +175,7 @@ async def main_loop_task(rsync_queue: RsyncQueue, prefix_tag: str, test_mode: bo
 
             if random.random() < sft_prob:
                 sft_item = await client.dequeue(queue_name="trainer.sft")
-                if sft_item['prefix_tag'] != prefix_tag:
+                if sft_item['prefix_tag'] != trainer_prefix_tag:
                     logger.error(f"❌ [trainerMain] Skipping item with prefix: {sft_item['prefix_tag']}")
                     continue
                 sft_block = TrainerSFTBlock(**sft_item)
@@ -188,7 +192,7 @@ async def main_loop_task(rsync_queue: RsyncQueue, prefix_tag: str, test_mode: bo
 
             if random.random() < rft_prob:
                 rft_item = await client.dequeue(queue_name="trainer.rft")
-                if rft_item['prefix_tag'] != prefix_tag:
+                if rft_item['prefix_tag'] != trainer_prefix_tag:
                     logger.error(f"❌ [trainerMain] Skipping item with prefix: {rft_item['prefix_tag']}")
                     continue
                 rft_block = TrainerRFTBlock(**rft_item)
@@ -205,7 +209,7 @@ async def main_loop_task(rsync_queue: RsyncQueue, prefix_tag: str, test_mode: bo
 
             if random.random() < grpo_prob:
                 grpo_item = await client.dequeue(queue_name="trainer.grpo")
-                if grpo_item['prefix_tag'] != prefix_tag:
+                if grpo_item['prefix_tag'] != trainer_prefix_tag:
                     logger.error(f"❌ [trainerMain] Skipping item with prefix: {grpo_item['prefix_tag']}")
                     continue
                 grpo_block = TrainerGRPOBlock(**grpo_item)
@@ -227,7 +231,7 @@ async def main_loop_task(rsync_queue: RsyncQueue, prefix_tag: str, test_mode: bo
 
 async def main():
     parser = argparse.ArgumentParser(description="Train a model using mixed SFT and GRPO trainers")
-    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.e")
+    parser.add_argument("--prefix_tag", type=str, default="auto")
     parser.add_argument("--test_mode", action="store_true")
     args = parser.parse_args()
 
@@ -255,11 +259,15 @@ async def main():
                 traceback.print_exc()
                 continue
     else:
+        global_workflow = GlobalWorkflow(args.prefix_tag)
+        trainer_prefix_tag = global_workflow.prefix_tag
+        logger.info(f"🌀 [trainerMain] Starting with prefix: {trainer_prefix_tag}")
+
         rsync_queue = RsyncQueue()
 
         # create tasks: 1/ main loop, 2/ rsync_queue
         rsync_task = asyncio.create_task(rsync_queue.rsync_task())
-        main_task = asyncio.create_task(main_loop_task(rsync_queue, args.prefix_tag, args.test_mode))
+        main_task = asyncio.create_task(main_loop_task(rsync_queue, trainer_prefix_tag, args.test_mode))
 
         # wait for the tasks to complete
         await asyncio.gather(rsync_task, main_task)
