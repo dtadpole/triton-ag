@@ -207,9 +207,9 @@ def eval_kernel_custom(
                 # Install the handler and arm the timer (in seconds)
                 signal.signal(signal.SIGALRM, on_critical_alarm)
                 signal.alarm(max_critical_time)  # exit after max_critical_time seconds
-                critical_timer = Timer(max_critical_time * 1.5, on_critical_timeout) # insurance policy for critical timeout
-                critical_timer.daemon = True
-                critical_timer.start()
+                # critical_timer = Timer(max_critical_time * 1.5, on_critical_timeout) # insurance policy for critical timeout
+                # critical_timer.daemon = True
+                # critical_timer.start()
                 logger.warning(f"[KB_Eval_Cli] [{task_tag}/{eval_tag}] Alarm set for Critical Section with [{max_critical_time}] seconds")
 
                 init_inputs = get_init_inputs()
@@ -354,7 +354,7 @@ def main():
     parser.add_argument("--measure_reference", action="store_true")
     parser.add_argument("--device-list", type=str, default="1")
     parser.add_argument("--max_critical_time", type=int, default=5)
-    parser.add_argument("--max_process_time", type=int, default=270)
+    parser.add_argument("--max_process_time", type=int, default=275)
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
