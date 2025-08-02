@@ -1,5 +1,6 @@
 import os
 import sys
+from collections import defaultdict
 import duckdb
 import unsloth
 import torch
@@ -60,7 +61,7 @@ class GRPOConfig(BaseModel):
 
 class GenerationResult(BaseModel):
     """Result of a single generation"""
-    gen_tag: str
+    turn_tag: str
     reward: float # total reward
     reward_items: Dict[str, float] = {} # individual reward components
     prompt_token_ids: List[int] = [] # prompt tokens
@@ -70,6 +71,7 @@ class GenerationResult(BaseModel):
 class GenerationResultGroup(BaseModel):
     """Set of generation results"""
     task_tag: str
+    turn_id: int
     results: List[GenerationResult]
     metadata: Dict[str, Any] = {} # metadata
 
@@ -78,7 +80,7 @@ class GenerationResultGroup(BaseModel):
         advantages = self._compute_advantages(config)
         return [
             {
-                'gen_tag': result.gen_tag,
+                'turn_tag': result.turn_tag,
                 'reward': result.reward,
                 'advantage': advantage,
                 'prompt_token_ids': result.prompt_token_ids,
@@ -146,7 +148,7 @@ class GRPOTrainer(BaseTrainer):
 
     def _compute_mini_batch_loss(self, batch: Dict[str, Any], clip_metrics: Dict[str, List[float]], group_max_length: Optional[int] = None):
         """Compute loss for the generated tokens"""
-        # gen_tags = batch['gen_tag']
+        # turn_tags = batch['turn_tag']
         # rewards = batch['reward']
         advantages = batch['advantage']
         prompt_token_ids = batch['prompt_token_ids']
@@ -390,15 +392,14 @@ def grpo_train_block(block: TrainerGRPOBlock, trainer: GRPOTrainer, callback: Op
             continue
         task_tag = row['metadata']['task_tag']
 
-        generation_results = []
-        prompt = None
-        prompt_token_ids = []
+        generation_results_by_turn = defaultdict(list)
         # read in all the gen_xx_completion.json files in the same folder (non-recursive)
         completion_files = [f for f in os.listdir(folder) if f.startswith('gen_') and f.endswith('_completion.json')]
         for completion_file in completion_files:
             with open(os.path.join(folder, completion_file), 'r') as f:
                 completion_data = json.load(f)
-            gen_tag = completion_file.replace('_completion.json', '')
+            turn_tag = completion_file.replace('_completion.json', '')
+            turn_id = int(turn_tag.split('_')[-1][1:]) # turn_id is the last number in the turn_tag, e.g. gen_01_t03 -> 3
             # read corresponding gen_xx_eval.json
             eval_file = completion_file.replace('_completion.json', '_eval.json')
             if not os.path.exists(os.path.join(folder, eval_file)):
@@ -410,49 +411,42 @@ def grpo_train_block(block: TrainerGRPOBlock, trainer: GRPOTrainer, callback: Op
             compiled = eval_data['compiled']
             correctness = eval_data['correctness']
             runtime = eval_data['runtime']
-            reward_compiled = 0.0 if compiled else -0.3
-            reward_correctness = 0.0 if correctness else -0.7
-            reward_runtime = 0.0 if runtime < 0 else ref_runtime / runtime
-            reward = reward_compiled + reward_correctness + reward_runtime
+            # reward_compiled = 0.0 # do NOT use compiled reward
+            reward_correctness = 0.3 if correctness else 0.0
+            reward_speedup = 0.0 if runtime < 0 else ref_runtime / runtime
+            reward = reward_correctness + reward_speedup
             # create a generation result group
-            if prompt is None:
-                prompt = completion_data['prompt']
-                prompt_token_ids = trainer.tokenizer.encode(prompt)
-            else:
-                if prompt != completion_data['prompt']:
-                    logger.error(f"❌ [GRPOTrainer] [{block.input_tag}] Prompt mismatch for [{gen_tag}] - [{prompt}] != [{completion_data['prompt']}]")
-                    # ignore this generation result and continue
-                    continue
+            prompt = completion_data['prompt']
+            prompt_token_ids = trainer.tokenizer.encode(prompt)
             # split completion_data['logprobs'] into a list of completion ids and logprobs
             completion_token_ids = [logprob['token_id'] for logprob in completion_data['logprobs']]
             completion_log_probs = [logprob['logprob'] for logprob in completion_data['logprobs']]
             # create the generation result object
             result = GenerationResult(
-                gen_tag=gen_tag,
+                turn_tag=turn_tag,
                 reward=reward,
                 reward_items={
-                    "compiled": reward_compiled,
                     "correctness": reward_correctness,
-                    "runtime": reward_runtime,
+                    "speedup": reward_speedup,
                 },
                 prompt_token_ids=prompt_token_ids,
                 completion_token_ids=completion_token_ids,
                 completion_log_probs=completion_log_probs,
             )
-            generation_results.append(result)
+            generation_results_by_turn[turn_id].append(result)
 
-        # create a generation result group only if we have at least 2 results
-        if len(generation_results) < 2:
-            logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] Skipping [{folder}] that has only [{len(generation_results)}] results")
-            continue
-        # check if all the reward are the same, if so, skip
-        if all(result.reward == generation_results[0].reward for result in generation_results):
-            logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] Skipping [{folder}] All rewards are the same: [{generation_results[0].reward}]")
-            continue
-        # we are here because we have at least 2 results and the rewards are not the same
-        # so we can create a generation result group
-        result_group = GenerationResultGroup(task_tag=task_tag, results=generation_results)
-        result_groups.append(result_group)
+        # iterate over the generation_results_by_turn and create a generation result group for each turn
+        for turn_id, generation_results in generation_results_by_turn.items():
+            # create a generation result group
+            if len(generation_results) < 2:
+                logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] Skipping [{folder}] that has only [{len(generation_results)}] results for turn [{turn_id}]")
+                continue
+            # check if all the reward are the same, if so, skip
+            if all(result.reward == generation_results[0].reward for result in generation_results):
+                logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] Skipping [{folder}] All rewards are the same: [{generation_results[0].reward}] for [{task_tag}] turn [{turn_id}]")
+                continue
+            result_group = GenerationResultGroup(task_tag=task_tag, turn_id=turn_id, results=generation_results)
+            result_groups.append(result_group)
 
     # Create group dataset
     dataset = GenerationDataset(result_groups)
@@ -551,7 +545,7 @@ def grpo_get_sample_dataset(tokenizer: AutoTokenizer, size: int = 20) -> Generat
             completion_log_probs = np.random.normal(0.0, 0.1, len(completion_token_ids)).tolist()
             # generation result
             result = GenerationResult(
-                gen_tag=f"gen_{id:02d}",
+                turn_tag=f"gen_{id:02d}",
                 reward=reward,
                 prompt_token_ids=prompt_token_ids,
                 completion_token_ids=completion_token_ids,
@@ -570,10 +564,10 @@ def grpo_get_sample_dataset(tokenizer: AutoTokenizer, size: int = 20) -> Generat
 async def main():
     """Main function for GRPO training"""
     parser = argparse.ArgumentParser(description="Train a model using GRPOTrainer")
-    parser.add_argument("--prefix_tag", type=str, default="KC_0.1.0_14B")
+    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.test")
     parser.add_argument("--epoch_id", type=int, default=0)
     parser.add_argument("--block_id", type=int, default=0)
-    parser.add_argument("--input_tag", type=str, default="KC_0.1.0_14B_000_00")
+    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B_20250801_233446")
     parser.add_argument("--input_dir", type=str, default="~/.codeGenEval")
     parser.add_argument("--output_dir", type=str, default="~/.trainer")
     parser.add_argument("--base_config", type=str, default="trainerBase.yaml")
