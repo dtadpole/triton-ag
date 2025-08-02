@@ -366,12 +366,12 @@ async def _check_total_error_count():
             ELAPSED_TIME = CURR_TIME - START_TIME
             if ELAPSED_TIME > MAX_RUN_TIME:
                 # add an star emoji
-                logger.error(f"⭐ Elapsed time is greater than {MAX_RUN_TIME/3600:.2f} hours, exiting... [parent process will restart]")
+                logger.error(f"⭐ Elapsed time [{ELAPSED_TIME:.2f}s] is greater than {MAX_RUN_TIME/3600:.2f} hours, exiting... [parent process will restart]")
                 # loop = asyncio.get_event_loop()
                 # loop.stop()
                 # exit(1)
             if CURR_ERROR_COUNT > MAX_ERROR_COUNT:
-                logger.error(f"❌ Total error count is greater than {MAX_ERROR_COUNT}, exiting")
+                logger.error(f"❌ Total error count [{CURR_ERROR_COUNT}] is greater than {MAX_ERROR_COUNT}!")
                 # loop = asyncio.get_event_loop()
                 # loop.stop()
                 # exit(1)
