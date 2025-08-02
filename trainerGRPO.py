@@ -158,26 +158,27 @@ class GRPOTrainer(BaseTrainer):
         attention_mask = batch['attention_mask'].to(self.device)
 
         # check that all the prompt_token_ids are the same
-        prompt_token_ids_0 = prompt_token_ids[0]
-        prompt_token_len = len(prompt_token_ids_0)
-        if len(prompt_token_ids) > 1:
-            for i in range(1, len(prompt_token_ids)):
-                if len(prompt_token_ids[i]) != prompt_token_len:
-                    raise ValueError(f"❌ [GRPOTrainer] Prompt token ids are not the same length: [idx.{i} != idx.{0}]")
-                elif prompt_token_ids[i] != prompt_token_ids_0:
-                    raise ValueError(f"❌ [GRPOTrainer] Prompt token ids are not the same: [idx.{i} != idx.{0}]")
+        # prompt_token_ids_0 = prompt_token_ids[0]
+        # prompt_token_len = len(prompt_token_ids_0)
+        # if len(prompt_token_ids) > 1:
+        #     for i in range(1, len(prompt_token_ids)):
+        #         if len(prompt_token_ids[i]) != prompt_token_len:
+        #              raise ValueError(f"❌ [GRPOTrainer] Prompt token ids are not the same length: [idx.{i} != idx.{0}]")
+        #         elif prompt_token_ids[i] != prompt_token_ids_0:
+        #             raise ValueError(f"❌ [GRPOTrainer] Prompt token ids are not the same: [idx.{i} != idx.{0}]")
         
         # get logits from model
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
-        # get the logits for the completion tokens only, remove the prompt tokens
-        output_completion_logits = outputs.logits[:, prompt_token_len-1:-1, :]
-        new_log_probs = F.log_softmax(output_completion_logits, dim=-1) # dim: (batch_size, completion_len, vocab_size)
 
         batch_loss = 0.0
         for i in range(len(advantages)): # for each generation result in the batch
+            # get the logits for the completion tokens only, remove the prompt tokens
+            prompt_token_len = len(prompt_token_ids[i])
+            output_completion_logits = outputs.logits[i, prompt_token_len-1:-1, :]
+            new_log_probs = F.log_softmax(output_completion_logits, dim=-1) # dim: (completion_len, vocab_size)
             # get log probabilities for the completion tokens
             labels = torch.tensor(completion_token_ids[i], device=self.device)
-            new_action_log_probs = new_log_probs[i, :len(completion_token_ids[i]), :].gather(
+            new_action_log_probs = new_log_probs[:len(completion_token_ids[i]), :].gather(
                 dim=-1, 
                 index=labels.unsqueeze(-1)
             ).squeeze(-1)  # (completion_len)
