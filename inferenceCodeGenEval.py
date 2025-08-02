@@ -89,9 +89,9 @@ class CodeGenEvalClient:
                 user_prompt_template = prompts_config.get('user_prompt.fix', 'Your code did not compile or run correctly.  Please fix the code and return the correct code.\n\nGenerated code evaluation:\n```json\n{prev_generated_eval}\n```')
         return user_prompt_template.format(
             reference_code=reference_code,
-            reference_eval=reference_eval,
+            reference_eval=json.dumps(reference_eval),
             prev_generated_code=prev_generated_code,
-            prev_generated_eval=prev_generated_eval,
+            prev_generated_eval=json.dumps(prev_generated_eval),
         )
 
     def get_example_reference_code(self) -> str:
