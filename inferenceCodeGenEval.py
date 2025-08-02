@@ -414,17 +414,17 @@ class CodeGenEvalClient:
                 logger.info(f"🔍 [CodeGenEval] [{self.run_tag}] Processing [{task_tag}] [{f'{gen_tag}'}]...")
 
                 wait_count = 0
-                max_wait_count = 20
+                max_wait_count = 10
                 while task_tag not in self.reference_eval_cache:
                     wait_count += 1
                     if wait_count > max_wait_count:
                         break
                     sleep_time = random.uniform(1, 10) # sleep randomly between 1 and 5 seconds, using float to avoid blocking
-                    logger.info(f"⏳ [CodeGenEval] [{self.run_tag}] Waiting for reference eval for [{task_tag}] [{f'{gen_tag}'}], sleeping for [{f'{sleep_time:.2f}s'}]")
+                    logger.info(f"⏳ [CodeGenEval] [{self.run_tag}] Waiting for reference eval for [{task_tag}] [{f'{gen_tag}'}], sleeping for [{f'{sleep_time:.2f}s'}] [{f'{wait_count}/{max_wait_count}'}]")
                     await asyncio.sleep(sleep_time)
 
                 if wait_count > max_wait_count:
-                    logger.error(f"❌ [CodeGenEval] [{self.run_tag}] Reference eval not found for [{task_tag}] [{f'{gen_tag}'}] after [{wait_count}/{max_wait_count}] attempts")
+                    logger.error(f"❌ [CodeGenEval] [{self.run_tag}] Reference eval not found for [{task_tag}] [{f'{gen_tag}'}] after [{wait_count}/{max_wait_count}] attempts. Skipping...")
                     continue
                     
                 if not self.reference_eval_cache[task_tag]['compiled'] or not self.reference_eval_cache[task_tag]['correctness']:
@@ -653,7 +653,7 @@ async def code_gen_eval_block(block: CodeGenEvalBlock):
 
         # now run inference
         codeGenEvalClient = CodeGenEvalClient(run_tag=run_tag, inference_client_config=config, output_dir=block.output_dir, logprobs=block.logprobs, template=block.template)
-        await codeGenEvalClient.run_block(task_tags, reference_code_contents, num_generations=block.num_generations, num_turns_per_generation=block.num_turns_per_generation, parallel_tasks=block.parallel_tasks)
+        await codeGenEvalClient.run_block(task_tags, reference_code_contents, num_generations=block.num_generations, num_turns_per_generation=block.num_turns_per_generation, parallel_tasks=block.parallel_tasks, run_reference=True)
         logger.info(f"🎉 [CodeGenEval] [{run_tag}] Block completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
 
     except Exception as e:
@@ -706,7 +706,7 @@ async def exemplar_block(block: ExemplarBlock):
 
         # now run inference
         codeGenEvalClient = CodeGenEvalClient(run_tag=block.input_tag, inference_client_config=config, output_dir=block.output_dir, logprobs=False, template=block.template)
-        await codeGenEvalClient.run_block(task_tags, reference_code_contents, reference_eval_contents=reference_eval_contents, num_generations=block.num_generations, parallel_tasks=block.parallel_tasks, run_reference=False)
+        await codeGenEvalClient.run_block(task_tags, reference_code_contents, reference_eval_contents=reference_eval_contents, num_generations=block.num_generations, parallel_tasks=block.parallel_tasks, run_reference=True)
         logger.info(f"🎉 [Exemplar] [{block.input_tag}] Block completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
 
     except Exception as e:

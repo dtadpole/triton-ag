@@ -155,7 +155,7 @@ class GlobalWorkflow:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.d")
+    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.e")
     parser.add_argument("--start_epoch", type=int, default=0)
     parser.add_argument("--start_block", type=int, default=0)
     args = parser.parse_args()
