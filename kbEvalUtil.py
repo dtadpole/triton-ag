@@ -12,6 +12,7 @@ from logger import logger
 import numpy as np
 import sys
 import ast
+import signal
 import argparse
 from collections import defaultdict
 
@@ -19,12 +20,22 @@ MAX_LOCK_AGE = 45 # seconds
 
 def on_critical_timeout(signum, frame):
     # logger.error(f"⏰ Critical timeout reached [{signum}] [{frame.f_code.co_name}], exiting.")
-    logger.error(f"⏰ Critical timeout reached [{signum}] [{frame}], exiting.")
-    sys.exit(5) # exit with code 5 to indicate timer expired
+    logger.error(f"⏰ Critical timeout reached")
+    logger.error(f"⏰ [{signum}] [{frame.f_code.co_name}]")
+    # kill the process
+    os.kill(os.getpid(), signal.SIGKILL)
+    # sleep for 1 second
+    time.sleep(1)
+    # exit with code 5 to indicate timer expired
+    os._exit(5)
 
 def on_process_timeout():
     logger.error(f"⛔ Process timeout reached, exiting.")
-    sys.exit(6) # exit with code 6 to indicate process timeout
+    os.kill(os.getpid(), signal.SIGKILL)
+    # sleep for 1 second
+    time.sleep(1)
+    # exit with code 6 to indicate process timeout
+    os._exit(6)
 
 
 def from_kbEval_yaml(yaml_file: str="kbEval.yaml"):
