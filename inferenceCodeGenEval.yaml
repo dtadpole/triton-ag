@@ -32,11 +32,32 @@ prompts:
 
 
     # User prompt template with substitutable source code parameter
-    user_prompt: |
-      Following is the reference PyTorch code, implement the complete new module with Triton (no testing code, no other code).
+    user_prompt.init: |
+      Following is the reference PyTorch code, implement the complete new module with Triton (no testing code, no init code, no other code).
 
       ```python
-      {source_code}
+      {reference_code}
+      ```
+
+      Reference code evaluation:
+      ```json
+      {reference_eval}
+      ```
+
+    user_prompt.fix: |
+      Your code did not compile or run correctly.  Please fix the code and return the correct code.
+
+      Generated code evaluation:
+      ```json
+      {prev_generated_eval}
+      ```
+
+    user_prompt.perf: |
+      Your code is correct. Please improve your code performance by optimizing the code, compare your performance to the reference code performance evaluation and consider all potential levers for optimizations.
+
+      Generated code evaluation:
+      ```json
+      {prev_generated_eval}
       ```
         
     examples:
@@ -157,15 +178,35 @@ prompts:
 
       Do NOT use emojis or special characters in your response.
 
-
     # User prompt template with substitutable source code parameter
-    user_prompt: |
-      Following is the reference PyTorch code, implement the complete new module with CUDA (no testing code, no other code).
+    user_prompt.init: |
+      Following is the reference PyTorch code, implement the complete new module with CUDA (no testing code, no init code, no other code).
 
       ```python
-      {source_code}
+      {reference_code}
       ```
-        
+
+      Reference code evaluation:
+      ```json
+      {reference_eval}
+      ```
+
+    user_prompt.fix: |
+      Your code did not compile or run correctly.  Please fix the code and return the correct code.
+
+      Generated code evaluation:
+      ```json
+      {prev_generated_eval}
+      ```
+
+    user_prompt.perf: |
+      Your code is correct. Please improve your code performance by optimizing the code, compare your performance to the reference code performance evaluation and consider all potential levers for optimizations.
+
+      Generated code evaluation:
+      ```json
+      {generated_eval}
+      ```
+
     examples:
       reference_code: |
         import torch

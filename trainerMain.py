@@ -227,7 +227,7 @@ async def main_loop_task(rsync_queue: RsyncQueue, prefix_tag: str, test_mode: bo
 
 async def main():
     parser = argparse.ArgumentParser(description="Train a model using mixed SFT and GRPO trainers")
-    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.b")
+    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.e")
     parser.add_argument("--test_mode", action="store_true")
     args = parser.parse_args()
 

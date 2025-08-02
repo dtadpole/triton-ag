@@ -84,16 +84,26 @@ class KbEvalClient:
                     response.raise_for_status()
 
                     result = KernelExecResult(**response.json())
+                    if (not result.compiled or not result.correctness) and "retriable" in result.metadata and result.metadata["retriable"]:
+                        sleep_seconds = 2 ** retry_count
+                        if retry_count < self.num_retries:
+                            # retry_count -= 0.5 # reduce retry count by 0.5 to avoid infinite loop
+                            logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Retriable error, retrying... [{retry_count}/{self.num_retries}] in [{sleep_seconds}s]")
+                            await asyncio.sleep(sleep_seconds)
+                            continue
+                        else:
+                            logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Return the last result from retriable error... [{retry_count}/{self.num_retries}]")
+                            return result
 
                     return result
 
             except Exception as e:
-                logger.warning(f"🔍 [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Error calling server: [{e}]")
+                logger.warning(f"🔍 [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Error calling server: [{e}] [{retry_count}/{self.num_retries}]")
                 if retry_count < self.num_retries:
                     sleep_seconds = 2 ** retry_count
                     logger.info(f"🔄 [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Retrying in {sleep_seconds} seconds... ({retry_count}/{self.num_retries})")
                     # exponential backoff
-                    time.sleep(sleep_seconds)
+                    await asyncio.sleep(sleep_seconds)
                     continue
                 else:
                     # add error emoji to beginning and end of the string
@@ -132,17 +142,27 @@ class KbEvalClient:
                     response.raise_for_status()
 
                     result = KernelExecResult(**response.json())
+                    if (not result.compiled or not result.correctness) and "retriable" in result.metadata and result.metadata["retriable"]:
+                        sleep_seconds = 2 ** retry_count
+                        if retry_count < self.num_retries:
+                            # retry_count -= 0.5 # reduce retry count by 0.5 to avoid infinite loop
+                            logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Retriable error, retrying... [{retry_count}/{self.num_retries}] in [{sleep_seconds}s]")
+                            await asyncio.sleep(sleep_seconds)
+                            continue
+                        else:
+                            logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Return the last result from retriable error... [{retry_count}/{self.num_retries}]")
+                            return result
 
                     return result
 
             except Exception as e:
                 # add retry emoji to beginning and end of the string
-                logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Error calling server: [{type(e).__name__}: {str(e)}]")
+                logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Error calling server: [{type(e).__name__}: {str(e)}] [{retry_count}/{self.num_retries}]")
                 if retry_count < self.num_retries:
                     sleep_seconds = 2 ** retry_count
                     logger.info(f"🔄 [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Retrying in {sleep_seconds} seconds... ({retry_count}/{self.num_retries})") # no emoji
                     # exponential backoff
-                    time.sleep(sleep_seconds)
+                    await asyncio.sleep(sleep_seconds)
                     continue
                 else:
                     # add error emoji to beginning and end of the string

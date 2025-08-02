@@ -1,5 +1,6 @@
 import json
 import yaml
+import argparse
 import torch
 from transformers import AutoTokenizer
 from logger import logger
@@ -81,7 +82,8 @@ async def rsync_file(source_path: str, target_path: str) -> int:
 
 def format_conversation(messages: List[Dict[str, Any]],
                         tokenizer: AutoTokenizer,
-                        mask_non_assistant_tokens: bool = True,
+                        mask_non_assistant_tokens: bool = True, # mask all token except assistant tokens
+                        mask_non_last_assistant_tokens: bool = False, # mask all token except last assistant tokens
                         ignore_index: int = -100,
                         tools: List[Union[Dict, Callable]] = [],
                         messages_from_openai_agent: bool = False,
@@ -120,7 +122,7 @@ def format_conversation(messages: List[Dict[str, Any]],
 
         if mask_non_assistant_tokens:
             # Mask user tokens if requested (only train on assistant responses)
-            labels = _mask_non_assistant_tokens(input_ids, labels, tokenizer, ignore_index)
+            labels = _mask_non_assistant_tokens(input_ids, labels, tokenizer, ignore_index=ignore_index, mask_non_last_assistant_tokens=mask_non_last_assistant_tokens)
             # convert labels to tensor
             labels = torch.tensor(labels)
     else:
@@ -154,6 +156,8 @@ def format_conversation(messages: List[Dict[str, Any]],
         attention_mask = encoding['attention_mask'].squeeze()
         labels = input_ids.clone()
         assistant_mask = encoding['assistant_masks'].squeeze().bool()
+        if mask_non_last_assistant_tokens:
+            assistant_mask = torch.tensor(extract_last_assistant_mask(assistant_mask))
         labels = labels.masked_fill(~assistant_mask, ignore_index)
     return {
             'text': formatted_text,
@@ -161,6 +165,24 @@ def format_conversation(messages: List[Dict[str, Any]],
             'attention_mask': attention_mask,
             'labels': labels
         }
+
+def extract_last_assistant_mask(mask: List[bool]) -> List[bool]:
+    """Extract the last continuous assistant mask from the mask"""
+    in_block = False
+    start = end = None
+    for i in reversed(range(len(mask))):
+        if mask[i]:
+            if not in_block:
+                end = i
+                in_block = True
+            start = i
+        elif in_block:
+            break
+    last_mask = [False] * len(mask)
+    if start is not None and end is not None:
+        for i in range(start, end + 1):
+            last_mask[i] = True
+    return last_mask
 
 def _manual_format_conversation(messages: List[Dict[str, str]], messages_from_openai_agent: bool = True) -> str:
     """Manually format conversation when chat template is not available"""
@@ -191,7 +213,7 @@ def _token_sequence_match(input_ids, start_idx, target_sequence):
         return False
     return input_ids[start_idx:start_idx + len(target_sequence)] == target_sequence
 
-def _mask_non_assistant_tokens(input_ids, labels, tokenizer, ignore_index) -> torch.Tensor:
+def _mask_non_assistant_tokens(input_ids, labels, tokenizer, ignore_index=-100, mask_non_last_assistant_tokens: bool = False) -> torch.Tensor:
     """Mask tokens that are not assistant responses."""
     # Convert to list for easier processing and ensure 1D
     input_ids_list = input_ids.squeeze().tolist() if input_ids.dim() > 1 else input_ids.tolist()
@@ -506,7 +528,13 @@ def print_masking_analysis(batch, tokenizer):
 
 
 def test_data_util():
-    tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen3-8B')
+    args = argparse.ArgumentParser()
+    args.add_argument("--model_name", type=str, default="Qwen/Qwen3-14B")
+    args.add_argument("--mask_non_assistant_tokens", type=bool, default=True)
+    args.add_argument("--mask_non_last_assistant_tokens", type=bool, default=True)
+    args = args.parse_args()
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     messages = [{
         "tools": [],
         "messages": [
@@ -585,12 +613,12 @@ def test_data_util():
 
     for message in messages:
         ## Use chat_completion to get the formatted text
-        formatted_data = format_conversation(message["messages"], tokenizer, tools=message["tools"], mask_non_assistant_tokens=True)
-        logger.info(formatted_data['text'])
+        formatted_data = format_conversation(message["messages"], tokenizer, tools=message["tools"], mask_non_assistant_tokens=args.mask_non_assistant_tokens, mask_non_last_assistant_tokens=args.mask_non_last_assistant_tokens, user_chat_template_for_masking=False)
+        logger.info(f"🔍 [test_data_util] Formatted text: {formatted_data['text']}")
         print_masking_analysis(formatted_data, tokenizer)
         ## Use the tokenizer to get the formatted text and masks
-        formatted_data = format_conversation(message["messages"], tokenizer, tools=message["tools"], mask_non_assistant_tokens=True, user_chat_template_for_masking=True)
-        logger.info(formatted_data['text'])
+        formatted_data = format_conversation(message["messages"], tokenizer, tools=message["tools"], mask_non_assistant_tokens=args.mask_non_assistant_tokens, mask_non_last_assistant_tokens=args.mask_non_last_assistant_tokens, user_chat_template_for_masking=True)
+        logger.info(f"🔍 [test_data_util] Formatted text: {formatted_data['text']}")
         print_masking_analysis(formatted_data, tokenizer)
 
 # added the support for return_assistant_tokens_mask in apply_chat_template
