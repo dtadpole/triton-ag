@@ -413,10 +413,19 @@ class CodeGenEvalClient:
                 # add info emoji to beginning of the line
                 logger.info(f"🔍 [CodeGenEval] [{self.run_tag}] Processing [{task_tag}] [{f'{gen_tag}'}]...")
 
+                wait_count = 0
+                max_wait_count = 20
                 while task_tag not in self.reference_eval_cache:
+                    wait_count += 1
+                    if wait_count > max_wait_count:
+                        break
                     sleep_time = random.uniform(1, 10) # sleep randomly between 1 and 5 seconds, using float to avoid blocking
                     logger.info(f"⏳ [CodeGenEval] [{self.run_tag}] Waiting for reference eval for [{task_tag}] [{f'{gen_tag}'}], sleeping for [{f'{sleep_time:.2f}s'}]")
                     await asyncio.sleep(sleep_time)
+
+                if wait_count > max_wait_count:
+                    logger.error(f"❌ [CodeGenEval] [{self.run_tag}] Reference eval not found for [{task_tag}] [{f'{gen_tag}'}] after [{wait_count}/{max_wait_count}] attempts")
+                    continue
                     
                 if not self.reference_eval_cache[task_tag]['compiled'] or not self.reference_eval_cache[task_tag]['correctness']:
                     logger.warning(f"⚠️ [CodeGenEval] [{self.run_tag}] Skipping generation [{f'{gen_tag}'}] as reference code is not correct for [{task_tag}]")
