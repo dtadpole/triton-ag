@@ -22,6 +22,7 @@ import json
 import psutil
 from datetime import datetime
 from logger import logger
+from armableWatchdog import ArmableWatchdog
 import random
 # from filelock import FileLock, Timeout
 
@@ -201,101 +202,105 @@ def eval_kernel_custom(
             with FileLock(lock_file):
                 logger.warning(f"[KB_Eval_Cli] [{task_tag}/{eval_tag}] Acquired lock [{lock_file}]")
 
-                # verify lock is working by sleeping randome between 10 and 20 seconds
-                # time.sleep(random.randint(3, 5)) # verified lock is working
+                with ArmableWatchdog(timeout_sec=max_critical_time, grace_sec=2) as arm:
+                    logger.warning(f"[KB_Eval_Cli] [{task_tag}/{eval_tag}] Arming for [{max_critical_time}] seconds")
+                    arm()
 
-                # Install the handler and arm the timer (in seconds)
-                signal.signal(signal.SIGALRM, on_critical_alarm)
-                signal.alarm(max_critical_time)  # exit after max_critical_time seconds
-                # critical_timer = Timer(max_critical_time * 1.5, on_critical_timeout) # insurance policy for critical timeout
-                # critical_timer.daemon = True
-                # critical_timer.start()
-                logger.warning(f"[KB_Eval_Cli] [{task_tag}/{eval_tag}] Alarm set for Critical Section with [{max_critical_time}] seconds")
+                    # verify lock is working by sleeping randomly between 10 and 20 seconds
+                    # time.sleep(random.randint(10, 15)) # verified lock is working
 
-                init_inputs = get_init_inputs()
-                init_inputs = [
-                    x.cuda(device=device) if isinstance(x, torch.Tensor) else x for x in init_inputs
-                ]
+                    # Install the handler and arm the timer (in seconds)
+                    # signal.signal(signal.SIGALRM, on_critical_alarm)
+                    # signal.alarm(max_critical_time)  # exit after max_critical_time seconds
+                    # critical_timer = Timer(max_critical_time * 1.5, on_critical_timeout) # insurance policy for critical timeout
+                    # critical_timer.daemon = True
+                    # critical_timer.start()
+                    logger.warning(f"[KB_Eval_Cli] [{task_tag}/{eval_tag}] Alarm set for Critical Section with [{max_critical_time}] seconds")
 
-                inputs = get_inputs()
-                inputs = [
-                    x.cuda(device=device) if isinstance(x, torch.Tensor) else x for x in inputs
-                ]
+                    init_inputs = get_init_inputs()
+                    init_inputs = [
+                        x.cuda(device=device) if isinstance(x, torch.Tensor) else x for x in init_inputs
+                    ]
 
-                with torch.no_grad():
-                    try:
-                        set_seed(seed_num)  # set seed for reproducible weights
-                        original_model = Model(*init_inputs)
-                        original_model = original_model.cuda(device=device)
-                        assert hasattr(original_model, "forward")
-                    except Exception as e:
-                        raise CompileInstantiationError(f"Error in instantiating original model: [{type(e)}] [{e}]") from e
+                    inputs = get_inputs()
+                    inputs = [
+                        x.cuda(device=device) if isinstance(x, torch.Tensor) else x for x in inputs
+                    ]
 
-                    if measure_reference:
-                        elapsed_times_ref = time_execution_with_cuda_event(
-                            original_model,
-                            *inputs,
-                            num_warmups=num_warmups,
-                            num_trials=num_perf_trials,
-                            device=device,
-                        )
-                        runtime_stats = get_timing_stats(elapsed_times_ref, device=device)
-
-                        return KernelExecResult(
-                            compiled=True,
-                            correctness=True,
-                            metadata=metadata,
-                            runtime=runtime_stats["mean"],
-                            runtime_stats=runtime_stats,
-                        )
-                    
-                    else:
+                    with torch.no_grad():
                         try:
-                            custom_model = ModelNew(*init_inputs)
-                            custom_model = custom_model.cuda(device=device)
-                            assert hasattr(custom_model, "forward")
+                            set_seed(seed_num)  # set seed for reproducible weights
+                            original_model = Model(*init_inputs)
+                            original_model = original_model.cuda(device=device)
+                            assert hasattr(original_model, "forward")
                         except Exception as e:
-                            raise CompileInstantiationError(f"Error in instantiating custom model: [{type(e)}] [{e}]") from e
+                            raise CompileInstantiationError(f"Error in instantiating original model: [{type(e)}] [{e}]") from e
 
-                        correctness_result = verify_correctness(
-                            original_model,
-                            custom_model,
-                            get_inputs,
-                            total_trials=num_verify_trials,
-                            seed=seed_num,
-                            device=device,
-                        )
+                        if measure_reference:
+                            elapsed_times_ref = time_execution_with_cuda_event(
+                                original_model,
+                                *inputs,
+                                num_warmups=num_warmups,
+                                num_trials=num_perf_trials,
+                                device=device,
+                            )
+                            runtime_stats = get_timing_stats(elapsed_times_ref, device=device)
 
-                        if correctness_result.passed_trials == num_verify_trials:
-                            correctness = True
-                        else:
-                            # if correctness is not met, return without measuring performance
                             return KernelExecResult(
                                 compiled=True,
-                                correctness=False,
+                                correctness=True,
+                                metadata=metadata,
+                                runtime=runtime_stats["mean"],
+                                runtime_stats=runtime_stats,
+                            )
+                        
+                        else:
+                            try:
+                                custom_model = ModelNew(*init_inputs)
+                                custom_model = custom_model.cuda(device=device)
+                                assert hasattr(custom_model, "forward")
+                            except Exception as e:
+                                raise CompileInstantiationError(f"Error in instantiating custom model: [{type(e)}] [{e}]") from e
+
+                            correctness_result = verify_correctness(
+                                original_model,
+                                custom_model,
+                                get_inputs,
+                                total_trials=num_verify_trials,
+                                seed=seed_num,
+                                device=device,
+                            )
+
+                            if correctness_result.passed_trials == num_verify_trials:
+                                correctness = True
+                            else:
+                                # if correctness is not met, return without measuring performance
+                                return KernelExecResult(
+                                    compiled=True,
+                                    correctness=False,
+                                    metadata=metadata | {
+                                        "correctness": correctness_result.model_dump(),
+                                    },
+                                )
+
+                            elapsed_times_perf = time_execution_with_cuda_event(
+                                custom_model,
+                                *inputs,
+                                num_warmups=num_warmups,
+                                num_trials=num_perf_trials,
+                                device=device,
+                            )
+                            runtime_stats = get_timing_stats(elapsed_times_perf, device=device)
+
+                            return KernelExecResult(
+                                compiled=True,
+                                correctness=correctness,
                                 metadata=metadata | {
                                     "correctness": correctness_result.model_dump(),
                                 },
+                                runtime=runtime_stats["mean"],
+                                runtime_stats=runtime_stats,
                             )
-
-                        elapsed_times_perf = time_execution_with_cuda_event(
-                            custom_model,
-                            *inputs,
-                            num_warmups=num_warmups,
-                            num_trials=num_perf_trials,
-                            device=device,
-                        )
-                        runtime_stats = get_timing_stats(elapsed_times_perf, device=device)
-
-                        return KernelExecResult(
-                            compiled=True,
-                            correctness=correctness,
-                            metadata=metadata | {
-                                "correctness": correctness_result.model_dump(),
-                            },
-                            runtime=runtime_stats["mean"],
-                            runtime_stats=runtime_stats,
-                        )
 
         except TimeoutError:
             graceful_eval_cleanup(context, device)
@@ -352,7 +357,7 @@ def main():
                         default="elemAddRef.py")
     parser.add_argument("--generated_code", type=str, default="elemAddTriton.py")
     parser.add_argument("--measure_reference", action="store_true")
-    parser.add_argument("--device-list", type=str, default="1")
+    parser.add_argument("--device-list", type=str, default="0")
     parser.add_argument("--max_critical_time", type=int, default=5)
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
