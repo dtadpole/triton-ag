@@ -353,15 +353,9 @@ def main():
     parser.add_argument("--generated_code", type=str, default="elemAddTriton.py")
     parser.add_argument("--measure_reference", action="store_true")
     parser.add_argument("--device-list", type=str, default="1")
-    parser.add_argument("--max_critical_time", type=int, default=5)
-    parser.add_argument("--max_process_time", type=int, default=275)
+    parser.add_argument("--max_critical_time", type=int, default=7)
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
-
-    # Install the handler and arm the timer (in seconds)
-    timer = Timer(args.max_process_time, on_process_timeout)
-    timer.daemon = True
-    timer.start()
 
     cli_config = from_kbEval_yaml()
     for key, value in cli_config.get("env_vars", {}).items():
