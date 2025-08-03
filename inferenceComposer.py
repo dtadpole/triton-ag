@@ -9,7 +9,7 @@ import argparse
 import yaml
 import random
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Any
 import boto3
 import requests
 import duckdb
@@ -17,10 +17,12 @@ from pathlib import Path
 from transformers import AutoTokenizer
 from inferenceClient import InferenceClient, InferenceClientConfig, load_inference_client_config
 from logger import logger
-from kbEvalTest.kbeval import KernelExecResult
+from kbEvalClient import KbEvalClient
 from globalUtils import CritiqueBlock
 from globalRegClient import GlobalRegClient
 from globalWorkflow import GlobalWorkflow
+from endpointUtil import Recorder, CodeExtractor, StatsClient
+
 
 class ComposeClient:
     def __init__(
@@ -35,8 +37,12 @@ class ComposeClient:
         with open(prompt_file, 'r') as f:
             self.prompt_config = yaml.safe_load(f)
         self.input_tag = input_tag
+        self.queue = asyncio.Queue()
+        self.recorder = Recorder()
+        self.kbEvalClient = KbEvalClient()
+        self.statsClient = StatsClient()
         self.inference_client_config = inference_client_config
-        self.inference_client = InferenceClient(config=self.inference_client_config)
+        self.inferenceClient = InferenceClient(config=self.inference_client_config)
         self.tokenizer = self.inference_client.tokenizer
         self.model_tag = self.inference_client.model_tag
         self.output_dir = self._get_output_dir(output_dir)
@@ -57,14 +63,12 @@ class ComposeClient:
         user_prompt_template = prompts_config.get('user_prompt', 'Reference code: {reference_code}\n\nReference code evaluation: {reference_code_eval}\n\nGenerated code: {generated_code}\n\nGenerated code evaluation: {generated_code_eval}')
         return user_prompt_template.format(reference_code=reference_code, reference_code_eval=json.dumps(reference_code_eval, indent=2), generated_code=generated_code, generated_code_eval=json.dumps(generated_code_eval, indent=2))
 
-    async def _process_critique(
+    async def _process_tasks(
         self,
+        context_vars: dict,
+        task_id: int,
         task_tag: str,
         gen_tag: str,
-        reference_code: str,
-        reference_code_eval: dict,
-        generated_code: str,
-        generated_code_eval: dict,
     ) -> str:
         """
         Process a single inference task for a file.
@@ -155,7 +159,7 @@ class ComposeClient:
         return critique_content
 
 
-    async def critique_task(self, queue: asyncio.Queue, task_id: int):
+    async def critique_task(self, worker_id: int):
         """
         Run inference task for a file.
         
@@ -168,10 +172,11 @@ class ComposeClient:
         while True:
             try:
                 # Get file path from queue (blocking with timeout)
-                item = await asyncio.wait_for(queue.get(), timeout=1.0)
+                item = await asyncio.wait_for(self.queue.get(), timeout=1.0)
                 if item is None:
-                    logger.info(f"[Task {task_id:02d}] Received termination signal")
+                    logger.info(f"[Worker {worker_id:02d}] Received termination signal")
                     break
+                
 
                 filename = item['filename']
                 messages = item['messages']
@@ -235,9 +240,9 @@ class ComposeClient:
                     except Exception as e:
                         # add warning emoji to beginning of the line
                         if retry_count >= max_retries:
-                            logger.error(f"❌ [Critique {task_id:02d}] Error critiquing [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
+                            logger.error(f"❌ [Critique {worker_id:02d}] Error critiquing [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
                         else:
-                            logger.warning(f"⚠️ [Critique {task_id:02d}] Error critiquing [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
+                            logger.warning(f"⚠️ [Critique {worker_id:02d}] Error critiquing [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
                         logger.error(traceback.format_exc())
 
             except asyncio.TimeoutError:
