@@ -1,0 +1,71 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def elementwise_add_kernel(
+    x_ptr,  # *Pointer* to first input tensor
+    y_ptr,  # *Pointer* to second input tensor  
+    output_ptr,  # *Pointer* to output tensor
+    n_elements,  # Size of the tensor
+    BLOCK_SIZE: tl.constexpr,  # Number of elements each program should process
+):
+    # Get the program ID to identify which block this program handles
+    pid = tl.program_id(axis=0)
+    
+    # Calculate the starting position for this block
+    block_start = pid * BLOCK_SIZE
+    
+    # Create a range of offsets for this block
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    
+    # Create a mask to handle cases where n_elements is not divisible by BLOCK_SIZE
+    mask = offsets < n_elements
+    
+    # Load data from input tensors
+    x = tl.load(x_ptr + offsets, mask=mask)
+    y = tl.load(y_ptr + offsets, mask=mask)
+    
+    # Perform element-wise addition
+    output = x + y
+    
+    # Store the result
+    tl.store(output_ptr + offsets, output, mask=mask)
+
+def elementwise_add_triton(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    # Ensure tensors are contiguous
+    x = x.contiguous()
+    y = y.contiguous()
+    
+    # Create output tensor
+    output = torch.empty_like(x)
+    
+    # Calculate total number of elements
+    n_elements = x.numel()
+    
+    # Choose block size (power of 2 for efficiency)
+    BLOCK_SIZE = 1024
+    
+    # Calculate grid size (number of blocks needed)
+    grid = (triton.cdiv(n_elements, BLOCK_SIZE),)
+    
+    # Launch the kernel
+    elementwise_add_kernel[grid](
+        x, y, output, n_elements, BLOCK_SIZE=BLOCK_SIZE
+    )
+    
+    return output
+
+class ModelNew(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, a, b):
+        return elementwise_add_triton(a, b)
+
+
+if __name__ == "__main__":
+    a = torch.randn(1024, 1024, device="cuda")
+    b = torch.randn(1024, 1024, device="cuda")
+    print(elementwise_add_triton(a, b))

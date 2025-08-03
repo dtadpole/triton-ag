@@ -21,10 +21,34 @@ wget https://developer.download.nvidia.com/compute/cuda/12.9.0/local_installers/
 sh cuda_12.9.0_575.51.03_linux.run
 rm cuda_12.9.0_575.51.03_linux.run
 
+### run.sh
+
+#!/bin/bash
+
+cd $HOME
+source .venv/bin/activate
+export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
+export VLLM_ATTENTION_BACKEND=FLASHINFER
+
+"$@"
+
+### install vLLM
+
+uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+uv pip install flashinfer-python
+uv pip install 'sglang>=0.4.9.post4'
+uv pip install pydantic pybase64 orjson uvicorn uvloop fastapi psutil zmq pillow huggingface huggingface_hub transformers sentencepiece sgl_kernel
+###
+
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
 export CUDA_LAUNCH_BLOCKING=1
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3
+
+###
+
+/root/run.sh python -m sglang.launch_server --model-path Qwen/Qwen3-32B --host 0.0.0.0 --port 8081 --tool-call-parser qwen25  --context-length 16384 --max-prefill-tokens 2048 --max-total-tokens 16384 --max-running-requests 32
+
 
 # this is optimal, but will require hours to quantize model as AWQ
 
@@ -100,6 +124,91 @@ uv pip install "vllm" "bitsandbytes"
 wget https://developer.download.nvidia.com/compute/cuda/12.9.0/local_installers/cuda_12.9.0_575.51.03_linux.run
 sh cuda_12.9.0_575.51.03_linux.run
 rm cuda_12.9.0_575.51.03_linux.run
+
+
+### run.sh
+
+#!/bin/bash
+
+cd $HOME
+source .venv/bin/activate
+export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
+export VLLM_ATTENTION_BACKEND=FLASHINFER
+
+"$@"
+
+### install vLLM
+
+uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+uv pip install 'vllm==0.10.0'
+
+export VLLM_ATTENTION_BACKEND=FLASHINFER
+
+ --revision 9216db5
+
+###
+
+/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-32B --port 8091 --host 0.0.0.0 --api-key dummy --enable-lora --max-lora-rank 128 --max-loras 8 --gpu-memory-utilization 0.9 --max_model_len 16384 --load_format safetensors --guided_decoding_backend guidance --guided-decoding-disable-fallback --enable_auto_tool_choice --tool_call_parser hermes --scheduling_policy priority --enable_chunked_prefill --max_num_batched_tokens 4096 --max_num_seqs 16 --max_log_len 0 --trust_remote_code --enable_prefix_caching --prefix-caching-hash-algo sha256 --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' --enforce-eager
+
+--no-enable-prefix-caching 
+
+--dtype bfloat16 --kv-cache-dtype auto 
+
+--enable_prefix_caching --prefix-caching-hash-algo sha256 
+
+###
+
+--max_num_batched_tokens 8192 --max_num_seqs 20
+
+###
+
+curl -X POST http://10.12.0.202:8091/v1/load_lora_adapter \
+     -H "Authorization: Bearer dummy" \
+     -H "Content-Type: application/json" \
+     -d '{
+           "lora_name": "TC_0.1.0_14B.a/checkpoint-300",
+           "lora_path": "TC_0.1.0_14B.a/checkpoint-300"
+         }'
+
+/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-14B --port 8091 --host 0.0.0.0 --api-key dummy --enable-lora --max-lora-rank 128 --max-loras 8 --gpu-memory-utilization 0.9 --max_model_len 16384 --load_format safetensors --guided_decoding_backend guidance --guided-decoding-disable-fallback --enable_auto_tool_choice --tool_call_parser hermes --scheduling_policy priority --enable_chunked_prefill --max_num_batched_tokens 4096 --max_num_seqs 16 --max_log_len 0 --trust_remote_code --enable_prefix_caching --prefix-caching-hash-algo sha256 --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' --enforce-eager
+
+
+--lora-modules KC_0.1.0_14B/checkpoint-240=KC_0.1.0_14B/checkpoint-240 KC_0.1.0_14B/checkpoint-200=KC_0.1.0_14B/checkpoint-200 KC_0.1.0_14B/checkpoint-180=KC_0.1.0_14B/checkpoint-180 KC_0.1.0_14B/checkpoint-160=KC_0.1.0_14B/checkpoint-160 KC_0.1.0_14B/checkpoint-140=KC_0.1.0_14B/checkpoint-140 
+
+
+--no-enable-prefix-caching 
+
+--lora-modules KC_0.1.0_14B/checkpoint-240=KC_0.1.0_14B/checkpoint-240 KC_0.1.0_14B/checkpoint-200=KC_0.1.0_14B/checkpoint-200 KC_0.1.0_14B/checkpoint-180=KC_0.1.0_14B/checkpoint-180 KC_0.1.0_14B/checkpoint-160=KC_0.1.0_14B/checkpoint-160 KC_0.1.0_14B/checkpoint-140=KC_0.1.0_14B/checkpoint-140 KC_0.1.0_14B/checkpoint-120=KC_0.1.0_14B/checkpoint-120
+
+taskA=/path/to/loraA taskB=/path/to/loraB
+
+--enable_prefix_caching --prefix-caching-hash-algo sha256 
+
+--enable-lora --max-lora-rank 128 --max-loras 8
+
+curl -X POST http://10.12.0.202:8091/v1/load_lora_adapter \
+  -H "Authorization: Bearer dummy" \
+  -H "Content-Type: application/json" \
+  -d '{"lora_name":"my_adapter","lora_path":"KC_0.1.0_14B/checkpoint-80"}'
+
+###
+
+
+/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-32B --enable-lora --max-loras 4 --max-lora-rank 128 --gpu-memory-utilization 0.9 --max-model-len 16384 --port 8091 --host 0.0.0.0 --trust-remote-code --tool-call-parser hermes --max_log_len 0 --trust_remote_code
+
+--rope-scaling '{"rope_type":"yarn","factor":0.5,"original_max_position_embeddings":32768}'
+
+--default-sampling-params '{"temperature": 0.7, "top_p": 0.9, "max_tokens": 14336}'
+
+### load and unload lora adapter
+
+curl -X POST http://localhost:8091/v1/load_lora_adapter \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer dummy" \
+  -d '{
+        "lora_name": "KC_0.1.0_520",
+        "lora_path": "/root/.trainer/KC_0.1.0/checkpoint-520"
+      }'
 
 ### This is super fast (AWQ)
 

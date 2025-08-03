@@ -11,13 +11,14 @@ import sys
 import io
 import asyncio
 import traceback
-from globalRegistry import GlobalRegistry
 from logger import logger
-from replCommon import CodeRequest, CodeResponse, load_config
+from replUtils import CodeRequest, CodeResponse, load_config
+from globalUtils import GlobalUtils
 
-reg = GlobalRegistry()
-fastapi: FastAPI = reg.get('reg.fastapi')
-global_namespace = {'reg': reg}
+global_utils = GlobalUtils()
+fastapi = global_utils.fastapi
+
+global_namespace = {}
 
 def execute_code(code: str) -> tuple:
     """Execute Python code and capture output/errors"""
@@ -81,16 +82,22 @@ def get_variables():
 
 
 @fastapi.post("/repl/reset")
-def reset():
+def reset_vars():
     """Reset the global namespace"""
+    reg = global_namespace['reg']
     global_namespace.clear()
     global_namespace['reg'] = reg
     global_namespace['vars'] = get_variables
-    global_namespace['reset'] = reset
+    global_namespace['reset'] = reset_vars
     return {"message": "Namespace reset"}
 
-# call reset
-reset()
+def init_vars(reg):
+    """Initialize the global namespace"""
+    global_namespace.clear()
+    global_namespace['reg'] = reg
+    global_namespace['vars'] = get_variables
+    global_namespace['reset'] = reset_vars
+    return {"message": "Namespace initialized"}
 
 @fastapi.get("/repl", response_class=HTMLResponse)
 async def web_repl():
@@ -258,4 +265,7 @@ Type Python code below and press Execute.
 
 
 if __name__ == "__main__":
+    from globalRegistry import GlobalRegistry
+    reg = GlobalRegistry()
+    init_vars(reg)
     asyncio.run(reg.run())

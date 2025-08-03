@@ -12,38 +12,37 @@ from datetime import datetime
 from typing import List, Dict
 import boto3
 import requests
+import duckdb
 from pathlib import Path
 from transformers import AutoTokenizer
 from inferenceClient import InferenceClient, InferenceClientConfig, load_inference_client_config
-from inferenceCodeGenEval import CODEGEN_EVAL_FOLDER
-from kbEvalClient import KbEvalClient
 from logger import logger
 from kbEvalTest.kbeval import KernelExecResult
-from globalRegistry import GlobalRegistry
-import duckdb
-
-CRITIQUE_FOLDER = Path(os.path.expanduser("~/.critique"))
+from globalUtils import CritiqueBlock
+from globalRegClient import GlobalRegClient
+from globalWorkflow import GlobalWorkflow
 
 class CritiqueClient:
     def __init__(
             self,
-            run_tag: str,
+            input_tag: str,
             inference_client_config: InferenceClientConfig,
             config_file: str = "inferenceCritique.yaml",
+            output_dir: str = "~/.critique",
     ):
         with open(config_file, 'r') as f:
             self.config = yaml.safe_load(f)
-        self.run_tag = run_tag
+        self.input_tag = input_tag
         self.inference_client_config = inference_client_config
         self.inference_client = InferenceClient(config=self.inference_client_config)
         self.tokenizer = self.inference_client.tokenizer
         self.model_tag = self.inference_client.model_tag
-        self.output_dir = self._get_output_dir()
+        self.output_dir = self._get_output_dir(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def _get_output_dir(self) -> Path:
+    def _get_output_dir(self, output_dir: str) -> Path:
         """Get output sub directory for a task."""
-        return CRITIQUE_FOLDER / self.run_tag / self.model_tag
+        return Path(os.path.expanduser(output_dir)) / self.input_tag / self.model_tag
 
     def get_system_prompt(self) -> str:
         """Get system prompt from configuration."""
@@ -122,7 +121,7 @@ class CritiqueClient:
                 }
             ],
             "metadata": {
-                "run_tag": self.run_tag,
+                "run_tag": self.input_tag,
                 "model_tag": self.model_tag,
                 "task_tag": task_tag,
                 "gen_tag": gen_tag,
@@ -150,7 +149,7 @@ class CritiqueClient:
             f.write(critique_content)
 
         # use generated emoji to beginning of the line
-        logger.info(f"👏 [Critique Client] [{self.run_tag}] Critiqued [{f'{task_tag}'}] [{f'{gen_tag}'}]: [{critique_file}] [{f'{num_tokens}'} tokens] [{f'{num_reasoning_tokens}'} reasoning tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
+        logger.info(f"👏 [Critique] [{self.input_tag}] Critiqued [{f'{task_tag}'}] [{f'{gen_tag}'}]: [{critique_file}] [{f'{num_tokens}'} tokens] [{f'{num_reasoning_tokens}'} reasoning tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
         return critique_content
 
 
@@ -184,7 +183,7 @@ class CritiqueClient:
                 # read reference code evaluation result
                 reference_code_eval_file = os.path.join(base_dir, f"reference_eval.json")
                 if not os.path.exists(reference_code_eval_file):
-                    logger.warning(f"⚠️ [Critique Client] [{self.run_tag}] Reference code evaluation file not found: {reference_code_eval_file}")
+                    logger.warning(f"⚠️ [Critique] [{self.input_tag}] Reference code evaluation file not found: {reference_code_eval_file}")
                     continue
                 # read the reference code evaluation result from the file
                 with open(reference_code_eval_file, 'r') as f:
@@ -193,7 +192,7 @@ class CritiqueClient:
                 # read generated code
                 generated_code_file = os.path.join(base_dir, f"{gen_tag}_generated_code.py")
                 if not os.path.exists(generated_code_file):
-                    logger.warning(f"⚠️ [Critique Client] [{self.run_tag}] Generated code file not found: {generated_code_file}")
+                    logger.warning(f"⚠️ [Critique] [{self.input_tag}] Generated code file not found: {generated_code_file}")
                     continue
                 # read the generated code from the file
                 with open(generated_code_file, 'r') as f:
@@ -202,7 +201,7 @@ class CritiqueClient:
                 # read generated code evaluation result
                 generated_code_eval_file = os.path.join(base_dir, f"{gen_tag}_eval.json")
                 if not os.path.exists(generated_code_eval_file):
-                    logger.warning(f"⚠️ [Critique Client] [{self.run_tag}] Evaluation result file not found: {generated_code_eval_file}")
+                    logger.warning(f"⚠️ [Critique] [{self.input_tag}] Evaluation result file not found: {generated_code_eval_file}")
                     continue
                 # read the evaluation result from the file
                 with open(generated_code_eval_file, 'r') as f:
@@ -213,11 +212,11 @@ class CritiqueClient:
                 critique_content_file = output_base_dir / f"{gen_tag}_critique.txt"
                 if os.path.exists(critique_content_file) and os.path.exists(critique_conversation_file):
                     # add a skip emoji to beginning of the line
-                    logger.info(f"⚡️ [Critique Client] [{self.run_tag}] Critique already exists: [{critique_content_file}], skipping...")
+                    logger.info(f"⚡️ [Critique] [{self.input_tag}] Critique already exists: [{critique_content_file}], skipping...")
                     continue
 
                 # add info emoji to beginning of the line
-                logger.info(f"🔍 [Critique Client] [{self.run_tag}] Processing [{task_tag}] [{f'{gen_tag}'}]...")
+                logger.info(f"🔍 [Critique] [{self.input_tag}] Processing [{task_tag}] [{f'{gen_tag}'}]...")
 
                 retry_count = 0
                 max_retries = 3
@@ -234,38 +233,47 @@ class CritiqueClient:
                     except Exception as e:
                         # add warning emoji to beginning of the line
                         if retry_count >= max_retries:
-                            logger.error(f"❌ [Task {task_id:02d}] Error critiquing [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
+                            logger.error(f"❌ [Critique {task_id:02d}] Error critiquing [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
                         else:
-                            logger.warning(f"⚠️ [Task {task_id:02d}] Error critiquing [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
+                            logger.warning(f"⚠️ [Critique {task_id:02d}] Error critiquing [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
                         logger.error(traceback.format_exc())
 
             except asyncio.TimeoutError:
                 # Timeout waiting for queue item, check if queue is empty
                 if queue.empty():
                     # add info magnifying glass emoji to beginning of the line
-                    logger.info(f"🔍 [Critique Client] [{self.run_tag}] Queue is empty, terminating")
+                    logger.info(f"🔍 [Critique] [{self.input_tag}] Queue is empty, terminating")
                     break
             except Exception as e:
-                logger.error(f"❌ [Critique Client] [{self.run_tag}] Unexpected error: {e}")
+                logger.error(f"❌ [Critique] [{self.input_tag}] Unexpected error: {e}")
                 logger.error(traceback.format_exc())
                 break
         
         # circle emoji to beginning of the line
-        logger.info(f"🎯 [Critique Client] [{self.run_tag}] completed")
+        logger.info(f"🎯 [Critique] [{self.input_tag}] completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
 
 
-async def critique_mini_batch(run_tag: str, config: InferenceClientConfig, parallel_tasks: int=10):
+async def critique_block(block: CritiqueBlock):
     """
     Run one batch of code generation and evaluation.
     """
     try:
-        # start running the batch
-        logger.info(f"🔍 [Critique Client] [{run_tag}] Running batch...")
+        config = load_inference_client_config(
+            provider_name=block.provider_name,
+            model_short_name=block.model_name,
+        )
+
+        # override the model name
+        if block.model_override:
+            config.model.model_name = block.model_override
+
+        # start running the block
+        logger.info(f"🔍 [Critique] [{block.input_tag}] Starting block...")
 
         # Set up directories
-        search_path = os.path.expanduser(f"{CODEGEN_EVAL_FOLDER}/{run_tag}")
+        search_path = os.path.expanduser(f"{block.input_dir}/{block.input_tag}")
         if not os.path.exists(search_path):
-            logger.error(f"❌ [Critique Client] [{run_tag}] Error: Input directory [{search_path}] does not exist")
+            logger.error(f"❌ [Critique] [{block.prefix_tag}] Error: Input directory [{search_path}] does not exist")
             return
 
         # query from search_path folder, find all the conversation_*.json files, and load them into a dataframe
@@ -274,7 +282,7 @@ async def critique_mini_batch(run_tag: str, config: InferenceClientConfig, paral
                             WHERE messages[3]['content'] IS NOT NULL
                         """)
 
-        logger.info(f"✅ [Critique Client] [{run_tag}] Found [{len(result)}] tasks to critique in [{search_path}]\n[{result}]")
+        logger.info(f"✅ [Critique] [{block.prefix_tag}] Found [{len(result)}] tasks to critique in [{search_path}]\n[{result}]")
 
         df = result.df()
 
@@ -287,33 +295,66 @@ async def critique_mini_batch(run_tag: str, config: InferenceClientConfig, paral
                 "metadata": row['metadata']
             })
 
-
-        critiqueClient = CritiqueClient(run_tag=run_tag, inference_client_config=config)
+        critiqueClient = CritiqueClient(input_tag=block.input_tag, inference_client_config=config)
 
         critique_tasks = []
-        for i in range(parallel_tasks):
+        for i in range(block.parallel_tasks):
             critique_tasks.append(asyncio.create_task(critiqueClient.critique_task(queue, i)))
 
         await asyncio.gather(*critique_tasks)
 
-        logger.info(f"✅ [Critique Client] [{run_tag}] Batch completed")
+        logger.info(f"🎉 [Critique] [{block.input_tag}] Block completed")
 
     except Exception as e:
-        logger.error(f"❌ [Critique Client] [{run_tag}] Error running batch: [{e}] in [{traceback.format_exc()}]")
+        logger.error(f"❌ [Critique] [{block.input_tag}] Error running block: [{e}] in [{traceback.format_exc()}]")
         logger.error(traceback.format_exc())
 
 
-if __name__ == "__main__":
+async def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--prefix_tag", type=str, default="KC_0.1.0_14B")
+    parser.add_argument("--epoch_id", type=int, default=-1)
+    parser.add_argument("--block_id", type=int, default=-1)
+    parser.add_argument("--input_tag", type=str, default="KC_0.1.0_14B_000_00")
+    parser.add_argument("--input_dir", type=str, default="~/.codeGenEval", help="Input directory containing Python files")
+    parser.add_argument("--output_dir", type=str, default="~/.critique", help="Output directory for the critique results")
     parser.add_argument("--provider", type=str, default="fireworks")  # most cost effective models are deepinfra-r1 and fireworks-v3
     parser.add_argument("--model", type=str, default="deepseek-v3")  # most cost effective models are deepinfra-r1 and fireworks-v3
-    parser.add_argument("--run_tag", type=str, default="v0.1_20250714_050308") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
-    parser.add_argument("--parallel_tasks", type=int, default=10)
+    parser.add_argument("--parallel_tasks", type=int, default=16)
+    parser.add_argument("--use_global_registry", action="store_true")
     args = parser.parse_args()
 
-    config = load_inference_client_config(
-        provider_name=args.provider,
-        model_short_name=args.model,
-    )
+    try:
+        if args.use_global_registry:
+            # get the global registry
+            global_reg_client = GlobalRegClient()
+            # get the critiqueBlock from the global registry
+            block_json = await global_reg_client.dequeue(f"inference.critique")
+            # convert the block_json to a CritiqueBlock object
+            block = CritiqueBlock(**block_json)
+        else:
+            block = CritiqueBlock(
+                prefix_tag=args.prefix_tag,
+                epoch_id=args.epoch_id,
+                block_id=args.block_id,
+                input_tag=args.input_tag,
+                provider_name=args.provider,
+                model_name=args.model,
+                parallel_tasks=args.parallel_tasks,
+                model_override=args.model_override,
+                input_dir=args.input_dir,
+                output_dir=args.output_dir,
+            )
+        # run the block
+        await critique_block(block)
 
-    asyncio.run(critique_mini_batch(args.run_tag, config, args.parallel_tasks))
+        if args.use_global_registry:
+            globalWorkflow = GlobalWorkflow(prefix_tag=block.prefix_tag)
+            await globalWorkflow.post_critique(block)
+
+    except Exception as e:
+        logger.error(f"❌ [Critique] [{block.input_tag}] Error running block: [{e}]")
+        logger.error(traceback.format_exc())
+
+if __name__ == "__main__":
+    asyncio.run(main())

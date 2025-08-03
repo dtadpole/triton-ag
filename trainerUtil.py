@@ -1,17 +1,89 @@
-import torch
 import json
+import yaml
+import argparse
+import torch
 from transformers import AutoTokenizer
 from logger import logger
 from typing import List, Dict, Any, Union, Callable
 import warnings
+import asyncio
+import os
+import httpx
+import aiohttp
 
 # Suppress specific warnings (modified by DevMate)
-warnings.filterwarnings("ignore", message=".*To copy construct from a tensor.*")
+# warnings.filterwarnings("ignore", message=".*To copy construct from a tensor.*")
 
+async def read_stream(stream, prefix: str, is_error: bool = False):
+    """Read from a stream and print each line with a prefix."""
+    while True:
+        line = await stream.readline()
+        if not line:
+            break
+        # Decode bytes to string and strip newline
+        output = line.decode("utf-8").rstrip()
+        if is_error:
+            logger.error(f"[{prefix}] {output}")
+        else:
+            logger.info(f"[{prefix}] {output}")
+
+def merge_dicts(a: dict, b: dict) -> dict:
+    """
+    Return a new dict that is a recursive merge of a and b.
+    Keys in b override keys in a. If both values are dicts, merge them recursively.
+    """
+    result = a.copy()
+    for key, b_val in b.items():
+        if key in result and isinstance(result[key], dict) and isinstance(b_val, dict):
+            result[key] = merge_dicts(result[key], b_val)
+        else:
+            result[key] = b_val
+    return result
+
+async def rsync_file(source_path: str, target_path: str, rsync_path: str = "rsync") -> int:
+    """
+    Rsync a file from source to target path
+    """
+    # run command: rsync -azP <source_path> <target_path>
+    command = f"rsync -azP --rsync-path '{rsync_path}' '{source_path}' '{target_path}'"
+    process = await asyncio.create_subprocess_shell(
+        command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=os.environ.copy(),
+    )
+
+    logger.info(f"[trainerUtil] [rsync_file] START ====================")
+    logger.info(f"[trainerUtil] [rsync_file] command: {command}")
+
+    # Create tasks to read stdout and stderr concurrently
+    stdout_task = asyncio.create_task(
+        read_stream(process.stdout, "reference", is_error=False)
+    )
+    stderr_task = asyncio.create_task(
+        read_stream(
+            process.stderr, "reference", is_error=True
+        )  # seems taking warning message as error message
+    )
+
+    # Wait for the process to complete
+    return_code = await process.wait()
+
+    # Wait for all output to be processed
+    await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+    if process.returncode != 0:
+        logger.error(f"[KB Eval] [reference] return code: {process.returncode}")
+    else:
+        logger.info(f"[KB Eval] [reference] return code: {process.returncode}")
+
+    logger.info(f"[trainerUtil] [rsync_file] END ====================")
+
+    return return_code
 
 def format_conversation(messages: List[Dict[str, Any]],
                         tokenizer: AutoTokenizer,
-                        mask_non_assistant_tokens: bool = True,
+                        mask_non_assistant_tokens: bool = True, # mask all token except assistant tokens
+                        mask_non_last_assistant_tokens: bool = False, # mask all token except last assistant tokens
                         ignore_index: int = -100,
                         tools: List[Union[Dict, Callable]] = [],
                         messages_from_openai_agent: bool = False,
@@ -50,7 +122,7 @@ def format_conversation(messages: List[Dict[str, Any]],
 
         if mask_non_assistant_tokens:
             # Mask user tokens if requested (only train on assistant responses)
-            labels = _mask_non_assistant_tokens(input_ids, labels, tokenizer, ignore_index)
+            labels = _mask_non_assistant_tokens(input_ids, labels, tokenizer, ignore_index=ignore_index, mask_non_last_assistant_tokens=mask_non_last_assistant_tokens)
             # convert labels to tensor
             labels = torch.tensor(labels)
     else:
@@ -84,6 +156,8 @@ def format_conversation(messages: List[Dict[str, Any]],
         attention_mask = encoding['attention_mask'].squeeze()
         labels = input_ids.clone()
         assistant_mask = encoding['assistant_masks'].squeeze().bool()
+        if mask_non_last_assistant_tokens:
+            assistant_mask = torch.tensor(extract_last_assistant_mask(assistant_mask))
         labels = labels.masked_fill(~assistant_mask, ignore_index)
     return {
             'text': formatted_text,
@@ -91,6 +165,24 @@ def format_conversation(messages: List[Dict[str, Any]],
             'attention_mask': attention_mask,
             'labels': labels
         }
+
+def extract_last_assistant_mask(mask: List[bool]) -> List[bool]:
+    """Extract the last continuous assistant mask from the mask"""
+    in_block = False
+    start = end = None
+    for i in reversed(range(len(mask))):
+        if mask[i]:
+            if not in_block:
+                end = i
+                in_block = True
+            start = i
+        elif in_block:
+            break
+    last_mask = [False] * len(mask)
+    if start is not None and end is not None:
+        for i in range(start, end + 1):
+            last_mask[i] = True
+    return last_mask
 
 def _manual_format_conversation(messages: List[Dict[str, str]], messages_from_openai_agent: bool = True) -> str:
     """Manually format conversation when chat template is not available"""
@@ -121,7 +213,7 @@ def _token_sequence_match(input_ids, start_idx, target_sequence):
         return False
     return input_ids[start_idx:start_idx + len(target_sequence)] == target_sequence
 
-def _mask_non_assistant_tokens(input_ids, labels, tokenizer, ignore_index) -> torch.Tensor:
+def _mask_non_assistant_tokens(input_ids, labels, tokenizer, ignore_index=-100, mask_non_last_assistant_tokens: bool = False) -> torch.Tensor:
     """Mask tokens that are not assistant responses."""
     # Convert to list for easier processing and ensure 1D
     input_ids_list = input_ids.squeeze().tolist() if input_ids.dim() > 1 else input_ids.tolist()
@@ -297,6 +389,111 @@ class SimpleCollator:
 
         return result
 
+class VLLMClient:
+    def __init__(self):
+        self.vllm_config = self.load_config().get('vllm', {})
+        self.host = self.vllm_config.get('host', '10.12.0.202')
+        self.port = self.vllm_config.get('port', 8091)
+        api_key_path = os.path.expanduser(self.vllm_config.get('api_key_path', '~/.keys/local.api.key'))
+        with open(api_key_path, 'r') as f:
+            self.api_key = f.read().strip()
+        self.timeout = self.vllm_config.get('timeout', 60)
+        self.retries = self.vllm_config.get('retries', 3)
+
+    def load_config(self, config_path: str = "trainerMain.yaml"):
+        """Load config from yaml file"""
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f)
+        return config
+
+    async def load_lora_adapter(self, lora_name: str, lora_path: str):
+        retry_count = 0
+        while retry_count < self.retries:
+            try:
+                retry_count += 1
+                limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
+                async with httpx.AsyncClient(limits=limits, headers={"Connection": "close"}, http2=False) as client:
+                    response = await client.post(
+                        f"http://{self.host}:{self.port}/v1/load_lora_adapter",
+                        json={
+                            "lora_name": lora_name,
+                            "lora_path": lora_path,
+                        },
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {self.api_key}",
+                        },
+                        timeout=self.timeout
+                    )
+                    logger.warning(f"🔍 [VLLMClient] Response: {response.text}") # use text instead of json
+                    response.raise_for_status()
+                    logger.info(f"🔍 [VLLMClient] Loaded lora adapter from [{lora_path}]")
+                    return
+            except Exception as e:
+                logger.warning(f"🔍 [VLLMClient] Error loading lora adapter from [{lora_path}]: {e}")
+                if retry_count < self.retries:
+                    logger.info(f"🔍 [VLLMClient] Retrying to load lora adapter from [{lora_path}] in {2 ** retry_count} seconds")
+                    await asyncio.sleep(2 ** retry_count)
+                else:
+                    logger.error(f"❌ [VLLMClient] Failed to load lora adapter from [{lora_path}] after {self.retries} retries")
+                    raise e
+
+    async def unload_lora_adapter(self, lora_name: str):
+        retry_count = 0
+        while retry_count < self.retries:
+            try:
+                retry_count += 1
+                limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
+                async with httpx.AsyncClient(limits=limits, headers={"Connection": "close"}, http2=False) as client:
+                    response = await client.post(
+                        f"http://{self.host}:{self.port}/v1/unload_lora_adapter",
+                        json={"lora_name": lora_name},
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {self.api_key}",
+                        },
+                        timeout=self.timeout
+                    )
+                    logger.warning(f"🔍 [VLLMClient] Response: {response.text}") # use text instead of json
+                    response.raise_for_status()
+                    logger.info(f"🔍 [VLLMClient] Unloaded lora adapter from [{lora_name}]")
+                    return
+            except Exception as e:
+                logger.warning(f"🔍 [VLLMClient] Error unloading lora adapter from [{lora_name}]: {e}")
+                if retry_count < self.retries:
+                    logger.info(f"🔍 [VLLMClient] Retrying to unload lora adapter from [{lora_name}] in {2 ** retry_count} seconds")
+                    await asyncio.sleep(2 ** retry_count)
+                else:
+                    logger.error(f"❌ [VLLMClient] Failed to unload lora adapter from [{lora_name}] after {self.retries} retries")
+                    raise e
+
+    async def get_models(self):
+        retry_count = 0
+        while retry_count < self.retries:
+            try:
+                retry_count += 1
+                limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
+                async with httpx.AsyncClient(limits=limits, headers={"Connection": "close"}, http2=False) as client:
+                    response = await client.get(
+                        f"http://{self.host}:{self.port}/v1/models",
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {self.api_key}",
+                        },
+                        timeout=self.timeout
+                    )
+                    response.raise_for_status()
+                    logger.info(f"🔍 [VLLMClient] Got models")
+                    return response.json()
+            except Exception as e:
+                logger.warning(f"🔍 [VLLMClient] Error getting models: {e}")
+                if retry_count < self.retries:
+                    logger.info(f"🔍 [VLLMClient] Retrying to get models in {2 ** retry_count} seconds")
+                    await asyncio.sleep(2 ** retry_count)
+                else:
+                    logger.error(f"❌ [VLLMClient] Failed to get models after {self.retries} retries")
+                    raise e
+
 def print_masking_analysis(batch, tokenizer):
     """Print detailed analysis of masked vs unmasked tokens in a batch."""
     prev_masked = None
@@ -331,7 +528,13 @@ def print_masking_analysis(batch, tokenizer):
 
 
 def test_data_util():
-    tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen3-8B')
+    args = argparse.ArgumentParser()
+    args.add_argument("--model_name", type=str, default="Qwen/Qwen3-14B")
+    args.add_argument("--mask_non_assistant_tokens", type=bool, default=True)
+    args.add_argument("--mask_non_last_assistant_tokens", type=bool, default=True)
+    args = args.parse_args()
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     messages = [{
         "tools": [],
         "messages": [
@@ -410,12 +613,12 @@ def test_data_util():
 
     for message in messages:
         ## Use chat_completion to get the formatted text
-        formatted_data = format_conversation(message["messages"], tokenizer, tools=message["tools"], mask_non_assistant_tokens=True)
-        logger.info(formatted_data['text'])
+        formatted_data = format_conversation(message["messages"], tokenizer, tools=message["tools"], mask_non_assistant_tokens=args.mask_non_assistant_tokens, mask_non_last_assistant_tokens=args.mask_non_last_assistant_tokens, user_chat_template_for_masking=False)
+        logger.info(f"🔍 [test_data_util] Formatted text: {formatted_data['text']}")
         print_masking_analysis(formatted_data, tokenizer)
         ## Use the tokenizer to get the formatted text and masks
-        formatted_data = format_conversation(message["messages"], tokenizer, tools=message["tools"], mask_non_assistant_tokens=True, user_chat_template_for_masking=True)
-        logger.info(formatted_data['text'])
+        formatted_data = format_conversation(message["messages"], tokenizer, tools=message["tools"], mask_non_assistant_tokens=args.mask_non_assistant_tokens, mask_non_last_assistant_tokens=args.mask_non_last_assistant_tokens, user_chat_template_for_masking=True)
+        logger.info(f"🔍 [test_data_util] Formatted text: {formatted_data['text']}")
         print_masking_analysis(formatted_data, tokenizer)
 
 # added the support for return_assistant_tokens_mask in apply_chat_template

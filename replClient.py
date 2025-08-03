@@ -11,7 +11,7 @@ import ast
 import traceback
 import readline
 from logger import logger
-from replCommon import CodeRequest, CodeResponse, load_config
+from replUtils import CodeRequest, CodeResponse, load_config
 
 
 class SimpleRepl:
