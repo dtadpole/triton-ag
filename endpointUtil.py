@@ -17,7 +17,7 @@ class Recorder:
     def __init__(self):
         pass
     
-    async def save(self, path: str, data: Any, format: str = "json"):
+    def save(self, path: str, data: Any, format: str = "json"):
         if format not in VALID_RECORD_FORMATS:
             raise ValueError(f"Invalid format: {format}, must be one of {VALID_RECORD_FORMATS}")
         # check that the folder exists
@@ -38,7 +38,7 @@ class CodeExtractor:
     def __init__(self):
         pass
     
-    async def extract_code(self, completion: str) -> str:
+    def extract_code(self, completion: str) -> str:
         # find the last ```python block
         code_blocks = re.findall(r"```python\n(.*?)\n```", completion, re.DOTALL)
         if len(code_blocks) == 0:

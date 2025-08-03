@@ -155,37 +155,51 @@ class ComposerClient:
             result[key] = self._process_variable(value, context_vars)
         return result
 
-    def log_completion(self, result: Any, context_vars: dict) -> dict:
-        pass
+    def log_completion(self, result: dict, context_vars: dict) -> dict:
+        run_tag = context_vars.get('run_tag', None)
+        model_tag = context_vars.get('model_tag', None)
+        task_tag = context_vars.get('task_tag', None)
+        turn_tag = context_vars.get('turn_tag', None)
+        generated_eval_path = context_vars.get('generated_eval_path', None)
+        num_completion_tokens = len(result['logprobs']) if 'logprobs' in result else 0
+        completion_time_seconds = context_vars.get('__endpoint_time__', None)
+        token_per_second = num_completion_tokens / completion_time_seconds if completion_time_seconds > 0 else 0.0
+        logger.info(f"👏 [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{generated_eval_path}] [{f'{num_completion_tokens}'} tokens] in [{completion_time_seconds:.2f}s] [{token_per_second:.2f} tokens/s]")
 
-    def log_chat_completion(self, result: Any, context_vars: dict) -> dict:
-        pass
+    def log_chat_completion(self, result: dict, context_vars: dict) -> dict:
+        run_tag = context_vars.get('run_tag', None)
+        model_tag = context_vars.get('model_tag', None)
+        task_tag = context_vars.get('task_tag', None)
+        turn_tag = context_vars.get('turn_tag', None)
+        generated_eval_path = context_vars.get('generated_eval_path', None)
+        num_completion_tokens = result['usage']['completion_tokens'] if 'usage' in result and 'completion_tokens' in result['usage'] else 0
+        completion_time_seconds = context_vars.get('__endpoint_time__', None)
+        token_per_second = num_completion_tokens / completion_time_seconds if completion_time_seconds > 0 else 0.0
+        logger.info(f"👏 [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{generated_eval_path}] [{f'{num_completion_tokens}'} tokens] in [{completion_time_seconds:.2f}s] [{token_per_second:.2f} tokens/s]")
 
-    def log_kb_eval_ref(self, result: Any, context_vars: dict) -> dict:
+    def log_kb_eval_ref(self, result: dict, context_vars: dict) -> dict:
         """Process log kb eval ref."""
         run_tag = context_vars.get('run_tag', None)
         model_tag = context_vars.get('model_tag', None)
         task_tag = context_vars.get('task_tag', None)
-        reference_eval = context_vars.get('reference_eval', None)
-        reference_eval_runtime = reference_eval['runtime'] if 'runtime' in reference_eval else -1.0
+        reference_eval_runtime = result['runtime'] if 'runtime' in result else -1.0
         reference_eval_path = context_vars.get('reference_eval_path', None)
         evaluation_time = context_vars.get('__endpoint_time__', None)
         logger.info(f"📚 [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{reference_eval_path}] [{reference_eval_runtime:.3f}ms] in [{evaluation_time:.2f}s]")
 
-    def log_kb_eval(self, result: Any, context_vars: dict) -> dict:
+    def log_kb_eval(self, result: dict, context_vars: dict) -> dict:
         """Process log eval."""
         run_tag = context_vars.get('run_tag', None)
         model_tag = context_vars.get('model_tag', None)
         task_tag = context_vars.get('task_tag', None)
         turn_tag = context_vars.get('turn_tag', None)
-        generated_eval = context_vars.get('generated_eval', None)
-        generated_eval_runtime = generated_eval['runtime'] if 'runtime' in generated_eval else -1.0
+        generated_eval_runtime = result['runtime'] if 'runtime' in result else -1.0
         generated_eval_path = context_vars.get('generated_eval_path', None)
         evaluation_time = context_vars.get('__endpoint_time__', None)
-        if generated_eval['compiled'] and generated_eval['correctness']:
+        if result['compiled'] and result['correctness']:
             logger.info(f"✅ [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{generated_eval_path}] [{generated_eval_runtime:.3f}ms] in [{evaluation_time:.1f}s]")
         else:
-            logger.warning(f"⚠️ [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{generated_eval_path}] [{'🟢' if generated_eval['compiled'] else '🔴'} compiled], [{'🟢' if generated_eval['correctness'] else '🔴'} correctness] in [{evaluation_time:.2f}s]")
+            logger.warning(f"⚠️ [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{generated_eval_path}] [{'🟢' if result['compiled'] else '🔴'} compiled], [{'🟢' if result['correctness'] else '🔴'} correctness] in [{evaluation_time:.2f}s]")
 
     async def input_processor(self, block: ComposerBlock):
         """Process input variables."""
@@ -194,16 +208,16 @@ class ComposerClient:
                 # get processor type
                 processor_type = processor_config.get('processor', None)
                 if not processor_type:
-                    logger.error(f"❌ [Composer] [{self.input_tag}] Input processor type not found in module [{self.module_file}] for processor [{processor_config}].")
+                    logger.error(f"🔴 [Composer] [{self.input_tag}] Input processor type not found in module [{self.module_file}] for processor [{processor_config}].")
                     continue
                 # get processor name
                 processor_name = processor_config.get('name', None)
                 if not processor_name:
-                    logger.error(f"❌ [Composer] [{self.input_tag}] Input processor name not found in module [{self.module_file}] for processor [{processor_config}].")
+                    logger.error(f"🔴 [Composer] [{self.input_tag}] Input processor name not found in module [{self.module_file}] for processor [{processor_config}].")
                     continue
 
                 if processor_type not in VALID_INPUT_PROCESSORS:
-                    logger.error(f"❌ [Composer] [{self.input_tag}] Invalid input processor type: [{processor_type}] in module [{self.module_file}] for processor [{processor_config}].")
+                    logger.error(f"🔴 [Composer] [{self.input_tag}] Invalid input processor type: [{processor_type}] in module [{self.module_file}] for processor [{processor_config}].")
                     continue
 
                 logger.info(f"🔍 [Composer] [{self.input_tag}] Running input processor [{processor_type}] [{processor_name}]...")
@@ -218,24 +232,24 @@ class ComposerClient:
                         context_vars = self._process_context_vars(processor_config['context_vars'], context_vars)
                     
                     if 'query' not in processor_config:
-                        logger.error(f"❌ [Composer] [{self.input_tag}] Query not found in input processor [{processor_config}].")
+                        logger.error(f"🔴 [Composer] [{self.input_tag}] Query not found in input processor [{processor_config}].")
                         continue
 
                     # now we have a valid processor, process the input variables
                     query = self._process_variable(processor_config['query'], context_vars)
                     if not query:
-                        logger.error(f"❌ [Composer] [{self.input_tag}] Query is empty in input processor [{processor_config}].")
+                        logger.error(f"🔴 [Composer] [{self.input_tag}] Query is empty in input processor [{processor_config}].")
                         continue
 
                 except Exception as e:
-                    logger.error(f"❌ [Composer] [{self.input_tag}] Error running input processor [{processor_type}] [{processor_name}]: [{type(e)}: {e}]")
+                    logger.error(f"🔴 [Composer] [{self.input_tag}] Error running input processor [{processor_type}] [{processor_name}]: [{type(e)}: {e}]")
                     continue
 
                 # now run the query
                 try:
                     result = duckdb.sql(query)
                 except Exception as e:
-                    logger.error(f"❌ [Composer] [{self.input_tag}] Error running query: [{query}] [{type(e)}: {e}]")
+                    logger.error(f"🔴 [Composer] [{self.input_tag}] Error running query: [{query}] [{type(e)}: {e}]")
                     logger.error(traceback.format_exc())
                     continue
 
@@ -264,11 +278,11 @@ class ComposerClient:
                                 enqueue_context_vars = row_context_vars
 
                         except Exception as e:
-                            logger.error(f"❌ [Composer] [{self.input_tag}] Error preparing enqueue: [{enqueue_config}] [{type(e)}: {e}]")
+                            logger.error(f"🔴 [Composer] [{self.input_tag}] Error preparing enqueue: [{enqueue_config}] [{type(e)}: {e}]")
                             continue
 
                         if "items" not in enqueue_config:
-                            logger.error(f"❌ [Composer] [{self.input_tag}] Item not found in enqueue config: {enqueue_config}")
+                            logger.error(f"🔴 [Composer] [{self.input_tag}] Item not found in enqueue config: {enqueue_config}")
                             continue
 
                         for item_config in enqueue_config.get('items', []):
@@ -285,15 +299,15 @@ class ComposerClient:
                                     item_vars = self._process_input_vars(item_config, enqueue_context_vars)
                                     await self.queue.put(item_vars)
                                 except Exception as e:
-                                    logger.error(f"❌ [Composer] [{self.input_tag}] Error enqueueing item: [{item_config}] [{type(e)}: {e}]")
+                                    logger.error(f"🔴 [Composer] [{self.input_tag}] Error enqueueing item: [{item_config}] [{type(e)}: {e}]")
                                     continue
 
                                 enqueue_count += 1
 
-                logger.info(f"🟢 [Composer] [{self.input_tag}] Input processor [{processor_type}] [{processor_name}] completed. Enqueued [{enqueue_count}] item(s).")
+                logger.info(f"👌 [Composer] [{self.input_tag}] Input processor [{processor_type}] [{processor_name}] completed. Enqueued [{enqueue_count}] item(s).")
 
             except Exception as e:
-                logger.error(f"❌ [Composer] [{self.input_tag}] Input processor [{processor_type}] [{processor_name}] error: [{type(e)}: {e}]")
+                logger.error(f"🔴 [Composer] [{self.input_tag}] Input processor [{processor_type}] [{processor_name}] error: [{type(e)}: {e}]")
                 logger.error(traceback.format_exc())
                 continue
 
@@ -317,13 +331,13 @@ class ComposerClient:
                     break
 
                 if 'worker' not in item:
-                    logger.error(f"❌ [Composer] [{self.input_tag}] Worker not configured in item: {item}")
+                    logger.error(f"🔴 [Composer] [{self.input_tag}] Worker not configured in item: {item}")
                     continue
 
                 worker_name = item['worker']
                 worker_config = self.module_config.get('queue_worker', {}).get(worker_name, {})
                 if not worker_config:
-                    logger.error(f"❌ [Composer] [{self.input_tag}] Worker config not found in module [{self.module_file}] for worker [{worker_name}].")
+                    logger.error(f"🔴 [Composer] [{self.input_tag}] Worker config not found in module [{self.module_file}] for worker [{worker_name}].")
                     continue
 
                 # start processing the worker config, create a new context_vars dictionary
@@ -337,7 +351,7 @@ class ComposerClient:
                         context_config = worker_config['context_vars']
                         context_vars = self._process_context_vars(context_config, context_vars)
                 except Exception as e:
-                    logger.error(f"❌ [Composer] [{self.input_tag}] Error processing context variables: {worker_config['context_vars']} [{type(e)}: {e}]")
+                    logger.error(f"🔴 [Composer] [{self.input_tag}] Error processing context variables: {worker_config['context_vars']} [{type(e)}: {e}]")
                     continue
 
                 try:
@@ -347,7 +361,7 @@ class ComposerClient:
                             logger.info(f"🔍 [Composer] [{self.input_tag}] Filter [{filter}] is false, skipping...")
                             continue
                 except Exception as e:
-                    logger.error(f"❌ [Composer] [{self.input_tag}] Error processing filter: {worker_config['filter']} [{type(e)}: {e}]")
+                    logger.error(f"🔴 [Composer] [{self.input_tag}] Error processing filter: {worker_config['filter']} [{type(e)}: {e}]")
                     continue
 
                 logger.info(f"🔍 [Composer] [{self.input_tag}] Running [worker {worker_id:02d}] [{worker_name}]...")
@@ -358,7 +372,7 @@ class ComposerClient:
                     else:
                         __loop_count__ = 1
                 except Exception as e:
-                    logger.error(f"❌ [Composer] [{self.input_tag}] Error processing loop count: {worker_config['__loop_count__']} [{type(e)}: {e}]")
+                    logger.error(f"🔴 [Composer] [{self.input_tag}] Error processing loop count: {worker_config['__loop_count__']} [{type(e)}: {e}]")
                     continue
 
                 step_context_vars = context_vars.copy() # create a copy of the context variables for the entire loop
@@ -373,7 +387,7 @@ class ComposerClient:
                     for step_config in worker_config['steps']:
                         try:
                             if 'endpoint' not in step_config:
-                                logger.error(f"❌ [Composer] [{self.input_tag}] Endpoint not found in step: {step_config}")
+                                logger.error(f"🔴 [Composer] [{self.input_tag}] Endpoint not found in step: {step_config}")
                                 error_encountered = True
                                 break
 
@@ -388,7 +402,7 @@ class ComposerClient:
 
                         except Exception as e:
                             # assume each step depend on each other, always break the steps if current step fails
-                            logger.error(f"❌ [Composer] [{self.input_tag}] Error getting endpoint: {step_config} [{type(e)}: {e}]")
+                            logger.error(f"🔴 [Composer] [{self.input_tag}] Error getting endpoint: {step_config} [{type(e)}: {e}]")
                             logger.error(traceback.format_exc())
                             error_encountered = True
                             break
@@ -399,7 +413,7 @@ class ComposerClient:
 
                         except Exception as e:
                             # assume each step depend on each other, always break the steps if current step fails
-                            logger.error(f"❌ [Composer] [{self.input_tag}] Error processing step context variables: {step_config['context_vars']} [{type(e)}: {e}]")
+                            logger.error(f"🔴 [Composer] [{self.input_tag}] Error processing step context variables: {step_config['context_vars']} [{type(e)}: {e}]")
                             error_encountered = True
                             break
 
@@ -410,7 +424,7 @@ class ComposerClient:
 
                         except Exception as e:
                             # assume each step depend on each other, always break the steps if current step fails
-                            logger.error(f"❌ [Composer] [{self.input_tag}] Error processing inputs: {step_config} [{type(e)}: {e}]")
+                            logger.error(f"🔴 [Composer] [{self.input_tag}] Error processing inputs: {step_config} [{type(e)}: {e}]")
                             error_encountered = True
                             break
 
@@ -430,7 +444,7 @@ class ComposerClient:
 
                         except Exception as e:
                             # assume each step depend on each other, always break the steps if current step fails
-                            logger.error(f"❌ [Composer] [{self.input_tag}] Error calling endpoint: {step_config} [{type(e)}: {e}]")
+                            logger.error(f"🔴 [Composer] [{self.input_tag}] Error calling endpoint: {step_config} [{type(e)}: {e}]")
                             # log stack track only when actually calling the endpoint
                             logger.error(traceback.format_exc())
                             error_encountered = True
@@ -443,7 +457,7 @@ class ComposerClient:
                                 if 'error_if' in step_config:
                                     error_if = self._process_variable(step_config['error_if'], step_context_vars)
                                     if error_if:
-                                        logger.error(f"❌ [Composer] [{self.input_tag}] Error in endpoint [{endpoint_class_name}.{endpoint_method_name}]: {result}")
+                                        logger.error(f"🔴 [Composer] [{self.input_tag}] Error in endpoint [{endpoint_class_name}.{endpoint_method_name}]: {result}")
                                         error_encountered = True
                                         break
                                 # now we don't have any errors, process the return in context variables
@@ -470,7 +484,7 @@ class ComposerClient:
 
                         except Exception as e:
                             # assume each step depend on each other, always break the steps if current step fails
-                            logger.error(f"❌ [Composer] [{self.input_tag}] Error processing returns: {step_config} [{type(e)}: {e}]")
+                            logger.error(f"🔴 [Composer] [{self.input_tag}] Error processing returns: {step_config} [{type(e)}: {e}]")
                             logger.error(traceback.format_exc())
                             error_encountered = True
                             break
@@ -479,7 +493,7 @@ class ComposerClient:
                         logger.error(f"🔴 [Composer] [{self.input_tag}] Error encountered in step: {step_config}")
                         break
 
-                logger.info(f"🟢 [Composer] [{self.input_tag}] [worker {worker_id:02d}] [{worker_name}] completed.")
+                logger.info(f"👌 [Composer] [{self.input_tag}] [worker {worker_id:02d}] [{worker_name}] completed.")
             
             except asyncio.TimeoutError:
                 continue
