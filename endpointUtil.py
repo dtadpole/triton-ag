@@ -121,7 +121,7 @@ class StatsClient:
             prefix_tag,
             f"model_tag={model_tag}",
             f"task_tag={task_tag}",
-            f"category={category}.jsonl"
+            f"{category}.jsonl"
         )
         dirname = os.path.dirname(file_path)
         if not os.path.exists(dirname):
@@ -147,4 +147,63 @@ class StatsClient:
                 retry_count += 1
                 cleanup_lockfile(lock_file)
     
-    # TODO: add code to get stats
+    async def wait_for_stats(self, prefix_tag: str, model_tag: str, task_tag: str, category: str, timeout: int = 120, last_n_lines: int = 100) -> dict:
+        file_path = os.path.join(
+            self.stats_dir,
+            prefix_tag,
+            f"model_tag={model_tag}",
+            f"task_tag={task_tag}",
+            f"{category}.jsonl"
+        )
+        start_time = time.time()
+        while not os.path.exists(file_path):
+            await asyncio.sleep(1)
+            if time.time() - start_time > timeout:
+                logger.error(f"[{os.getpid()}] Timeout waiting for [{file_path}] after [{timeout}s]")
+                raise TimeoutError(f"Timeout waiting for [{file_path}] after [{timeout}s]")
+        # read the last 50 lines
+        with open(file_path, 'r') as f:
+            lines = f.readlines()[-last_n_lines:]
+        # parse the lines and get 'runtime'
+        runtime_list = []
+        last_row = None
+        for line in lines:
+            data = json.loads(line)
+            runtime_list.append(data['runtime'])
+            last_row = data
+        # calculate 25th, 50th, 75th percentile
+        runtime_list.sort()
+        percentile_stats = {
+            'count': len(runtime_list),
+            'min': runtime_list[0],
+            'max': runtime_list[-1],
+            'mean': sum(runtime_list) / len(runtime_list),
+            '25th': runtime_list[int(len(runtime_list) * 0.25)],
+            '50th': runtime_list[int(len(runtime_list) * 0.5)],
+            '75th': runtime_list[int(len(runtime_list) * 0.75)]
+        }
+        last_row['runtime'] = percentile_stats['50th']
+        last_row['metadata']['stats'] = percentile_stats
+        return last_row
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--prefix_tag", type=str, default="test")
+    parser.add_argument("--model_tag", type=str, default="fireworks_deepseek-v3")
+    parser.add_argument("--task_tag", type=str, default="level1_24_LogSoftmax.py")
+    parser.add_argument("--category", type=str, default="reference")
+    parser.add_argument("--timeout", type=int, default=120)
+    parser.add_argument("--last_n_lines", type=int, default=100)
+    args = parser.parse_args()
+
+    stats_client = StatsClient()
+    result = asyncio.run(stats_client.wait_for_reference_stats(
+        prefix_tag=args.prefix_tag,
+        model_tag=args.model_tag,
+        task_tag=args.task_tag,
+        category=args.category,
+        timeout=args.timeout,
+        last_n_lines=args.last_n_lines
+    ))
+    logger.info(json.dumps(result, indent=2))
