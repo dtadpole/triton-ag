@@ -9,7 +9,7 @@ from pathlib import Path
 from logger import logger
 from typing import Any
 
-VALID_RECORD_FORMATS = ["json", "txt"]
+VALID_RECORD_FORMATS = ["json", "text"]
 
 MAX_LOCK_AGE = 20 # 20 seconds
 
@@ -28,9 +28,11 @@ class Recorder:
         if format == "json":
             with open(path, 'w') as f:
                 f.write(json.dumps(data, indent=2, ensure_ascii=False, default=str))
-        elif format == "txt":
+        elif format == "text":
             with open(path, 'w') as f:
                 f.write(data)
+        else:
+            raise ValueError(f"Invalid format: {format}, must be one of {VALID_RECORD_FORMATS}")
 
 class CodeExtractor:
     def __init__(self):

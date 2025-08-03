@@ -99,9 +99,9 @@ class KbEvalClient:
                             continue
                         else:
                             logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Return the last result from retriable error... [{retry_count}/{self.num_retries}]")
-                            return result
+                            return result.model_dump()
 
-                    return result
+                    return result.model_dump()
 
             except Exception as e:
                 logger.warning(f"🔍 [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Error calling server: [{e}] [{retry_count}/{self.num_retries}]")
@@ -166,9 +166,9 @@ class KbEvalClient:
                             continue
                         else:
                             logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Return the last result from retriable error... [{retry_count}/{self.num_retries}]")
-                            return result
+                            return result.model_dump()
 
-                    return result
+                    return result.model_dump()
 
             except Exception as e:
                 # add retry emoji to beginning and end of the string

@@ -66,8 +66,8 @@ class KernelExecResult(BaseModel):
     """
     compiled: bool = False
     correctness: bool = False
-    metadata: dict = {}
     runtime: float = -1.0  # in us, only recorded if we decide to measure performance
+    metadata: dict = {}
     runtime_stats: dict = {}  # only recorded if we decide to measure performance
 
 class CorrectnessResult(BaseModel):
