@@ -70,6 +70,7 @@ module:
             reference_code: "`reference_code`"
           # returned variables will be added to the context
           returns:
+            error_if: "`__result__ is None or __result__['runtime'] <= 0`"
             context_vars:
               reference_eval: "`__result__`"
               reference_eval_path: "`f'{record_folder}/reference_eval.json'`"
@@ -107,6 +108,7 @@ module:
           returns:
             context_vars:
               reference_eval: "`__result__`"
+              reference_eval_path: "`f'{stats_dir}/{prefix_tag}/task_tag={task_tag}/reference.jsonl'`"
             logging:
               method: "log_kb_eval_ref"
         - endpoint: inferenceClient.completion
@@ -119,7 +121,6 @@ module:
               "gen_tag": "`gen_tag`"
               "turn_tag": "`turn_tag`"
               "code_type": "`code_type`"
-              "reference_code": "`reference_code`"
             messages: |
               `[
                 {"role": "system", "content": self.get_system_prompt(__context__)}, 

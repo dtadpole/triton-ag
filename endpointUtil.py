@@ -115,14 +115,23 @@ class StatsClient:
         os.makedirs(self.stats_dir, exist_ok=True)
 
     async def add_data_point(self, prefix_tag: str, model_tag: str, task_tag: str, category: str, data: dict):
-        # save the data to the file
-        file_path = os.path.join(
-            self.stats_dir,
-            prefix_tag,
-            f"model_tag={model_tag}",
-            f"task_tag={task_tag}",
-            f"{category}.jsonl"
-        )
+        if category == "reference":
+            # if category is reference, ignore model_tag
+            file_path = os.path.join(
+                self.stats_dir,
+                prefix_tag,
+                f"task_tag={task_tag}",
+                f"{category}.jsonl"
+            )
+        else:
+            # save the data to the file
+            file_path = os.path.join(
+                self.stats_dir,
+                prefix_tag,
+                f"model_tag={model_tag}",
+                f"task_tag={task_tag}",
+                f"{category}.jsonl"
+            )
         dirname = os.path.dirname(file_path)
         if not os.path.exists(dirname):
             os.makedirs(dirname, exist_ok=True)
@@ -148,29 +157,52 @@ class StatsClient:
                 cleanup_lockfile(lock_file)
     
     async def wait_for_stats(self, prefix_tag: str, model_tag: str, task_tag: str, category: str, timeout: int = 120, last_n_lines: int = 100) -> dict:
-        file_path = os.path.join(
-            self.stats_dir,
-            prefix_tag,
-            f"model_tag={model_tag}",
-            f"task_tag={task_tag}",
-            f"{category}.jsonl"
-        )
+        if category == "reference":
+            # if category is reference, ignore model_tag
+            file_path = os.path.join(
+                self.stats_dir,
+                prefix_tag,
+                f"task_tag={task_tag}",
+                f"{category}.jsonl"
+            )
+        else:
+            # save the data to the file
+            file_path = os.path.join(
+                self.stats_dir,
+                prefix_tag,
+                f"model_tag={model_tag}",
+                f"task_tag={task_tag}",
+                f"{category}.jsonl"
+            )
+        # wait until the file exists
         start_time = time.time()
-        while not os.path.exists(file_path):
-            await asyncio.sleep(1)
-            if time.time() - start_time > timeout:
-                logger.error(f"[{os.getpid()}] Timeout waiting for [{file_path}] after [{timeout}s]")
-                raise TimeoutError(f"Timeout waiting for [{file_path}] after [{timeout}s]")
-        # read the last 50 lines
-        with open(file_path, 'r') as f:
-            lines = f.readlines()[-last_n_lines:]
-        # parse the lines and get 'runtime'
         runtime_list = []
-        last_row = None
-        for line in lines:
-            data = json.loads(line)
-            runtime_list.append(data['runtime'])
-            last_row = data
+        while True:
+            try:
+                if not os.path.exists(file_path):
+                    continue
+                # read the last 50 lines
+                with open(file_path, 'r') as f:
+                    lines = f.readlines()[-last_n_lines:]
+                # parse the lines and get 'runtime'
+                last_row = None
+                for line in lines:
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        logger.warning(f"[{os.getpid()}] Ignore invalid JSON line in [{file_path}]: [{line}]")
+                        continue
+                    runtime_list.append(data['runtime'])
+                    last_row = data
+                # break if there is at least one valid runtime
+                if len(runtime_list) > 0:
+                    break
+            finally:
+                await asyncio.sleep(1)
+                if time.time() - start_time > timeout:
+                    logger.error(f"[{os.getpid()}] Timeout waiting for [{file_path}] after [{timeout}s]")
+                    raise TimeoutError(f"Timeout waiting for [{file_path}] after [{timeout}s]")
+
         # calculate 25th, 50th, 75th percentile
         runtime_list.sort()
         percentile_stats = {

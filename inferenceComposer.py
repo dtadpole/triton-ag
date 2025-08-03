@@ -52,8 +52,8 @@ class ComposerClient:
         self.inferenceClient = InferenceClient(config=self.inference_client_config)
         self.tokenizer = self.inferenceClient.tokenizer
         self.model_tag = self.inferenceClient.model_tag
-        self.output_dir = self._get_output_dir(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        # self.output_dir = self._get_output_dir(output_dir)
+        # self.output_dir.mkdir(parents=True, exist_ok=True)
         self.module_file = module_file
         self.prompt_file = prompt_file
         self.module_config = yaml.safe_load(open(module_file, 'r')).get('module', {})
@@ -66,6 +66,7 @@ class ComposerClient:
             "os": os,
             "json": json,
             "yaml": yaml,
+            "stats_dir": os.path.expanduser(stats_dir),
             "__start_time__": datetime.now().strftime("%Y%m%d_%H%M%S"),
         }
         if 'context_vars' in self.module_config:
