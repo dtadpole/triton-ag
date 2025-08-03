@@ -174,7 +174,18 @@ class ComposerClient:
 
     def log_kb_eval(self, result: Any, context_vars: dict) -> dict:
         """Process log eval."""
-        pass
+        run_tag = context_vars.get('run_tag', None)
+        model_tag = context_vars.get('model_tag', None)
+        task_tag = context_vars.get('task_tag', None)
+        turn_tag = context_vars.get('turn_tag', None)
+        generated_eval = context_vars.get('generated_eval', None)
+        generated_eval_runtime = generated_eval['runtime'] if 'runtime' in generated_eval else -1.0
+        generated_eval_path = context_vars.get('generated_eval_path', None)
+        evaluation_time = context_vars.get('__endpoint_time__', None)
+        if generated_eval['compiled'] and generated_eval['correctness']:
+            logger.info(f"✅ [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{generated_eval_path}] [{generated_eval_runtime:.3f}ms] in [{evaluation_time:.1f}s]")
+        else:
+            logger.warning(f"⚠️ [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{generated_eval_path}] [{'🟢' if generated_eval['compiled'] else '🔴'} compiled], [{'🟢' if generated_eval['correctness'] else '🔴'} correctness] in [{evaluation_time:.2f}s]")
 
     async def input_processor(self, block: ComposerBlock):
         """Process input variables."""
@@ -427,7 +438,6 @@ class ComposerClient:
 
                         try:
                             if 'returns' in step_config:
-                                logger.info(f"🔍 [Composer] [{self.input_tag}] Endpoint [{endpoint_class_name}.{endpoint_method_name}] returned: {str(result)[:100]}...")
                                 step_context_vars['__result__'] = result
                                 # process error_if
                                 if 'error_if' in step_config:

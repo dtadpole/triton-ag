@@ -99,7 +99,6 @@ module:
         completion: null
       steps:
         - endpoint: inferenceClient.completion
-          record_time: true
           context_vars:
             turn_tag: "`f'{gen_tag}_t{__loop_idx__:02d}'`" # turn_tag is gen_01_t03
             metadata:
@@ -180,10 +179,13 @@ module:
           returns:
             context_vars:
               generated_eval: "`__result__`"
+              generated_eval_path: "`f'{record_folder}/{turn_tag}_generated_eval.json'`"
             save_to:
-              - path: "`f'{record_folder}/{turn_tag}_generated_eval.json'`"
+              - path: "`generated_eval_path`"
                 data: "`generated_eval`"
                 format: "json"
+            logging:
+              method: "log_kb_eval"
         - endpoint: statsClient.add_data_point
           inputs:
             prefix_tag: "`prefix_tag`"
