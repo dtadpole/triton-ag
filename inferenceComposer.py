@@ -66,6 +66,7 @@ class ComposerClient:
             "os": os,
             "json": json,
             "yaml": yaml,
+            "__start_time__": datetime.now().strftime("%Y%m%d_%H%M%S"),
         }
         if 'context_vars' in self.module_config:
             self.context_vars = self._process_context_vars(self.module_config['context_vars'], self.context_vars)
