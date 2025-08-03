@@ -587,8 +587,8 @@ async def main():
     parser.add_argument("--input_tag", type=str, default="test")
     parser.add_argument("--input_dir", type=str, default="~/.codeGenEval", help="Input directory containing Python files")
     parser.add_argument("--output_dir", type=str, default="~/.inference/composer", help="Output directory for the composer results")
-    parser.add_argument("--provider", type=str, default="fireworks")  # most cost effective models are deepinfra-r1 and fireworks-v3
-    parser.add_argument("--model", type=str, default="deepseek-v3")  # most cost effective models are deepinfra-r1 and fireworks-v3
+    parser.add_argument("--provider", type=str, default="local")  # most cost effective models are deepinfra-r1 and fireworks-v3
+    parser.add_argument("--model", type=str, default="qwen3-14b")  # most cost effective models are deepinfra-r1 and fireworks-v3
     parser.add_argument("--model_override", type=str, default=None)
     parser.add_argument("--parallel_workers", type=int, default=1)
     parser.add_argument("--num_samples", type=int, default=2)

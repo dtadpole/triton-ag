@@ -297,72 +297,19 @@ class InferenceClient:
 
         logprobs_tokenized_content = []
         if logprobs_content:
-            # tokenize the generated content
-            token_ids = self.tokenizer.encode(generated_content, add_special_tokens=False, padding=False)
-            generated_tokens = [self.tokenizer.decode([token_id]) for token_id in token_ids]
-            if len(token_ids) == len(logprobs_content):
-                pass
-            elif len(token_ids) == len(logprobs_content) - 1:
-                # add eos_token_id is handling for Qwen, where <|im_end|> is not included in the generated content
-                token_ids = token_ids + [self.tokenizer.eos_token_id]
-            else:
-                # use exact tokens from logprobs_content
-                logger.warning(f"⚠️ [InferenceClient] [Completion] unable to match the generated content [len={len(token_ids)}] with the logprobs content [len={len(logprobs_content)}], using exact tokens from logprobs_content")
-                token_ids = []
-                generated_tokens = []
-                for token_prob in logprobs_content:
-                    encoded_token = self.tokenizer.encode(token_prob['token'], add_special_tokens=False)
-                    if len(encoded_token) == 1:
-                        token_ids.append(encoded_token[0])
-                        generated_tokens.append(token_prob['token'])
-                    elif len(encoded_token) == 0:
-                        if len(token_ids) == len(logprobs_content) - 1:
-                            logger.warning(f"⚠️ [InferenceClient] [Completion] encountered empty token: [token_ids={len(token_ids)}], [logprobs_content={len(logprobs_content)}], adding [eos_token_id] to the end")
-                            token_ids.append(self.tokenizer.eos_token_id)
-                            generated_tokens.append(self.tokenizer.eos_token)
-                        else:
-                            error_message = f"❌ [InferenceClient] [Completion] encountered empty token: [token_ids={len(token_ids)}] [logprobs_content={len(logprobs_content)}]"
-                            logger.error(error_message)
-                            raise ValueError(error_message)
-                    else:
-                        logger.warning(f"⚠️ [InferenceClient] [Completion] encountered multiple tokens: [encoded_token={len(encoded_token)}], [logprobs_content={len(logprobs_content)}], using the first token")
-                        token_ids.append(encoded_token[0])
-                        generated_tokens.append(token_prob['token'])
-            if len(token_ids) != len(logprobs_content):
-                logger.error(f"❌ [InferenceClient] [Completion] Generated content: [generated_content={generated_content}] [len={len(token_ids)}] [generated_tokens={list(zip(token_ids, generated_tokens))}]")
-                logger.error(f"❌ [InferenceClient] [Completion] Logprobs: [len={len(logprobs_content)}] [{logprobs_content}]")
-                error_message = f"❌ [InferenceClient] [Completion] Logprobs length mismatch: [token_ids={len(token_ids)}] != [logprobs={len(logprobs_content)}]]"
-                logger.error(error_message)
-                raise ValueError(error_message)
-            # replace all the tokens in logprobs_content with the tokens from the generated content
-            num_matched_tokens = 0
-            num_mismatched_tokens = 0
-            for token_id, logprob in zip(token_ids, logprobs_content):
-                decoded_token = self.tokenizer.decode([token_id])
-                encoded_token_id = self.tokenizer.encode(decoded_token, add_special_tokens=False)
-                logprob_token = logprob['token']
-                logprob_token_normalized = logprob_token.replace('Ġ', ' ').replace('Ċ', '\n').replace('▁', ' ')
-                encoded_logprob_token_id = self.tokenizer.encode(logprob_token, add_special_tokens=False)
-                if encoded_token_id == encoded_logprob_token_id or decoded_token == logprob_token_normalized:
-                    num_matched_tokens += 1
-                else:
-                    num_mismatched_tokens += 1
-                    if num_mismatched_tokens < 10:
-                        logger.warning(f"⚠️ [InferenceClient] [Completion] Logprobs: logprob_token=[{logprob_token}], logprob_token_id=[{encoded_logprob_token_id}] != decoded_token=[{decoded_token}], decoded_token_id=[{encoded_token_id}], token_id=[{token_id}]")
-                tokenized_logprob = {
-                    "token": decoded_token,
+            for logprob_content in logprobs_content:
+                raw_token = logprob_content['token']
+                if ':' not in raw_token:
+                    raise ValueError(f"⚠️ [InferenceClient] [Completion] Logprobs: cannot parse token id from [token={raw_token}]")
+                try:
+                    token_id = int(raw_token.split(':')[-1])
+                except ValueError:
+                    raise ValueError(f"⚠️ [InferenceClient] [Completion] Logprobs: cannot parse token id from [token={raw_token}]")
+                logprobs_tokenized_content.append({
+                    "token": raw_token,
                     "token_id": token_id,
-                    "logprob": logprob['logprob']
-                }
-                logprobs_tokenized_content.append(tokenized_logprob)
-            # check if the matched ratio is less than 90%
-            matched_ratio = num_matched_tokens * 100.0 / len(logprobs_content) if len(logprobs_content) > 0 else 0.0
-            if matched_ratio < REQUIRED_MATCHED_RATIO:
-                error_message = f"❌ [InferenceClient] [Completion] Logprobs: [num_matched_tokens={num_matched_tokens}] / [len={len(logprobs_content)}] = [matched_ratio={matched_ratio:.2f}%]"
-                logger.error(error_message)
-                raise ValueError(error_message)
-            else:
-                logger.info(f"🔍 [InferenceClient] [Completion] Logprobs: [num_matched_tokens={num_matched_tokens}] / [len={len(logprobs_content)}] = [matched_ratio={matched_ratio:.2f}%]")
+                    "logprob": logprob_content['logprob'],
+                })
 
         return {'content': generated_content, "logprobs": logprobs_tokenized_content}
        
