@@ -157,7 +157,7 @@ def _compile_and_load_model(model_src: str, context: dict, filename: str = "<str
         exec(code, context)  # expose to current namespace
     except Exception as e:
         raise CompileLoadError(str(e)) from e
-    
+
     return context
 
 def load_model_and_inputs(
@@ -226,15 +226,25 @@ def load_custom_model(
 
     _compile_and_load_model(model_custom_src, context, filename)
 
+
+    # Redefine the eq of two function objects. If the get_init_inputs and get_inputs have the same format, they should be equal
+    # The old comparison won't be equal event if the generated code has identical definition as reference code for the two functions
+    def compare_functions_objects(func1, func2):
+        return (
+            func1.__code__.co_code == func2.__code__.co_code and
+            func1.__code__.co_names == func2.__code__.co_names and
+            func1.__code__.co_varnames == func2.__code__.co_varnames
+        )
+
     # check if any of the original components have been modified
     afterwards_Model = context.get("Model")
     afterwards_get_init_inputs_fn = context.get("get_init_inputs")
     afterwards_get_inputs_fn = context.get("get_inputs")
     if afterwards_Model != original_Model:
         raise CompileModifiedComponentError("class [Model] has been modified")
-    if afterwards_get_init_inputs_fn != original_get_init_inputs_fn:
+    if compare_functions_objects(afterwards_get_init_inputs_fn,original_get_init_inputs_fn) is False:
         raise CompileModifiedComponentError("function [get_init_inputs] has been modified")
-    if afterwards_get_inputs_fn != original_get_inputs_fn:
+    if compare_functions_objects(afterwards_get_inputs_fn, original_get_inputs_fn) is False:
         raise CompileModifiedComponentError("function [get_inputs] has been modified")
 
     # check "ModelNew" exists in the context
@@ -245,7 +255,7 @@ def load_custom_model(
         raise CompileMissingComponentError(f"class [ModelNew] is not a class, but {type(ModelNew)}")
     elif not issubclass(ModelNew, nn.Module):
         raise CompileMissingComponentError(f"class [ModelNew] is not a subclass of nn.Module, but {type(ModelNew)}")
-    
+
     # return the ModelNew class
     return ModelNew
 
