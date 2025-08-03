@@ -74,6 +74,10 @@ class ComposerClient:
         """Get output sub directory for a task."""
         return Path(os.path.expanduser(output_dir)) / self.input_tag / self.model_tag
 
+    def get_prompt_code_type(self, context_vars: dict) -> str:
+        """Get prompt code type from configuration."""
+        return self.prompt_config.get('code_type', 'triton')
+
     def get_system_prompt(self, context_vars: dict) -> str:
         """Get system prompt from configuration."""
         reference_code = self.get_example_reference_code()
@@ -187,17 +191,31 @@ class ComposerClient:
         evaluation_time = context_vars.get('__endpoint_time__', None)
         logger.info(f"📚 [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{reference_eval_path}] [{reference_eval_runtime:.3f}ms] in [{evaluation_time:.2f}s]")
 
-    def log_kb_eval(self, result: dict, context_vars: dict) -> dict:
+    async def log_kb_eval(self, result: dict, context_vars: dict) -> dict:
         """Process log eval."""
+        prefix_tag = context_vars.get('prefix_tag', None)
         run_tag = context_vars.get('run_tag', None)
         model_tag = context_vars.get('model_tag', None)
         task_tag = context_vars.get('task_tag', None)
         turn_tag = context_vars.get('turn_tag', None)
         generated_eval_runtime = result['runtime'] if 'runtime' in result else -1.0
         generated_eval_path = context_vars.get('generated_eval_path', None)
+        reference_eval = await self.statsClient.wait_for_stats(
+            prefix_tag=prefix_tag,
+            model_tag=model_tag,
+            task_tag=task_tag,
+            category="reference",
+        )
+        reference_eval_runtime = reference_eval['runtime'] if 'runtime' in reference_eval else -1.0
+        if generated_eval_runtime > 0 and reference_eval_runtime > 0:
+            speedup = reference_eval_runtime / generated_eval_runtime
+        else:
+            speedup = 0.0
+        # fun emoji for speedup
+        speedup_emoji = '🚀' if speedup > 1.0 else ('🦙' if speedup > 0.5 else '🐢')
         evaluation_time = context_vars.get('__endpoint_time__', None)
         if result['compiled'] and result['correctness']:
-            logger.info(f"✅ [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{generated_eval_path}] [{generated_eval_runtime:.3f}ms] in [{evaluation_time:.1f}s]")
+            logger.info(f"✅ [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{generated_eval_path}] [{generated_eval_runtime:.3f}ms] [{speedup_emoji} {speedup:.2f}x] in [{evaluation_time:.1f}s]")
         else:
             logger.warning(f"⚠️ [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{generated_eval_path}] [{'🟢' if result['compiled'] else '🔴'} compiled], [{'🟢' if result['correctness'] else '🔴'} correctness] in [{evaluation_time:.2f}s]")
 
@@ -478,7 +496,11 @@ class ComposerClient:
                                         log_method = getattr(self, log_config.get('method', None))
                                         if not log_method:
                                             logger.warning(f"🔴 [Composer] [{self.input_tag}] Logging method not found: {log_config}")
-                                        log_method(result, step_context_vars)
+                                        # check if log_method is async
+                                        if asyncio.iscoroutinefunction(log_method):
+                                            await log_method(result, step_context_vars)
+                                        else:
+                                            log_method(result, step_context_vars)
                                     except Exception as e:
                                         logger.warning(f"🔴 [Composer] [{self.input_tag}] Error processing logging: {log_config} [{type(e)}: {e}]")
 
