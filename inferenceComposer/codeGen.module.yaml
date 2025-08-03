@@ -88,15 +88,25 @@ module:
       filter: "`True`" # you can specify a filter criteria here
       __loop_count__: "`num_turns_per_generation`"
       context_vars:
+        record_folder: "`f'{output_dir}/{run_tag}/model_tag={model_tag}/task_tag={task_tag}'`"
         logprobs: true
         generated_code: null
         generated_eval: null
         conversation: null
         completion: null
-        record_folder: "`f'{output_dir}/{run_tag}/model_tag={model_tag}/task_tag={task_tag}'`"
       steps:
         - endpoint: inferenceClient.completion
+          record_time: true
           context_vars:
+            turn_tag: "`f'{gen_tag}_t{__loop_idx__:02d}'`" # turn_tag is gen_01_t03
+            metadata:
+              "run_tag": "`run_tag`"
+              "model_tag": "`model_tag`"
+              "task_tag": "`task_tag`"
+              "gen_tag": "`gen_tag`"
+              "turn_tag": "`turn_tag`"
+              "code_type": "`code_type`"
+              "reference_code": "`reference_code`"
             messages: |
               `[
                 {"role": "system", "content": self.get_system_prompt(__context__)}, 
@@ -112,7 +122,6 @@ module:
                 add_generation_prompt=True,
                 enable_thinking=False,
               )`
-            turn_tag: "`f'{gen_tag}_t{__loop_idx__:02d}'`" # turn_tag is gen_01_t03
           inputs:
             prompt: "`prompt`"
             max_tokens: "`max_tokens`"
@@ -120,8 +129,25 @@ module:
           returns:
             error_if: "`__return__ is None`"
             context_vars:
-              conversation: "`completion['conversation']`"
-              completion: "`completion['choices'][0]['message']['content']`"
+              metadata: |
+                `metadata | {
+                  "num_completion_tokens": len(__return__['usage']['completion_tokens']),
+                  "completion_time_seconds": __endpoint_time__,
+                  "token_per_second": len(__return__['usage']['completion_tokens']) / __endpoint_time__,
+                }
+                `
+              messages: |
+                `messages + [
+                  {"role": "assistant", "content": __return__['content']}
+                ]`
+              completion: |
+                "prompt": "`prompt`"
+                "completion": "`__return__['content']`"
+                "logprobs": "`__return__['logprobs']`"
+                "metadata": "`metadata`"
+              conversation: |
+                messages: "`messages`"
+                metadata: "`metadata`"
         - endpoint: recorder.save
           inputs:
             path: "`f'{record_folder}/{turn_tag}_conversation.json'`"
