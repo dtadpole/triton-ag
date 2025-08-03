@@ -160,22 +160,22 @@ class ComposerClient:
         model_tag = context_vars.get('model_tag', None)
         task_tag = context_vars.get('task_tag', None)
         turn_tag = context_vars.get('turn_tag', None)
-        generated_eval_path = context_vars.get('generated_eval_path', None)
+        conversation_path = context_vars.get('conversation_path', None)
         num_completion_tokens = len(result['logprobs']) if 'logprobs' in result else 0
         completion_time_seconds = context_vars.get('__endpoint_time__', None)
         token_per_second = num_completion_tokens / completion_time_seconds if completion_time_seconds > 0 else 0.0
-        logger.info(f"👏 [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{generated_eval_path}] [{f'{num_completion_tokens}'} tokens] in [{completion_time_seconds:.2f}s] [{token_per_second:.2f} tokens/s]")
+        logger.info(f"👏 [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{conversation_path}] [{f'{num_completion_tokens}'} tokens] in [{completion_time_seconds:.2f}s] [{token_per_second:.2f} tokens/s]")
 
     def log_chat_completion(self, result: dict, context_vars: dict) -> dict:
         run_tag = context_vars.get('run_tag', None)
         model_tag = context_vars.get('model_tag', None)
         task_tag = context_vars.get('task_tag', None)
         turn_tag = context_vars.get('turn_tag', None)
-        generated_eval_path = context_vars.get('generated_eval_path', None)
+        conversation_path = context_vars.get('conversation_path', None)
         num_completion_tokens = result['usage']['completion_tokens'] if 'usage' in result and 'completion_tokens' in result['usage'] else 0
         completion_time_seconds = context_vars.get('__endpoint_time__', None)
         token_per_second = num_completion_tokens / completion_time_seconds if completion_time_seconds > 0 else 0.0
-        logger.info(f"👏 [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{generated_eval_path}] [{f'{num_completion_tokens}'} tokens] in [{completion_time_seconds:.2f}s] [{token_per_second:.2f} tokens/s]")
+        logger.info(f"👏 [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{conversation_path}] [{f'{num_completion_tokens}'} tokens] in [{completion_time_seconds:.2f}s] [{token_per_second:.2f} tokens/s]")
 
     def log_kb_eval_ref(self, result: dict, context_vars: dict) -> dict:
         """Process log kb eval ref."""
