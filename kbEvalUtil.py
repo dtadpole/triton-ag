@@ -226,15 +226,23 @@ def load_custom_model(
 
     _compile_and_load_model(model_custom_src, context, filename)
 
+
+    def compare_functions_objects(func1, func2):
+        return (
+            func1.__code__.co_code == func2.__code__.co_code and
+            func1.__code__.co_names == func2.__code__.co_names and
+            func1.__code__.co_varnames == func2.__code__.co_varnames
+        )
+
     # check if any of the original components have been modified
     afterwards_Model = context.get("Model")
     afterwards_get_init_inputs_fn = context.get("get_init_inputs")
     afterwards_get_inputs_fn = context.get("get_inputs")
     if afterwards_Model != original_Model:
         raise CompileModifiedComponentError("class [Model] has been modified")
-    if afterwards_get_init_inputs_fn != original_get_init_inputs_fn:
+    if compare_functions_objects(afterwards_get_init_inputs_fn,original_get_init_inputs_fn) is False:
         raise CompileModifiedComponentError("function [get_init_inputs] has been modified")
-    if afterwards_get_inputs_fn != original_get_inputs_fn:
+    if compare_functions_objects(afterwards_get_inputs_fn, original_get_inputs_fn) is False:
         raise CompileModifiedComponentError("function [get_inputs] has been modified")
 
     # check "ModelNew" exists in the context
