@@ -18,8 +18,8 @@ import time
 import torch
 import asyncio
 from logger import logger
-from kbEvalCli import compile_and_eval_kernel, eval_kernel_reference
-from kbEvalTest.kbeval import KernelExecResult
+from kbEvalCli import eval_kernel_custom
+from kbEvalUtil import KernelExecResult
 from typing import DefaultDict, Dict, List, Optional, Any, Tuple, Callable
 import argparse
 import yaml
@@ -73,6 +73,7 @@ class TrainingConfig(BaseModel):
     scheduler_type: str = "cosine"
     num_warmup_steps: int = 50
     dataloader_num_workers: int = 4
+    loss_multiplier: float = 1.0
     seed: int = -1
 
 class TrainerLoraConfig(BaseModel):
@@ -86,10 +87,10 @@ class TrainerLoraConfig(BaseModel):
 
 class LoggingConfig(BaseModel):
     """Configuration for logging parameters"""
-    use_wandb: bool = False
-    wandb_project: str = "unsloth-lora-training"
+    use_wandb: bool = True
+    wandb_project: str = "kb_trainer"
     wandb_run_name: Optional[str] = None
-
+    wandb_run_id: Optional[str] = None
 
 class TrainerConfig(BaseModel):
     """Main configuration class containing all training parameters"""
@@ -100,10 +101,16 @@ class TrainerConfig(BaseModel):
     logging: LoggingConfig = LoggingConfig()
 
     @classmethod
-    def from_yaml(cls, yaml_path: str) -> 'TrainerConfig':
+    def from_yaml(cls, yaml_path: str, override_yaml_path: Optional[str] = None) -> 'TrainerConfig':
         """Load configuration from YAML file"""
         with open(yaml_path, 'r') as f:
             config_dict = yaml.safe_load(f)
+
+        if override_yaml_path is not None:
+            with open(override_yaml_path, 'r') as f:
+                override_config_dict = yaml.safe_load(f)
+            # do a recursive merge of the two dictionaries
+            config_dict = merge_dicts(config_dict, override_config_dict)
 
         # Create config objects from sections
         model_config = ModelConfig()
@@ -764,9 +771,9 @@ def eval_kernel_reference_sp(
     verbose: bool=False):
     args = argparse.Namespace(verbose=verbose)
     device_ = torch.device(device)
+    build_dir = GRPO_FOLDER + f"/kbeval/{run_tag}/{model_tag}/{task_tag}/eval_tag"
     for reference_code in reference_codes:
-        result_queue.put((reference_code, eval_kernel_reference(run_tag, model_tag, task_tag, reference_code, device_, args)))
-
+        result_queue.put((reference_code, eval_kernel_custom(run_tag, model_tag, task_tag, run_tag, reference_code, "<string>", "", "<string>", device_, work_dir=build_dir, measure_reference=True)))
 
 def eval_kernel_reference_mp(run_tag: str,
                              model_tag: str,
@@ -814,10 +821,9 @@ def eval_kernel_reference_generate_sp(
         gi = hash_string_short(generated_code, 5)
         build_dir_cur = build_dir + f"/{gi}/"
         result_queue.put(((reference_code, generated_code),
-                           compile_and_eval_kernel(run_tag, model_tag, task_tag, eval_tag, reference_code, generated_code, device_, build_dir_cur, args)
+                           eval_kernel_custom(run_tag, model_tag, task_tag, run_tag, reference_code, "<string>", generated_code, "<string>", device_, work_dir=build_dir_cur, code_type="cuda", measure_reference=False)
                            )
                           )
-
 
 def eval_kernel_reference_generate_mp(run_tag: str,
                              model_tag: str,
@@ -868,7 +874,6 @@ def code_evaluation_local(
     reference_runtime_cache = {}
     reference_codes = list(gerenated_code_dict.keys())
     reference_runtime_cache = eval_kernel_reference_mp(run_tag, model_tag, task_tag, reference_codes, devices)
-
 
     ref_gen_tuples = []
     for ri, (reference_code, generated_codes) in enumerate(gerenated_code_dict.items()):
@@ -1289,8 +1294,8 @@ async def main():
         # await test_rollout_policy_logproba(args)
         # await test_rollout_policy_logproba_mp(args) # unsloth is not pickable
         # await test_rollout_policy_logproba_safethreading(args) # safethreading is still slow
-        await test_rollout_policy_logproba_shellprocess(args)
-        # await test_code_evaluation_local()
+        # await test_rollout_policy_logproba_shellprocess(args)
+        await test_code_evaluation_local()
         # await test_prompt_manager(args)
         return
 
