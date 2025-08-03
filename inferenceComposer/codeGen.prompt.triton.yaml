@@ -17,12 +17,22 @@ prompts:
     - The input and output must be on CUDA device. Your answer must be the complete new module, with no testing code, no init code, no other code. It will be evaluated and you will be given feedback on its correctness and speedup so you can iterate to maximize the performance.
     - If you receive feedback from user on your code, you shall improve your code based on the feedback.
 
+    Example reference code:
+    ```python
+    {reference_code}
+    ```
+    Example generated code:
+    ```python
+    {generated_code}
+    ```
+
     Do NOT use emojis or special characters in your response.
 
   # User prompt template with substitutable source code parameter
   user_prompt.init: |
     Following is the reference PyTorch code, implement the complete new module with Triton (no testing code, no init code, no other code).
 
+    Reference code:
     ```python
     {reference_code}
     ```
@@ -32,7 +42,18 @@ prompts:
     {reference_eval}
     ```
 
-  user_prompt.next: |
+  user_prompt.fix: |
+    Your code did not compile or run correctly.  Please fix the code and return the correct code.
+
+    Generated code evaluation:
     ```json
-    {prev_generated_eval}
+    {generated_eval}
+    ```
+
+  user_prompt.perf: |
+    Compare to the reference code performance evaluation and improve your code performance by optimizing the code.
+
+    Generated code evaluation:
+    ```json
+    {generated_eval}
     ```

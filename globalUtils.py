@@ -89,6 +89,25 @@ class ReflectionBlock(BaseModel):
     output_dir: str = Field(default="~/.reflection")
     test_mode: bool = Field(default=False)
 
+class ComposerBlock(BaseModel):
+    prefix_tag: str
+    epoch_id: int
+    block_id: int
+    input_tag: str
+    provider_name: str
+    model_name: str
+    module_file: str
+    prompt_file: str
+    example_file: str
+    num_samples: int
+    num_generations: int
+    num_turns_per_generation: int = Field(default=4)
+    parallel_workers: int = Field(default=16)
+    model_override: Optional[str] = Field(default=None)
+    input_dir: str = Field(default="~/.inference/composer")
+    output_dir: str = Field(default="~/.inference/composer")
+    test_mode: bool = Field(default=False)
+
 class GlobalUtils:
     _instance = None # class variable to store the instance
 

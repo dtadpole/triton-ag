@@ -4,6 +4,7 @@ import asyncio
 import fcntl
 import time
 import psutil
+from pathlib import Path
 from logger import logger
 from typing import Any
 
@@ -15,7 +16,7 @@ class Recorder:
     def __init__(self):
         pass
     
-    def save(self, path: str, data: Any, format: str = "json"):
+    async def save(self, path: str, data: Any, format: str = "json"):
         if format not in VALID_RECORD_FORMATS:
             raise ValueError(f"Invalid format: {format}, must be one of {VALID_RECORD_FORMATS}")
         # check that the folder exists
@@ -34,7 +35,7 @@ class CodeExtractor:
     def __init__(self):
         pass
     
-    def extract_code(self, completion: str) -> str:
+    async def extract_code(self, completion: str) -> str:
         return completion
 
 
@@ -61,7 +62,7 @@ class FileLock:
         except BlockingIOError as e:
             self.lock_fd.close()
             raise TimeoutError("Could not acquire lock")
-        logger.warning(f"Lock [{self.lock_file}] acquired.")
+        logger.info(f"Lock [{self.lock_file}] acquired.")
         return self
 
     def __exit__(self, type, value, traceback):
@@ -69,7 +70,7 @@ class FileLock:
             self.lock_fd.write('\n[done]\n')
             fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_UN)
             self.lock_fd.close()
-            logger.warning(f"Lock [{self.lock_file}] released.")
+            logger.info(f"Lock [{self.lock_file}] released.")
 
 def cleanup_lockfile(lock_file: str):
     if os.path.exists(lock_file):
@@ -103,25 +104,34 @@ def cleanup_lockfile(lock_file: str):
 
 class StatsClient:
     def __init__(self, stats_dir: str = "~/.trainer/stats"):
-        self.stats_dir = stats_dir
-        self.stats_dir.mkdir(parents=True, exist_ok=True)
+        self.stats_dir = Path(os.path.expanduser(stats_dir))
+        os.makedirs(self.stats_dir, exist_ok=True)
 
     async def add_data_point(self, prefix_tag: str, model_tag: str, task_tag: str, category: str, data: dict):
         # save the data to the file
-        path = os.path.join(self.stats_dir, prefix_tag, model_tag, task_tag, f"{category}.jsonl")
-        lock_file = path + ".lock"
+        file_path = os.path.join(
+            self.stats_dir,
+            prefix_tag,
+            f"model_tag={model_tag}",
+            f"task_tag={task_tag}",
+            f"category={category}.jsonl"
+        )
+        dirname = os.path.dirname(file_path)
+        if not os.path.exists(dirname):
+            os.makedirs(dirname, exist_ok=True)
+        lock_file = file_path + ".lock"
         # lock the file first
         retry_count = 0
         max_retries = 5
         while retry_count < max_retries:
             try:
                 with FileLock(lock_file):
-                    with open(path, 'a') as f:
+                    with open(file_path, 'a+') as f:
                         f.write(json.dumps(data) + "\n")
                     break
             except TimeoutError:
                 if retry_count == max_retries - 1:
-                    logger.error(f"[{os.getpid()}] Error adding data point to [{path}] after {max_retries} retries")
+                    logger.error(f"[{os.getpid()}] Error adding data point to [{file_path}] after {max_retries} retries")
                     break
                 else:
                     await asyncio.sleep(2 ** retry_count) # sleep for 2^retry_count seconds

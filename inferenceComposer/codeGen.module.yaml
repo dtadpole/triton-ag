@@ -1,0 +1,170 @@
+module:
+  name: codeGen
+  # built-in context like `self` has already been set
+  # here we add addotional context variables for easier access by the program
+  # variables will be evaluated sequentially, so that later variables can use earlier variables
+  context_vars:
+    provider_name: "`self.inference_client_config.provider.provider_name`"
+    model_short_name: "`self.inference_client_config.model.model_short_name`"
+    model_tag: "{provider_name}_{model_short_name}"
+    max_tokens: "`self.inference_client_config.model.max_tokens`"
+
+  # input processor adds jobs to the queue
+  input_processor:
+    # reference task
+    - processor: duckdb
+      name: codeGenEval
+      # built-in context like `block` has already been set
+      # here we add addotional context variables for easier access by the program
+      context_vars:
+        prefix_tag: "`block.prefix_tag`"
+        epoch_id: "`block.epoch_id`"
+        block_id: "`block.block_id`" 
+        input_tag: "`block.input_tag`"
+      query: |
+        SELECT filename as kb_filename, content as reference_code
+        FROM read_text(['kernel_bench/level1/*.py', 'kernel_bench/level2/*.py'])
+        ORDER BY random()
+        LIMIT {block.num_samples};
+      enqueue:
+        # built-in context like `row` has already been set
+        # here we add addotional context variables for easier access by the program
+        context_vars:
+          run_tag: "`f'{block.prefix_tag}_{block.epoch_id:03d}_{block.block_id:02d}'`" # run_tag is the prefix tag + epoch id + block id
+          task_tag: "`'_'.join('_'.join(row.kb_filename.split('/')[-2:]).split('_')[:5])`" # task_tag joins the level and filename, and returns the first 5 parts
+        items:
+          - worker: "eval.reference"
+            run_tag: "`run_tag`"
+            model_tag: "`model_tag`"
+            task_tag: "`task_tag`"
+            kb_filename: "`row.kb_filename`" # kb_filename is the filename
+            reference_code: "`row.reference_code`" # reference code
+            output_dir: "`block.output_dir`" # output_dir is the output directory
+            # generate code and evaluate
+          - __repeat_count__: "`block.num_generations`"
+            worker: "codeGenEval.custom"
+            run_tag: "`run_tag`"
+            model_tag: "`model_tag`"
+            task_tag: "`task_tag`"
+            gen_tag: "`f'gen_{__repeat_idx__:02d}'`" # gen_tag is the generation tag
+            reference_code: "`row.reference_code`" # reference code
+            output_dir: "`block.output_dir`" # output_dir is the output directory
+            num_turns_per_generation: "`block.num_turns_per_generation`" # number of turns per generation
+  
+  # queue worker reads from the queue and executes the worker
+  queue_worker:
+    # reference worker
+    eval.reference:
+      filter: "`True`" # you can specify a filter criteria here
+      context_vars:
+        record_folder: "`f'{output_dir}/{run_tag}/model_tag={model_tag}/task_tag={task_tag}'`"
+      steps:
+        - endpoint: kbEvalClient.kb_eval_ref
+          inputs:
+            run_tag: "`run_tag`"
+            model_tag: "`model_tag`"
+            task_tag: "`task_tag`"
+            reference_code: "`reference_code`"
+          # returned variables will be added to the context
+          returns:
+            - reference_eval
+        - endpoint: recorder.save
+          inputs:
+            path: "`f'{record_folder}/reference_eval.json'`"
+            data: "`reference_eval`"
+            format: "json"
+        - endpoint: statsClient.add_data_point
+          inputs:
+            prefix_tag: "`prefix_tag`"
+            model_tag: "`model_tag`"
+            task_tag: "`task_tag`"
+            category: "reference"
+            data: "`reference_eval.model_dump()`"
+        - endpoint: logger.info
+          inputs:
+            message: "`f'Reference eval: {reference_eval}'`"
+    # codeGenEval worker
+    codeGenEval.custom:
+      filter: "`True`" # you can specify a filter criteria here
+      __loop_count__: "`num_turns_per_generation`"
+      context_vars:
+        logprobs: true
+        generated_code: null
+        generated_eval: null
+        conversation: null
+        completion: null
+        record_folder: "`f'{output_dir}/{run_tag}/model_tag={model_tag}/task_tag={task_tag}'`"
+      steps:
+        - endpoint: inferenceClient.completion
+          context_vars:
+            messages: |
+              `[
+                {"role": "system", "content": self.get_system_prompt(__context__)}, 
+                {"role": "user", "content": self.get_user_prompt(__context__)}
+              ] if conversation is None else conversation['messages'] + [
+                {"role": "user", "content": self.get_user_prompt(__context__)}
+              ]
+              `
+            prompt: |
+              `self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+              )`
+            turn_tag: "`f'{gen_tag}_t{__loop_idx__:02d}'`" # turn_tag is gen_01_t03
+          inputs:
+            prompt: "`prompt`"
+            max_tokens: "`max_tokens`"
+            logprobs: "`logprobs`"
+          returns:
+            error_if: "`__return__ is None`"
+            context_vars:
+              conversation: "`completion['conversation']`"
+              completion: "`completion['choices'][0]['message']['content']`"
+        - endpoint: recorder.save
+          inputs:
+            path: "`f'{record_folder}/{turn_tag}_conversation.json'`"
+            data: "`conversation`"
+            format: "json"
+        - endpoint: recorder.save
+          inputs:
+            path: "`f'{record_folder}/{turn_tag}_completion.json'`"
+            data: "`completion`"
+            format: "json"
+        - endpoint: codeExtractor.extract_code
+          inputs:
+            completion: "`completion['content']`"
+          returns:
+            - generated_code
+        - endpoint: recorder.save
+          inputs:
+            path: "`f'{record_folder}/{turn_tag}_generated_code.json'`"
+            data: "`generated_code`"
+            format: "text"
+        - endpoint: kbEvalClient.kb_eval
+          inputs:
+            run_tag: "`run_tag`"
+            model_tag: "`model_tag`"
+            task_tag: "`task_tag`
+            eval_tag: "`turn_tag`" # eval_tag is the turn tag
+            reference_code: "`reference_code`"
+            generated_code: "`generated_code`"
+            code_type: "`code_type`" # code_type is the code type
+          returns:
+            - generated_eval
+        - endpoint: recorder.save
+          inputs:
+            path: "`f'{record_folder}/{turn_tag}_generated_eval.json'`"
+            data: "`generated_eval`"
+            format: "json"
+        - endpoint: statsClient.add_data_point
+          inputs:
+            prefix_tag: "`prefix_tag`"
+            model_tag: "`model_tag`"
+            task_tag: "`task_tag`"
+            category: "generated"
+            data: "`generated_eval.model_dump()`"
+        - endpoint: logger.info
+          inputs:
+            message: "`f'Generated code eval: {generated_eval}'`"

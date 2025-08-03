@@ -9,7 +9,7 @@ import argparse
 import yaml
 import random
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import boto3
 import requests
 import duckdb
@@ -18,249 +18,404 @@ from transformers import AutoTokenizer
 from inferenceClient import InferenceClient, InferenceClientConfig, load_inference_client_config
 from logger import logger
 from kbEvalClient import KbEvalClient
-from globalUtils import CritiqueBlock
+from globalUtils import ComposerBlock
 from globalRegClient import GlobalRegClient
 from globalWorkflow import GlobalWorkflow
 from endpointUtil import Recorder, CodeExtractor, StatsClient
 
+VALID_INPUT_PROCESSORS = [
+    "duckdb",
+]
 
-class ComposeClient:
+
+class ComposerClient:
     def __init__(
             self,
             input_tag: str,
             inference_client_config: InferenceClientConfig,
-            prompt_file: str = "inferenceCompose/prompt.exemplar.yaml",
-            workflow_file: str = "inferenceCompose/workflow.exemplar.yaml",
-            output_dir: str = "~/.inference/compose",
+            module_file: str = "inferenceComposer/codeGen.module.yaml",
+            prompt_file: str = "inferenceComposer/codeGen.prompt.triton.yaml",
+            example_file: str = "inferenceComposer/triton.example.yaml",
+            output_dir: str = "~/.inference/composer",
             stats_dir: str = "~/.trainer/stats",
     ):
         with open(prompt_file, 'r') as f:
             self.prompt_config = yaml.safe_load(f)
         self.input_tag = input_tag
+        self.logger = logger
         self.queue = asyncio.Queue()
         self.recorder = Recorder()
         self.kbEvalClient = KbEvalClient()
         self.statsClient = StatsClient()
         self.inference_client_config = inference_client_config
         self.inferenceClient = InferenceClient(config=self.inference_client_config)
-        self.tokenizer = self.inference_client.tokenizer
-        self.model_tag = self.inference_client.model_tag
+        self.tokenizer = self.inferenceClient.tokenizer
+        self.model_tag = self.inferenceClient.model_tag
         self.output_dir = self._get_output_dir(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.module_file = module_file
+        self.prompt_file = prompt_file
+        self.module_config = yaml.safe_load(open(module_file, 'r')).get('module', {})
+        self.prompt_config = yaml.safe_load(open(prompt_file, 'r')).get('prompts', {})
+        self.example_file = example_file
+        self.example_config = yaml.safe_load(open(example_file, 'r')).get('examples', {})
+        self.context_vars = {
+            # built-in context vars
+            "self": self,
+        }
+        if 'context_vars' in self.module_config:
+            self.context_vars = self._process_context_vars(self.module_config['context_vars'], self.context_vars)
 
     def _get_output_dir(self, output_dir: str) -> Path:
         """Get output sub directory for a task."""
         return Path(os.path.expanduser(output_dir)) / self.input_tag / self.model_tag
 
-    def get_system_prompt(self) -> str:
+    def get_system_prompt(self, context_vars: dict) -> str:
         """Get system prompt from configuration."""
-        prompts_config = self.prompt_config.get('prompts', {})
-        return prompts_config.get('system_prompt', 'You are a helpful assistant.')
+        prompts_config = self.get_prompt_template()
+        reference_code = self.get_example_reference_code()
+        generated_code = self.get_example_generated_code()
+        return prompts_config.get('system_prompt', 'You are a helpful assistant.').format(
+            reference_code=reference_code,
+            generated_code=generated_code,
+        )
 
-    def get_user_prompt(self, reference_code: str, reference_code_eval: dict, generated_code: str, generated_code_eval: dict) -> str:
+    def get_user_prompt(self, context_vars: dict) -> str:
         """Get user prompt from configuration with source code substituted."""
-        prompts_config = self.prompt_config.get('prompts', {})
-        user_prompt_template = prompts_config.get('user_prompt', 'Reference code: {reference_code}\n\nReference code evaluation: {reference_code_eval}\n\nGenerated code: {generated_code}\n\nGenerated code evaluation: {generated_code_eval}')
-        return user_prompt_template.format(reference_code=reference_code, reference_code_eval=json.dumps(reference_code_eval, indent=2), generated_code=generated_code, generated_code_eval=json.dumps(generated_code_eval, indent=2))
-
-    async def _process_tasks(
-        self,
-        context_vars: dict,
-        task_id: int,
-        task_tag: str,
-        gen_tag: str,
-    ) -> str:
-        """
-        Process a single inference task for a file.
-        
-        Args:
-            task_tag: Task tag for this task
-            reference_code: Reference code for this task
-            gen_tag: Generation ID for this task
-            
-        Returns:
-            str: Generated code for this task
-        """
-        # Create conversation
-        system_prompt = self.get_system_prompt()
-        user_prompt = self.get_user_prompt(reference_code, reference_code_eval, generated_code, generated_code_eval)
-        
-        # Generate response
-        start_time = time.time()
-        result = await self.inference_client.chat_completion([
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ])
-        generation_time = time.time() - start_time
-        
-        content = result.get('content', '')
-        reasoning_content = result.get('reasoning_content', '')
-
-        tokens = self.tokenizer.encode(content) if content else []
-        reasoning_tokens = self.tokenizer.encode(reasoning_content) if reasoning_content else []
-
-        num_tokens = len(tokens)
-        num_reasoning_tokens = len(reasoning_tokens)
-        token_per_second = (num_tokens + num_reasoning_tokens) / generation_time
-
-        # prepare the output directory
-        output_dir = self.output_dir / task_tag
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        # save response to a file
-        conversation_file = output_dir / f"{gen_tag}_conversation.json"
-
-        conversation = {
-            "messages": [
-                {
-                    "role": "system",
-                    "content": system_prompt
-                },
-                {
-                    "role": "user",
-                    "content": user_prompt
-                },
-                {
-                    "role": "assistant",
-                    "reasoning_content": reasoning_content,
-                    "content": content
-                }
-            ],
-            "metadata": {
-                "run_tag": self.input_tag,
-                "model_tag": self.model_tag,
-                "task_tag": task_tag,
-                "gen_tag": gen_tag,
-                "reference_code": reference_code,
-                "reference_code_eval": reference_code_eval,
-                "generated_code": generated_code,
-                "evaluation_result": generated_code_eval,
-                "num_tokens": num_tokens,
-                "num_reasoning_tokens": num_reasoning_tokens,
-                "generation_time_seconds": generation_time,
-                "token_per_second": token_per_second,
-            }
-        }
-
-        with open(conversation_file, 'w') as f:
-            f.write(json.dumps(conversation, indent=2, ensure_ascii=False, default=str))
-
-        # save the generated code to a file
-        critique_file = self.output_dir / task_tag / f"{gen_tag}_critique.txt"
-        with open(critique_file, 'w') as f:
-            if reasoning_content:
-                critique_content = f"<think>\n{reasoning_content}\n</think>\n\n{content}"   
+        prompts_config = self.get_prompt_template()
+        generated_code = context_vars.get('generated_code', None)
+        generated_eval = context_vars.get('generated_eval', None)
+        reference_code = context_vars.get('reference_code', None)
+        reference_eval = context_vars.get('reference_eval', None)
+        if generated_code is None or generated_eval is None:
+            user_prompt_template = prompts_config.get('user_prompt.init', 'Implement Triton code for the following reference code.\n\nReference code:\n```python\n{reference_code}\n```\n\nReference code evaluation:\n```json\n{reference_eval}\n```')
+        else:
+            if generated_eval['compiled'] and generated_eval['correctness']:
+                user_prompt_template = prompts_config.get('user_prompt.perf', 'Compare to the reference code performance evaluation and improve your code performance by optimizing the code.\n\nGenerated code evaluation:\n```json\n{generated_eval}\n```')
             else:
-                critique_content = content
-            f.write(critique_content)
+                user_prompt_template = prompts_config.get('user_prompt.fix', 'Your code did not compile or run correctly.  Please fix the code and return the correct code.\n\nGenerated code evaluation:\n```json\n{generated_eval}\n```')
+        return user_prompt_template.format(
+            reference_code=reference_code,
+            reference_eval=json.dumps(reference_eval),
+            generated_code=generated_code,
+            generated_eval=json.dumps(generated_eval),
+        )
 
-        # use generated emoji to beginning of the line
-        logger.info(f"👏 [Critique] [{self.input_tag}] Critiqued [{f'{task_tag}'}] [{f'{gen_tag}'}]: [{critique_file}] [{f'{num_tokens}'} tokens] [{f'{num_reasoning_tokens}'} reasoning tokens] in [{generation_time:.2f}s] [{token_per_second:.2f} tokens/s]")
-        return critique_content
+    def get_example_reference_code(self) -> str:
+        """Get example reference code from configuration."""
+        return self.example_config.get('reference_code', '')
 
+    def get_example_generated_code(self) -> str:
+        """Get example generated code from configuration."""
+        return self.example_config.get('generated_code', '')
 
-    async def critique_task(self, worker_id: int):
-        """
-        Run inference task for a file.
-        
-        Args:
-            queue: Queue containing file paths to process
-            run_tag: Run tag for evaluation
-            task_tag: Unique task identifier
-        """
+    async def input_processor(self, block: ComposerBlock):
+        """Process input variables."""
+        for processor_config in self.module_config.get('input_processor', []):
+            try:
+                # get processor type
+                processor_type = processor_config.get('processor', None)
+                if not processor_type:
+                    logger.error(f"❌ [Composer] [{self.input_tag}] Input processor type not found in module [{self.module_file}] for processor [{processor_config}].")
+                    continue
+                # get processor name
+                processor_name = processor_config.get('name', None)
+                if not processor_name:
+                    logger.error(f"❌ [Composer] [{self.input_tag}] Input processor name not found in module [{self.module_file}] for processor [{processor_config}].")
+                    continue
 
+                if processor_type not in VALID_INPUT_PROCESSORS:
+                    logger.error(f"❌ [Composer] [{self.input_tag}] Invalid input processor type: [{processor_type}] in module [{self.module_file}] for processor [{processor_config}].")
+                    continue
+
+                logger.info(f"🔍 [Composer] [{self.input_tag}] Running input processor [{processor_type}] [{processor_name}]...")
+
+                try:
+                    # now we have a valid processor, process the context variables
+                    context_vars = self.context_vars | {
+                        "block": block,
+                        "__context__": context_vars,
+                    }
+                    if 'context_vars' in processor_config:
+                        context_vars = self._process_context_vars(processor_config['context_vars'], context_vars)
+                    
+                    if 'query' not in processor_config:
+                        logger.error(f"❌ [Composer] [{self.input_tag}] Query not found in input processor [{processor_config}].")
+                        continue
+
+                    # now we have a valid processor, process the input variables
+                    query = self._process_variable(processor_config['query'], context_vars)
+                    if not query:
+                        logger.error(f"❌ [Composer] [{self.input_tag}] Query is empty in input processor [{processor_config}].")
+                        continue
+
+                except Exception as e:
+                    logger.error(f"❌ [Composer] [{self.input_tag}] Error running input processor [{processor_type}] [{processor_name}]: [{type(e)}: {e}]")
+                    continue
+
+                # now run the query
+                try:
+                    result = duckdb.sql(query)
+                except Exception as e:
+                    logger.error(f"❌ [Composer] [{self.input_tag}] Error running query: [{query}] [{type(e)}: {e}]")
+                    logger.error(traceback.format_exc())
+                    continue
+
+                # now we have a valid result, process the result
+                result_df = result.df()
+                if len(result_df) == 0:
+                    logger.warning(f"🗑️ [Composer] [{self.input_tag}] Query returned no results: [{query}]")
+                    continue
+
+                logger.info(f"🔍 [Composer] [{self.input_tag}] Query returned [{len(result_df)}] results:\n[{result_df}]")
+
+                enqueue_count = 0
+                for idx, row in result_df.iterrows():
+                    if "enqueue" in processor_config:
+                        enqueue_config = processor_config.get('enqueue', {})
+
+                        try:
+                            # now we have a valid result, process the result
+                            row_context_vars = context_vars | {
+                                "row": row,
+                                "__context__": row_context_vars,
+                            }
+                            if 'context_vars' in enqueue_config:
+                                enqueue_context_vars = self._process_context_vars(enqueue_config['context_vars'], row_context_vars)
+                            else:
+                                enqueue_context_vars = row_context_vars
+
+                        except Exception as e:
+                            logger.error(f"❌ [Composer] [{self.input_tag}] Error preparing enqueue: [{enqueue_config}] [{type(e)}: {e}]")
+                            continue
+
+                        if "items" not in enqueue_config:
+                            logger.error(f"❌ [Composer] [{self.input_tag}] Item not found in enqueue config: {enqueue_config}")
+                            continue
+
+                        for item_config in enqueue_config.get('items', []):
+                            # process each enqueue item
+                            if "__repeat_count__" in item_config:
+                                __repeat_count__ = self._process_variable(item_config['__repeat_count__'], enqueue_context_vars)
+                            else:
+                                __repeat_count__ = 1
+
+                            for __repeat_idx__ in range(__repeat_count__):
+                                enqueue_context_vars['__repeat_idx__'] = __repeat_idx__
+
+                                try:                                
+                                    item_vars = self._process_input_vars(item_config, enqueue_context_vars)
+                                    await self.queue.put(item_vars)
+                                except Exception as e:
+                                    logger.error(f"❌ [Composer] [{self.input_tag}] Error enqueueing item: [{item_config}] [{type(e)}: {e}]")
+                                    continue
+
+                                enqueue_count += 1
+
+                logger.info(f"🟢 [Composer] [{self.input_tag}] Input processor [{processor_type}] [{processor_name}] completed. Enqueued [{enqueue_count}] item(s).")
+
+            except Exception as e:
+                logger.error(f"❌ [Composer] [{self.input_tag}] Input processor [{processor_type}] [{processor_name}] error: [{type(e)}: {e}]")
+                logger.error(traceback.format_exc())
+                continue
+
+    def _process_variable(self, value: Any, context_vars: dict) -> Any:
+        """Process a variable."""
+        if isinstance(value, str):
+            stripped_value = value.strip()
+            if stripped_value.startswith('`') and stripped_value.endswith('`'):
+                try:
+                    # if the value is a python expression, evaluate it via python eval
+                    return eval(stripped_value[1:-1], context_vars)
+                except Exception as e:
+                    logger.error(f"❌ [Composer] [{self.input_tag}] Error evaluating variable: [{stripped_value}] [{type(e)}: {e}]")
+                    raise e
+            else:
+                # if the value is a string, format it with the format
+                return value.format(**context_vars)
+        else:
+            return value
+
+    def _process_context_vars(self, context_config: dict, context_vars: dict) -> dict:
+        """Process context variables."""
+        for key, value in context_config.items():
+            context_vars[key] = self._process_variable(value, context_vars)
+        context_vars['__context__'] = context_vars
+        return context_vars
+
+    def _process_input_vars(self, input_config: dict, context_vars: dict) -> dict:
+        """Process input variables."""
+        result = {}
+        for key, value in input_config.items():
+            result[key] = self._process_variable(value, context_vars)
+        return result
+
+    def _process_returns_vars(self, result: Any, returns_config: list, context_vars: dict) -> bool:
+        """Process returns variables."""
+        if len(returns_config) == 0:
+            return True
+        elif len(returns_config) == 1:
+            context_vars[returns_config[0]] = result
+            if result is None:
+                return False
+            else:
+                return True
+        else:
+            # if result is not tuple, raise an error
+            if not isinstance(result, tuple):
+                raise ValueError(f"❌ [Composer] [{self.input_tag}] Result is not a tuple: {result}.  Returns config requires [{len(returns_config)}] variables.")
+            elif len(returns_config) != len(result):
+                raise ValueError(f"❌ [Composer] [{self.input_tag}] Result is a tuple of length [{len(result)}], but returns config requires [{len(returns_config)}] variables.")
+            else:
+                # if result is tuple, process the variables
+                for idx, name in enumerate(returns_config):
+                    context_vars[name] = result[idx]
+                return True
+
+    async def queue_worker(self, worker_id: int):
+        """Run queue worker."""
         while True:
             try:
                 # Get file path from queue (blocking with timeout)
                 item = await asyncio.wait_for(self.queue.get(), timeout=1.0)
                 if item is None:
-                    logger.info(f"[Worker {worker_id:02d}] Received termination signal")
+                    logger.info(f"🔍 [Composer] [{self.input_tag}] [Worker {worker_id:02d}] Received termination signal")
                     break
-                
 
-                filename = item['filename']
-                messages = item['messages']
-                metadata = item['metadata']
-
-                task_tag = metadata['task_tag']
-                gen_tag = metadata['gen_tag']
-                reference_code = metadata['reference_code']
-
-                base_dir = os.path.dirname(filename)
-                # read reference code evaluation result
-                reference_code_eval_file = os.path.join(base_dir, f"reference_eval.json")
-                if not os.path.exists(reference_code_eval_file):
-                    logger.warning(f"⚠️ [Critique] [{self.input_tag}] Reference code evaluation file not found: {reference_code_eval_file}")
-                    continue
-                # read the reference code evaluation result from the file
-                with open(reference_code_eval_file, 'r') as f:
-                    reference_code_eval = json.load(f)
-
-                # read generated code
-                generated_code_file = os.path.join(base_dir, f"{gen_tag}_generated_code.py")
-                if not os.path.exists(generated_code_file):
-                    logger.warning(f"⚠️ [Critique] [{self.input_tag}] Generated code file not found: {generated_code_file}")
-                    continue
-                # read the generated code from the file
-                with open(generated_code_file, 'r') as f:
-                    generated_code = f.read()
-
-                # read generated code evaluation result
-                generated_code_eval_file = os.path.join(base_dir, f"{gen_tag}_eval.json")
-                if not os.path.exists(generated_code_eval_file):
-                    logger.warning(f"⚠️ [Critique] [{self.input_tag}] Evaluation result file not found: {generated_code_eval_file}")
-                    continue
-                # read the evaluation result from the file
-                with open(generated_code_eval_file, 'r') as f:
-                    generated_code_eval = json.load(f)
-
-                output_base_dir = self.output_dir / task_tag
-                critique_conversation_file = output_base_dir / f"{gen_tag}_conversation.json"
-                critique_content_file = output_base_dir / f"{gen_tag}_critique.txt"
-                if os.path.exists(critique_content_file) and os.path.exists(critique_conversation_file):
-                    # add a skip emoji to beginning of the line
-                    logger.info(f"⚡️ [Critique] [{self.input_tag}] Critique already exists: [{critique_content_file}], skipping...")
+                if 'worker' not in item:
+                    logger.error(f"❌ [Composer] [{self.input_tag}] Worker not configured in item: {item}")
                     continue
 
-                # add info emoji to beginning of the line
-                logger.info(f"🔍 [Critique] [{self.input_tag}] Processing [{task_tag}] [{f'{gen_tag}'}]...")
+                worker_name = item['worker']
+                worker_config = self.module_config.get('queue_worker', {}).get(worker_name, {})
+                if not worker_config:
+                    logger.error(f"❌ [Composer] [{self.input_tag}] Worker config not found in module [{self.module_file}] for worker [{worker_name}].")
+                    continue
 
-                retry_count = 0
-                max_retries = 3
-                while retry_count < max_retries:
-                    retry_count += 1
-                    try:
-                        # Process the inference task
-                        critique_content = await self._process_critique(task_tag=task_tag, gen_tag=gen_tag, reference_code=reference_code, reference_code_eval=reference_code_eval, generated_code=generated_code, generated_code_eval=generated_code_eval)
-                        
-                        if critique_content:
-                            # we are successful, break the retry loop
+                # start processing the worker config, create a new context_vars dictionary
+                context_vars = self.context_vars | {
+                    "input": item,
+                    "__context__": context_vars,
+                } | item # add the input variables to the context variables
+                try:
+                    # process additional context variables
+                    if 'context_vars' in worker_config:
+                        context_config = worker_config['context_vars']
+                        context_vars = self._process_context_vars(context_config, context_vars)
+                except Exception as e:
+                    logger.error(f"❌ [Composer] [{self.input_tag}] Error processing context variables: {worker_config['context_vars']} [{type(e)}: {e}]")
+                    continue
+
+                try:
+                    if 'filter' in worker_config:
+                        filter = self._process_variable(worker_config['filter'], context_vars)
+                        if not filter:
+                            logger.info(f"🔍 [Composer] [{self.input_tag}] Filter [{filter}] is false, skipping...")
+                            continue
+                except Exception as e:
+                    logger.error(f"❌ [Composer] [{self.input_tag}] Error processing filter: {worker_config['filter']} [{type(e)}: {e}]")
+                    continue
+
+                logger.info(f"🔍 [Composer] [{self.input_tag}] Running [worker {worker_id:02d}] [{worker_name}]...")
+
+                try:
+                    if '__loop_count__' in worker_config:
+                        __loop_count__ = self._process_variable(worker_config['__loop_count__'], context_vars)
+                    else:
+                        __loop_count__ = 1
+                except Exception as e:
+                    logger.error(f"❌ [Composer] [{self.input_tag}] Error processing loop count: {worker_config['__loop_count__']} [{type(e)}: {e}]")
+                    continue
+
+                step_context_vars = context_vars.copy() # create a copy of the context variables for the entire loop
+                for __loop_idx__ in range(__loop_count__):
+                    # add context variables for the loop
+                    step_context_vars['__loop_idx__'] = __loop_idx__
+                    step_context_vars['__loop_count__'] = __loop_count__
+
+                    # work through the steps
+                    for step_config in worker_config['steps']:
+                        try:
+                            if 'endpoint' not in step_config:
+                                logger.error(f"❌ [Composer] [{self.input_tag}] Endpoint not found in step: {step_config}")
+                                break
+
+                            # get the endpoint instance and function
+                            endpoint = step_config['endpoint'].split('.')
+                            endpoint_class_name = endpoint[0]
+                            endpoint_method_name = endpoint[1]
+                            # get self.{endpoint_class}
+                            endpoint_instance = getattr(self, endpoint_class_name)
+                            # get self.{endpoint_class}.{endpoint_method}
+                            endpoint_function = getattr(endpoint_instance, endpoint_method_name)
+
+                        except Exception as e:
+                            # assume each step depend on each other, always break the steps if current step fails
+                            logger.error(f"❌ [Composer] [{self.input_tag}] Error getting endpoint: {step_config} [{type(e)}: {e}]")
+                            logger.error(traceback.format_exc())
                             break
-                        
-                    except Exception as e:
-                        # add warning emoji to beginning of the line
-                        if retry_count >= max_retries:
-                            logger.error(f"❌ [Critique {worker_id:02d}] Error critiquing [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
-                        else:
-                            logger.warning(f"⚠️ [Critique {worker_id:02d}] Error critiquing [{task_tag}] [{f'{gen_tag}'}]: {e}", f"[{retry_count}/{max_retries}]")
-                        logger.error(traceback.format_exc())
 
+                        if 'context_vars' in step_config:
+                            step_context_vars = self._process_context_vars(step_config['context_vars'], step_context_vars)
+
+                        try:
+                            # get the inputs
+                            input_config = step_config.get('inputs', {})
+                            input_vars = self._process_input_vars(input_config, step_context_vars)
+
+                        except Exception as e:
+                            # assume each step depend on each other, always break the steps if current step fails
+                            logger.error(f"❌ [Composer] [{self.input_tag}] Error processing inputs: {step_config} [{type(e)}: {e}]")
+                            break
+
+                        try:
+                            # call the endpoint function
+                            # check if the endpoint function is async
+                            if asyncio.iscoroutinefunction(endpoint_function):
+                                result = await endpoint_function(**input_vars)
+                            else:
+                                result = endpoint_function(**input_vars)
+
+                        except Exception as e:
+                            # assume each step depend on each other, always break the steps if current step fails
+                            logger.error(f"❌ [Composer] [{self.input_tag}] Error calling endpoint: {step_config} [{type(e)}: {e}]")
+                            # log stack track only when actually calling the endpoint
+                            logger.error(traceback.format_exc())
+                            break
+
+                        try:
+                            if 'returns' in step_config:
+                                logger.info(f"🔍 [Composer] [{self.input_tag}] Endpoint [{endpoint_class_name}.{endpoint_method_name}] returned: {result}")
+                                returns_config = step_config['returns']
+                                success = self._process_returns_vars(result, returns_config, step_context_vars)
+                                if not success:
+                                    logger.error(f"❌ [Composer] [{self.input_tag}] Unable to process returns: {returns_config} [{result}]")
+                                    break
+
+                        except Exception as e:
+                            # assume each step depend on each other, always break the steps if current step fails
+                            logger.error(f"❌ [Composer] [{self.input_tag}] Error processing returns: {step_config} [{type(e)}: {e}]")
+                            logger.error(traceback.format_exc())
+                            break
+
+                logger.info(f"🟢 [Composer] [{self.input_tag}] [worker {worker_id:02d}] [{worker_name}] completed.")
+            
             except asyncio.TimeoutError:
-                # Timeout waiting for queue item, check if queue is empty
-                if queue.empty():
-                    # add info magnifying glass emoji to beginning of the line
-                    logger.info(f"🔍 [Critique] [{self.input_tag}] Queue is empty, terminating")
-                    break
+                continue
+            
             except Exception as e:
-                logger.error(f"❌ [Critique] [{self.input_tag}] Unexpected error: {e}")
+                logger.error(f"❌ [Composer] [{self.input_tag}] Worker [{worker_id:02d}] error: [{type(e)}: {e}]")
                 logger.error(traceback.format_exc())
                 break
-        
+
+            finally:
+                await asyncio.sleep(1)
+
         # circle emoji to beginning of the line
-        logger.info(f"🎯 [Critique] [{self.input_tag}] completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
+        logger.info(f"🎯 [Composer] [{self.input_tag}] Worker [{worker_id:02d}] completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
 
 
-async def compose_block(block: ComposeBlock):
+async def composer_block(block: ComposerBlock):
     """
     Run one batch of code generation and evaluation.
     """
@@ -275,92 +430,93 @@ async def compose_block(block: ComposeBlock):
             config.model.model_name = block.model_override
 
         # start running the block
-        logger.info(f"🔍 [Critique] [{block.input_tag}] Starting block...")
+        logger.info(f"🔍 [Composer] [{block.input_tag}] Starting block...")
 
-        # Set up directories
-        search_path = os.path.expanduser(f"{block.input_dir}/{block.input_tag}")
-        if not os.path.exists(search_path):
-            logger.error(f"❌ [Critique] [{block.prefix_tag}] Error: Input directory [{search_path}] does not exist")
-            return
+        composerClient = ComposerClient(
+            input_tag=block.input_tag,
+            inference_client_config=config,
+            module_file=block.module_file,
+            prompt_file=block.prompt_file,
+            example_file=block.example_file,
+            output_dir=block.output_dir,
+        )
 
-        # query from search_path folder, find all the conversation_*.json files, and load them into a dataframe
-        result = duckdb.sql(f"""SELECT filename, messages, metadata
-                            FROM read_json_auto('{search_path}/**/*_conversation.json') 
-                            WHERE messages[3]['content'] IS NOT NULL
-                        """)
+        # start the input processor
+        await composerClient.input_processor(block)
 
-        logger.info(f"✅ [Critique] [{block.prefix_tag}] Found [{len(result)}] tasks to critique in [{search_path}]\n[{result}]")
+        # start the queue workers
+        queue_workers = []
+        for i in range(block.parallel_workers):
+            queue_workers.append(asyncio.create_task(composerClient.queue_worker(i)))
+            await composerClient.queue.put(None) # add exit signals
 
-        df = result.df()
+        # wait for the queue workers to complete
+        await asyncio.gather(*queue_workers)
 
-        queue = asyncio.Queue()
-        # iterate the dataframe and put the items into the queue
-        for index, row in df.iterrows(): 
-            queue.put_nowait({
-                "filename": row['filename'],
-                "messages": row['messages'],
-                "metadata": row['metadata']
-            })
-
-        critiqueClient = CritiqueClient(input_tag=block.input_tag, inference_client_config=config)
-
-        critique_tasks = []
-        for i in range(block.parallel_tasks):
-            critique_tasks.append(asyncio.create_task(critiqueClient.critique_task(queue, i)))
-
-        await asyncio.gather(*critique_tasks)
-
-        logger.info(f"🎉 [Critique] [{block.input_tag}] Block completed")
+        logger.info(f"🎉 [Composer] [{block.input_tag}] Block completed")
 
     except Exception as e:
-        logger.error(f"❌ [Critique] [{block.input_tag}] Error running block: [{e}] in [{traceback.format_exc()}]")
+        logger.error(f"❌ [Composer] [{block.input_tag}] Error running block: [{e}] in [{traceback.format_exc()}]")
         logger.error(traceback.format_exc())
 
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prefix_tag", type=str, default="KC_0.1.0_14B")
+    parser.add_argument("--prefix_tag", type=str, default="test")
     parser.add_argument("--epoch_id", type=int, default=-1)
     parser.add_argument("--block_id", type=int, default=-1)
-    parser.add_argument("--input_tag", type=str, default="KC_0.1.0_14B_000_00")
+    parser.add_argument("--input_tag", type=str, default="test")
     parser.add_argument("--input_dir", type=str, default="~/.codeGenEval", help="Input directory containing Python files")
-    parser.add_argument("--output_dir", type=str, default="~/.critique", help="Output directory for the critique results")
+    parser.add_argument("--output_dir", type=str, default="~/.composer", help="Output directory for the composer results")
     parser.add_argument("--provider", type=str, default="fireworks")  # most cost effective models are deepinfra-r1 and fireworks-v3
     parser.add_argument("--model", type=str, default="deepseek-v3")  # most cost effective models are deepinfra-r1 and fireworks-v3
-    parser.add_argument("--parallel_tasks", type=int, default=16)
-    parser.add_argument("--use_global_registry", action="store_true")
+    parser.add_argument("--model_override", type=str, default=None)
+    parser.add_argument("--parallel_workers", type=int, default=4)
+    parser.add_argument("--num_samples", type=int, default=2)
+    parser.add_argument("--num_generations", type=int, default=2)
+    parser.add_argument("--num_turns_per_generation", type=int, default=4)
+    parser.add_argument("--use_global_queue", type=str, default=None)
+    parser.add_argument("--module_file", type=str, default="inferenceComposer/codeGen.module.yaml")
+    parser.add_argument("--prompt_file", type=str, default="inferenceComposer/codeGen.prompt.triton.yaml")
+    parser.add_argument("--example_file", type=str, default="inferenceComposer/triton.example.yaml")
     args = parser.parse_args()
 
     try:
-        if args.use_global_registry:
+        if args.use_global_queue:
             # get the global registry
             global_reg_client = GlobalRegClient()
             # get the critiqueBlock from the global registry
-            block_json = await global_reg_client.dequeue(f"inference.critique")
-            # convert the block_json to a CritiqueBlock object
-            block = CritiqueBlock(**block_json)
+            block_json = await global_reg_client.dequeue(f"inference.composer.{args.use_global_queue}")
+            # convert the block_json to a ComposerBlock object
+            block = ComposerBlock(**block_json)
         else:
-            block = CritiqueBlock(
+            block = ComposerBlock(
                 prefix_tag=args.prefix_tag,
                 epoch_id=args.epoch_id,
                 block_id=args.block_id,
                 input_tag=args.input_tag,
                 provider_name=args.provider,
                 model_name=args.model,
-                parallel_tasks=args.parallel_tasks,
+                module_file=args.module_file,
+                prompt_file=args.prompt_file,
+                example_file=args.example_file,
+                num_samples=args.num_samples,
+                num_generations=args.num_generations,
+                num_turns_per_generation=args.num_turns_per_generation,
+                parallel_workers=args.parallel_workers,
                 model_override=args.model_override,
                 input_dir=args.input_dir,
                 output_dir=args.output_dir,
             )
         # run the block
-        await critique_block(block)
+        await composer_block(block)
 
-        if args.use_global_registry:
+        if args.use_global_queue:
             globalWorkflow = GlobalWorkflow(prefix_tag=block.prefix_tag)
             await globalWorkflow.post_critique(block)
 
     except Exception as e:
-        logger.error(f"❌ [Critique] [{block.input_tag}] Error running block: [{e}]")
+        logger.error(f"❌ [Composer] [{block.input_tag}] Error running block: [{e}]")
         logger.error(traceback.format_exc())
 
 if __name__ == "__main__":
