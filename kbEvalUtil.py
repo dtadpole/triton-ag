@@ -226,7 +226,8 @@ def load_custom_model(
 
     _compile_and_load_model(model_custom_src, context, filename)
 
-
+    # Redefine the eq of two function objects. If the get_init_inputs and get_inputs have the same format, they should be equal
+    # The old comparison won't be equal event if the generated code has identical definition as reference code for the two functions
     def compare_functions_objects(func1, func2):
         return (
             func1.__code__.co_code == func2.__code__.co_code and
