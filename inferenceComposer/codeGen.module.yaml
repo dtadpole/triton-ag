@@ -72,11 +72,10 @@ module:
           returns:
             context_vars:
               reference_eval: "`__result__`"
-        - endpoint: recorder.save
-          inputs:
-            path: "`f'{record_folder}/reference_eval.json'`"
-            data: "`reference_eval`"
-            format: "json"
+            save_to:
+              - path: "`f'{record_folder}/reference_eval.json'`"
+                data: "`reference_eval`"
+                format: "json"
         - endpoint: statsClient.add_data_point
           inputs:
             prefix_tag: "`prefix_tag`"
@@ -84,9 +83,6 @@ module:
             task_tag: "`task_tag`"
             category: "reference"
             data: "`reference_eval`"
-        # - endpoint: logger.info
-        #   inputs:
-        #     message: "`f'Reference eval: {reference_eval}'`"
     # codeGenEval worker
     codeGenEval.custom:
       filter: "`True`" # you can specify a filter criteria here
@@ -152,27 +148,23 @@ module:
               conversation:
                 messages: "`messages`"
                 metadata: "`metadata`"
-        - endpoint: recorder.save
-          inputs:
-            path: "`f'{record_folder}/{turn_tag}_conversation.json'`"
-            data: "`conversation`"
-            format: "json"
-        - endpoint: recorder.save
-          inputs:
-            path: "`f'{record_folder}/{turn_tag}_completion.json'`"
-            data: "`completion`"
-            format: "json"
+            save_to:
+              - path: "`f'{record_folder}/{turn_tag}_conversation.json'`"
+                data: "`conversation`"
+                format: "json"
+              - path: "`f'{record_folder}/{turn_tag}_completion.json'`"
+                data: "`completion`"
+                format: "json"
         - endpoint: codeExtractor.extract_code
           inputs:
             completion: "`completion['completion']`"
           returns:
             context_vars:
               generated_code: "`__result__`"
-        - endpoint: recorder.save
-          inputs:
-            path: "`f'{record_folder}/{turn_tag}_generated_code.json'`"
-            data: "`generated_code`"
-            format: "text"
+            save_to:
+              - path: "`f'{record_folder}/{turn_tag}_generated_code.json'`"
+                data: "`generated_code`"
+                format: "text"
         - endpoint: kbEvalClient.kb_eval
           inputs:
             run_tag: "`run_tag`"
@@ -185,11 +177,10 @@ module:
           returns:
             context_vars:
               generated_eval: "`__result__`"
-        - endpoint: recorder.save
-          inputs:
-            path: "`f'{record_folder}/{turn_tag}_generated_eval.json'`"
-            data: "`generated_eval`"
-            format: "json"
+            save_to:
+              - path: "`f'{record_folder}/{turn_tag}_generated_eval.json'`"
+                data: "`generated_eval`"
+                format: "json"
         - endpoint: statsClient.add_data_point
           inputs:
             prefix_tag: "`prefix_tag`"
@@ -197,6 +188,3 @@ module:
             task_tag: "`task_tag`"
             category: "generated"
             data: "`generated_eval`"
-        # - endpoint: logger.info
-        #   inputs:
-        #     message: "`f'Generated code eval: {generated_eval}'`"

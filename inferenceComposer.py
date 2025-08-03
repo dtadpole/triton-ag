@@ -111,6 +111,66 @@ class ComposerClient:
         """Get example generated code from configuration."""
         return self.example_config.get('generated_code', '')
 
+    def _process_variable(self, value: Any, context_vars: dict) -> Any:
+        """Process a variable."""
+        if isinstance(value, str):
+            stripped_value = value.strip()
+            if stripped_value.startswith('`') and stripped_value.endswith('`'):
+                try:
+                    # if the value is a python expression, evaluate it via python eval
+                    return eval(stripped_value[1:-1], context_vars)
+                except Exception as e:
+                    logger.error(f"❌ [Composer] [{self.input_tag}] Error evaluating variable: [{stripped_value}] [{type(e)}: {e}]")
+                    raise e
+            else:
+                # if the value is a string, format it with the format
+                return value.format(**context_vars)
+        else:
+            return value
+
+    def _process_context_vars(self, context_config: dict, context_vars: dict, local_context_vars: dict = None) -> dict:
+        """Process context variables."""
+        for key, value in context_config.items():
+            # recursively process the context variables
+            if isinstance(value, dict):
+                if local_context_vars is None:
+                    context_vars[key] = self._process_context_vars(value, context_vars, local_context_vars={})
+                else:
+                    local_context_vars[key] = self._process_context_vars(value, context_vars, local_context_vars={})
+            else:
+                if local_context_vars is None:
+                    context_vars[key] = self._process_variable(value, context_vars)
+                else:
+                    local_context_vars[key] = self._process_variable(value, context_vars)
+        if local_context_vars is None:
+            context_vars['__context__'] = context_vars
+            return context_vars
+        else:
+            return local_context_vars
+
+    def _process_input_vars(self, input_config: dict, context_vars: dict) -> dict:
+        """Process input variables."""
+        result = {}
+        for key, value in input_config.items():
+            result[key] = self._process_variable(value, context_vars)
+        return result
+
+    def _process_log_inference(self, result: Any, context_vars: dict) -> dict:
+        """Process log inference."""
+        if 'logprobs' in result:
+            context_vars['logprobs'] = result['logprobs']
+        if 'usage' in result:
+            context_vars['usage'] = result['usage']
+        return context_vars
+
+    def _process_log_eval(self, result: Any, context_vars: dict) -> dict:
+        """Process log eval."""
+        if 'logprobs' in result:
+            context_vars['logprobs'] = result['logprobs']
+        if 'usage' in result:
+            context_vars['usage'] = result['usage']
+        return context_vars
+
     async def input_processor(self, block: ComposerBlock):
         """Process input variables."""
         for processor_config in self.module_config.get('input_processor', []):
@@ -221,72 +281,15 @@ class ComposerClient:
                 logger.error(traceback.format_exc())
                 continue
 
-    def _process_variable(self, value: Any, context_vars: dict) -> Any:
-        """Process a variable."""
-        if isinstance(value, str):
-            stripped_value = value.strip()
-            if stripped_value.startswith('`') and stripped_value.endswith('`'):
-                try:
-                    # if the value is a python expression, evaluate it via python eval
-                    return eval(stripped_value[1:-1], context_vars)
-                except Exception as e:
-                    logger.error(f"❌ [Composer] [{self.input_tag}] Error evaluating variable: [{stripped_value}] [{type(e)}: {e}]")
-                    raise e
-            else:
-                # if the value is a string, format it with the format
-                return value.format(**context_vars)
-        else:
-            return value
+    def _process_log_eval(self, result: Any, context_vars: dict) -> dict:
+        """Process log eval."""
+        if 'logprobs' in result:
+            context_vars['logprobs'] = result['logprobs']
+        if 'usage' in result:
+            context_vars['usage'] = result['usage']
+        return context_vars
 
-    def _process_context_vars(self, context_config: dict, context_vars: dict, local_context_vars: dict = None) -> dict:
-        """Process context variables."""
-        for key, value in context_config.items():
-            # recursively process the context variables
-            if isinstance(value, dict):
-                if local_context_vars is None:
-                    context_vars[key] = self._process_context_vars(value, context_vars, local_context_vars={})
-                else:
-                    local_context_vars[key] = self._process_context_vars(value, context_vars, local_context_vars={})
-            else:
-                if local_context_vars is None:
-                    context_vars[key] = self._process_variable(value, context_vars)
-                else:
-                    local_context_vars[key] = self._process_variable(value, context_vars)
-        if local_context_vars is None:
-            context_vars['__context__'] = context_vars
-            return context_vars
-        else:
-            return local_context_vars
-
-    def _process_input_vars(self, input_config: dict, context_vars: dict) -> dict:
-        """Process input variables."""
-        result = {}
-        for key, value in input_config.items():
-            result[key] = self._process_variable(value, context_vars)
-        return result
-
-    def _process_returns_vars(self, result: Any, returns_config: list, context_vars: dict) -> bool:
-        """Process returns variables."""
-        if len(returns_config) == 0:
-            return True
-        elif len(returns_config) == 1:
-            context_vars[returns_config[0]] = result
-            if result is None:
-                return False
-            else:
-                return True
-        else:
-            # if result is not tuple, raise an error
-            if not isinstance(result, tuple):
-                raise ValueError(f"❌ [Composer] [{self.input_tag}] Result is not a tuple: {result}.  Returns config requires [{len(returns_config)}] variables.")
-            elif len(returns_config) != len(result):
-                raise ValueError(f"❌ [Composer] [{self.input_tag}] Result is a tuple of length [{len(result)}], but returns config requires [{len(returns_config)}] variables.")
-            else:
-                # if result is tuple, process the variables
-                for idx, name in enumerate(returns_config):
-                    context_vars[name] = result[idx]
-                return True
-
+    
     async def queue_worker(self, worker_id: int):
         """Run queue worker."""
         while True:
@@ -425,6 +428,7 @@ class ComposerClient:
                             if 'returns' in step_config:
                                 logger.info(f"🔍 [Composer] [{self.input_tag}] Endpoint [{endpoint_class_name}.{endpoint_method_name}] returned: {str(result)[:100]}...")
                                 step_context_vars['__result__'] = result
+                                # process error_if
                                 if 'error_if' in step_config:
                                     error_if = self._process_variable(step_config['error_if'], step_context_vars)
                                     if error_if:
@@ -435,6 +439,13 @@ class ComposerClient:
                                 returns_config = step_config['returns']
                                 if 'context_vars' in returns_config:
                                     step_context_vars = self._process_context_vars(returns_config['context_vars'], step_context_vars)
+                                # process save_to
+                                if 'save_to' in returns_config:
+                                    for save_to_config in returns_config['save_to']:
+                                        path = self._process_variable(save_to_config['path'], step_context_vars)
+                                        data = self._process_variable(save_to_config['data'], step_context_vars)
+                                        format = save_to_config['format'] if 'format' in save_to_config else 'text'
+                                        self.recorder.save(path, data, format=format)
 
                         except Exception as e:
                             # assume each step depend on each other, always break the steps if current step fails
