@@ -75,7 +75,7 @@ class InferenceClient:
         self.max_tokens = config.model.max_tokens
         self.top_p = config.model.top_p
         self.top_k = config.model.top_k
-        self.logprobs = config.model.logprobs
+        # self.logprobs = config.model.logprobs
         # model tag
         self.model_tag = f"{self.provider_name}_{self.model_short_name}"
 
@@ -103,7 +103,7 @@ class InferenceClient:
             # add info magnifying glass emoji
             logger.info(f"🔍 [InferenceClient] Using NON-STREAMING mode with OpenAI client [{self.model_tag}]")
         
-    async def _chat_completion(self, messages: List[Dict], max_tokens: int = None):
+    async def _chat_completion(self, messages: List[Dict], max_tokens: int = None, logprobs: bool = False):
         """
         Generate text using OpenAI-compatible API with streaming or non-streaming mode.
         
@@ -124,7 +124,7 @@ class InferenceClient:
                 max_tokens=max_tokens,
                 stream=True,
                 timeout=self.timeout,
-                logprobs=self.logprobs,
+                logprobs=1 if logprobs else NOT_GIVEN,
                 # top_p=self.top_p,
                 # extra_body={"top_k": self.top_k}
             )
@@ -180,7 +180,7 @@ class InferenceClient:
                 max_tokens=max_tokens,
                 stream=False,
                 timeout=self.timeout,
-                logprobs=self.logprobs,
+                logprobs=1 if logprobs else NOT_GIVEN,
                 # top_p=self.top_p,
                 # extra_body={"top_k": self.top_k}
             )
@@ -210,7 +210,7 @@ class InferenceClient:
 
         return return_message
 
-    async def chat_completion(self, messages: List[Dict], max_tokens: int = None) -> Dict:
+    async def chat_completion(self, messages: List[Dict], max_tokens: int = None, logprobs: bool = False) -> Dict:
         """
         Generate text using OpenAI-compatible API with streaming or non-streaming mode.
         """
@@ -218,7 +218,7 @@ class InferenceClient:
         while retry_count < self.max_retries:
             retry_count += 1
             try:
-                return await self._chat_completion(messages, max_tokens=max_tokens)
+                return await self._chat_completion(messages, max_tokens=max_tokens, logprobs=logprobs)
             except Exception as e:
                 traceback.print_exc()
                 if retry_count < self.max_retries:
@@ -228,7 +228,7 @@ class InferenceClient:
                     logger.error(f"❌ [InferenceClient] [Chat completion] Failed: {e}, giving up...") # give up after max retries
         return None
 
-    async def _completion(self, prompt: str, max_tokens: int = None):
+    async def _completion(self, prompt: str, max_tokens: int = None, logprobs: bool = False):
         """
         Generate text completion using OpenAI-compatible API with streaming or non-streaming mode.
         
@@ -253,7 +253,7 @@ class InferenceClient:
                 stop=[self.tokenizer.eos_token] + EOS_TOKENS,
                 stream=True,
                 timeout=self.timeout,
-                logprobs=1 if self.logprobs else NOT_GIVEN,
+                logprobs=1 if logprobs else NOT_GIVEN,
                 # top_p=self.top_p,
                 # extra_body={"top_k": self.top_k}
             )
@@ -281,7 +281,7 @@ class InferenceClient:
                 stop=[self.tokenizer.eos_token] + EOS_TOKENS,
                 stream=False,
                 timeout=self.timeout,
-                logprobs=1 if self.logprobs else NOT_GIVEN,
+                logprobs=1 if logprobs else NOT_GIVEN,
                 # top_p=self.top_p,
                 # extra_body={"top_k": self.top_k}
             )
@@ -366,7 +366,7 @@ class InferenceClient:
 
         return {'content': generated_content, "logprobs": logprobs_tokenized_content}
        
-    async def completion(self, prompt: str, max_tokens: int = None) -> Dict:
+    async def completion(self, prompt: str, max_tokens: int = None, logprobs: bool = False) -> Dict:
         """
         Generate text completion using OpenAI-compatible API with streaming or non-streaming mode.
         """
@@ -374,7 +374,7 @@ class InferenceClient:
         while retry_count < self.max_retries:
             retry_count += 1
             try:
-                return await self._completion(prompt, max_tokens=max_tokens)
+                return await self._completion(prompt, max_tokens=max_tokens, logprobs=logprobs)
             except Exception as e:
                 if retry_count < self.max_retries:
                     logger.warning(f"⚠️ [InferenceClient] [Completion] Failed: {e} [{retry_count}/{self.max_retries}], retrying in {2 ** retry_count} seconds...")

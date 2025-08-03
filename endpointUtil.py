@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import asyncio
 import fcntl
 import time
@@ -36,7 +37,11 @@ class CodeExtractor:
         pass
     
     async def extract_code(self, completion: str) -> str:
-        return completion
+        # find the last ```python block
+        code_blocks = re.findall(r"```python\n(.*?)\n```", completion, re.DOTALL)
+        if len(code_blocks) == 0:
+            return completion
+        return code_blocks[-1]
 
 
 class FileLock:
@@ -62,7 +67,7 @@ class FileLock:
         except BlockingIOError as e:
             self.lock_fd.close()
             raise TimeoutError("Could not acquire lock")
-        logger.info(f"Lock [{self.lock_file}] acquired.")
+        logger.debug(f"Lock [{self.lock_file}] acquired.")
         return self
 
     def __exit__(self, type, value, traceback):
@@ -70,7 +75,7 @@ class FileLock:
             self.lock_fd.write('\n[done]\n')
             fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_UN)
             self.lock_fd.close()
-            logger.info(f"Lock [{self.lock_file}] released.")
+            logger.debug(f"Lock [{self.lock_file}] released.")
 
 def cleanup_lockfile(lock_file: str):
     if os.path.exists(lock_file):

@@ -34,21 +34,24 @@ module:
           task_tag: "`'_'.join('_'.join(row.kb_filename.split('/')[-2:]).split('_')[:5])`" # task_tag joins the level and filename, and returns the first 5 parts
         items:
           - worker: "eval.reference"
+            prefix_tag: "`prefix_tag`"
             run_tag: "`run_tag`"
             model_tag: "`model_tag`"
             task_tag: "`task_tag`"
             kb_filename: "`row.kb_filename`" # kb_filename is the filename
             reference_code: "`row.reference_code`" # reference code
-            output_dir: "`block.output_dir`" # output_dir is the output directory
+            output_dir: "`os.path.expanduser(block.output_dir)`" # output_dir is the output directory
             # generate code and evaluate
           - __repeat_count__: "`block.num_generations`"
             worker: "codeGenEval.custom"
+            prefix_tag: "`prefix_tag`"
             run_tag: "`run_tag`"
             model_tag: "`model_tag`"
             task_tag: "`task_tag`"
             gen_tag: "`f'gen_{__repeat_idx__:02d}'`" # gen_tag is the generation tag
             reference_code: "`row.reference_code`" # reference code
-            output_dir: "`block.output_dir`" # output_dir is the output directory
+            code_type: "triton"
+            output_dir: "`os.path.expanduser(block.output_dir)`" # output_dir is the output directory
             num_turns_per_generation: "`block.num_turns_per_generation`" # number of turns per generation
   
   # queue worker reads from the queue and executes the worker
@@ -67,7 +70,8 @@ module:
             reference_code: "`reference_code`"
           # returned variables will be added to the context
           returns:
-            - reference_eval
+            context_vars:
+              reference_eval: "`__result__`"
         - endpoint: recorder.save
           inputs:
             path: "`f'{record_folder}/reference_eval.json'`"
@@ -80,9 +84,9 @@ module:
             task_tag: "`task_tag`"
             category: "reference"
             data: "`reference_eval.model_dump()`"
-        - endpoint: logger.info
-          inputs:
-            message: "`f'Reference eval: {reference_eval}'`"
+        # - endpoint: logger.info
+        #   inputs:
+        #     message: "`f'Reference eval: {reference_eval}'`"
     # codeGenEval worker
     codeGenEval.custom:
       filter: "`True`" # you can specify a filter criteria here
@@ -127,23 +131,23 @@ module:
             max_tokens: "`max_tokens`"
             logprobs: "`logprobs`"
           returns:
-            error_if: "`__return__ is None`"
+            error_if: "`__result__ is None`"
             context_vars:
               metadata: |
                 `metadata | {
-                  "num_completion_tokens": len(__return__['usage']['completion_tokens']),
+                  "num_completion_tokens": len(__result__['logprobs']),
                   "completion_time_seconds": __endpoint_time__,
-                  "token_per_second": len(__return__['usage']['completion_tokens']) / __endpoint_time__,
+                  "token_per_second": len(__result__['logprobs']) / __endpoint_time__,
                 }
                 `
               messages: |
                 `messages + [
-                  {"role": "assistant", "content": __return__['content']}
+                  {"role": "assistant", "content": __result__['content']}
                 ]`
               completion: |
                 "prompt": "`prompt`"
-                "completion": "`__return__['content']`"
-                "logprobs": "`__return__['logprobs']`"
+                "completion": "`__result__['content']`"
+                "logprobs": "`__result__['logprobs']`"
                 "metadata": "`metadata`"
               conversation: |
                 messages: "`messages`"
@@ -160,9 +164,10 @@ module:
             format: "json"
         - endpoint: codeExtractor.extract_code
           inputs:
-            completion: "`completion['content']`"
+            completion: "`completion['completion']`"
           returns:
-            - generated_code
+            context_vars:
+              generated_code: "`__result__`"
         - endpoint: recorder.save
           inputs:
             path: "`f'{record_folder}/{turn_tag}_generated_code.json'`"
@@ -172,13 +177,14 @@ module:
           inputs:
             run_tag: "`run_tag`"
             model_tag: "`model_tag`"
-            task_tag: "`task_tag`
+            task_tag: "`task_tag`"
             eval_tag: "`turn_tag`" # eval_tag is the turn tag
             reference_code: "`reference_code`"
             generated_code: "`generated_code`"
             code_type: "`code_type`" # code_type is the code type
           returns:
-            - generated_eval
+            context_vars:
+              generated_eval: "`__result__`"
         - endpoint: recorder.save
           inputs:
             path: "`f'{record_folder}/{turn_tag}_generated_eval.json'`"
@@ -191,6 +197,6 @@ module:
             task_tag: "`task_tag`"
             category: "generated"
             data: "`generated_eval.model_dump()`"
-        - endpoint: logger.info
-          inputs:
-            message: "`f'Generated code eval: {generated_eval}'`"
+        # - endpoint: logger.info
+        #   inputs:
+        #     message: "`f'Generated code eval: {generated_eval}'`"

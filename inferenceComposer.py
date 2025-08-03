@@ -47,6 +47,7 @@ class ComposerClient:
         self.recorder = Recorder()
         self.kbEvalClient = KbEvalClient()
         self.statsClient = StatsClient()
+        self.codeExtractor = CodeExtractor()
         self.inference_client_config = inference_client_config
         self.inferenceClient = InferenceClient(config=self.inference_client_config)
         self.tokenizer = self.inferenceClient.tokenizer
@@ -62,6 +63,9 @@ class ComposerClient:
         self.context_vars = {
             # built-in context vars
             "self": self,
+            "os": os,
+            "json": json,
+            "yaml": yaml,
         }
         if 'context_vars' in self.module_config:
             self.context_vars = self._process_context_vars(self.module_config['context_vars'], self.context_vars)
@@ -72,28 +76,26 @@ class ComposerClient:
 
     def get_system_prompt(self, context_vars: dict) -> str:
         """Get system prompt from configuration."""
-        prompts_config = self.get_prompt_template()
         reference_code = self.get_example_reference_code()
         generated_code = self.get_example_generated_code()
-        return prompts_config.get('system_prompt', 'You are a helpful assistant.').format(
+        return self.prompt_config.get('system_prompt', 'You are a helpful assistant.').format(
             reference_code=reference_code,
             generated_code=generated_code,
         )
 
     def get_user_prompt(self, context_vars: dict) -> str:
         """Get user prompt from configuration with source code substituted."""
-        prompts_config = self.get_prompt_template()
         generated_code = context_vars.get('generated_code', None)
         generated_eval = context_vars.get('generated_eval', None)
         reference_code = context_vars.get('reference_code', None)
         reference_eval = context_vars.get('reference_eval', None)
         if generated_code is None or generated_eval is None:
-            user_prompt_template = prompts_config.get('user_prompt.init', 'Implement Triton code for the following reference code.\n\nReference code:\n```python\n{reference_code}\n```\n\nReference code evaluation:\n```json\n{reference_eval}\n```')
+            user_prompt_template = self.prompt_config.get('user_prompt.init', 'Implement Triton code for the following reference code.\n\nReference code:\n```python\n{reference_code}\n```\n\nReference code evaluation:\n```json\n{reference_eval}\n```')
         else:
             if generated_eval['compiled'] and generated_eval['correctness']:
-                user_prompt_template = prompts_config.get('user_prompt.perf', 'Compare to the reference code performance evaluation and improve your code performance by optimizing the code.\n\nGenerated code evaluation:\n```json\n{generated_eval}\n```')
+                user_prompt_template = self.prompt_config.get('user_prompt.perf', 'Compare to the reference code performance evaluation and improve your code performance by optimizing the code.\n\nGenerated code evaluation:\n```json\n{generated_eval}\n```')
             else:
-                user_prompt_template = prompts_config.get('user_prompt.fix', 'Your code did not compile or run correctly.  Please fix the code and return the correct code.\n\nGenerated code evaluation:\n```json\n{generated_eval}\n```')
+                user_prompt_template = self.prompt_config.get('user_prompt.fix', 'Your code did not compile or run correctly.  Please fix the code and return the correct code.\n\nGenerated code evaluation:\n```json\n{generated_eval}\n```')
         return user_prompt_template.format(
             reference_code=reference_code,
             reference_eval=json.dumps(reference_eval),
@@ -134,8 +136,8 @@ class ComposerClient:
                     # now we have a valid processor, process the context variables
                     context_vars = self.context_vars | {
                         "block": block,
-                        "__context__": context_vars,
                     }
+                    context_vars['__context__'] = context_vars
                     if 'context_vars' in processor_config:
                         context_vars = self._process_context_vars(processor_config['context_vars'], context_vars)
                     
@@ -178,8 +180,8 @@ class ComposerClient:
                             # now we have a valid result, process the result
                             row_context_vars = context_vars | {
                                 "row": row,
-                                "__context__": row_context_vars,
                             }
+                            row_context_vars['__context__'] = row_context_vars
                             if 'context_vars' in enqueue_config:
                                 enqueue_context_vars = self._process_context_vars(enqueue_config['context_vars'], row_context_vars)
                             else:
@@ -236,12 +238,25 @@ class ComposerClient:
         else:
             return value
 
-    def _process_context_vars(self, context_config: dict, context_vars: dict) -> dict:
+    def _process_context_vars(self, context_config: dict, context_vars: dict, local_context_vars: dict = None) -> dict:
         """Process context variables."""
         for key, value in context_config.items():
-            context_vars[key] = self._process_variable(value, context_vars)
-        context_vars['__context__'] = context_vars
-        return context_vars
+            # recursively process the context variables
+            if isinstance(value, dict):
+                if local_context_vars is None:
+                    context_vars[key] = self._process_context_vars(value, context_vars, local_context_vars={})
+                else:
+                    local_context_vars[key] = self._process_context_vars(value, context_vars, local_context_vars={})
+            else:
+                if local_context_vars is None:
+                    context_vars[key] = self._process_variable(value, context_vars)
+                else:
+                    local_context_vars[key] = self._process_variable(value, context_vars)
+        if local_context_vars is None:
+            context_vars['__context__'] = context_vars
+            return context_vars
+        else:
+            return local_context_vars
 
     def _process_input_vars(self, input_config: dict, context_vars: dict) -> dict:
         """Process input variables."""
@@ -295,8 +310,8 @@ class ComposerClient:
                 # start processing the worker config, create a new context_vars dictionary
                 context_vars = self.context_vars | {
                     "input": item,
-                    "__context__": context_vars,
                 } | item # add the input variables to the context variables
+                context_vars['__context__'] = context_vars
                 try:
                     # process additional context variables
                     if 'context_vars' in worker_config:
@@ -328,16 +343,19 @@ class ComposerClient:
                     continue
 
                 step_context_vars = context_vars.copy() # create a copy of the context variables for the entire loop
+                step_context_vars['__context__'] = step_context_vars
                 for __loop_idx__ in range(__loop_count__):
                     # add context variables for the loop
                     step_context_vars['__loop_idx__'] = __loop_idx__
                     step_context_vars['__loop_count__'] = __loop_count__
 
                     # work through the steps
+                    error_encountered = False
                     for step_config in worker_config['steps']:
                         try:
                             if 'endpoint' not in step_config:
                                 logger.error(f"❌ [Composer] [{self.input_tag}] Endpoint not found in step: {step_config}")
+                                error_encountered = True
                                 break
 
                             # get the endpoint instance and function
@@ -353,10 +371,23 @@ class ComposerClient:
                             # assume each step depend on each other, always break the steps if current step fails
                             logger.error(f"❌ [Composer] [{self.input_tag}] Error getting endpoint: {step_config} [{type(e)}: {e}]")
                             logger.error(traceback.format_exc())
+                            error_encountered = True
                             break
 
-                        if 'context_vars' in step_config:
-                            step_context_vars = self._process_context_vars(step_config['context_vars'], step_context_vars)
+                        try:
+                            if 'context_vars' in step_config:
+                                step_context_vars = self._process_context_vars(step_config['context_vars'], step_context_vars)
+
+                            if 'record_time' in step_config:
+                                record_time = self._process_variable(step_config['record_time'], step_context_vars)
+                            else:
+                                record_time = False
+
+                        except Exception as e:
+                            # assume each step depend on each other, always break the steps if current step fails
+                            logger.error(f"❌ [Composer] [{self.input_tag}] Error processing step context variables: {step_config['context_vars']} [{type(e)}: {e}]")
+                            error_encountered = True
+                            break
 
                         try:
                             # get the inputs
@@ -366,37 +397,55 @@ class ComposerClient:
                         except Exception as e:
                             # assume each step depend on each other, always break the steps if current step fails
                             logger.error(f"❌ [Composer] [{self.input_tag}] Error processing inputs: {step_config} [{type(e)}: {e}]")
+                            error_encountered = True
                             break
 
                         try:
                             # call the endpoint function
+                            if record_time:
+                                start_time = time.time()
                             # check if the endpoint function is async
                             if asyncio.iscoroutinefunction(endpoint_function):
                                 result = await endpoint_function(**input_vars)
                             else:
                                 result = endpoint_function(**input_vars)
+                            if record_time:
+                                end_time = time.time()
+                                step_context_vars['__endpoint_time__'] = end_time - start_time
 
                         except Exception as e:
                             # assume each step depend on each other, always break the steps if current step fails
                             logger.error(f"❌ [Composer] [{self.input_tag}] Error calling endpoint: {step_config} [{type(e)}: {e}]")
                             # log stack track only when actually calling the endpoint
                             logger.error(traceback.format_exc())
+                            error_encountered = True
                             break
 
                         try:
                             if 'returns' in step_config:
-                                logger.info(f"🔍 [Composer] [{self.input_tag}] Endpoint [{endpoint_class_name}.{endpoint_method_name}] returned: {result}")
+                                logger.info(f"🔍 [Composer] [{self.input_tag}] Endpoint [{endpoint_class_name}.{endpoint_method_name}] returned: {str(result)[:100]}...")
+                                step_context_vars['__result__'] = result
+                                if 'error_if' in step_config:
+                                    error_if = self._process_variable(step_config['error_if'], step_context_vars)
+                                    if error_if:
+                                        logger.error(f"❌ [Composer] [{self.input_tag}] Error in endpoint [{endpoint_class_name}.{endpoint_method_name}]: {result}")
+                                        error_encountered = True
+                                        break
+                                # now we don't have any errors, process the return in context variables
                                 returns_config = step_config['returns']
-                                success = self._process_returns_vars(result, returns_config, step_context_vars)
-                                if not success:
-                                    logger.error(f"❌ [Composer] [{self.input_tag}] Unable to process returns: {returns_config} [{result}]")
-                                    break
+                                if 'context_vars' in returns_config:
+                                    step_context_vars = self._process_context_vars(returns_config['context_vars'], step_context_vars)
 
                         except Exception as e:
                             # assume each step depend on each other, always break the steps if current step fails
                             logger.error(f"❌ [Composer] [{self.input_tag}] Error processing returns: {step_config} [{type(e)}: {e}]")
                             logger.error(traceback.format_exc())
+                            error_encountered = True
                             break
+
+                    if error_encountered:
+                        logger.error(f"🔴 [Composer] [{self.input_tag}] Error encountered in step: {step_config}")
+                        break
 
                 logger.info(f"🟢 [Composer] [{self.input_tag}] [worker {worker_id:02d}] [{worker_name}] completed.")
             
@@ -404,7 +453,7 @@ class ComposerClient:
                 continue
             
             except Exception as e:
-                logger.error(f"❌ [Composer] [{self.input_tag}] Worker [{worker_id:02d}] error: [{type(e)}: {e}]")
+                logger.error(f"🔴 [Composer] [{self.input_tag}] Worker [{worker_id:02d}] error: [{type(e)}: {e}]")
                 logger.error(traceback.format_exc())
                 break
 
@@ -467,11 +516,11 @@ async def main():
     parser.add_argument("--block_id", type=int, default=-1)
     parser.add_argument("--input_tag", type=str, default="test")
     parser.add_argument("--input_dir", type=str, default="~/.codeGenEval", help="Input directory containing Python files")
-    parser.add_argument("--output_dir", type=str, default="~/.composer", help="Output directory for the composer results")
+    parser.add_argument("--output_dir", type=str, default="~/.inference/composer", help="Output directory for the composer results")
     parser.add_argument("--provider", type=str, default="fireworks")  # most cost effective models are deepinfra-r1 and fireworks-v3
     parser.add_argument("--model", type=str, default="deepseek-v3")  # most cost effective models are deepinfra-r1 and fireworks-v3
     parser.add_argument("--model_override", type=str, default=None)
-    parser.add_argument("--parallel_workers", type=int, default=4)
+    parser.add_argument("--parallel_workers", type=int, default=1)
     parser.add_argument("--num_samples", type=int, default=2)
     parser.add_argument("--num_generations", type=int, default=2)
     parser.add_argument("--num_turns_per_generation", type=int, default=4)
