@@ -155,21 +155,26 @@ class ComposerClient:
             result[key] = self._process_variable(value, context_vars)
         return result
 
-    def _process_log_inference(self, result: Any, context_vars: dict) -> dict:
-        """Process log inference."""
-        if 'logprobs' in result:
-            context_vars['logprobs'] = result['logprobs']
-        if 'usage' in result:
-            context_vars['usage'] = result['usage']
-        return context_vars
+    def log_completion(self, result: Any, context_vars: dict) -> dict:
+        pass
 
-    def _process_log_eval(self, result: Any, context_vars: dict) -> dict:
+    def log_chat_completion(self, result: Any, context_vars: dict) -> dict:
+        pass
+
+    def log_kb_eval_ref(self, result: Any, context_vars: dict) -> dict:
+        """Process log kb eval ref."""
+        run_tag = context_vars.get('run_tag', None)
+        model_tag = context_vars.get('model_tag', None)
+        task_tag = context_vars.get('task_tag', None)
+        reference_eval = context_vars.get('reference_eval', None)
+        reference_eval_runtime = reference_eval['runtime'] if 'runtime' in reference_eval else -1.0
+        reference_eval_path = context_vars.get('reference_eval_path', None)
+        evaluation_time = context_vars.get('__endpoint_time__', None)
+        logger.info(f"📚 [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{reference_eval_path}] [{reference_eval_runtime:.3f}ms] in [{evaluation_time:.2f}s]")
+
+    def log_kb_eval(self, result: Any, context_vars: dict) -> dict:
         """Process log eval."""
-        if 'logprobs' in result:
-            context_vars['logprobs'] = result['logprobs']
-        if 'usage' in result:
-            context_vars['usage'] = result['usage']
-        return context_vars
+        pass
 
     async def input_processor(self, block: ComposerBlock):
         """Process input variables."""
@@ -381,11 +386,6 @@ class ComposerClient:
                             if 'context_vars' in step_config:
                                 step_context_vars = self._process_context_vars(step_config['context_vars'], step_context_vars)
 
-                            if 'record_time' in step_config:
-                                record_time = self._process_variable(step_config['record_time'], step_context_vars)
-                            else:
-                                record_time = False
-
                         except Exception as e:
                             # assume each step depend on each other, always break the steps if current step fails
                             logger.error(f"❌ [Composer] [{self.input_tag}] Error processing step context variables: {step_config['context_vars']} [{type(e)}: {e}]")
@@ -405,6 +405,7 @@ class ComposerClient:
 
                         try:
                             # call the endpoint function
+                            record_time = True if 'returns' in step_config else False
                             if record_time:
                                 start_time = time.time()
                             # check if the endpoint function is async
@@ -446,6 +447,16 @@ class ComposerClient:
                                         data = self._process_variable(save_to_config['data'], step_context_vars)
                                         format = save_to_config['format'] if 'format' in save_to_config else 'text'
                                         self.recorder.save(path, data, format=format)
+                                # process logging
+                                if 'logging' in returns_config:
+                                    log_config = returns_config['logging']
+                                    try:
+                                        log_method = getattr(self, log_config.get('method', None))
+                                        if not log_method:
+                                            logger.warning(f"🔴 [Composer] [{self.input_tag}] Logging method not found: {log_config}")
+                                        log_method(result, step_context_vars)
+                                    except Exception as e:
+                                        logger.warning(f"🔴 [Composer] [{self.input_tag}] Error processing logging: {log_config} [{type(e)}: {e}]")
 
                         except Exception as e:
                             # assume each step depend on each other, always break the steps if current step fails
