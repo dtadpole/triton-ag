@@ -4,7 +4,7 @@ import argparse
 from datetime import datetime
 from logger import logger
 from globalRegClient import GlobalRegClient
-from globalUtils import CodeGenEvalBlock, CritiqueBlock, ExemplarBlock, ReflectionBlock, TrainerSFTBlock, TrainerRFTBlock, TrainerGRPOBlock
+from globalUtils import CodeGenEvalBlock, CritiqueBlock, ExemplarBlock, ReflectionBlock, TrainerSFTBlock, TrainerRFTBlock, TrainerGRPOBlock, get_prefix_tag
 
 TASK_TYPE_CODEGENEVAL = "inference.codeGenEval"
 TASK_TYPE_EXEMPLAR = "inference.exemplar"
@@ -25,10 +25,7 @@ VALID_TASK_TYPES = [
 class GlobalWorkflow:
     def __init__(self, prefix_tag: str, config_path: str = "globalWorkflow.yaml"):
         self.config = self.from_yaml(config_path)
-        if prefix_tag == "auto":
-            self.prefix_tag = self.config.get("global", {}).get("prefix_tag", f"auto_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-        else:
-            self.prefix_tag = prefix_tag
+        self.prefix_tag = get_prefix_tag(prefix_tag, config_path)
         self.global_config = self.config.get("global", {})
         self.codeGenEval_default = self.config.get(TASK_TYPE_CODEGENEVAL, {}).get("default", {})
         self.exemplar_default = self.config.get(TASK_TYPE_EXEMPLAR, {}).get("default", {})

@@ -1,0 +1,112 @@
+module:
+  name: exemplar
+  # built-in context like `self` has already been set
+  # here we add addotional context variables for easier access by the program
+  # variables will be evaluated sequentially, so that later variables can use earlier variables
+  context_vars:
+    provider_name: "`self.inference_client_config.provider.provider_name`"
+    model_short_name: "`self.inference_client_config.model.model_short_name`"
+    model_tag: "{provider_name}_{model_short_name}"
+    max_tokens: "`self.inference_client_config.model.max_tokens`"
+  # input processor adds jobs to the queue
+  input_processor:
+    # reference task
+    - processor: duckdb
+      name: eval.reference
+      # built-in context like `input` has already been set
+      # here we add addotional context variables for easier access by the program
+      context_vars:
+        prefix_tag: "`input.prefix_tag`"
+        epoch_id: "`input.epoch_id`"
+        block_id: "`input.block_id`" 
+        input_tag: "`input.input_tag`"
+      query: |
+        SELECT * FROM {input_tag}
+      enqueue:
+        item:
+          worker: "eval.reference"
+          run_tag: "`input.input_tag`" # run_tag is the input tag
+          task_tag: "`row.task_tag`" # task_tag is the task name
+          reference_code: "`row.reference_code`" # reference code
+    # generate code and evaluate
+    - processor: duckdb
+      name: codeGenEval.custom
+      # built-in context like `input` has already been set
+      # here we add addotional context variables for easier access by the program
+      context_vars:
+        prefix_tag: "`input.prefix_tag`"
+        epoch_id: "`input.epoch_id`"
+        block_id: "`input.block_id`"
+        input_tag: "`input.input_tag`"
+      query: |
+        SELECT * FROM {input_tag}
+      enqueue:
+        repeat_count: "`input.num_generations`"
+        item:
+          worker: "codeGenEval.custom"
+          run_tag: "`input.input_tag`" # run_tag is the input tag
+          task_tag: "`row.task_tag`" # task_tag is the task name
+          reference_code: "`row.reference_code`" # reference code
+          generated_code: "`row.generated_code`" # generated code
+          turn_id: "`row.turn_id`" # turn_id is the turn id
+          num_turns: "`input.num_turns_per_generation`" # number of turns per generation
+
+  queue_worker:
+    # reference worker
+    eval.reference:
+      filter: "`True`" # you can specify a filter criteria here
+      steps:
+        - endpoint: kbEvalClient.kb_eval_ref
+          inputs:
+            run_tag: "`run_tag`"
+            model_tag: "`model_tag`"
+            task_tag: "`task_tag`" # task_tag is the task name
+            reference_code: "`reference_code`"
+          # returned variables will be added to the context
+          returns:
+            - reference_eval
+        - endpoint: recorder.save
+          inputs:
+            path: "`f'{output_dir}/{run_tag}/{model_tag}/{task_tag}/reference_eval.json'`"
+            data: "`reference_eval`"
+            format: "json"
+        - endpoint: statsClient.log_data_point
+          inputs:
+            run_tag: "`run_tag`"
+            model_tag: "`model_tag`"
+            task_tag: "`task_tag`" # task_tag is the task name
+            reference_eval: "`reference_eval`"
+    # codeGenEval worker
+    codeGenEval.custom:
+      filter: "`True`" # you can specify a filter criteria here
+      loop_count: "`input.num_turns_per_generation`"
+      steps:
+        - endpoint: inferenceClient.completion
+          context_vars:
+            # we need to create the prompt here
+            prompt: "`input.prompt`"
+          inputs:
+            prompt: "`prompt`"
+            max_tokens: "`max_tokens`"
+            logprobs: "`logprobs`"
+          returns:
+            - completion
+        - endpoint: codeExtractor.extract_code
+          inputs:
+            completion: "`completion`"
+          returns:
+            - generated_code
+        - endpoint: recorder.save
+          inputs:
+            path: "`f'{output_dir}/{run_tag}/{model_tag}/{task_tag}/{turn_tag}_conversation.json'`"
+            data: "`generated_eval`"
+            format: "json"
+        - endpoint: kbEvalClient.kb_eval_custom
+          inputs:
+            run_tag: "`run_tag`"
+            model_tag: "`model_tag`"
+            task_tag: "`task_tag`" # task_tag is the task name
+            reference_code: "`reference_code`"
+            generated_code: "`generated_code`"
+          returns:
+            - generated_eval
