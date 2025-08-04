@@ -23,7 +23,8 @@ from kbEvalUtil import on_process_timeout
 
 KB_EVAL_TOKEN = None
 
-CURR_ERROR_COUNT = 0
+TOTAL_REQUEST_COUNTER = 0
+TOTAL_ERROR_COUNTER = 0
 MAX_ERROR_COUNT = 10
 START_TIME = time.time()
 MAX_RUN_TIME = 2 * 3600 # restart periods in seconds
@@ -33,8 +34,8 @@ KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
 # Create app
 app = FastAPI()
 
-request_counter = 0
-request_counter_lock = asyncio.Lock()
+parallel_request_counter = 0
+parallel_request_counter_lock = asyncio.Lock()
 
 DEVICES = []
 
@@ -152,10 +153,10 @@ async def get_pending_task_count():
 
 @app.get("/stats")
 async def stats():
-    global request_counter
+    global parallel_request_counter
     return {
         "num_devices": len(DEVICES),
-        "pending_requests": request_counter,
+        "pending_requests": parallel_request_counter,
     }
 
 
@@ -168,13 +169,14 @@ async def kb_eval_ref(
     reference_code: str = Body(...),
     authenticated: bool = Depends(verify_token)
 ) -> KernelExecResult:
-    global request_counter, request_counter_lock, DEVICES
+    global TOTAL_REQUEST_COUNTER, TOTAL_ERROR_COUNTER, parallel_request_counter, parallel_request_counter_lock, DEVICES
 
     # logger.info(f"kb_eval_ref: {run_tag}, {model_tag}, {task_tag}, {reference_code}")
 
     try:
-        async with request_counter_lock:
-            request_counter += 1
+        async with parallel_request_counter_lock:
+            parallel_request_counter += 1
+            TOTAL_REQUEST_COUNTER += 1
 
         # get prefix_tag from run_tag by removing regex pattern [_ddd_dd] (ddd is 3 digits, dd is 2 digits) at the end if exists
         prefix_tag = re.sub(r"_\d{3}_\d{2}$", "", run_tag)
@@ -242,6 +244,10 @@ async def kb_eval_ref(
         result = KernelExecResult.model_validate(result_json)
 
         metrics = {
+            "health/completion": 1,
+            "health/parallel_requests": parallel_request_counter,
+            "health/error_counter": TOTAL_ERROR_COUNTER,
+            "health/request_counter": TOTAL_REQUEST_COUNTER,
             f"{task_tag}/healthiness": 1,
             f"{task_tag}/compiled": 1 if result.compiled else 0,
             f"{task_tag}/correctness": 1 if result.correctness else 0,
@@ -253,8 +259,8 @@ async def kb_eval_ref(
         return result
 
     except Exception as e:
-        global CURR_ERROR_COUNT
-        CURR_ERROR_COUNT += 1
+        global TOTAL_ERROR_COUNTER
+        TOTAL_ERROR_COUNTER += 1
         logger.error(f"❌ [KB Eval] [reference] error: {type(e).__name__}: {str(e)}")
         result = KernelExecResult(
             compiled=False,
@@ -266,6 +272,10 @@ async def kb_eval_ref(
             runtime=-1.0,
         )
         metrics = {
+            "health/completion": 0,
+            "health/parallel_requests": parallel_request_counter,
+            "health/error_counter": TOTAL_ERROR_COUNTER,
+            "health/request_counter": TOTAL_REQUEST_COUNTER,
             f"{task_tag}/healthiness": 0,
             f"{task_tag}/compiled": 1 if result.compiled else 0,
             f"{task_tag}/correctness": 1 if result.correctness else 0,
@@ -276,13 +286,13 @@ async def kb_eval_ref(
         return result
 
     finally:
-        async with request_counter_lock:
-            request_counter -= 1
-            if request_counter < 0:
+        async with parallel_request_counter_lock:
+            parallel_request_counter -= 1
+            if parallel_request_counter < 0:
                 logger.error(
-                    f"Request counter is negative: {request_counter}, resetting to 0"
+                    f"Request counter is negative: {parallel_request_counter}, resetting to 0"
                 )
-                request_counter = 0
+                parallel_request_counter = 0
 
 
 @app.post("/kb_eval")
@@ -297,11 +307,12 @@ async def kb_eval(
     code_type: str = Body(default="cuda"),
     authenticated: bool = Depends(verify_token)
 ) -> KernelExecResult:
-    global request_counter, request_counter_lock, DEVICES
+    global TOTAL_REQUEST_COUNTER, TOTAL_ERROR_COUNTER, parallel_request_counter, parallel_request_counter_lock, DEVICES
 
     try:
-        async with request_counter_lock:
-            request_counter += 1
+        async with parallel_request_counter_lock:
+            parallel_request_counter += 1
+            TOTAL_REQUEST_COUNTER += 1
 
         # get prefix_tag from run_tag by removing regex pattern [_ddd_dd] (ddd is 3 digits, dd is 2 digits) at the end if exists
         prefix_tag = re.sub(r"_\d{3}_\d{2}$", "", run_tag)
@@ -371,6 +382,9 @@ async def kb_eval(
 
         metrics = {
             "health/completion": 1,
+            "health/parallel_requests": parallel_request_counter,
+            "health/error_counter": TOTAL_ERROR_COUNTER,
+            "health/request_counter": TOTAL_REQUEST_COUNTER,
             "metrics/compiled": 1 if result.compiled else 0,
             "metrics/correctness": 1 if result.correctness else 0,
             "metrics/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
@@ -386,8 +400,8 @@ async def kb_eval(
         return result
 
     except Exception as e:
-        global CURR_ERROR_COUNT
-        CURR_ERROR_COUNT += 1
+        global TOTAL_ERROR_COUNTER
+        TOTAL_ERROR_COUNTER += 1
         logger.error(f"❌ [KB Eval] [{eval_tag}] error: {type(e).__name__}: {str(e)}")
         result = KernelExecResult(
             compiled=False,
@@ -401,6 +415,9 @@ async def kb_eval(
 
         metrics = {
             "health/completion": 0,
+            "health/parallel_requests": parallel_request_counter,
+            "health/error_counter": TOTAL_ERROR_COUNTER,
+            "health/request_counter": TOTAL_REQUEST_COUNTER,
             "metrics/compiled": 1 if result.compiled else 0,
             "metrics/correctness": 1 if result.correctness else 0,
             "metrics/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
@@ -416,17 +433,17 @@ async def kb_eval(
         return result
 
     finally:
-        async with request_counter_lock:
-            request_counter -= 1
-            if request_counter < 0:
+        async with parallel_request_counter_lock:
+            parallel_request_counter -= 1
+            if parallel_request_counter < 0:
                 logger.error(
-                    f"Request counter is negative: {request_counter}, resetting to 0"
+                    f"Request counter is negative: {parallel_request_counter}, resetting to 0"
                 )
-                request_counter = 0
+                parallel_request_counter = 0
 
 
 async def _check_total_error_count():
-    global CURR_ERROR_COUNT, MAX_ERROR_COUNT, START_TIME
+    global TOTAL_ERROR_COUNTER, MAX_ERROR_COUNT, START_TIME
 
     print_interval = 10
     check_interval = 3 # seconds
@@ -443,13 +460,13 @@ async def _check_total_error_count():
                 # loop = asyncio.get_event_loop()
                 # loop.stop()
                 # exit(1)
-            if CURR_ERROR_COUNT > MAX_ERROR_COUNT:
-                logger.error(f"❌ Total error count [{CURR_ERROR_COUNT}] is greater than {MAX_ERROR_COUNT}!")
+            if TOTAL_ERROR_COUNTER > MAX_ERROR_COUNT:
+                logger.error(f"❌ Total error count [{TOTAL_ERROR_COUNTER}] is greater than {MAX_ERROR_COUNT}!")
                 # loop = asyncio.get_event_loop()
                 # loop.stop()
                 # exit(1)
-            elif CURR_ERROR_COUNT > 0 and counter % print_interval == 0:
-                logger.warning(f"⚠️ Total error count is {CURR_ERROR_COUNT}, continuing...")
+            elif TOTAL_ERROR_COUNTER > 0 and counter % print_interval == 0:
+                logger.warning(f"⚠️ Total error count is {TOTAL_ERROR_COUNTER}, continuing...")
         finally:
             await asyncio.sleep(check_interval)
 
