@@ -63,8 +63,9 @@ def verify_token(authorization: str = Header(None)):
 wandb_loggers = {} # {prefix_tag: wandb.Run}
 def _setup_wandb_logging(prefix_tag: str="test", model_tag: str="local_qwen3-14b"):
     """Setup logging and tracking"""
-    if prefix_tag in wandb_loggers:
-        return wandb_loggers[prefix_tag]
+    key = f"{prefix_tag}_{model_tag}"
+    if key in wandb_loggers:
+        return wandb_loggers[key]
     
     wandb_run = wandb.init(
         project=f"kb_eval_{prefix_tag}",
@@ -72,8 +73,8 @@ def _setup_wandb_logging(prefix_tag: str="test", model_tag: str="local_qwen3-14b
         name=f"{model_tag}-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
         resume="allow",
     )
-    wandb_loggers[prefix_tag] = wandb_run
-    logger.info(f"📊 W&B logging enabled for [{prefix_tag}]")
+    wandb_loggers[key] = wandb_run
+    logger.info(f"📊 W&B logging enabled for [{key}]")
     return wandb_run
 
 async def get_with_timeout(queue, timeout):
