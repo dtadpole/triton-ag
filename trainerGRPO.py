@@ -388,10 +388,11 @@ def grpo_train_block(block: TrainerGRPOBlock, trainer: GRPOTrainer, callback: Op
         ref_runtime = row['runtime']
 
         # get task tag from metadata
-        if 'task_tag' not in row['metadata']:
-            logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] Skipping [{row['filename']}] No task tag in metadata")
-            continue
-        task_tag = row['metadata']['task_tag']
+        # if 'task_tag' not in row['metadata']:
+        #     logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] Skipping [{row['filename']}] No task tag in metadata")
+        #     continue
+        # task_tag = row['metadata']['task_tag']
+        task_tag = folder.split('/')[-1].split('=')[-1]
 
         generation_results_by_turn = defaultdict(list)
         # read in all the gen_xx_completion.json files in the same folder (non-recursive)
@@ -402,7 +403,7 @@ def grpo_train_block(block: TrainerGRPOBlock, trainer: GRPOTrainer, callback: Op
             turn_tag = completion_file.replace('_completion.json', '')
             turn_id = int(turn_tag.split('_')[-1][1:]) # turn_id is the last number in the turn_tag, e.g. gen_01_t03 -> 3
             # read corresponding gen_xx_eval.json
-            eval_file = completion_file.replace('_completion.json', '_eval.json')
+            eval_file = completion_file.replace('_completion.json', '_generated_eval.json')
             if not os.path.exists(os.path.join(folder, eval_file)):
                 logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] No eval file found for [{completion_file}]")
                 continue
@@ -412,10 +413,10 @@ def grpo_train_block(block: TrainerGRPOBlock, trainer: GRPOTrainer, callback: Op
             compiled = eval_data['compiled']
             correctness = eval_data['correctness']
             runtime = eval_data['runtime']
-            reward_compiled = 0.1 if compiled else 0.0 # use a small compiled reward for reward shaping
+            # reward_compiled = 0.1 if compiled else 0.0 # use a small compiled reward for reward shaping
             reward_correctness = 0.3 if correctness else 0.0
             reward_speedup = 0.0 if runtime < 0 else ref_runtime / runtime
-            reward = reward_compiled + reward_correctness + reward_speedup
+            reward = reward_correctness + reward_speedup
             # create a generation result group
             prompt = completion_data['prompt']
             prompt_token_ids = trainer.tokenizer.encode(prompt)
@@ -427,7 +428,7 @@ def grpo_train_block(block: TrainerGRPOBlock, trainer: GRPOTrainer, callback: Op
                 turn_tag=turn_tag,
                 reward=reward,
                 reward_items={
-                    "compiled": reward_compiled,
+                    # "compiled": reward_compiled,
                     "correctness": reward_correctness,
                     "speedup": reward_speedup,
                 },

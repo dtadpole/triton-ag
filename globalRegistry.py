@@ -1,4 +1,5 @@
 import os
+import traceback
 import socket
 import json
 import yaml
@@ -96,17 +97,23 @@ class GlobalRegistry:
                 if os.path.exists(f"{self.global_registry_dir}/queues.json.bak"):
                     with open(f"{self.global_registry_dir}/queues.json.bak", "r") as f:
                         queue_storage = json.load(f)
+            # load queues from the config
+            queues_configs = self.config.get("queues", [])
+            for queue_config in queues_configs:
+                queue_name = queue_config.get("name")
+                queue_object_name = f"{QUEUE_PREFIX}{queue_name}"
+                if queue_object_name not in self.registry:
+                    logger.info(f"🎢 Creating queue [{queue_object_name}]")
+                    self.put(queue_object_name, asyncio.Queue())
             # load the queues from the config
-            queues = self.config.get("queues", [])
-            for queue in queues:
-                object_name = f"{QUEUE_PREFIX}{queue.get('name')}"
-                if object_name not in self.registry:
-                    logger.info(f"🎢 Creating queue [{object_name}]")
-                    self.put(object_name, asyncio.Queue())
-                    if object_name in queue_storage:
-                        for item in queue_storage[object_name]:
-                            await self.get(object_name).put(item)
-                        logger.info(f"📦 Loaded {len(queue_storage[object_name])} items into queue [{object_name}]")
+            for queue_name, queue_items in queue_storage.items():
+                queue_object_name = f"{QUEUE_PREFIX}{queue_name}"
+                if queue_object_name not in self.registry:
+                    logger.info(f"🎢 Creating queue [{queue_object_name}]")
+                    self.put(queue_object_name, asyncio.Queue())
+                    for item in queue_items:
+                        await self.get(queue_object_name).put(item)
+                    logger.info(f"📦 Loaded {len(queue_items)} items into queue [{queue_object_name}]")
         except Exception as e:
             logger.error(f"Error updating queues: {e}")
 
@@ -153,13 +160,11 @@ class GlobalRegistry:
                 queue_filename = f"{self.global_registry_dir}/queues.json"
                 if os.path.exists(queue_filename):
                     os.rename(queue_filename, f"{queue_filename}.bak")
-                queues = self.config.get("queues", [])
-                for queue in queues:
-                    queue_name = queue.get("name")
-                    object_name = f"{QUEUE_PREFIX}{queue_name}"
-                    q = self.get(object_name)
-                    if q is not None:
-                        queue_storage[object_name] = list(q._queue)
+                # iterate over all the keys in the registry
+                for key in self.keys():
+                    if key.startswith(QUEUE_PREFIX):
+                        queue_name = key.replace(QUEUE_PREFIX, "")
+                        queue_storage[queue_name] = list(self.get(key)._queue)
                 # save the queues to the config
                 with open(queue_filename, "w") as f:
                     json.dump(queue_storage, f, indent=2)
@@ -368,19 +373,31 @@ async def qlist():
     }
 
 @fastapi.post("/queue/enqueue")
-async def enqueue(queue_name: str = Body(...), item: Dict[str, Any] = Body(...)):
-    queue = reg.get(f"{QUEUE_PREFIX}{queue_name}")
+async def enqueue(
+    queue_name: str = Body(...), 
+    item: Dict[str, Any] = Body(...), 
+    create_queue: bool = Body(default=False)
+):
+    object_name = f"{QUEUE_PREFIX}{queue_name}"
+    queue = reg.get(object_name)
     if queue is None:
-        raise HTTPException(status_code=404, detail=f"Queue [{queue_name}] not found")
+        if create_queue:
+            logger.info(f"🎢 Creating queue [{object_name}]")
+            queue = asyncio.Queue()
+            reg.put(object_name, queue)
+        else:
+            raise HTTPException(status_code=404, detail=f"Queue [{queue_name}] not found")
     try:
         await queue.put(item)
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error enqueuing item [{item}] into queue [{queue_name}]: {e}")
     return {"message": f"Item [{item}] enqueued into queue [{queue_name}]"}
 
 @fastapi.get("/queue/dequeue/{queue_name}")
 async def dequeue(queue_name: str):
-    queue = reg.get(f"{QUEUE_PREFIX}{queue_name}")
+    object_name = f"{QUEUE_PREFIX}{queue_name}"
+    queue = reg.get(object_name)
     if queue is None:
         raise HTTPException(status_code=404, detail=f"Queue [{queue_name}] not found")
     # get timeout from config
@@ -392,7 +409,8 @@ async def dequeue(queue_name: str):
 
 @fastapi.get("/queue/qsize/{queue_name}")
 async def qsize(queue_name: str):
-    queue = reg.get(f"{QUEUE_PREFIX}{queue_name}")
+    object_name = f"{QUEUE_PREFIX}{queue_name}"
+    queue = reg.get(object_name)
     if queue is None:
         raise HTTPException(status_code=404, detail=f"Queue [{queue_name}] not found")
     return queue.qsize()

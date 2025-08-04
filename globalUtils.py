@@ -8,7 +8,7 @@ from typing import Optional
 REG_PORT_FILE = ".reg.port"
 REG_DIR = ".reg"
 
-MODEL_OVERRIDE_KEY = "adapter.codeGenEval.model_override"
+MODEL_OVERRIDE_KEY = "adapter.model_override"
 
 class TrainerSFTBlock(BaseModel):
     prefix_tag: str

@@ -18,8 +18,6 @@ from trainerGRPO import grpo_train_block, grpo_get_trainer, GRPOConfig
 from trainerUtil import rsync_file, VLLMClient
 
 
-client = GlobalRegClient()
-
 LAST_MODIFIED_WITHIN = 3600
 ALPHA = 1.1
 
@@ -134,100 +132,113 @@ class RsyncQueue:
                 traceback.print_exc()
                 await asyncio.sleep(5)
 
-async def main_loop_task(rsync_queue: RsyncQueue, trainer_prefix_tag: str, test_mode: bool):
+class TrainerMain:
+    def __init__(self, prefix_tag: str):
+        self.prefix_tag = prefix_tag
+        self.rsync_queue = RsyncQueue()
+        self.trainer_prefix_tag = get_prefix_tag(prefix_tag)
+        self.reg_client = GlobalRegClient()
 
-    logger.info(f"🌀 [trainerMain] Main loop started for prefix: {trainer_prefix_tag}")
+    async def main_loop_task(self):
+        logger.info(f"🌀 [trainerMain] Main loop started for prefix: {self.trainer_prefix_tag}")
 
-    base_config_file = "trainerBase.yaml"
-    sft_config_file = "trainerSFT.yaml"
-    rft_config_file = "trainerRFT.yaml"
-    grpo_config_file = "trainerGRPO.yaml"
-    # initialize trainers (for now, we only have sft and grpo)
-    sft_trainer = sft_get_trainer(None, trainer_prefix_tag, base_config_file, sft_config_file)
-    rft_trainer = rft_get_trainer(sft_trainer, trainer_prefix_tag, base_config_file, rft_config_file)
-    grpo_trainer = grpo_get_trainer(rft_trainer, trainer_prefix_tag, base_config_file, grpo_config_file)
+        base_config_file = "trainerBase.yaml"
+        sft_config_file = "trainerSFT.yaml"
+        rft_config_file = "trainerRFT.yaml"
+        grpo_config_file = "trainerGRPO.yaml"
+        # initialize trainers (for now, we only have sft and grpo)
+        sft_trainer = sft_get_trainer(None, self.trainer_prefix_tag, base_config_file, sft_config_file)
+        rft_trainer = rft_get_trainer(sft_trainer, self.trainer_prefix_tag, base_config_file, rft_config_file)
+        grpo_trainer = grpo_get_trainer(rft_trainer, self.trainer_prefix_tag, base_config_file, grpo_config_file)
 
-    loop = asyncio.get_event_loop()
+        loop = asyncio.get_event_loop()
 
-    while True:
-        try:
-            sft_qsize = await client.qsize('trainer.sft')
-            rft_qsize = await client.qsize('trainer.rft')
-            grpo_qsize = await client.qsize('trainer.grpo')
+        while True:
+            try:
+                # reinitialize the reg_client to avoid stale connection
+                self.reg_client = GlobalRegClient(prefix_tag=self.trainer_prefix_tag)
+                # queue name is {task_type}:{task_name}
+                SFT_QUEUE_NAME = 'trainer.sft:sft.1'
+                RFT_QUEUE_NAME = 'trainer.rft:rft.1'
+                GRPO_QUEUE_NAME = 'trainer.grpo:grpo.1'
 
-            # randomly pick a queue to dequeue from based on the qsize as the probability
-            # sft_qsize / (sft_qsize + rft_qsize + grpo_qsize)
-            # rft_qsize / (sft_qsize + rft_qsize + grpo_qsize)
-            # grpo_qsize / (sft_qsize + rft_qsize + grpo_qsize)
-            total_qsize = sft_qsize + rft_qsize + grpo_qsize
-            # randomly pick a queue to dequeue from based on the probability
-            if total_qsize == 0:
-                logger.info(f"🔍 [trainerMain] No items to process, sleeping for [10] seconds")
-                await asyncio.sleep(10)
-                continue
-            else:
-                logger.info(f"🔍 [trainerMain] Queue sizes: sft: [{sft_qsize}], rft: [{rft_qsize}], grpo: [{grpo_qsize}]")
+                sft_qsize = await self.reg_client.qsize(SFT_QUEUE_NAME)
+                rft_qsize = await self.reg_client.qsize(RFT_QUEUE_NAME)
+                grpo_qsize = await self.reg_client.qsize(GRPO_QUEUE_NAME)
 
-            # calculate the probability for each queue, use ALPHA (>1.0) to enhance the probability for larger queues
-            sft_prob = (sft_qsize / total_qsize) ** ALPHA
-            rft_prob = (rft_qsize / total_qsize) ** ALPHA
-            grpo_prob = (grpo_qsize / total_qsize) ** ALPHA
-
-            if random.random() < sft_prob:
-                sft_item = await client.dequeue(queue_name="trainer.sft")
-                if sft_item['prefix_tag'] != trainer_prefix_tag:
-                    logger.error(f"❌ [trainerMain] Skipping item with prefix: {sft_item['prefix_tag']}")
+                # randomly pick a queue to dequeue from based on the qsize as the probability
+                # sft_qsize / (sft_qsize + rft_qsize + grpo_qsize)
+                # rft_qsize / (sft_qsize + rft_qsize + grpo_qsize)
+                # grpo_qsize / (sft_qsize + rft_qsize + grpo_qsize)
+                total_qsize = sft_qsize + rft_qsize + grpo_qsize
+                # randomly pick a queue to dequeue from based on the probability
+                if total_qsize == 0:
+                    logger.info(f"🔍 [trainerMain] No items to process, sleeping for [10] seconds")
+                    await asyncio.sleep(10)
                     continue
-                sft_block = TrainerSFTBlock(**sft_item)
-                logger.info(f"🧊 [trainerMain] Training SFT block: {sft_block.input_tag}")
-                # update config before running
-                base_config = TrainerConfig.from_yaml(base_config_file, override_yaml_path=sft_config_file)
-                sft_config = SFTConfig.from_yaml(sft_config_file)
-                sft_trainer._update_config(base_config)
-                sft_trainer._update_sft_config(sft_config)
-                logger.info(f"🔍 [trainerMain] Base config: {sft_trainer.config.model_dump_json()}")
-                logger.info(f"🔍 [trainerMain] SFT config: {sft_trainer.sft_config.model_dump_json()}")
-                # run in executor to avoid blocking the event loop
-                await loop.run_in_executor(None, sft_train_block, sft_block, sft_trainer, rsync_queue.enqueue)
+                else:
+                    logger.info(f"🔍 [trainerMain] Queue sizes: sft: [{sft_qsize}], rft: [{rft_qsize}], grpo: [{grpo_qsize}]")
 
-            if random.random() < rft_prob:
-                rft_item = await client.dequeue(queue_name="trainer.rft")
-                if rft_item['prefix_tag'] != trainer_prefix_tag:
-                    logger.error(f"❌ [trainerMain] Skipping item with prefix: {rft_item['prefix_tag']}")
-                    continue
-                rft_block = TrainerRFTBlock(**rft_item)
-                logger.info(f"🧊 [trainerMain] Training RFT block: {rft_block.input_tag}")
-                # update config before running
-                base_config = TrainerConfig.from_yaml(base_config_file, override_yaml_path=rft_config_file)
-                rft_config = RFTConfig.from_yaml(rft_config_file)
-                rft_trainer._update_config(base_config)
-                rft_trainer._update_rft_config(rft_config)
-                logger.info(f"🔍 [trainerMain] Base config: {rft_trainer.config.model_dump_json()}")
-                logger.info(f"🔍 [trainerMain] RFT config: {rft_trainer.rft_config.model_dump_json()}")
-                # run in executor to avoid blocking the event loop
-                await loop.run_in_executor(None, rft_train_block, rft_block, rft_trainer, rsync_queue.enqueue)
+                # calculate the probability for each queue, use ALPHA (>1.0) to enhance the probability for larger queues
+                sft_prob = (sft_qsize / total_qsize) ** ALPHA
+                rft_prob = (rft_qsize / total_qsize) ** ALPHA
+                grpo_prob = (grpo_qsize / total_qsize) ** ALPHA
 
-            if random.random() < grpo_prob:
-                grpo_item = await client.dequeue(queue_name="trainer.grpo")
-                if grpo_item['prefix_tag'] != trainer_prefix_tag:
-                    logger.error(f"❌ [trainerMain] Skipping item with prefix: {grpo_item['prefix_tag']}")
-                    continue
-                grpo_block = TrainerGRPOBlock(**grpo_item)
-                logger.info(f"🧊 [trainerMain] Training GRPO block: {grpo_block.input_tag}")
-                # update config before running
-                base_config = TrainerConfig.from_yaml(base_config_file, override_yaml_path=grpo_config_file)
-                grpo_config = GRPOConfig.from_yaml(grpo_config_file)
-                grpo_trainer._update_config(base_config)
-                grpo_trainer._update_grpo_config(grpo_config)
-                logger.info(f"🔍 [trainerMain] Base config: {grpo_trainer.config.model_dump_json()}")
-                logger.info(f"🔍 [trainerMain] GRPO config: {grpo_trainer.grpo_config.model_dump_json()}")
-                # run in executor to avoid blocking the event loop
-                await loop.run_in_executor(None, grpo_train_block, grpo_block, grpo_trainer, rsync_queue.enqueue)
+                if random.random() < sft_prob:
+                    sft_item = await client.dequeue(queue_name=SFT_QUEUE_NAME)
+                    if sft_item['prefix_tag'] != trainer_prefix_tag:
+                        logger.error(f"❌ [trainerMain] Skipping item with prefix: {sft_item['prefix_tag']}")
+                        continue
+                    sft_block = TrainerSFTBlock(**sft_item)
+                    logger.info(f"🧊 [trainerMain] Training SFT block: {sft_block.input_tag}")
+                    # update config before running
+                    base_config = TrainerConfig.from_yaml(base_config_file, override_yaml_path=sft_config_file)
+                    sft_config = SFTConfig.from_yaml(sft_config_file)
+                    sft_trainer._update_config(base_config)
+                    sft_trainer._update_sft_config(sft_config)
+                    logger.info(f"🔍 [trainerMain] Base config: {sft_trainer.config.model_dump_json()}")
+                    logger.info(f"🔍 [trainerMain] SFT config: {sft_trainer.sft_config.model_dump_json()}")
+                    # run in executor to avoid blocking the event loop
+                    await loop.run_in_executor(None, sft_train_block, sft_block, sft_trainer, self.rsync_queue.enqueue)
 
-        except Exception as e:
-            logger.error(f"❌ [trainerMain] Error: [{type(e)}: {e}]")
-            traceback.print_exc()
-            await asyncio.sleep(5)
+                if random.random() < rft_prob:
+                    rft_item = await self.reg_client.dequeue(queue_name=RFT_QUEUE_NAME)
+                    if rft_item['prefix_tag'] != self.trainer_prefix_tag:
+                        logger.error(f"❌ [trainerMain] Skipping item with prefix: {rft_item['prefix_tag']}")
+                        continue
+                    rft_block = TrainerRFTBlock(**rft_item)
+                    logger.info(f"🧊 [trainerMain] Training RFT block: {rft_block.input_tag}")
+                    # update config before running
+                    base_config = TrainerConfig.from_yaml(base_config_file, override_yaml_path=rft_config_file)
+                    rft_config = RFTConfig.from_yaml(rft_config_file)
+                    rft_trainer._update_config(base_config)
+                    rft_trainer._update_rft_config(rft_config)
+                    logger.info(f"🔍 [trainerMain] Base config: {rft_trainer.config.model_dump_json()}")
+                    logger.info(f"🔍 [trainerMain] RFT config: {rft_trainer.rft_config.model_dump_json()}")
+                    # run in executor to avoid blocking the event loop
+                    await loop.run_in_executor(None, rft_train_block, rft_block, rft_trainer, self.rsync_queue.enqueue)
+
+                if random.random() < grpo_prob:
+                    grpo_item = await self.reg_client.dequeue(queue_name=GRPO_QUEUE_NAME)
+                    if grpo_item['prefix_tag'] != self.trainer_prefix_tag:
+                        logger.error(f"❌ [trainerMain] Skipping item with prefix: {grpo_item['prefix_tag']}")
+                        continue
+                    grpo_block = TrainerGRPOBlock(**grpo_item)
+                    logger.info(f"🧊 [trainerMain] Training GRPO block: {grpo_block.input_tag}")
+                    # update config before running
+                    base_config = TrainerConfig.from_yaml(base_config_file, override_yaml_path=grpo_config_file)
+                    grpo_config = GRPOConfig.from_yaml(grpo_config_file)
+                    grpo_trainer._update_config(base_config)
+                    grpo_trainer._update_grpo_config(grpo_config)
+                    logger.info(f"🔍 [trainerMain] Base config: {grpo_trainer.config.model_dump_json()}")
+                    logger.info(f"🔍 [trainerMain] GRPO config: {grpo_trainer.grpo_config.model_dump_json()}")
+                    # run in executor to avoid blocking the event loop
+                    await loop.run_in_executor(None, grpo_train_block, grpo_block, grpo_trainer, self.rsync_queue.enqueue)
+
+            except Exception as e:
+                logger.error(f"❌ [trainerMain] Error: [{type(e)}: {e}]")
+                traceback.print_exc()
+                await asyncio.sleep(5)
 
 async def main():
     parser = argparse.ArgumentParser(description="Train a model using mixed SFT and GRPO trainers")
@@ -261,12 +272,11 @@ async def main():
     else:
         trainer_prefix_tag = get_prefix_tag(args.prefix_tag)
         logger.info(f"🌀 [trainerMain] Starting with prefix: {trainer_prefix_tag}")
-
-        rsync_queue = RsyncQueue()
+        main_trainer = TrainerMain(trainer_prefix_tag)
 
         # create tasks: 1/ main loop, 2/ rsync_queue
-        rsync_task = asyncio.create_task(rsync_queue.rsync_task())
-        main_task = asyncio.create_task(main_loop_task(rsync_queue, trainer_prefix_tag, args.test_mode))
+        rsync_task = asyncio.create_task(main_trainer.rsync_queue.rsync_task())
+        main_task = asyncio.create_task(main_trainer.main_loop_task())
 
         # wait for the tasks to complete
         await asyncio.gather(rsync_task, main_task)

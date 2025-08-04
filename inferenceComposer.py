@@ -18,7 +18,7 @@ from transformers import AutoTokenizer
 from inferenceClient import InferenceClient, InferenceClientConfig, load_inference_client_config
 from logger import logger
 from kbEvalClient import KbEvalClient
-from globalUtils import ComposerBlock
+from globalUtils import ComposerBlock, MODEL_OVERRIDE_KEY
 from globalRegClient import GlobalRegClient
 from globalWorkflow import GlobalWorkflow
 from endpointUtil import Recorder, CodeExtractor, StatsClient
@@ -26,7 +26,6 @@ from endpointUtil import Recorder, CodeExtractor, StatsClient
 VALID_INPUT_PROCESSORS = [
     "duckdb",
 ]
-
 
 class ComposerClient:
     def __init__(
@@ -534,7 +533,7 @@ class ComposerClient:
         logger.info(f"🎯 [Composer] [{self.input_tag}] Worker [{worker_id:02d}] completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
 
 
-async def composer_block(block: ComposerBlock):
+async def composer_block(block: ComposerBlock, use_global_registry: bool = False):
     """
     Run one batch of code generation and evaluation.
     """
@@ -572,6 +571,10 @@ async def composer_block(block: ComposerBlock):
         # wait for the queue workers to complete
         await asyncio.gather(*queue_workers)
 
+        if use_global_registry:
+            globalWorkflow = GlobalWorkflow(prefix_tag=block.prefix_tag)
+            await globalWorkflow.post_composer(block)
+
         logger.info(f"🎉 [Composer] [{block.input_tag}] Block completed")
 
     except Exception as e:
@@ -594,20 +597,41 @@ async def main():
     parser.add_argument("--num_samples", type=int, default=2)
     parser.add_argument("--num_generations", type=int, default=2)
     parser.add_argument("--num_turns_per_generation", type=int, default=4)
-    parser.add_argument("--use_global_queue", type=str, default=None)
+    parser.add_argument("--use_global_queue", type=str, default=None) # this is the task_name of the global queue
+    parser.add_argument("--proc_id", type=str, default=None)
     parser.add_argument("--module_file", type=str, default="inferenceComposer/codeGen.module.yaml")
     parser.add_argument("--prompt_file", type=str, default="inferenceComposer/codeGen.prompt.triton.yaml")
     parser.add_argument("--example_file", type=str, default="inferenceComposer/triton.example.yaml")
     args = parser.parse_args()
 
+    if args.proc_id is not None:
+        PROC_ID = args.proc_id
+    else:
+        PROC_ID = os.environ.get("PROC_ID", None)
+
     try:
         if args.use_global_queue:
+            task_type = "inference.composer" # hard code for inferenceComposer
+            task_name = args.use_global_queue # user configurable name
+            QUEUE_NAME = f"{task_type}:{task_name}"
             # get the global registry
             global_reg_client = GlobalRegClient()
             # get the critiqueBlock from the global registry
-            block_json = await global_reg_client.dequeue(f"inference.composer.{args.use_global_queue}")
+            block_json = await global_reg_client.dequeue(QUEUE_NAME)
             # convert the block_json to a ComposerBlock object
             block = ComposerBlock(**block_json)
+            # process the model override
+            model_override = await global_reg_client.get(f"{MODEL_OVERRIDE_KEY}")
+            if model_override:
+                logger.info(f"🔍 [Composer] [{block.prefix_tag}] Using model override: [{model_override}]")
+                block.model_override = model_override
+                # update model_override in the global registry
+                if PROC_ID is None:
+                    error_msg = f"❌ [Composer] [{block.prefix_tag}] Unable to get PROC_ID to update model_override [{model_override}]"
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
+                else:
+                    await global_reg_client.put(f"adapter.{QUEUE_NAME}.model_override.{PROC_ID}", model_override)
         else:
             block = ComposerBlock(
                 prefix_tag=args.prefix_tag,
@@ -632,7 +656,7 @@ async def main():
 
         if args.use_global_queue:
             globalWorkflow = GlobalWorkflow(prefix_tag=block.prefix_tag)
-            await globalWorkflow.post_critique(block)
+            await globalWorkflow.post_composer(args.use_global_queue, block)
 
     except Exception as e:
         logger.error(f"❌ [Composer] [{block.input_tag}] Error running block: [{e}]")
