@@ -21,43 +21,57 @@ module:
         epoch_id: "`block.epoch_id`"
         block_id: "`block.block_id`" 
         input_tag: "`block.input_tag`"
+        input_dir: "`block.input_dir`"
       query: |
-        SELECT filename as kb_filename, content as reference_code
-        FROM read_text(['kernel_bench/level1/*.py', 'kernel_bench/level2/*.py'])
-        ORDER BY random()
-        LIMIT {block.num_samples};
+        WITH j AS (
+          SELECT
+            filename AS kb_filename,
+            regexp_replace(filename, '[/\\\\][^/\\\\]+$', '') AS dirpath,
+            messages,
+            metadata
+          FROM read_json_auto(
+            '{input_dir}/{input_tag}/**/*_conversation.json',
+            sample_size=-1, ignore_errors=true, filename=true
+          )
+        ),
+        t as (
+          SELECT
+            filename AS reference_code_filename,
+            regexp_replace(filename, '[/\\\\][^/\\\\]+$', '') AS dirpath,
+            content as reference_code
+          FROM read_text('{input_dir}/{input_tag}/**/reference_code.py')
+        )
+        SELECT j.*, t.reference_code
+        FROM j
+        JOIN t
+        USING (dirpath)
+        ;
       enqueue:
         # built-in context like `row` has already been set
         # here we add addotional context variables for easier access by the program
         context_vars:
-          run_tag: "`f'{block.prefix_tag}_{block.epoch_id:03d}_{block.block_id:02d}' if block.epoch_id >= 0 and block.block_id >= 0 else f'{block.prefix_tag}_{__start_time__}'`" # run_tag is the prefix tag + epoch id + block id
-          task_tag: "`'_'.join('_'.join(row.kb_filename.split('/')[-2:]).split('_')[:5])`" # task_tag joins the level and filename, and returns the first 5 parts
+          run_tag: "`input_tag`" # run_tag is the prefix tag + epoch id + block id
+          task_tag: "`row.kb_filename.split('/')[-2]`" # task_tag is the 2nd last part of the filename
+          turn_tag: "`'_'.join(row.kb_filename.split('/')[-1].split('_')[:3])`" # turn_tag is the first 3 parts of the filename
         items:
-          - __repeat_count__: "`block.num_generations`"
-            worker: "codeGenEval.custom"
+          - worker: "codeGenEval.exemplar"
             prefix_tag: "`prefix_tag`"
             run_tag: "`run_tag`"
             model_tag: "`model_tag`"
             task_tag: "`task_tag`"
-            gen_tag: "`f'gen_{__repeat_idx__:02d}'`" # gen_tag is the generation tag
+            turn_tag: "`turn_tag`" # turn_tag is the turn tag
+            messages: "`list(row.messages)`"
             reference_code: "`row.reference_code`" # reference code
             code_type: "`self.get_prompt_code_type(__context__)`"
             output_dir: "`os.path.expanduser(block.output_dir)`" # output_dir is the output directory
-            num_turns_per_generation: "`block.num_turns_per_generation`" # number of turns per generation
   
   # queue worker reads from the queue and executes the worker
   queue_worker:
     # codeGenEval worker
-    codeGenEval.custom:
+    codeGenEval.exemplar:
       filter: "`True`" # you can specify a filter criteria here
-      __loop_count__: "`num_turns_per_generation`"
       context_vars:
         record_folder: "`f'{output_dir}/{run_tag}/{model_tag}/{task_tag}'`"
-        logprobs: true
-        generated_code: null
-        generated_eval: null
-        conversation: null
-        completion: null
       steps:
         - endpoint: statsClient.wait_for_stats
           inputs:
@@ -71,71 +85,48 @@ module:
               reference_eval_path: "`f'{stats_dir}/{prefix_tag}/{task_tag}/reference.jsonl'`"
             logging:
               method: "log_kb_eval_ref"
-        - endpoint: inferenceClient.completion
+        - endpoint: inferenceClient.chat_completion
           context_vars:
-            turn_tag: "`f'{gen_tag}_t{__loop_idx__:02d}'`" # turn_tag is gen_01_t03
             metadata:
               "run_tag": "`run_tag`"
               "model_tag": "`model_tag`"
               "task_tag": "`task_tag`"
-              "gen_tag": "`gen_tag`"
               "turn_tag": "`turn_tag`"
               "code_type": "`code_type`"
-            messages: |
-              `[
-                {"role": "system", "content": self.get_system_prompt(__context__)}, 
-                {"role": "user", "content": self.get_user_prompt(__context__)}
-              ] if conversation is None else conversation['messages'] + [
-                {"role": "user", "content": self.get_user_prompt(__context__)}
-              ]
-              `
-            prompt: |
-              `self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False,
-              )`
+            shortened_messages: "`input['messages'][:-1]`"
           inputs:
-            prompt: "`prompt`"
+            messages: "`shortened_messages`"
             max_tokens: "`max_tokens`"
-            logprobs: "`logprobs`"
+            logprobs: "`False`"
           returns:
-            error_if: "`__result__ is None`"
+            error_if: "`__result__ is None or 'content' not in __result__`"
             context_vars:
+              completion: "`__result__['content']`"
+              num_completion_tokens: "`__result__['usage']['completion_tokens'] if 'usage' in __result__ and 'completion_tokens' in __result__['usage'] else 0`"
               metadata: |
                 `metadata | {
-                  "num_completion_tokens": len(__result__['logprobs']),
+                  "num_completion_tokens": num_completion_tokens,
                   "completion_time_seconds": __endpoint_time__,
-                  "token_per_second": len(__result__['logprobs']) / __endpoint_time__,
+                  "token_per_second": num_completion_tokens / __endpoint_time__,
                 }
                 `
-              messages: |
-                `messages + [
-                  {"role": "assistant", "content": __result__['content']}
+              new_messages: |
+                `shortened_messages + [
+                  {"role": "assistant", "content": completion}
                 ]`
-              completion:
-                "prompt": "`prompt`"
-                "completion": "`__result__['content']`"
-                "logprobs": "`__result__['logprobs']`"
-                "metadata": "`metadata`"
               conversation:
-                messages: "`messages`"
+                messages: "`new_messages`"
                 metadata: "`metadata`"
               conversation_path: "`f'{record_folder}/{turn_tag}_conversation.json'`"
-              completion_path: "`f'{record_folder}/{turn_tag}_completion.json'`"
             save_to:
               - path: "`conversation_path`"
                 data: "`conversation`"
                 format: "json"
-              - path: "`completion_path`"
-                data: "`completion`"
-                format: "json"
             logging:
-              method: "log_completion"
+              method: "log_chat_completion"
         - endpoint: codeExtractor.extract_code
           inputs:
-            completion: "`completion['completion']`"
+            completion: "`completion`"
           returns:
             context_vars:
               generated_code: "`__result__`"

@@ -56,6 +56,7 @@ inference.composer:
       #   parallel_tasks: 24
       #   template: triton.1
       #   input_dir: ~/.codeGenEval
+      #   output_dir: ~/.exemplar
       - type: trainer.grpo
         name: grpo.1
         prefix_tag: "{prefix_tag}"
@@ -70,6 +71,29 @@ inference.composer:
         block_id: "{block_id}"
         input_tag: "{run_tag}"
         input_dir: ~/.codeGenEval
+
+  exemplar.1:
+    default:
+      input_dir: ~/.inference/composer/input
+      output_dir: ~/.inference/composer/output
+      module_file: inferenceComposer/exemplar.module.yaml
+      prompt_file: inferenceComposer/codeGen.prompt.triton.yaml
+      example_file: inferenceComposer/triton.example.yaml
+      provider_name: fireworks
+      model_name: deepseek-v3
+      num_generations: 4
+      parallel_tasks: 24
+      logprobs: false
+      model_override: null
+
+    post_tasks:
+      - type: trainer.sft
+        name: sft.1
+        prefix_tag: "{prefix_tag}"
+        epoch_id: "{epoch_id}"
+        block_id: "{block_id}"
+        input_tag: "{run_tag}"
+        input_dir: ~/.exemplar
 
 trainer.sft:
   sft.1:

@@ -125,7 +125,7 @@ class ComposerClient:
                     # if the value is a python expression, evaluate it via python eval
                     return eval(stripped_value[1:-1], context_vars)
                 except Exception as e:
-                    logger.error(f"❌ [Composer] [{self.input_tag}] Error evaluating variable: [{stripped_value}] [{type(e)}: {e}]")
+                    logger.error(f"❌ [Composer] [{self.input_tag}] Error evaluating variable: [{type(e)}: {e}]\n{stripped_value} ")
                     raise e
             else:
                 # if the value is a string, format it with the format
@@ -507,7 +507,7 @@ class ComposerClient:
 
                         except Exception as e:
                             # assume each step depend on each other, always break the steps if current step fails
-                            logger.error(f"🔴 [Composer] [{self.input_tag}] Error processing returns: {step_config} [{type(e)}: {e}]")
+                            logger.error(f"🔴 [Composer] [{self.input_tag}] Error processing returns: [step_config={step_config}] [{type(e)}: {e}]")
                             logger.error(traceback.format_exc())
                             error_encountered = True
                             break
@@ -584,14 +584,14 @@ async def composer_block(block: ComposerBlock, use_global_registry: bool = False
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prefix_tag", type=str, default="test")
+    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.h")
     parser.add_argument("--epoch_id", type=int, default=-1)
     parser.add_argument("--block_id", type=int, default=-1)
-    parser.add_argument("--input_tag", type=str, default="test")
+    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B.h_001_01")
     parser.add_argument("--input_dir", type=str, default="~/.codeGenEval", help="Input directory containing Python files")
     parser.add_argument("--output_dir", type=str, default="~/.inference/composer", help="Output directory for the composer results")
-    parser.add_argument("--provider", type=str, default="local")  # most cost effective models are deepinfra-r1 and fireworks-v3
-    parser.add_argument("--model", type=str, default="qwen3-14b")  # most cost effective models are deepinfra-r1 and fireworks-v3
+    parser.add_argument("--provider", type=str, default="fireworks")  # most cost effective models are deepinfra-r1 and fireworks-v3
+    parser.add_argument("--model", type=str, default="deepseek-v3")  # most cost effective models are deepinfra-r1 and fireworks-v3
     parser.add_argument("--model_override", type=str, default=None)
     parser.add_argument("--parallel_workers", type=int, default=1)
     parser.add_argument("--num_samples", type=int, default=2)
@@ -599,7 +599,7 @@ async def main():
     parser.add_argument("--num_turns_per_generation", type=int, default=4)
     parser.add_argument("--use_global_queue", type=str, default=None) # this is the task_name of the global queue
     parser.add_argument("--proc_id", type=str, default=None)
-    parser.add_argument("--module_file", type=str, default="inferenceComposer/codeGen.module.yaml")
+    parser.add_argument("--module_file", type=str, default="inferenceComposer/exemplar.module.yaml")
     parser.add_argument("--prompt_file", type=str, default="inferenceComposer/codeGen.prompt.triton.yaml")
     parser.add_argument("--example_file", type=str, default="inferenceComposer/triton.example.yaml")
     args = parser.parse_args()
