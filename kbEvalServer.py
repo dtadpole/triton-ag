@@ -403,7 +403,7 @@ async def kb_eval(
             "health/completion": 0,
             "metrics/compiled": 1 if result.compiled else 0,
             "metrics/correctness": 1 if result.correctness else 0,
-            "metrics/runtime": result.runtime, # seconds
+            "metrics/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
             "metrics/elapsed_time": time.time() - start_time, # seconds
             f"{task_tag}/healthiness": 0,
             f"{task_tag}/compiled": 1 if result.compiled else 0,
