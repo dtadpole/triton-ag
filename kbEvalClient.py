@@ -218,8 +218,8 @@ async def main():
     parser.add_argument("--task_tag", type=str, default="task_tag")
     parser.add_argument("--eval_tag", type=str, default="eval_tag")
     parser.add_argument("--reference_code", type=str, default="elemAddRef.py")
-    parser.add_argument("--generated_code", type=str, default="elemAddCuda.py")
-    parser.add_argument("--code_type", type=str, default="cuda")
+    parser.add_argument("--generated_code", type=str, default="elemAddTriton.py")
+    parser.add_argument("--code_type", type=str, default="triton")
     parser.add_argument("--measure_reference", action="store_true")
     args = parser.parse_args()
 
@@ -231,10 +231,10 @@ async def main():
 
     if args.measure_reference:
         result = await client.kb_eval_ref(run_tag=args.run_tag, model_tag=args.model_tag, task_tag=args.task_tag, reference_code=reference_model_src)
-        logger.info(f"🔍 [kbEvalClient] [{args.run_tag}] [{args.model_tag}] [{args.task_tag}] Reference code evaluation result: {json.dumps(result.model_dump() if result else None, indent=4)}")
+        logger.info(f"🔍 [kbEvalClient] [{args.run_tag}] [{args.model_tag}] [{args.task_tag}] Reference code evaluation result: {json.dumps(result if result else None, indent=4)}")
     else:
         result = await client.kb_eval(run_tag=args.run_tag, model_tag=args.model_tag, task_tag=args.task_tag, eval_tag=args.eval_tag, reference_code=reference_model_src, generated_code=generated_model_src, code_type=args.code_type)
-        logger.info(f"🔍 [kbEvalClient] [{args.run_tag}] [{args.model_tag}] [{args.task_tag}] [{args.eval_tag}] Generated code evaluation result: {json.dumps(result.model_dump() if result else None, indent=4)}")
+        logger.info(f"🔍 [kbEvalClient] [{args.run_tag}] [{args.model_tag}] [{args.task_tag}] [{args.eval_tag}] Generated code evaluation result: {json.dumps(result if result else None, indent=4)}")
 
 if __name__ == "__main__":
     asyncio.run(main())
