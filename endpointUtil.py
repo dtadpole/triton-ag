@@ -120,7 +120,7 @@ class StatsClient:
             file_path = os.path.join(
                 self.stats_dir,
                 prefix_tag,
-                f"task_tag={task_tag}",
+                f"{task_tag}",
                 f"{category}.jsonl"
             )
         else:
@@ -128,8 +128,8 @@ class StatsClient:
             file_path = os.path.join(
                 self.stats_dir,
                 prefix_tag,
-                f"model_tag={model_tag}",
-                f"task_tag={task_tag}",
+                f"{model_tag}",
+                f"{task_tag}",
                 f"{category}.jsonl"
             )
         dirname = os.path.dirname(file_path)
@@ -162,7 +162,7 @@ class StatsClient:
             file_path = os.path.join(
                 self.stats_dir,
                 prefix_tag,
-                f"task_tag={task_tag}",
+                f"{task_tag}",
                 f"{category}.jsonl"
             )
         else:
@@ -170,8 +170,8 @@ class StatsClient:
             file_path = os.path.join(
                 self.stats_dir,
                 prefix_tag,
-                f"model_tag={model_tag}",
-                f"task_tag={task_tag}",
+                f"{model_tag}",
+                f"{task_tag}",
                 f"{category}.jsonl"
             )
         # wait until the file exists
