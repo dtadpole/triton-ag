@@ -259,7 +259,7 @@ async def kb_eval_ref(
         return result
 
     except Exception as e:
-        global TOTAL_ERROR_COUNTER
+        # global TOTAL_ERROR_COUNTER
         TOTAL_ERROR_COUNTER += 1
         logger.error(f"❌ [KB Eval] [reference] error: {type(e).__name__}: {str(e)}")
         result = KernelExecResult(
@@ -400,7 +400,7 @@ async def kb_eval(
         return result
 
     except Exception as e:
-        global TOTAL_ERROR_COUNTER
+        # global TOTAL_ERROR_COUNTER
         TOTAL_ERROR_COUNTER += 1
         logger.error(f"❌ [KB Eval] [{eval_tag}] error: {type(e).__name__}: {str(e)}")
         result = KernelExecResult(
