@@ -16,6 +16,9 @@ fastapi = global_utils.fastapi
 QUEUE_PREFIX = "queue."
 ADAPTER_PREFIX = "adapter."
 
+TRAINER_DIR = "~/.trainer"
+PREFIX_TAG = "auto"
+
 # create a singleton class to store global variables
 class GlobalRegistry:
     _instance = None # class variable to store the instance

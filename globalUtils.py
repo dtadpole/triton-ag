@@ -118,14 +118,18 @@ def get_prefix_tag(prefix_tag:str="auto", config_path:str="globalWorkflow.yaml")
     if prefix_tag == "auto":
         with open(config_path, "r") as f:
             yaml_data = yaml.safe_load(f)
-        return yaml_data.get("global", {}).get("prefix_tag", f"auto_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        loaded_prefix_tag = yaml_data.get("global", {}).get("prefix_tag", f"auto_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        # write to config_path
+        return loaded_prefix_tag
     else:
         return prefix_tag
 
 def get_global_registry_dir(prefix_tag:str="auto", trainer_dir:str="~/.trainer"):
+    prefix_tag = get_prefix_tag(prefix_tag)
     return os.path.join(os.path.expanduser(trainer_dir), prefix_tag, REG_DIR)
 
 def get_global_registry_port(prefix_tag:str="auto", trainer_dir:str="~/.trainer"):
+    prefix_tag = get_prefix_tag(prefix_tag)
     port_file = os.path.join(get_global_registry_dir(prefix_tag, trainer_dir), REG_PORT_FILE)
     if os.path.exists(port_file):
         with open(port_file, "r") as f:
