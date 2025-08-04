@@ -1,5 +1,8 @@
 import argparse
 import asyncio
+import wandb
+import datetime
+import re
 import signal
 import concurrent.futures
 import json
@@ -56,6 +59,21 @@ def verify_token(authorization: str = Header(None)):
 
     return True
 
+wandb_loggers = {} # {prefix_tag: wandb.Run}
+def _setup_wandb_logging(prefix_tag: str="test"):
+    """Setup logging and tracking"""
+    if prefix_tag in wandb_loggers:
+        return wandb_loggers[prefix_tag]
+    
+    wandb_run = wandb.init(
+        project="kb_eval",
+        id=f"{prefix_tag}",
+        name=f"{prefix_tag}-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+        resume="allow",
+    )
+    wandb_loggers[prefix_tag] = wandb_run
+    logger.info(f"📊 W&B logging enabled for [{prefix_tag}]")
+    return wandb_run
 
 async def get_with_timeout(queue, timeout):
     try:
@@ -158,6 +176,10 @@ async def kb_eval_ref(
         async with request_counter_lock:
             request_counter += 1
 
+        # get prefix_tag from run_tag by removing regex pattern [_ddd_dd] (ddd is 3 digits, dd is 2 digits) at the end if exists
+        prefix_tag = re.sub(r"_\d{3}_\d{2}$", "", run_tag)
+        wandb_run = _setup_wandb_logging(prefix_tag)
+
         start_time = time.time()
 
         # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}/{eval_tag}/{time_tag}
@@ -219,6 +241,15 @@ async def kb_eval_ref(
 
         result = KernelExecResult.model_validate(result_json)
 
+        metrics = {
+            f"{task_tag}/healthiness": 1,
+            f"{task_tag}/compiled": 1 if result.compiled else 0,
+            f"{task_tag}/correctness": 1 if result.correctness else 0,
+            f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
+            f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
+        }
+        wandb_run.log(metrics)
+
         return result
 
     except Exception as e:
@@ -234,6 +265,14 @@ async def kb_eval_ref(
             },
             runtime=-1.0,
         )
+        metrics = {
+            f"{task_tag}/healthiness": 0,
+            f"{task_tag}/compiled": 1 if result.compiled else 0,
+            f"{task_tag}/correctness": 1 if result.correctness else 0,
+            f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
+            f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
+        }
+        wandb_run.log(metrics)
         return result
 
     finally:
@@ -263,6 +302,10 @@ async def kb_eval(
     try:
         async with request_counter_lock:
             request_counter += 1
+
+        # get prefix_tag from run_tag by removing regex pattern [_ddd_dd] (ddd is 3 digits, dd is 2 digits) at the end if exists
+        prefix_tag = re.sub(r"_\d{3}_\d{2}$", "", run_tag)
+        wandb_run = _setup_wandb_logging(prefix_tag)
 
         start_time = time.time()
 
@@ -326,6 +369,20 @@ async def kb_eval(
 
         result = KernelExecResult.model_validate(result_json)
 
+        metrics = {
+            "health/completion": 1,
+            "metrics/compiled": 1 if result.compiled else 0,
+            "metrics/correctness": 1 if result.correctness else 0,
+            "metrics/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
+            "metrics/elapsed_time": time.time() - start_time, # seconds
+            f"{task_tag}/healthiness": 1,
+            f"{task_tag}/compiled": 1 if result.compiled else 0,
+            f"{task_tag}/correctness": 1 if result.correctness else 0,
+            f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
+            f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
+        }
+        wandb_run.log(metrics)
+
         return result
 
     except Exception as e:
@@ -341,6 +398,21 @@ async def kb_eval(
             },
             runtime=-1.0,
         )
+
+        metrics = {
+            "health/completion": 0,
+            "metrics/compiled": 1 if result.compiled else 0,
+            "metrics/correctness": 1 if result.correctness else 0,
+            "metrics/runtime": result.runtime, # seconds
+            "metrics/elapsed_time": time.time() - start_time, # seconds
+            f"{task_tag}/healthiness": 0,
+            f"{task_tag}/compiled": 1 if result.compiled else 0,
+            f"{task_tag}/correctness": 1 if result.correctness else 0,
+            f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
+            f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
+        }
+        wandb_run.log(metrics)
+
         return result
 
     finally:
