@@ -16,7 +16,7 @@ import signal
 import argparse
 from collections import defaultdict
 
-MAX_LOCK_AGE = 30 # seconds
+MAX_LOCK_AGE = 15 # seconds
 
 def on_critical_alarm(signum, frame):
     # logger.error(f"⏰ Critical timeout reached [{signum}] [{frame.f_code.co_name}], exiting.")

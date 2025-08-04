@@ -229,8 +229,8 @@ async def kb_eval_ref(
             compiled=False,
             correctness=False,
             metadata={
-                "processing_error": f"[kb_eval_ref] Cannot generate the result file in time. Unexpected error: {type(e).__name__}: {str(e)}",
-                "retriable": True, # if the error is retriable, the client will retry the request
+                "processing_error": f"[kb_eval_ref] Cannot generate the evaluation result in time. Unexpected error: {type(e).__name__}: {str(e)}",
+                "retriable": "maybe", # if the error is retriable, the client will retry the request
             },
             runtime=-1.0,
         )
@@ -336,7 +336,7 @@ async def kb_eval(
             compiled=False,
             correctness=False,
             metadata={
-                "processing_error": f"[kb_eval] Cannot generate the result file in time. Unexpected error: {type(e).__name__}: {str(e)}",
+                "processing_error": f"[kb_eval] Cannot generate the evaluation result in time. Unexpected error: {type(e).__name__}: {str(e)}",
                 "retriable": True, # if the error is retriable, the client will retry the request
             },
             runtime=-1.0,
