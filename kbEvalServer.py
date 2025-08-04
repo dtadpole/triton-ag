@@ -61,19 +61,20 @@ def verify_token(authorization: str = Header(None)):
     return True
 
 wandb_loggers = {} # {prefix_tag: wandb.Run}
-def _setup_wandb_logging(prefix_tag: str="test"):
+def _setup_wandb_logging(prefix_tag: str="test", model_tag: str="local_qwen3-14b"):
     """Setup logging and tracking"""
-    if prefix_tag in wandb_loggers:
-        return wandb_loggers[prefix_tag]
+    key = f"{prefix_tag}_{model_tag}"
+    if key in wandb_loggers:
+        return wandb_loggers[key]
     
     wandb_run = wandb.init(
-        project="kb_eval",
-        id=f"{prefix_tag}",
-        name=f"{prefix_tag}-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+        project=f"kb_eval_{prefix_tag}",
+        id=f"{model_tag}",
+        name=f"{model_tag}-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
         resume="allow",
     )
-    wandb_loggers[prefix_tag] = wandb_run
-    logger.info(f"📊 W&B logging enabled for [{prefix_tag}]")
+    wandb_loggers[key] = wandb_run
+    logger.info(f"📊 W&B logging enabled for [{key}]")
     return wandb_run
 
 async def get_with_timeout(queue, timeout):
@@ -180,7 +181,7 @@ async def kb_eval_ref(
 
         # get prefix_tag from run_tag by removing regex pattern [_ddd_dd] (ddd is 3 digits, dd is 2 digits) at the end if exists
         prefix_tag = re.sub(r"_\d{3}_\d{2}$", "", run_tag)
-        wandb_run = _setup_wandb_logging(prefix_tag)
+        wandb_run = _setup_wandb_logging(prefix_tag, model_tag)
 
         start_time = time.time()
 
@@ -316,7 +317,7 @@ async def kb_eval(
 
         # get prefix_tag from run_tag by removing regex pattern [_ddd_dd] (ddd is 3 digits, dd is 2 digits) at the end if exists
         prefix_tag = re.sub(r"_\d{3}_\d{2}$", "", run_tag)
-        wandb_run = _setup_wandb_logging(prefix_tag)
+        wandb_run = _setup_wandb_logging(prefix_tag, model_tag)
 
         start_time = time.time()
 
