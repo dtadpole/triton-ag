@@ -218,8 +218,8 @@ async def main():
     parser.add_argument("--task_tag", type=str, default="task_tag")
     parser.add_argument("--eval_tag", type=str, default="eval_tag")
     parser.add_argument("--reference_code", type=str, default="elemAddRef.py")
-    parser.add_argument("--generated_code", type=str, default="elemAddCuda.py")
-    parser.add_argument("--code_type", type=str, default="cuda")
+    parser.add_argument("--generated_code", type=str, default="elemAddTriton.py")
+    parser.add_argument("--code_type", type=str, default="triton")
     parser.add_argument("--measure_reference", action="store_true")
     args = parser.parse_args()
 
