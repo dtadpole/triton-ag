@@ -1,6 +1,12 @@
+import os
+import yaml
 from fastapi import FastAPI
+from datetime import datetime
 from pydantic import BaseModel, Field
 from typing import Optional
+
+REG_PORT_FILE = ".reg.port"
+REG_DIR = ".reg"
 
 MODEL_OVERRIDE_KEY = "adapter.codeGenEval.model_override"
 
@@ -107,6 +113,25 @@ class ComposerBlock(BaseModel):
     input_dir: str = Field(default="~/.inference/composer")
     output_dir: str = Field(default="~/.inference/composer")
     test_mode: bool = Field(default=False)
+
+def get_prefix_tag(prefix_tag:str="auto", config_path:str="globalWorkflow.yaml"):
+    if prefix_tag == "auto":
+        with open(config_path, "r") as f:
+            yaml_data = yaml.safe_load(f)
+        return yaml_data.get("global", {}).get("prefix_tag", f"auto_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    else:
+        return prefix_tag
+
+def get_global_registry_dir(prefix_tag:str="auto", trainer_dir:str="~/.trainer"):
+    return os.path.join(os.path.expanduser(trainer_dir), prefix_tag, REG_DIR)
+
+def get_global_registry_port(prefix_tag:str="auto", trainer_dir:str="~/.trainer"):
+    port_file = os.path.join(get_global_registry_dir(prefix_tag, trainer_dir), REG_PORT_FILE)
+    if os.path.exists(port_file):
+        with open(port_file, "r") as f:
+            return int(f.read())
+    else:
+        return None
 
 class GlobalUtils:
     _instance = None # class variable to store the instance

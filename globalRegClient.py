@@ -3,13 +3,14 @@ import asyncio
 import httpx
 from typing import Any, Dict, Optional
 from logger import logger
+from globalUtils import get_global_registry_port
 
 
 class GlobalRegClient:
-    def __init__(self, host: str = "localhost", port: int = 8084):
+    def __init__(self, prefix_tag: str = "auto", trainer_dir: str = "~/.trainer"):
         self.config = self._load_config().get("client", {})
         self.host = self.config.get("host", "localhost")
-        self.port = self.config.get("port", 8084)
+        self.port = get_global_registry_port(prefix_tag, trainer_dir)
         self.base_url = f"http://{self.host}:{self.port}"
         self.retries = self.config.get("retries", 5)
         self.timeout = self.config.get("timeout", 300)

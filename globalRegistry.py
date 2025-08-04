@@ -1,4 +1,5 @@
 import os
+import socket
 import json
 import yaml
 import time
@@ -7,16 +8,13 @@ import uvicorn
 from typing import Any, Dict, Optional, Annotated
 from fastapi import FastAPI, HTTPException, Body, Query
 from loguru import logger
-from globalUtils import GlobalUtils
+from globalUtils import GlobalUtils, get_prefix_tag, get_global_registry_dir, REG_PORT_FILE
 
 global_utils = GlobalUtils()
 fastapi = global_utils.fastapi
 
-GLOBAL_REGISTRY_DIR = "globalRegistry"
-
 QUEUE_PREFIX = "queue."
 ADAPTER_PREFIX = "adapter."
-
 
 # create a singleton class to store global variables
 class GlobalRegistry:
@@ -34,6 +32,9 @@ class GlobalRegistry:
         # actually initialize the instance if we add a flag.
         if not hasattr(self, '_initialized'):
             self._initialized = True
+            self.global_registry_dir = get_global_registry_dir()
+            logger.info(f"🗂️ [GlobalRegistry] Global registry directory: [{self.global_registry_dir}]")
+            os.makedirs(self.global_registry_dir, exist_ok=True)
             self.config = self._load_config()
             self.registry = {}  # registry of global variables, or object registry ==> {key: value}
             self.tasks = {}  # registry of tasks, or task registry ==> {task_name: task_coroutine}
@@ -61,8 +62,8 @@ class GlobalRegistry:
         Load the adapters from the config
         """
         try:
-            if os.path.exists(f"{GLOBAL_REGISTRY_DIR}/adapters.json"):
-                with open(f"{GLOBAL_REGISTRY_DIR}/adapters.json", "r") as f:
+            if os.path.exists(f"{self.global_registry_dir}/adapters.json"):
+                with open(f"{self.global_registry_dir}/adapters.json", "r") as f:
                     adapters = json.load(f)
             else:
                 adapters = {}
@@ -83,14 +84,14 @@ class GlobalRegistry:
             queue_storage = {}
             try:
                 # if globalRegistry/queues.json exists, load it
-                queue_filename = f"{GLOBAL_REGISTRY_DIR}/queues.json"
+                queue_filename = f"{self.global_registry_dir}/queues.json"
                 if os.path.exists(queue_filename):
                     with open(queue_filename, "r") as f:
                         queue_storage = json.load(f) # queue_storage is a dictionary of queue names and their items
             except Exception as e:
                 # load from globalRegistry/queues.yaml.bak
-                if os.path.exists(f"{GLOBAL_REGISTRY_DIR}/queues.json.bak"):
-                    with open(f"{GLOBAL_REGISTRY_DIR}/queues.json.bak", "r") as f:
+                if os.path.exists(f"{self.global_registry_dir}/queues.json.bak"):
+                    with open(f"{self.global_registry_dir}/queues.json.bak", "r") as f:
                         queue_storage = json.load(f)
             # load the queues from the config
             queues = self.config.get("queues", [])
@@ -115,9 +116,9 @@ class GlobalRegistry:
                 interval = self.config.get("_save_adapter_task", {}).get("interval", 10)
                 adapters = {}
                 # if folder globalRegistry does not exist, create it
-                if not os.path.exists(GLOBAL_REGISTRY_DIR):
-                    os.makedirs(GLOBAL_REGISTRY_DIR)
-                adapter_filename = f"{GLOBAL_REGISTRY_DIR}/adapters.json"
+                if not os.path.exists(self.global_registry_dir):
+                    os.makedirs(self.global_registry_dir)
+                adapter_filename = f"{self.global_registry_dir}/adapters.json"
                 # if globalRegistry/adapters.json exists, move it to globalRegistry/adapters.json.bak
                 if os.path.exists(adapter_filename):
                     os.rename(adapter_filename, f"{adapter_filename}.bak")
@@ -143,10 +144,10 @@ class GlobalRegistry:
                 interval = self.config.get("_save_queue_task", {}).get("interval", 10)
                 queue_storage = {}
                 # if folder globalRegistry does not exist, create it
-                if not os.path.exists(GLOBAL_REGISTRY_DIR):
-                    os.makedirs(GLOBAL_REGISTRY_DIR)
+                if not os.path.exists(self.global_registry_dir):
+                    os.makedirs(self.global_registry_dir)
                 # if globalRegistry/queues.json exists, move it to globalRegistry/queues.json.bak
-                queue_filename = f"{GLOBAL_REGISTRY_DIR}/queues.json"
+                queue_filename = f"{self.global_registry_dir}/queues.json"
                 if os.path.exists(queue_filename):
                     os.rename(queue_filename, f"{queue_filename}.bak")
                 queues = self.config.get("queues", [])
@@ -293,16 +294,23 @@ class GlobalRegistry:
         """
         return os.getcwd()
 
-    
     async def run(self):
         """
         Run the server and refresh the config in parallel
         """
         try:
+            # get the port from the config
             host = self.config.get("fastapi", {}).get("host", "0.0.0.0")
-            port = self.config.get("fastapi", {}).get("port", 8000)
-            server = uvicorn.Server(uvicorn.Config(self.get("reg.fastapi"), host=host, port=port))
-            logger.info(f"Configuring fastapi server at [{host}:{port}]")
+            port = self.config.get("fastapi", {}).get("port", 0)
+            s = socket.socket(); s.bind((host, port)); s.listen(2048)
+            listen_host, listen_port = s.getsockname()
+            server = uvicorn.Server(uvicorn.Config(self.get("reg.fastapi"), fd=s.fileno()))
+            logger.info(f"FastAPI server listening on: [{listen_host}:{listen_port}]")
+
+            # write port number to {self.global_registry_dir}/{REG_PORT_FILE}
+            port_file = os.path.join(self.global_registry_dir, REG_PORT_FILE)
+            with open(port_file, "w") as f:
+                f.write(str(listen_port))
 
             # create a task to run the server
             self.put_task("reg.fastapi", server.serve())
@@ -388,6 +396,15 @@ async def qsize(queue_name: str):
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--trainer_dir", type=str, default="~/.trainer")
+    parser.add_argument("--prefix_tag", type=str, default="auto")
+    args = parser.parse_args()
+
+    TRAINER_DIR = args.trainer_dir
+    PREFIX_TAG = get_prefix_tag(args.prefix_tag)
+
     # initialize the global registry singleton
     reg = GlobalRegistry()
     # add repl server to the fastapi app, and initialize/reset the repl namespace
