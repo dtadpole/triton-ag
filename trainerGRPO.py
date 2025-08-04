@@ -398,45 +398,50 @@ def grpo_train_block(block: TrainerGRPOBlock, trainer: GRPOTrainer, callback: Op
         # read in all the gen_xx_completion.json files in the same folder (non-recursive)
         completion_files = [f for f in os.listdir(folder) if f.startswith('gen_') and f.endswith('_completion.json')]
         for completion_file in completion_files:
-            with open(os.path.join(folder, completion_file), 'r') as f:
-                completion_data = json.load(f)
-            turn_tag = completion_file.replace('_completion.json', '')
-            turn_id = int(turn_tag.split('_')[-1][1:]) # turn_id is the last number in the turn_tag, e.g. gen_01_t03 -> 3
-            # read corresponding gen_xx_eval.json
-            eval_file = completion_file.replace('_completion.json', '_generated_eval.json')
-            if not os.path.exists(os.path.join(folder, eval_file)):
-                logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] No eval file found for [{completion_file}]")
+            try:
+                with open(os.path.join(folder, completion_file), 'r') as f:
+                    completion_data = json.load(f)
+                turn_tag = completion_file.replace('_completion.json', '')
+                turn_id = int(turn_tag.split('_')[-1][1:]) # turn_id is the last number in the turn_tag, e.g. gen_01_t03 -> 3
+                # read corresponding gen_xx_eval.json
+                eval_file = completion_file.replace('_completion.json', '_generated_eval.json')
+                if not os.path.exists(os.path.join(folder, eval_file)):
+                    logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] No eval file found for [{completion_file}]")
+                    continue
+                with open(os.path.join(folder, eval_file), 'r') as f:
+                    eval_data = json.load(f)
+                # ok, now compile all the information together
+                # compiled = eval_data['compiled']
+                correctness = eval_data['correctness']
+                runtime = eval_data['runtime']
+                # reward_compiled = 0.1 if compiled else 0.0 # use a small compiled reward for reward shaping
+                reward_correctness = 0.3 if correctness else 0.0
+                reward_speedup = 0.0 if runtime < 0 else ref_runtime / runtime
+                reward = reward_correctness + reward_speedup
+                # create a generation result group
+                prompt = completion_data['prompt']
+                prompt_token_ids = trainer.tokenizer.encode(prompt)
+                # split completion_data['logprobs'] into a list of completion ids and logprobs
+                completion_token_ids = [logprob['token_id'] for logprob in completion_data['logprobs']]
+                completion_log_probs = [logprob['logprob'] for logprob in completion_data['logprobs']]
+                # create the generation result object
+                result = GenerationResult(
+                    turn_tag=turn_tag,
+                    reward=reward,
+                    reward_items={
+                        # "compiled": reward_compiled,
+                        "correctness": reward_correctness,
+                        "speedup": reward_speedup,
+                    },
+                    prompt_token_ids=prompt_token_ids,
+                    completion_token_ids=completion_token_ids,
+                    completion_log_probs=completion_log_probs,
+                )
+                generation_results_by_turn[turn_id].append(result)
+            except Exception as e:
+                logger.error(f"❌ [GRPOTrainer] [{block.input_tag}] Error processing [{completion_file}]: {e}")
+                traceback.print_exc()
                 continue
-            with open(os.path.join(folder, eval_file), 'r') as f:
-                eval_data = json.load(f)
-            # ok, now compile all the information together
-            compiled = eval_data['compiled']
-            correctness = eval_data['correctness']
-            runtime = eval_data['runtime']
-            # reward_compiled = 0.1 if compiled else 0.0 # use a small compiled reward for reward shaping
-            reward_correctness = 0.3 if correctness else 0.0
-            reward_speedup = 0.0 if runtime < 0 else ref_runtime / runtime
-            reward = reward_correctness + reward_speedup
-            # create a generation result group
-            prompt = completion_data['prompt']
-            prompt_token_ids = trainer.tokenizer.encode(prompt)
-            # split completion_data['logprobs'] into a list of completion ids and logprobs
-            completion_token_ids = [logprob['token_id'] for logprob in completion_data['logprobs']]
-            completion_log_probs = [logprob['logprob'] for logprob in completion_data['logprobs']]
-            # create the generation result object
-            result = GenerationResult(
-                turn_tag=turn_tag,
-                reward=reward,
-                reward_items={
-                    # "compiled": reward_compiled,
-                    "correctness": reward_correctness,
-                    "speedup": reward_speedup,
-                },
-                prompt_token_ids=prompt_token_ids,
-                completion_token_ids=completion_token_ids,
-                completion_log_probs=completion_log_probs,
-            )
-            generation_results_by_turn[turn_id].append(result)
 
         # iterate over the generation_results_by_turn and create a generation result group for each turn
         for turn_id, generation_results in generation_results_by_turn.items():
