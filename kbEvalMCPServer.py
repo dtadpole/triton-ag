@@ -98,7 +98,7 @@ async def kb_eval_reference(
             raise Exception("Failed to evaluate reference code")
 
         # write response to file
-        response_json = result.model_dump()
+        response_json = result # already a dict
         if "metadata" not in response_json:
             response_json["metadata"] = {}
         response_json["metadata"] = response_json["metadata"] | {
@@ -171,7 +171,7 @@ async def kb_eval_dspy(
         if result is None:
             raise Exception("Failed to evaluate generated code")
 
-        response_json = result.model_dump()
+        response_json = result # already a dict
         if "metadata" not in response_json:
             response_json["metadata"] = {}
         response_json["metadata"] = response_json["metadata"] | {
@@ -245,7 +245,7 @@ async def kb_eval_iteration(
         if result is None:
             raise Exception("Failed to evaluate generated code")
 
-        response_json = result.model_dump()
+        response_json = result # already a dict
         if "metadata" not in response_json:
             response_json["metadata"] = {}
         response_json["metadata"] = response_json["metadata"] | {

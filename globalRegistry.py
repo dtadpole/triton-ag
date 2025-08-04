@@ -1,4 +1,6 @@
 import os
+import traceback
+import socket
 import json
 import yaml
 import time
@@ -7,16 +9,16 @@ import uvicorn
 from typing import Any, Dict, Optional, Annotated
 from fastapi import FastAPI, HTTPException, Body, Query
 from loguru import logger
-from globalUtils import GlobalUtils
+from globalUtils import GlobalUtils, get_prefix_tag, get_global_registry_dir, REG_PORT_FILE
 
 global_utils = GlobalUtils()
 fastapi = global_utils.fastapi
 
-GLOBAL_REGISTRY_DIR = "globalRegistry"
-
 QUEUE_PREFIX = "queue."
 ADAPTER_PREFIX = "adapter."
 
+TRAINER_DIR = "~/.trainer"
+PREFIX_TAG = "auto"
 
 # create a singleton class to store global variables
 class GlobalRegistry:
@@ -34,6 +36,9 @@ class GlobalRegistry:
         # actually initialize the instance if we add a flag.
         if not hasattr(self, '_initialized'):
             self._initialized = True
+            self.global_registry_dir = get_global_registry_dir()
+            logger.info(f"🗂️ [GlobalRegistry] Global registry directory: [{self.global_registry_dir}]")
+            os.makedirs(self.global_registry_dir, exist_ok=True)
             self.config = self._load_config()
             self.registry = {}  # registry of global variables, or object registry ==> {key: value}
             self.tasks = {}  # registry of tasks, or task registry ==> {task_name: task_coroutine}
@@ -61,8 +66,8 @@ class GlobalRegistry:
         Load the adapters from the config
         """
         try:
-            if os.path.exists(f"{GLOBAL_REGISTRY_DIR}/adapters.json"):
-                with open(f"{GLOBAL_REGISTRY_DIR}/adapters.json", "r") as f:
+            if os.path.exists(f"{self.global_registry_dir}/adapters.json"):
+                with open(f"{self.global_registry_dir}/adapters.json", "r") as f:
                     adapters = json.load(f)
             else:
                 adapters = {}
@@ -83,26 +88,32 @@ class GlobalRegistry:
             queue_storage = {}
             try:
                 # if globalRegistry/queues.json exists, load it
-                queue_filename = f"{GLOBAL_REGISTRY_DIR}/queues.json"
+                queue_filename = f"{self.global_registry_dir}/queues.json"
                 if os.path.exists(queue_filename):
                     with open(queue_filename, "r") as f:
                         queue_storage = json.load(f) # queue_storage is a dictionary of queue names and their items
             except Exception as e:
                 # load from globalRegistry/queues.yaml.bak
-                if os.path.exists(f"{GLOBAL_REGISTRY_DIR}/queues.json.bak"):
-                    with open(f"{GLOBAL_REGISTRY_DIR}/queues.json.bak", "r") as f:
+                if os.path.exists(f"{self.global_registry_dir}/queues.json.bak"):
+                    with open(f"{self.global_registry_dir}/queues.json.bak", "r") as f:
                         queue_storage = json.load(f)
+            # load queues from the config
+            queues_configs = self.config.get("queues", [])
+            for queue_config in queues_configs:
+                queue_name = queue_config.get("name")
+                queue_object_name = f"{QUEUE_PREFIX}{queue_name}"
+                if queue_object_name not in self.registry:
+                    logger.info(f"🎢 Creating queue [{queue_object_name}]")
+                    self.put(queue_object_name, asyncio.Queue())
             # load the queues from the config
-            queues = self.config.get("queues", [])
-            for queue in queues:
-                object_name = f"{QUEUE_PREFIX}{queue.get('name')}"
-                if object_name not in self.registry:
-                    logger.info(f"🎢 Creating queue [{object_name}]")
-                    self.put(object_name, asyncio.Queue())
-                    if object_name in queue_storage:
-                        for item in queue_storage[object_name]:
-                            await self.get(object_name).put(item)
-                        logger.info(f"📦 Loaded {len(queue_storage[object_name])} items into queue [{object_name}]")
+            for queue_name, queue_items in queue_storage.items():
+                queue_object_name = f"{QUEUE_PREFIX}{queue_name}"
+                if queue_object_name not in self.registry:
+                    logger.info(f"🎢 Creating queue [{queue_object_name}]")
+                    self.put(queue_object_name, asyncio.Queue())
+                    for item in queue_items:
+                        await self.get(queue_object_name).put(item)
+                    logger.info(f"📦 Loaded {len(queue_items)} items into queue [{queue_object_name}]")
         except Exception as e:
             logger.error(f"Error updating queues: {e}")
 
@@ -115,9 +126,9 @@ class GlobalRegistry:
                 interval = self.config.get("_save_adapter_task", {}).get("interval", 10)
                 adapters = {}
                 # if folder globalRegistry does not exist, create it
-                if not os.path.exists(GLOBAL_REGISTRY_DIR):
-                    os.makedirs(GLOBAL_REGISTRY_DIR)
-                adapter_filename = f"{GLOBAL_REGISTRY_DIR}/adapters.json"
+                if not os.path.exists(self.global_registry_dir):
+                    os.makedirs(self.global_registry_dir)
+                adapter_filename = f"{self.global_registry_dir}/adapters.json"
                 # if globalRegistry/adapters.json exists, move it to globalRegistry/adapters.json.bak
                 if os.path.exists(adapter_filename):
                     os.rename(adapter_filename, f"{adapter_filename}.bak")
@@ -143,19 +154,17 @@ class GlobalRegistry:
                 interval = self.config.get("_save_queue_task", {}).get("interval", 10)
                 queue_storage = {}
                 # if folder globalRegistry does not exist, create it
-                if not os.path.exists(GLOBAL_REGISTRY_DIR):
-                    os.makedirs(GLOBAL_REGISTRY_DIR)
+                if not os.path.exists(self.global_registry_dir):
+                    os.makedirs(self.global_registry_dir)
                 # if globalRegistry/queues.json exists, move it to globalRegistry/queues.json.bak
-                queue_filename = f"{GLOBAL_REGISTRY_DIR}/queues.json"
+                queue_filename = f"{self.global_registry_dir}/queues.json"
                 if os.path.exists(queue_filename):
                     os.rename(queue_filename, f"{queue_filename}.bak")
-                queues = self.config.get("queues", [])
-                for queue in queues:
-                    queue_name = queue.get("name")
-                    object_name = f"{QUEUE_PREFIX}{queue_name}"
-                    q = self.get(object_name)
-                    if q is not None:
-                        queue_storage[object_name] = list(q._queue)
+                # iterate over all the keys in the registry
+                for key in self.keys():
+                    if key.startswith(QUEUE_PREFIX):
+                        queue_name = key.replace(QUEUE_PREFIX, "")
+                        queue_storage[queue_name] = list(self.get(key)._queue)
                 # save the queues to the config
                 with open(queue_filename, "w") as f:
                     json.dump(queue_storage, f, indent=2)
@@ -293,16 +302,23 @@ class GlobalRegistry:
         """
         return os.getcwd()
 
-    
     async def run(self):
         """
         Run the server and refresh the config in parallel
         """
         try:
+            # get the port from the config
             host = self.config.get("fastapi", {}).get("host", "0.0.0.0")
-            port = self.config.get("fastapi", {}).get("port", 8000)
-            server = uvicorn.Server(uvicorn.Config(self.get("reg.fastapi"), host=host, port=port))
-            logger.info(f"Configuring fastapi server at [{host}:{port}]")
+            port = self.config.get("fastapi", {}).get("port", 0)
+            s = socket.socket(); s.bind((host, port)); s.listen(2048)
+            listen_host, listen_port = s.getsockname()
+            server = uvicorn.Server(uvicorn.Config(self.get("reg.fastapi"), fd=s.fileno()))
+            logger.info(f"FastAPI server listening on: [{listen_host}:{listen_port}]")
+
+            # write port number to {self.global_registry_dir}/{REG_PORT_FILE}
+            port_file = os.path.join(self.global_registry_dir, REG_PORT_FILE)
+            with open(port_file, "w") as f:
+                f.write(str(listen_port))
 
             # create a task to run the server
             self.put_task("reg.fastapi", server.serve())
@@ -357,19 +373,31 @@ async def qlist():
     }
 
 @fastapi.post("/queue/enqueue")
-async def enqueue(queue_name: str = Body(...), item: Dict[str, Any] = Body(...)):
-    queue = reg.get(f"{QUEUE_PREFIX}{queue_name}")
+async def enqueue(
+    queue_name: str = Body(...), 
+    item: Dict[str, Any] = Body(...), 
+    create_queue: bool = Body(default=False)
+):
+    object_name = f"{QUEUE_PREFIX}{queue_name}"
+    queue = reg.get(object_name)
     if queue is None:
-        raise HTTPException(status_code=404, detail=f"Queue [{queue_name}] not found")
+        if create_queue:
+            logger.info(f"🎢 Creating queue [{object_name}]")
+            queue = asyncio.Queue()
+            reg.put(object_name, queue)
+        else:
+            raise HTTPException(status_code=404, detail=f"Queue [{queue_name}] not found")
     try:
         await queue.put(item)
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error enqueuing item [{item}] into queue [{queue_name}]: {e}")
     return {"message": f"Item [{item}] enqueued into queue [{queue_name}]"}
 
 @fastapi.get("/queue/dequeue/{queue_name}")
 async def dequeue(queue_name: str):
-    queue = reg.get(f"{QUEUE_PREFIX}{queue_name}")
+    object_name = f"{QUEUE_PREFIX}{queue_name}"
+    queue = reg.get(object_name)
     if queue is None:
         raise HTTPException(status_code=404, detail=f"Queue [{queue_name}] not found")
     # get timeout from config
@@ -381,13 +409,23 @@ async def dequeue(queue_name: str):
 
 @fastapi.get("/queue/qsize/{queue_name}")
 async def qsize(queue_name: str):
-    queue = reg.get(f"{QUEUE_PREFIX}{queue_name}")
+    object_name = f"{QUEUE_PREFIX}{queue_name}"
+    queue = reg.get(object_name)
     if queue is None:
         raise HTTPException(status_code=404, detail=f"Queue [{queue_name}] not found")
     return queue.qsize()
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--trainer_dir", type=str, default="~/.trainer")
+    parser.add_argument("--prefix_tag", type=str, default="auto")
+    args = parser.parse_args()
+
+    TRAINER_DIR = args.trainer_dir
+    PREFIX_TAG = get_prefix_tag(args.prefix_tag)
+
     # initialize the global registry singleton
     reg = GlobalRegistry()
     # add repl server to the fastapi app, and initialize/reset the repl namespace

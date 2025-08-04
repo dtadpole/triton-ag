@@ -3,16 +3,18 @@ import asyncio
 import httpx
 from typing import Any, Dict, Optional
 from logger import logger
+from globalUtils import get_global_registry_port
 
 
 class GlobalRegClient:
-    def __init__(self, host: str = "localhost", port: int = 8084):
+    def __init__(self, prefix_tag: str = "auto", trainer_dir: str = "~/.trainer"):
         self.config = self._load_config().get("client", {})
         self.host = self.config.get("host", "localhost")
-        self.port = self.config.get("port", 8084)
+        self.port = get_global_registry_port(prefix_tag, trainer_dir)
         self.base_url = f"http://{self.host}:{self.port}"
         self.retries = self.config.get("retries", 5)
         self.timeout = self.config.get("timeout", 300)
+        logger.info(f"🔍 [GlobalRegClient] Initialized with host: {self.host}, port: {self.port}, retries: {self.retries}, timeout: {self.timeout}")
 
     def _load_config(self):
         with open("globalRegistry.yaml", "r") as f:
@@ -96,13 +98,17 @@ class GlobalRegClient:
                     raise e
         return []
     
-    async def enqueue(self, queue_name: str, item: Dict[str, Any]):
+    async def enqueue(self, queue_name: str, item: Dict[str, Any], create_queue: bool = False):
         retry_count = 0
         while retry_count < self.retries:
             try:
                 url = f"{self.base_url}/queue/enqueue"
                 async with httpx.AsyncClient() as client:
-                    response = await client.post(url, json={"queue_name": queue_name, "item": item}, timeout=self.timeout)
+                    response = await client.post(url, json={
+                        "queue_name": queue_name,
+                        "item": item,
+                        "create_queue": create_queue
+                    }, timeout=self.timeout)
                     response.raise_for_status()
                     return response.json()
             except Exception as e:
@@ -138,6 +144,7 @@ class GlobalRegClient:
             try:
                 url = f"{self.base_url}/queue/qsize/{queue_name}"
                 async with httpx.AsyncClient() as client:
+                    logger.info(f"🔍 [GlobalRegClient] Getting queue size via [{url}]")
                     response = await client.get(url, timeout=self.timeout)
                     response.raise_for_status()
                     return response.json()

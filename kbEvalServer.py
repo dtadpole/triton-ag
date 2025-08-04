@@ -1,5 +1,8 @@
 import argparse
 import asyncio
+import wandb
+from datetime import datetime
+import re
 import signal
 import concurrent.futures
 import json
@@ -20,7 +23,8 @@ from kbEvalUtil import on_process_timeout
 
 KB_EVAL_TOKEN = None
 
-CURR_ERROR_COUNT = 0
+TOTAL_REQUEST_COUNTER = 0
+TOTAL_ERROR_COUNTER = 0
 MAX_ERROR_COUNT = 10
 START_TIME = time.time()
 MAX_RUN_TIME = 360000 // 2 # restart periods in seconds
@@ -30,8 +34,8 @@ KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
 # Create app
 app = FastAPI()
 
-request_counter = 0
-request_counter_lock = asyncio.Lock()
+parallel_request_counter = 0
+parallel_request_counter_lock = asyncio.Lock()
 
 DEVICES = []
 
@@ -56,6 +60,21 @@ def verify_token(authorization: str = Header(None)):
 
     return True
 
+wandb_loggers = {} # {prefix_tag: wandb.Run}
+def _setup_wandb_logging(prefix_tag: str="test"):
+    """Setup logging and tracking"""
+    if prefix_tag in wandb_loggers:
+        return wandb_loggers[prefix_tag]
+    
+    wandb_run = wandb.init(
+        project="kb_eval",
+        id=f"{prefix_tag}",
+        name=f"{prefix_tag}-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+        resume="allow",
+    )
+    wandb_loggers[prefix_tag] = wandb_run
+    logger.info(f"📊 W&B logging enabled for [{prefix_tag}]")
+    return wandb_run
 
 async def get_with_timeout(queue, timeout):
     try:
@@ -134,10 +153,10 @@ async def get_pending_task_count():
 
 @app.get("/stats")
 async def stats():
-    global request_counter
+    global parallel_request_counter
     return {
         "num_devices": len(DEVICES),
-        "pending_requests": request_counter,
+        "pending_requests": parallel_request_counter,
     }
 
 
@@ -150,13 +169,18 @@ async def kb_eval_ref(
     reference_code: str = Body(...),
     authenticated: bool = Depends(verify_token)
 ) -> KernelExecResult:
-    global request_counter, request_counter_lock, DEVICES
+    global TOTAL_REQUEST_COUNTER, TOTAL_ERROR_COUNTER, parallel_request_counter, parallel_request_counter_lock, DEVICES
 
     # logger.info(f"kb_eval_ref: {run_tag}, {model_tag}, {task_tag}, {reference_code}")
 
     try:
-        async with request_counter_lock:
-            request_counter += 1
+        async with parallel_request_counter_lock:
+            parallel_request_counter += 1
+            TOTAL_REQUEST_COUNTER += 1
+
+        # get prefix_tag from run_tag by removing regex pattern [_ddd_dd] (ddd is 3 digits, dd is 2 digits) at the end if exists
+        prefix_tag = re.sub(r"_\d{3}_\d{2}$", "", run_tag)
+        wandb_run = _setup_wandb_logging(prefix_tag)
 
         start_time = time.time()
 
@@ -219,31 +243,56 @@ async def kb_eval_ref(
 
         result = KernelExecResult.model_validate(result_json)
 
+        metrics = {
+            "health/completion": 1,
+            "health/parallel_requests": parallel_request_counter,
+            "health/error_counter": TOTAL_ERROR_COUNTER,
+            "health/request_counter": TOTAL_REQUEST_COUNTER,
+            f"{task_tag}/healthiness": 1,
+            f"{task_tag}/compiled": 1 if result.compiled else 0,
+            f"{task_tag}/correctness": 1 if result.correctness else 0,
+            f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
+            f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
+        }
+        wandb_run.log(metrics)
+
         return result
 
     except Exception as e:
-        global CURR_ERROR_COUNT
-        CURR_ERROR_COUNT += 1
+        # global TOTAL_ERROR_COUNTER
+        TOTAL_ERROR_COUNTER += 1
         logger.error(f"❌ [KB Eval] [reference] error: {type(e).__name__}: {str(e)}")
         result = KernelExecResult(
             compiled=False,
             correctness=False,
             metadata={
-                "processing_error": f"[kb_eval_ref] Cannot generate the result file in time. Unexpected error: {type(e).__name__}: {str(e)}",
-                "retriable": True, # if the error is retriable, the client will retry the request
+                "processing_error": f"[kb_eval_ref] Cannot generate the evaluation result in time. Unexpected error: {type(e).__name__}: {str(e)}",
+                "retriable": "maybe", # if the error is retriable, the client will retry the request
             },
             runtime=-1.0,
         )
+        metrics = {
+            "health/completion": 0,
+            "health/parallel_requests": parallel_request_counter,
+            "health/error_counter": TOTAL_ERROR_COUNTER,
+            "health/request_counter": TOTAL_REQUEST_COUNTER,
+            f"{task_tag}/healthiness": 0,
+            f"{task_tag}/compiled": 1 if result.compiled else 0,
+            f"{task_tag}/correctness": 1 if result.correctness else 0,
+            f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
+            f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
+        }
+        wandb_run.log(metrics)
         return result
 
     finally:
-        async with request_counter_lock:
-            request_counter -= 1
-            if request_counter < 0:
+        async with parallel_request_counter_lock:
+            parallel_request_counter -= 1
+            if parallel_request_counter < 0:
                 logger.error(
-                    f"Request counter is negative: {request_counter}, resetting to 0"
+                    f"Request counter is negative: {parallel_request_counter}, resetting to 0"
                 )
-                request_counter = 0
+                parallel_request_counter = 0
 
 
 @app.post("/kb_eval")
@@ -258,11 +307,16 @@ async def kb_eval(
     code_type: str = Body(default="cuda"),
     authenticated: bool = Depends(verify_token)
 ) -> KernelExecResult:
-    global request_counter, request_counter_lock, DEVICES
+    global TOTAL_REQUEST_COUNTER, TOTAL_ERROR_COUNTER, parallel_request_counter, parallel_request_counter_lock, DEVICES
 
     try:
-        async with request_counter_lock:
-            request_counter += 1
+        async with parallel_request_counter_lock:
+            parallel_request_counter += 1
+            TOTAL_REQUEST_COUNTER += 1
+
+        # get prefix_tag from run_tag by removing regex pattern [_ddd_dd] (ddd is 3 digits, dd is 2 digits) at the end if exists
+        prefix_tag = re.sub(r"_\d{3}_\d{2}$", "", run_tag)
+        wandb_run = _setup_wandb_logging(prefix_tag)
 
         start_time = time.time()
 
@@ -326,35 +380,70 @@ async def kb_eval(
 
         result = KernelExecResult.model_validate(result_json)
 
+        metrics = {
+            "health/completion": 1,
+            "health/parallel_requests": parallel_request_counter,
+            "health/error_counter": TOTAL_ERROR_COUNTER,
+            "health/request_counter": TOTAL_REQUEST_COUNTER,
+            "metrics/compiled": 1 if result.compiled else 0,
+            "metrics/correctness": 1 if result.correctness else 0,
+            "metrics/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
+            "metrics/elapsed_time": time.time() - start_time, # seconds
+            f"{task_tag}/healthiness": 1,
+            f"{task_tag}/compiled": 1 if result.compiled else 0,
+            f"{task_tag}/correctness": 1 if result.correctness else 0,
+            f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
+            f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
+        }
+        wandb_run.log(metrics)
+
         return result
 
     except Exception as e:
-        global CURR_ERROR_COUNT
-        CURR_ERROR_COUNT += 1
+        # global TOTAL_ERROR_COUNTER
+        TOTAL_ERROR_COUNTER += 1
         logger.error(f"❌ [KB Eval] [{eval_tag}] error: {type(e).__name__}: {str(e)}")
         result = KernelExecResult(
             compiled=False,
             correctness=False,
             metadata={
-                "processing_error": f"[kb_eval] Cannot generate the result file in time. Unexpected error: {type(e).__name__}: {str(e)}",
+                "processing_error": f"[kb_eval] Cannot generate the evaluation result in time. Unexpected error: {type(e).__name__}: {str(e)}",
                 "retriable": True, # if the error is retriable, the client will retry the request
             },
             runtime=-1.0,
         )
+
+        metrics = {
+            "health/completion": 0,
+            "health/parallel_requests": parallel_request_counter,
+            "health/error_counter": TOTAL_ERROR_COUNTER,
+            "health/request_counter": TOTAL_REQUEST_COUNTER,
+            "metrics/compiled": 1 if result.compiled else 0,
+            "metrics/correctness": 1 if result.correctness else 0,
+            "metrics/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
+            "metrics/elapsed_time": time.time() - start_time, # seconds
+            f"{task_tag}/healthiness": 0,
+            f"{task_tag}/compiled": 1 if result.compiled else 0,
+            f"{task_tag}/correctness": 1 if result.correctness else 0,
+            f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
+            f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
+        }
+        wandb_run.log(metrics)
+
         return result
 
     finally:
-        async with request_counter_lock:
-            request_counter -= 1
-            if request_counter < 0:
+        async with parallel_request_counter_lock:
+            parallel_request_counter -= 1
+            if parallel_request_counter < 0:
                 logger.error(
-                    f"Request counter is negative: {request_counter}, resetting to 0"
+                    f"Request counter is negative: {parallel_request_counter}, resetting to 0"
                 )
-                request_counter = 0
+                parallel_request_counter = 0
 
 
 async def _check_total_error_count():
-    global CURR_ERROR_COUNT, MAX_ERROR_COUNT, START_TIME
+    global TOTAL_ERROR_COUNTER, MAX_ERROR_COUNT, START_TIME
 
     print_interval = 10
     check_interval = 3 # seconds
@@ -371,13 +460,13 @@ async def _check_total_error_count():
                 # loop = asyncio.get_event_loop()
                 # loop.stop()
                 # exit(1)
-            if CURR_ERROR_COUNT > MAX_ERROR_COUNT:
-                logger.error(f"❌ Total error count [{CURR_ERROR_COUNT}] is greater than {MAX_ERROR_COUNT}!")
+            if TOTAL_ERROR_COUNTER > MAX_ERROR_COUNT:
+                logger.error(f"❌ Total error count [{TOTAL_ERROR_COUNTER}] is greater than {MAX_ERROR_COUNT}!")
                 # loop = asyncio.get_event_loop()
                 # loop.stop()
                 # exit(1)
-            elif CURR_ERROR_COUNT > 0 and counter % print_interval == 0:
-                logger.warning(f"⚠️ Total error count is {CURR_ERROR_COUNT}, continuing...")
+            elif TOTAL_ERROR_COUNTER > 0 and counter % print_interval == 0:
+                logger.warning(f"⚠️ Total error count is {TOTAL_ERROR_COUNTER}, continuing...")
         finally:
             await asyncio.sleep(check_interval)
 

@@ -1,0 +1,162 @@
+module:
+  name: exemplar
+  # built-in context like `self` has already been set
+  # here we add addotional context variables for easier access by the program
+  # variables will be evaluated sequentially, so that later variables can use earlier variables
+  context_vars:
+    provider_name: "`self.inference_client_config.provider.provider_name`"
+    model_short_name: "`self.inference_client_config.model.model_short_name`"
+    model_tag: "{provider_name}_{model_short_name}"
+    max_tokens: "`self.inference_client_config.model.max_tokens`"
+
+  # input processor adds jobs to the queue
+  input_processor:
+    # reference task
+    - processor: duckdb
+      name: exemplar
+      # built-in context like `block` has already been set
+      # here we add addotional context variables for easier access by the program
+      context_vars:
+        prefix_tag: "`block.prefix_tag`"
+        epoch_id: "`block.epoch_id`"
+        block_id: "`block.block_id`" 
+        input_tag: "`block.input_tag`"
+        input_dir: "`block.input_dir`"
+      query: |
+        WITH j AS (
+          SELECT
+            filename AS kb_filename,
+            regexp_replace(filename, '[/\\\\][^/\\\\]+$', '') AS dirpath,
+            messages,
+            metadata
+          FROM read_json_auto(
+            '{input_dir}/{input_tag}/**/*_conversation.json',
+            sample_size=-1, ignore_errors=true, filename=true
+          )
+        ),
+        t as (
+          SELECT
+            filename AS reference_code_filename,
+            regexp_replace(filename, '[/\\\\][^/\\\\]+$', '') AS dirpath,
+            content as reference_code
+          FROM read_text('{input_dir}/{input_tag}/**/reference_code.py')
+        )
+        SELECT j.*, t.reference_code
+        FROM j
+        JOIN t
+        USING (dirpath)
+        ;
+      enqueue:
+        # built-in context like `row` has already been set
+        # here we add addotional context variables for easier access by the program
+        context_vars:
+          run_tag: "`input_tag`" # run_tag is the prefix tag + epoch id + block id
+          task_tag: "`row.kb_filename.split('/')[-2]`" # task_tag is the 2nd last part of the filename
+          turn_tag: "`'_'.join(row.kb_filename.split('/')[-1].split('_')[:3])`" # turn_tag is the first 3 parts of the filename
+        items:
+          - worker: "codeGenEval.exemplar"
+            prefix_tag: "`prefix_tag`"
+            run_tag: "`run_tag`"
+            model_tag: "`model_tag`"
+            task_tag: "`task_tag`"
+            turn_tag: "`turn_tag`" # turn_tag is the turn tag
+            messages: "`list(row.messages)`"
+            reference_code: "`row.reference_code`" # reference code
+            code_type: "`self.get_prompt_code_type(__context__)`"
+            output_dir: "`os.path.expanduser(block.output_dir)`" # output_dir is the output directory
+  
+  # queue worker reads from the queue and executes the worker
+  queue_worker:
+    # codeGenEval worker
+    codeGenEval.exemplar:
+      filter: "`True`" # you can specify a filter criteria here
+      context_vars:
+        record_folder: "`f'{output_dir}/{run_tag}/{model_tag}/{task_tag}'`"
+      steps:
+        - endpoint: statsClient.wait_for_stats
+          inputs:
+            prefix_tag: "`prefix_tag`"
+            model_tag: "`model_tag`"
+            task_tag: "`task_tag`"
+            category: "reference"
+          returns:
+            context_vars:
+              reference_eval: "`__result__`"
+              reference_eval_path: "`f'{stats_dir}/{prefix_tag}/{task_tag}/reference.jsonl'`"
+            logging:
+              method: "log_kb_eval_ref"
+        - endpoint: inferenceClient.chat_completion
+          context_vars:
+            metadata:
+              "run_tag": "`run_tag`"
+              "model_tag": "`model_tag`"
+              "task_tag": "`task_tag`"
+              "turn_tag": "`turn_tag`"
+              "code_type": "`code_type`"
+            shortened_messages: "`input['messages'][:-1]`"
+          inputs:
+            messages: "`shortened_messages`"
+            max_tokens: "`max_tokens`"
+            logprobs: "`False`"
+          returns:
+            error_if: "`__result__ is None or 'content' not in __result__`"
+            context_vars:
+              completion: "`__result__['content']`"
+              num_completion_tokens: "`__result__['usage']['completion_tokens'] if 'usage' in __result__ and 'completion_tokens' in __result__['usage'] else 0`"
+              metadata: |
+                `metadata | {
+                  "num_completion_tokens": num_completion_tokens,
+                  "completion_time_seconds": __endpoint_time__,
+                  "token_per_second": num_completion_tokens / __endpoint_time__,
+                }
+                `
+              new_messages: |
+                `shortened_messages + [
+                  {"role": "assistant", "content": completion}
+                ]`
+              conversation:
+                messages: "`new_messages`"
+                metadata: "`metadata`"
+              conversation_path: "`f'{record_folder}/{turn_tag}_conversation.json'`"
+            save_to:
+              - path: "`conversation_path`"
+                data: "`conversation`"
+                format: "json"
+            logging:
+              method: "log_chat_completion"
+        - endpoint: codeExtractor.extract_code
+          inputs:
+            completion: "`completion`"
+          returns:
+            context_vars:
+              generated_code: "`__result__`"
+            save_to:
+              - path: "`f'{record_folder}/{turn_tag}_generated_code.json'`"
+                data: "`generated_code`"
+                format: "text"
+        - endpoint: kbEvalClient.kb_eval
+          inputs:
+            run_tag: "`run_tag`"
+            model_tag: "`model_tag`"
+            task_tag: "`task_tag`"
+            eval_tag: "`turn_tag`" # eval_tag is the turn tag
+            reference_code: "`reference_code`"
+            generated_code: "`generated_code`"
+            code_type: "`code_type`" # code_type is the code type
+          returns:
+            context_vars:
+              generated_eval: "`__result__`"
+              generated_eval_path: "`f'{record_folder}/{turn_tag}_generated_eval.json'`"
+            save_to:
+              - path: "`generated_eval_path`"
+                data: "`generated_eval`"
+                format: "json"
+            logging:
+              method: "log_kb_eval"
+        - endpoint: statsClient.add_data_point
+          inputs:
+            prefix_tag: "`prefix_tag`"
+            model_tag: "`model_tag`"
+            task_tag: "`task_tag`"
+            category: "generated"
+            data: "`generated_eval`"

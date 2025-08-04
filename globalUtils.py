@@ -1,8 +1,14 @@
+import os
+import yaml
 from fastapi import FastAPI
+from datetime import datetime
 from pydantic import BaseModel, Field
 from typing import Optional
 
-MODEL_OVERRIDE_KEY = "adapter.codeGenEval.model_override"
+REG_PORT_FILE = ".reg.port"
+REG_DIR = ".reg"
+
+MODEL_OVERRIDE_KEY = "adapter.model_override"
 
 class TrainerSFTBlock(BaseModel):
     prefix_tag: str
@@ -88,6 +94,48 @@ class ReflectionBlock(BaseModel):
     input_dir: str = Field(default="~/.codeGenEval")
     output_dir: str = Field(default="~/.reflection")
     test_mode: bool = Field(default=False)
+
+class ComposerBlock(BaseModel):
+    prefix_tag: str
+    epoch_id: int
+    block_id: int
+    input_tag: str
+    provider_name: str
+    model_name: str
+    module_file: str
+    prompt_file: str
+    example_file: str
+    num_samples: int
+    num_generations: int
+    num_turns_per_generation: int = Field(default=4)
+    parallel_workers: int = Field(default=16)
+    model_override: Optional[str] = Field(default=None)
+    input_dir: str = Field(default="~/.inference/composer")
+    output_dir: str = Field(default="~/.inference/composer")
+    test_mode: bool = Field(default=False)
+
+def get_prefix_tag(prefix_tag:str="auto", config_path:str="globalWorkflow.yaml"):
+    if prefix_tag == "auto":
+        with open(config_path, "r") as f:
+            yaml_data = yaml.safe_load(f)
+        loaded_prefix_tag = yaml_data.get("global", {}).get("prefix_tag", f"auto_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        # write to config_path
+        return loaded_prefix_tag
+    else:
+        return prefix_tag
+
+def get_global_registry_dir(prefix_tag:str="auto", trainer_dir:str="~/.trainer"):
+    prefix_tag = get_prefix_tag(prefix_tag)
+    return os.path.join(os.path.expanduser(trainer_dir), prefix_tag, REG_DIR)
+
+def get_global_registry_port(prefix_tag:str="auto", trainer_dir:str="~/.trainer"):
+    prefix_tag = get_prefix_tag(prefix_tag)
+    port_file = os.path.join(get_global_registry_dir(prefix_tag, trainer_dir), REG_PORT_FILE)
+    if os.path.exists(port_file):
+        with open(port_file, "r") as f:
+            return int(f.read())
+    else:
+        return None
 
 class GlobalUtils:
     _instance = None # class variable to store the instance

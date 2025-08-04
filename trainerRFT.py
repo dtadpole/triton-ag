@@ -158,7 +158,7 @@ def rft_train_block(block: TrainerRFTBlock, trainer: RFTTrainer, callback: Optio
 
         # query from search_path folder, find all the conversation_*.json files, and load them into a dataframe
         result = duckdb.sql(f"""SELECT filename, compiled, correctness, metadata, runtime, runtime_stats
-                            FROM read_json_auto('{search_path}/**/gen_*_eval.json', sample_size=-1, ignore_errors=true) 
+                            FROM read_json_auto('{search_path}/**/gen_*_generated_eval.json', sample_size=-1, ignore_errors=true) 
                         """)
         
         result_df = result.df()
@@ -171,7 +171,7 @@ def rft_train_block(block: TrainerRFTBlock, trainer: RFTTrainer, callback: Optio
         filtered_df['messages'] = None
         filtered_df['metadata'] = None
         for index, row in filtered_df.iterrows():
-            conversation_filename = row['filename'].replace("_eval.json", "_conversation.json")
+            conversation_filename = row['filename'].replace("_generated_eval.json", "_conversation.json")
             with open(conversation_filename, 'r') as f:
                 messages = json.load(f)
             # add a new column 'messages' to the filtered_df
