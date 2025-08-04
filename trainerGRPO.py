@@ -412,10 +412,10 @@ def grpo_train_block(block: TrainerGRPOBlock, trainer: GRPOTrainer, callback: Op
             compiled = eval_data['compiled']
             correctness = eval_data['correctness']
             runtime = eval_data['runtime']
-            # reward_compiled = 0.0 # do NOT use compiled reward
+            reward_compiled = 0.1 if compiled else 0.0 # use a small compiled reward for reward shaping
             reward_correctness = 0.3 if correctness else 0.0
             reward_speedup = 0.0 if runtime < 0 else ref_runtime / runtime
-            reward = reward_correctness + reward_speedup
+            reward = reward_compiled + reward_correctness + reward_speedup
             # create a generation result group
             prompt = completion_data['prompt']
             prompt_token_ids = trainer.tokenizer.encode(prompt)
@@ -427,6 +427,7 @@ def grpo_train_block(block: TrainerGRPOBlock, trainer: GRPOTrainer, callback: Op
                 turn_tag=turn_tag,
                 reward=reward,
                 reward_items={
+                    "compiled": reward_compiled,
                     "correctness": reward_correctness,
                     "speedup": reward_speedup,
                 },
