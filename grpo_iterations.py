@@ -887,6 +887,8 @@ def code_evaluation_local(
         generate_code_results = [ref_gen_code_results[(reference_code, generated_code)] for generated_code in generated_codes]
         eval_scores[reference_code] = {}
         eval_scores[reference_code]["result"] = generate_code_results
+        eval_scores[reference_code]["compiled"] = [g.compiled for g in generate_code_results]
+        eval_scores[reference_code]["correctness"] = [g.correctness for g in generate_code_results]
         eval_scores[reference_code]["reward"] = [reward_function(g.compiled, g.correctness, g.runtime / reference_runtime, reward_config)
                     for g in generate_code_results]
     return eval_scores
@@ -1152,8 +1154,8 @@ async def train_grpo(args: argparse.Namespace):
 
     grpo_config.beta = online_grpo_config["train"]["grpo_beta"]
     grpo_config.reference_model_update_steps = online_grpo_config["train"]["grpo_reference_model_update_steps"]
-    grpo_config.clip_epsilon_lower = online_grpo_config["train"]["grpo_clip_epsilon_lower"]
-    grpo_config.clip_epsilon_upper = online_grpo_config["train"]["grpo_clip_epsilon_upper"]
+    grpo_config.clip_ratio_epsilon_lower = online_grpo_config["train"]["grpo_clip_epsilon_lower"]
+    grpo_config.clip_ratio_epsilon_upper = online_grpo_config["train"]["grpo_clip_epsilon_upper"]
 
     try:
         trainer = GRPOTrainer(args.run_tag, grpo_config, base_config) # trainer.model is the current policy
@@ -1242,13 +1244,15 @@ async def train_grpo(args: argparse.Namespace):
 
         #Create GRPO dataset
         rewards_groups = [reward_dict[reference_code]["reward"] for reference_code in evaluated_reference_codes]
+        comipled_groups = [reward_dict[reference_code]["compiled"] for reference_code in evaluated_reference_codes]
+        correctness_groups = [reward_dict[reference_code]["correctness"] for reference_code in evaluated_reference_codes]
         rewards_save_path = os.path.join(trainer.checkpoint_path, f"reward_{epoch}.json")
         with open(rewards_save_path, "w") as f:
-            json.dump({"referece_codes": evaluated_reference_codes, "rewards": rewards_groups}, f, indent=4)
+            json.dump({"referece_codes": evaluated_reference_codes, "rewards": rewards_groups, "compiled": comipled_groups, "correctness": correctness_groups}, f, indent=4)
 
         result_groups = []
         for response_group, rewards in zip(evaluated_response_groups, rewards_groups):
-            result_group = GenerationResultGroup(task_tag="{args.run_tage}_{epoch}", results=[])
+            result_group = GenerationResultGroup(task_tag="{args.run_tage}_{epoch}", turn_id=0, results=[])
             id = 0
             for response, reward in zip(response_group, rewards):
                 id += 1
@@ -1256,7 +1260,7 @@ async def train_grpo(args: argparse.Namespace):
                 completion_token_ids = response["completion_token_ids"]
                 completion_log_probs = response["completion_log_probs"]
                 result = GenerationResult(
-                    gen_tag=f"gen_{id:02d}",
+                    turn_tag=f"gen_{id:02d}",
                     reward=reward,
                     prompt_token_ids=prompt_token_ids,
                     completion_token_ids=completion_token_ids,
@@ -1281,12 +1285,12 @@ async def train_grpo(args: argparse.Namespace):
 
 async def main():
     parser = argparse.ArgumentParser(description="Iterate Model by Online GRPO")
-    parser.add_argument("--start_model_path", type=str, default="finetune_model_output/sft_t2/qwen3_32b/")
-    parser.add_argument("--run_tag", type=str, default="v0.1_20250801_grpot4")
+    parser.add_argument("--start_model_path", type=str, default="finetune_model_output/sft_t2/qwen3_32b/") #  finetune_model_output/sft_t2/qwen3_32b/  unsloth/Qwen3-8B
+    parser.add_argument("--run_tag", type=str, default="v0.1_20250803_grpot6")
     parser.add_argument("--base-config", type=str, default="trainerBase.yaml")
     parser.add_argument("--grpo-config", type=str, default="trainerGRPO.yaml")
     parser.add_argument("--online-grpo-config", type=str, default="grpo_iterations.yaml")
-    parser.add_argument("--test", action='store_true', help='Enable verbose output.')
+    parser.add_argument("--test", action='store_true', help='whether to run test only')
     args = parser.parse_args()
 
     if args.test:
@@ -1294,9 +1298,9 @@ async def main():
         # await test_rollout_policy_logproba(args)
         # await test_rollout_policy_logproba_mp(args) # unsloth is not pickable
         # await test_rollout_policy_logproba_safethreading(args) # safethreading is still slow
-        # await test_rollout_policy_logproba_shellprocess(args)
+        await test_rollout_policy_logproba_shellprocess(args)
         await test_code_evaluation_local()
-        # await test_prompt_manager(args)
+        await test_prompt_manager(args)
         return
 
     await train_grpo(args)
