@@ -298,7 +298,7 @@ class CodeGenEvalClient:
             # Call the evaluation server
             start_time = time.time()
             result = await self.kb_eval_client.kb_eval(run_tag=self.run_tag, model_tag=self.model_tag, task_tag=task_tag, eval_tag=turn_tag, reference_code=reference_code, generated_code=generated_code, code_type=self.get_code_type())
-            eval_result_json = result.model_dump()
+            eval_result_json = result
             # compare generated performance to reference performance
             if reference_eval and 'runtime' in reference_eval:
                 reference_runtime = reference_eval['runtime']
@@ -357,7 +357,7 @@ class CodeGenEvalClient:
             # for each file in bucket_files, run kb_eval_ref
             start_time = time.time()
             result = await self.kb_eval_client.kb_eval_ref(run_tag=self.run_tag, model_tag=self.model_tag, task_tag=task_tag, reference_code=reference_code)
-            result_json = result.model_dump()
+            result_json = result
             evaluation_time = time.time() - start_time
             result_json['metadata'] = {
                 "run_tag": self.run_tag,
