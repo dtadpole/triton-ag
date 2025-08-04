@@ -197,8 +197,12 @@ class StatsClient:
                 # break if there is at least one valid runtime
                 if len(runtime_list) > 0:
                     break
-            finally:
+            except Exception as e:
+                logger.error(f"[{os.getpid()}] Error waiting for [{file_path}]: [{e}]")
                 await asyncio.sleep(1)
+                continue
+            finally:
+                await asyncio.sleep(0.1)
                 if time.time() - start_time > timeout:
                     logger.error(f"[{os.getpid()}] Timeout waiting for [{file_path}] after [{timeout}s]")
                     raise TimeoutError(f"Timeout waiting for [{file_path}] after [{timeout}s]")

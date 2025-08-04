@@ -621,17 +621,18 @@ async def main():
             # convert the block_json to a ComposerBlock object
             block = ComposerBlock(**block_json)
             # process the model override
-            model_override = await global_reg_client.get(f"{MODEL_OVERRIDE_KEY}")
-            if model_override:
-                logger.info(f"🔍 [Composer] [{block.prefix_tag}] Using model override: [{model_override}]")
-                block.model_override = model_override
-                # update model_override in the global registry
-                if PROC_ID is None:
-                    error_msg = f"❌ [Composer] [{block.prefix_tag}] Unable to get PROC_ID to update model_override [{model_override}]"
-                    logger.error(error_msg)
-                    raise Exception(error_msg)
-                else:
-                    await global_reg_client.put(f"adapter.{QUEUE_NAME}.model_override.{PROC_ID}", model_override)
+            if task_name.startswith("codeGen"): # a hack for now. TODO: fix this
+                model_override = await global_reg_client.get(f"{MODEL_OVERRIDE_KEY}")
+                if model_override:
+                    logger.info(f"🔍 [Composer] [{block.prefix_tag}] Using model override: [{model_override}]")
+                    block.model_override = model_override
+                    # update model_override in the global registry
+                    if PROC_ID is None:
+                        error_msg = f"❌ [Composer] [{block.prefix_tag}] Unable to get PROC_ID to update model_override [{model_override}]"
+                        logger.error(error_msg)
+                        raise Exception(error_msg)
+                    else:
+                        await global_reg_client.put(f"adapter.{QUEUE_NAME}.model_override.{PROC_ID}", model_override)
         else:
             block = ComposerBlock(
                 prefix_tag=args.prefix_tag,

@@ -185,8 +185,8 @@ class TrainerMain:
                 grpo_prob = (grpo_qsize / total_qsize) ** ALPHA
 
                 if random.random() < sft_prob:
-                    sft_item = await client.dequeue(queue_name=SFT_QUEUE_NAME)
-                    if sft_item['prefix_tag'] != trainer_prefix_tag:
+                    sft_item = await self.reg_client.dequeue(queue_name=SFT_QUEUE_NAME)
+                    if sft_item['prefix_tag'] != self.trainer_prefix_tag:
                         logger.error(f"❌ [trainerMain] Skipping item with prefix: {sft_item['prefix_tag']}")
                         continue
                     sft_block = TrainerSFTBlock(**sft_item)
