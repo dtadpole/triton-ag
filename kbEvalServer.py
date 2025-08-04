@@ -1,7 +1,7 @@
 import argparse
 import asyncio
 import wandb
-import datetime
+from datetime import datetime
 import re
 import signal
 import concurrent.futures
