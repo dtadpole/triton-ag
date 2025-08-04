@@ -55,7 +55,13 @@ class KbEvalClient:
             logger.warning(f"⚠️ [kbEvalClient] Warning: Config file [{config_file}] not found")
             return {}
 
-    async def kb_eval_ref(self, run_tag: str="auto", model_tag: str="model_tag", task_tag: str="task_tag", reference_code: str="reference_code") -> KernelExecResult:
+    async def kb_eval_ref(
+        self,
+        run_tag: str="auto",
+        model_tag: str="model_tag",
+        task_tag: str="task_tag",
+        reference_code: str="reference_code",
+    ) -> KernelExecResult:
         """Call the kbEvalRemoteServer with evaluation parameters"""
         if len(self.kb_eval_config) > 0 and len(self.kb_eval_config["servers"]) > 1:
             self.pick_server()
@@ -93,9 +99,9 @@ class KbEvalClient:
                             continue
                         else:
                             logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Return the last result from retriable error... [{retry_count}/{self.num_retries}]")
-                            return result
+                            return result.model_dump()
 
-                    return result
+                    return result.model_dump()
 
             except Exception as e:
                 logger.warning(f"🔍 [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Error calling server: [{e}] [{retry_count}/{self.num_retries}]")
@@ -110,7 +116,16 @@ class KbEvalClient:
                     logger.error(f"❌ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Failed after {retry_count} retries")
                     return None
 
-    async def kb_eval(self, run_tag: str="auto", model_tag: str="model_tag", task_tag: str="task_tag", eval_tag: str="eval_tag", reference_code: str="reference_code", generated_code: str="generated_code", code_type: str="cuda") -> KernelExecResult:
+    async def kb_eval(
+        self,
+        run_tag: str="auto",
+        model_tag: str="model_tag",
+        task_tag: str="task_tag",
+        eval_tag: str="eval_tag",
+        reference_code: str="reference_code",
+        generated_code: str="generated_code",
+        code_type: str="cuda",
+    ) -> KernelExecResult:
         """Call the kbEvalRemoteServer with evaluation parameters"""
         if len(self.kb_eval_config) > 0 and len(self.kb_eval_config["servers"]) > 1:
             self.pick_server()
@@ -151,9 +166,9 @@ class KbEvalClient:
                             continue
                         else:
                             logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Return the last result from retriable error... [{retry_count}/{self.num_retries}]")
-                            return result
+                            return result.model_dump()
 
-                    return result
+                    return result.model_dump()
 
             except Exception as e:
                 # add retry emoji to beginning and end of the string

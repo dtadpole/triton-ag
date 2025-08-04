@@ -7,7 +7,7 @@ import httpx
 import yaml
 import traceback
 import os
-from globalUtils import MODEL_OVERRIDE_KEY, TrainerGRPOBlock, TrainerRFTBlock, TrainerSFTBlock
+from globalUtils import MODEL_OVERRIDE_KEY, TrainerGRPOBlock, TrainerRFTBlock, TrainerSFTBlock, get_prefix_tag
 from logger import logger
 from globalWorkflow import GlobalWorkflow
 from globalRegClient import GlobalRegClient
@@ -259,8 +259,7 @@ async def main():
                 traceback.print_exc()
                 continue
     else:
-        global_workflow = GlobalWorkflow(args.prefix_tag)
-        trainer_prefix_tag = global_workflow.prefix_tag
+        trainer_prefix_tag = get_prefix_tag(args.prefix_tag)
         logger.info(f"🌀 [trainerMain] Starting with prefix: {trainer_prefix_tag}")
 
         rsync_queue = RsyncQueue()

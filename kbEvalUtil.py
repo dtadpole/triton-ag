@@ -16,8 +16,6 @@ import signal
 import argparse
 from collections import defaultdict
 
-MAX_LOCK_AGE = 30 # seconds
-
 def on_critical_alarm(signum, frame):
     # logger.error(f"⏰ Critical timeout reached [{signum}] [{frame.f_code.co_name}], exiting.")
     logger.error(f"⏰ Critical alarm invoked")
@@ -68,8 +66,8 @@ class KernelExecResult(BaseModel):
     """
     compiled: bool = False
     correctness: bool = False
-    metadata: dict = {}
     runtime: float = -1.0  # in us, only recorded if we decide to measure performance
+    metadata: dict = {}
     runtime_stats: dict = {}  # only recorded if we decide to measure performance
 
 class CorrectnessResult(BaseModel):
@@ -348,70 +346,6 @@ def graceful_eval_cleanup(curr_context: dict, device: torch.device):
             )  # Wait for all CUDA operations to complete
 
     # _cleanup_cuda_extensions() # SIMON NOTE: is this necessary?
-
-
-class FileLock:
-    def __init__(self, lock_file):
-        self.lock_file = lock_file
-        self.lock_fd = None
-        self.pid = os.getpid()
-
-    def __enter__(self):
-        try:
-            # if open file with 'w', it will change modified timestamp even without writing to the file
-            self.lock_fd = open(self.lock_file, 'r+')
-        except FileNotFoundError:
-             # if file does not exist, open file with 'w'
-            self.lock_fd = open(self.lock_file, 'w')
-        try:
-            fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            # write my pid to lock file
-            self.lock_fd.truncate(0)
-            self.lock_fd.write(str(self.pid) + "\n")
-            self.lock_fd.flush()
-            # os.fsync(self.lock_fd.fileno())
-        except BlockingIOError as e:
-            self.lock_fd.close()
-            raise TimeoutError("Could not acquire lock")
-        logger.warning(f"Lock [{self.lock_file}] acquired.")
-        return self
-
-    def __exit__(self, type, value, traceback):
-        if self.lock_fd:
-            self.lock_fd.write('\n[done]\n')
-            fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_UN)
-            self.lock_fd.close()
-            logger.warning(f"Lock [{self.lock_file}] released.")
-
-def cleanup_lockfile(lock_file: str):
-    if os.path.exists(lock_file):
-        my_pid = os.getpid()
-        lock_modified_time = os.path.getmtime(lock_file)
-        with open(lock_file, 'r') as file:
-            try:
-                fcntl.flock(file.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
-                first_line = file.readline().strip()
-                digits_only = ""
-                for c in first_line:
-                    if c.isdigit():
-                        digits_only += c
-                if digits_only:
-                    file_pid = int(digits_only)
-                    if my_pid != file_pid:
-                        if psutil.pid_exists(file_pid):
-                            logger.warning(f"[{my_pid}] Lock file [{lock_file}] for [pid={digits_only}] is running...")
-                        else:
-                            # if process is not running
-                            logger.error(f"[{my_pid}] Lock file [{lock_file}] [pid={digits_only}] is not running, deleting...")
-                            os.remove(lock_file)
-            except BlockingIOError:
-                if lock_modified_time < time.time() - MAX_LOCK_AGE:
-                    # safety net: if modified time is more than MAX_LOCK_AGE, delete lock file
-                    logger.error(f"[{my_pid}] Lock file [{lock_file}] older than [{MAX_LOCK_AGE}s], deleting...")
-                    try:
-                        os.remove(lock_file)
-                    except Exception as e:
-                        pass
 
 class FunctionCallMapper(ast.NodeVisitor):
     def __init__(self):
