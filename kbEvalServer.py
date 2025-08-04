@@ -72,6 +72,7 @@ def _setup_wandb_logging(prefix_tag: str="test", model_tag: str="local_qwen3-14b
         id=f"{model_tag}",
         name=f"{model_tag}-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
         resume="allow",
+        reinit="create_new",
     )
     wandb_loggers[key] = wandb_run
     logger.info(f"📊 W&B logging enabled for [{key}]")
