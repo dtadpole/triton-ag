@@ -118,6 +118,11 @@ def main(config_path):
     else:
         raise ValueError("Output model path not found in config")
 
+    if "output_model_fullprec_path" in model_paths:
+        output_model_fullprec_path = model_paths['output_model_fullprec_path']
+    else:
+        raise ValueError("output_model_fullprec_path not found in config")
+
     data_paths = config['data_paths']
     if "calibration_experience" in data_paths:
         calibration_experience_path = data_paths['calibration_experience']
@@ -132,7 +137,10 @@ def main(config_path):
     quant_params_config = config['quantize_params']
 
     device_map = config["device"] if "device" in config else "auto"
-    tem_full_precision_model = "/tmp/tem_model_path"
+    if output_model_fullprec_path == "":
+        tem_full_precision_model = "/tmp/tem_model_path"
+    else:
+        tem_full_precision_model = output_model_fullprec_path
 
     # Prepare evaluation data
     if eval_experience == "":
@@ -186,10 +194,12 @@ def main(config_path):
         logger.info("Start loading base model and Lora adapter...")
         base_model = AutoModelForCausalLM.from_pretrained(base_model_path)
         model_with_lora = PeftModel.from_pretrained(base_model, lora_adapter_path)
+        tokenizer = AutoTokenizer.from_pretrained(lora_adapter_path)
         # Merge the base model and Lora adapter
         logger.info("Start merging base model and Lora adapter...")
         model_merged = model_with_lora.merge_and_unload()
         model_merged.save_pretrained(tem_full_precision_model)
+        tokenizer.save_pretrained(tem_full_precision_model)
 
         # Calculate perplexity of the merged full precision model
         logger.info("Calculating perplexity of the merged full precision model...")
@@ -198,7 +208,6 @@ def main(config_path):
             device_map=device_map,
             torch_dtype=torch.float16
         )
-        tokenizer = AutoTokenizer.from_pretrained(lora_adapter_path)
 
         # Calculate and log perplexity of the merged model
         merged_model_perplexity = calculate_perplexity(
@@ -256,10 +265,7 @@ def main(config_path):
     if quant_params_config["apply_quantization"]:
         model.quantize(tokenizer,
                        quant_config = quant_config,
-                       calib_data=data,
-                       n_parallel_calib_samples=quant_params_config["n_parallel_calib_samples"],
-                       max_calib_samples=quant_params_config["max_calib_samples"],
-                       max_calib_seq_len=quant_params_config["max_calib_seq_len"])
+                       calib_data=data)
         model.save_quantized(output_model_path)
         tokenizer.save_pretrained(output_model_path)
     else:
@@ -287,12 +293,13 @@ def main(config_path):
     del awq_model
     torch.cuda.empty_cache()
 
-    # Remove the temporary full precision model
-    if os.path.exists(tem_full_precision_model):
-        try:
-            shutil.rmtree(tem_full_precision_model)
-        except OSError as e:
-            logger.error(f"Error: {e.strerror}")
+    if output_model_fullprec_path == "":
+        # Remove the temporary full precision model
+        if os.path.exists(tem_full_precision_model):
+            try:
+                shutil.rmtree(tem_full_precision_model)
+            except OSError as e:
+                logger.error(f"Error: {e.strerror}")
     logger.info("Calibration and quantization are done.")
 
     # Print final perplexity comparison if LoRA adapter was used and perplexity was calculated
