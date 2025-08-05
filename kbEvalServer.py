@@ -261,6 +261,34 @@ async def kb_eval_ref(
 
         return result
 
+    except FileNotFoundError as e:
+        # global TOTAL_ERROR_COUNTER
+        TOTAL_ERROR_COUNTER += 1
+        elapsed_time = time.time() - start_time
+        logger.error(f"❌ [KB Eval] [reference] error: {type(e).__name__}: {str(e)}")
+        result = KernelExecResult(
+            compiled=False,
+            correctness=False,
+            metadata={
+                "processing_error": f"[kb_eval_ref] Cannot generate the evaluation result in time [{elapsed_time:.2f}s]",
+                "retriable": "maybe", # if the error is retriable, the client will retry the request
+            },
+            runtime=-1.0,
+        )
+        metrics = {
+            "health/completion": 0,
+            "health/parallel_requests": parallel_request_counter,
+            "health/error_counter": TOTAL_ERROR_COUNTER,
+            "health/request_counter": TOTAL_REQUEST_COUNTER,
+            f"{task_tag}/healthiness": 0,
+            f"{task_tag}/compiled": 1 if result.compiled else 0,
+            f"{task_tag}/correctness": 1 if result.correctness else 0,
+            f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
+            f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
+        }
+        wandb_run.log(metrics)
+        return result
+
     except Exception as e:
         # global TOTAL_ERROR_COUNTER
         TOTAL_ERROR_COUNTER += 1
@@ -269,7 +297,7 @@ async def kb_eval_ref(
             compiled=False,
             correctness=False,
             metadata={
-                "processing_error": f"[kb_eval_ref] Cannot generate the evaluation result in time. Unexpected error: {type(e).__name__}: {str(e)}",
+                "processing_error": f"[kb_eval_ref] Cannot generate the evaluation result in time [{elapsed_time:.2f}s]. Unexpected error: {type(e).__name__}: {str(e)}",
                 "retriable": "maybe", # if the error is retriable, the client will retry the request
             },
             runtime=-1.0,
@@ -393,6 +421,39 @@ async def kb_eval(
             "metrics/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
             "metrics/elapsed_time": time.time() - start_time, # seconds
             f"{task_tag}/healthiness": 1,
+            f"{task_tag}/compiled": 1 if result.compiled else 0,
+            f"{task_tag}/correctness": 1 if result.correctness else 0,
+            f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
+            f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
+        }
+        wandb_run.log(metrics)
+
+        return result
+
+    except FileNotFoundError as e:
+        # global TOTAL_ERROR_COUNTER
+        TOTAL_ERROR_COUNTER += 1
+        logger.error(f"❌ [KB Eval] [{eval_tag}] error: {type(e).__name__}: {str(e)}")
+        result = KernelExecResult(
+            compiled=False,
+            correctness=False,
+            metadata={
+                "processing_error": f"[kb_eval] Cannot generate the evaluation result in time [{elapsed_time:.2f}s].",
+                "retriable": True, # if the error is retriable, the client will retry the request
+            },
+            runtime=-1.0,
+        )
+
+        metrics = {
+            "health/completion": 0,
+            "health/parallel_requests": parallel_request_counter,
+            "health/error_counter": TOTAL_ERROR_COUNTER,
+            "health/request_counter": TOTAL_REQUEST_COUNTER,
+            "metrics/compiled": 1 if result.compiled else 0,
+            "metrics/correctness": 1 if result.correctness else 0,
+            "metrics/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
+            "metrics/elapsed_time": time.time() - start_time, # seconds
+            f"{task_tag}/healthiness": 0,
             f"{task_tag}/compiled": 1 if result.compiled else 0,
             f"{task_tag}/correctness": 1 if result.correctness else 0,
             f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
