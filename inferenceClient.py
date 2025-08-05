@@ -33,7 +33,8 @@ class ModelConfig(BaseModel):
     model_name: str = Field()
     tokenizer_name: str = Field(default=None)
     temperature: float = Field(default=0.6)
-    max_tokens: int = Field(default=8192)
+    max_tokens: int = Field(default=16384)
+    truncate_prompt_tokens: int = Field(default=8192)
     top_p: float = Field(default=1.0)
     top_k: int = Field(default=40)
     logprobs: bool = Field(default=False)
@@ -73,6 +74,7 @@ class InferenceClient:
         self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name, trust_remote_code=self.config.provider.trust_remote_code)
         self.temperature = config.model.temperature
         self.max_tokens = config.model.max_tokens
+        self.truncate_prompt_tokens = config.model.truncate_prompt_tokens
         self.top_p = config.model.top_p
         self.top_k = config.model.top_k
         # self.logprobs = config.model.logprobs
@@ -127,6 +129,7 @@ class InferenceClient:
                 logprobs=1 if logprobs else NOT_GIVEN,
                 # top_p=self.top_p,
                 # extra_body={"top_k": self.top_k}
+                extra_body={"truncate_prompt_tokens": self.truncate_prompt_tokens}
             )
             
             # Initialize variables to accumulate streaming response
@@ -183,6 +186,7 @@ class InferenceClient:
                 logprobs=1 if logprobs else NOT_GIVEN,
                 # top_p=self.top_p,
                 # extra_body={"top_k": self.top_k}
+                extra_body={"truncate_prompt_tokens": self.truncate_prompt_tokens}
             )
             
             # Extract text from response
@@ -256,6 +260,7 @@ class InferenceClient:
                 logprobs=1 if logprobs else NOT_GIVEN,
                 # top_p=self.top_p,
                 # extra_body={"top_k": self.top_k}
+                extra_body={"truncate_prompt_tokens": self.truncate_prompt_tokens}
             )
             
             # Process streaming response
@@ -284,6 +289,7 @@ class InferenceClient:
                 logprobs=1 if logprobs else NOT_GIVEN,
                 # top_p=self.top_p,
                 # extra_body={"top_k": self.top_k}
+                extra_body={"truncate_prompt_tokens": self.truncate_prompt_tokens}
             )
             
             # Extract text from response

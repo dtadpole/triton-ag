@@ -112,7 +112,7 @@ module:
           returns:
             context_vars:
               reference_eval: "`__result__`"
-              reference_eval_path: "`f'{stats_dir}/{prefix_tag}/{task_tag}/reference.jsonl'`"
+              reference_eval_path: "`f'{stats_dir}/{prefix_tag}/reference/{task_tag}/reference.jsonl'`"
             logging:
               method: "log_kb_eval_ref"
         - endpoint: inferenceClient.completion
@@ -129,7 +129,9 @@ module:
               `[
                 {"role": "system", "content": self.get_system_prompt(__context__)}, 
                 {"role": "user", "content": self.get_user_prompt(__context__)}
-              ] if conversation is None else conversation['messages'] + [
+              ] if conversation is None else conversation['messages'][:-1] + [
+                {"role": "assistant", "content": f"```python\n{generated_code}\n```"}
+              ] + [
                 {"role": "user", "content": self.get_user_prompt(__context__)}
               ]
               `
@@ -138,7 +140,7 @@ module:
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
-                enable_thinking=False,
+                enable_thinking=True,
               )`
           inputs:
             prompt: "`prompt`"
@@ -181,12 +183,21 @@ module:
           inputs:
             completion: "`completion['completion']`"
           returns:
+            error_if: "`__result__ is None or __result__['code'] is None`"
             context_vars:
-              generated_code: "`__result__`"
+              generated_code: "`__result__['code']`"
+              generated_reasoning: "`__result__['reasoning']`"
+              generated_code_path: "`f'{record_folder}/{turn_tag}_generated_code.json'`"
+              generated_reasoning_path: "`f'{record_folder}/{turn_tag}_generated_reasoning.json'`"
             save_to:
-              - path: "`f'{record_folder}/{turn_tag}_generated_code.json'`"
+              - path: "`generated_code_path`"
                 data: "`generated_code`"
                 format: "text"
+              - path: "`generated_reasoning_path`"
+                data: "`generated_reasoning`"
+                format: "text"
+            logging:
+              method: "log_code_extraction"
         - endpoint: kbEvalClient.kb_eval
           inputs:
             run_tag: "`run_tag`"

@@ -39,11 +39,22 @@ class CodeExtractor:
         pass
     
     def extract_code(self, completion: str) -> str:
-        # find the last ```python block
+        # first extract <think>...</think> block
+        think_blocks = re.findall(r"(<think>.*?</think>)", completion, re.DOTALL)
+        for think_block in think_blocks:
+            completion = completion.replace(think_block, "")
+        # then extract ```python block
         code_blocks = re.findall(r"```python\n(.*?)\n```", completion, re.DOTALL)
-        if len(code_blocks) == 0:
-            return completion
-        return code_blocks[-1]
+        # if not found, try ``` block
+        if not code_blocks:
+            code_blocks = re.findall(r"```\n(.*?)\n```", completion, re.DOTALL)
+        # if still not found, use the whole completion
+        if not code_blocks:
+            code_blocks = [completion]
+        return {
+            "code": code_blocks[0],
+            "reasoning": '\n'.join(think_blocks)
+        }
 
 
 class FileLock:

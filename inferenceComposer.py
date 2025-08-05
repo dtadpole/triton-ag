@@ -182,6 +182,17 @@ class ComposerClient:
         token_per_second = num_completion_tokens / completion_time_seconds if completion_time_seconds > 0 else 0.0
         logger.info(f"👏 [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{conversation_path}] [{f'{num_completion_tokens}'} tokens] in [{completion_time_seconds:.2f}s] [{token_per_second:.2f} tokens/s]")
 
+    def log_code_extraction(self, result: dict, context_vars: dict) -> dict:
+        """Process log code extraction."""
+        run_tag = context_vars.get('run_tag', None)
+        model_tag = context_vars.get('model_tag', None)
+        task_tag = context_vars.get('task_tag', None)
+        turn_tag = context_vars.get('turn_tag', None)
+        generated_code = context_vars['generated_code']
+        generated_reasoning = context_vars['generated_reasoning']
+        generated_code_path = context_vars.get('generated_code_path', None)
+        logger.info(f"👏 [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{generated_code_path}] [{generated_code[:100]}]... [{generated_reasoning[:100]}...")
+
     def log_kb_eval_ref(self, result: dict, context_vars: dict) -> dict:
         """Process log kb eval ref."""
         run_tag = context_vars.get('run_tag', None)
