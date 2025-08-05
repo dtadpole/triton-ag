@@ -54,7 +54,14 @@ def from_kbEval_yaml(yaml_file: str="kbEval.yaml"):
     return yaml_data.get("kbEvalCli", {}).get(hostname, {})
 
 def format_exception(e: Exception):
-    return "\n".join(traceback.format_exception(type(e), e, e.__traceback__))
+    # return "\n".join(traceback.format_exception(type(e), e, e.__traceback__)
+    message = f"{type(e).__name__}: {e}"
+    if e.__cause__ is not None or e.__context__ is not None:
+        # return message + "\n  caused by: " + format_exception(e.__cause__ or e.__context__)
+        return format_exception(e.__cause__ or e.__context__)
+    else:
+        return message
+    # return f"{type(e).__name__}: {e.message}"
 
 def set_seed(seed: int):
     torch.manual_seed(seed)

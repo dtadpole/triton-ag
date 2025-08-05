@@ -432,12 +432,12 @@ def main():
             )
     except Exception as exception:
         exit_code = 1
-        exception_traceback_str = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
+        # exception_traceback_str = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
         traceback.print_exc()
         result = KernelExecResult(
             compiled=False,
             correctness=False,
-            metadata={"processing_error": exception_traceback_str},
+            metadata={"processing_error": format_exception(exception)},
         )
     finally:
         if result is not None:

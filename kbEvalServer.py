@@ -70,9 +70,10 @@ def _setup_wandb_logging(prefix_tag: str="test", model_tag: str="local_qwen3-14b
     wandb_run = wandb.init(
         project=f"kb_eval_{prefix_tag}",
         id=f"{model_tag}",
-        name=f"{model_tag}-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+        name=f"{model_tag}-{datetime.now().strftime('%Y%m%d-%H%M')}",
         resume="allow",
         reinit="create_new",
+        settings=wandb.Settings(init_timeout=10),
     )
     wandb_loggers[key] = wandb_run
     logger.info(f"📊 W&B logging enabled for [{key}]")
@@ -180,11 +181,11 @@ async def kb_eval_ref(
             parallel_request_counter += 1
             TOTAL_REQUEST_COUNTER += 1
 
+        start_time = time.time()
+
         # get prefix_tag from run_tag by removing regex pattern [_ddd_dd] (ddd is 3 digits, dd is 2 digits) at the end if exists
         prefix_tag = re.sub(r"_\d{3}_\d{2}$", "", run_tag)
         wandb_run = _setup_wandb_logging(prefix_tag, model_tag)
-
-        start_time = time.time()
 
         # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}/{eval_tag}/{time_tag}
         temp_dir = os.path.join(KB_EVAL_DIR, run_tag, model_tag, task_tag)
@@ -316,11 +317,11 @@ async def kb_eval(
             parallel_request_counter += 1
             TOTAL_REQUEST_COUNTER += 1
 
+        start_time = time.time()
+
         # get prefix_tag from run_tag by removing regex pattern [_ddd_dd] (ddd is 3 digits, dd is 2 digits) at the end if exists
         prefix_tag = re.sub(r"_\d{3}_\d{2}$", "", run_tag)
         wandb_run = _setup_wandb_logging(prefix_tag, model_tag)
-
-        start_time = time.time()
 
         # temp_dir is {HOME}/.kbeval/{run_tag}/{model_tag}/{task_tag}/{eval_tag}
         temp_dir = os.path.join(KB_EVAL_DIR, run_tag, model_tag, task_tag, eval_tag)
