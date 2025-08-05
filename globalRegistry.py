@@ -389,10 +389,11 @@ async def enqueue(
             raise HTTPException(status_code=404, detail=f"Queue [{queue_name}] not found")
     try:
         await queue.put(item)
+        logger.info(f"🎢 Enqueued item [{item}] into queue [{queue_name}]")
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error enqueuing item [{item}] into queue [{queue_name}]: {e}")
-    return {"message": f"Item [{item}] enqueued into queue [{queue_name}]"}
+    return {"message": f"Enqueued [{item}] into queue [{queue_name}]"}
 
 @fastapi.get("/queue/dequeue/{queue_name}")
 async def dequeue(queue_name: str):
@@ -403,7 +404,9 @@ async def dequeue(queue_name: str):
     # get timeout from config
     timeout = reg.config.get("fastapi", {}).get("dequeue_timeout", 5)
     try:
-        return await asyncio.wait_for(queue.get(), timeout=timeout)
+        item = await asyncio.wait_for(queue.get(), timeout=timeout)
+        logger.info(f"🎢 Dequeued item [{item}] from queue [{queue_name}]")
+        return item
     except asyncio.TimeoutError:
         raise HTTPException(status_code=408, detail=f"Queue [{queue_name}] timed out")
 

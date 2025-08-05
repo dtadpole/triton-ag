@@ -199,7 +199,7 @@ class TrainerMain:
                     logger.info(f"🔍 [trainerMain] Base config: {sft_trainer.config.model_dump_json()}")
                     logger.info(f"🔍 [trainerMain] SFT config: {sft_trainer.sft_config.model_dump_json()}")
                     # run in executor to avoid blocking the event loop
-                    await loop.run_in_executor(None, sft_train_block, sft_block, sft_trainer, self.rsync_queue.enqueue)
+                    await sft_train_block(sft_block, sft_trainer, self.rsync_queue.enqueue)
 
                 if random.random() < rft_prob:
                     rft_item = await self.reg_client.dequeue(queue_name=RFT_QUEUE_NAME)
@@ -216,7 +216,7 @@ class TrainerMain:
                     logger.info(f"🔍 [trainerMain] Base config: {rft_trainer.config.model_dump_json()}")
                     logger.info(f"🔍 [trainerMain] RFT config: {rft_trainer.rft_config.model_dump_json()}")
                     # run in executor to avoid blocking the event loop
-                    await loop.run_in_executor(None, rft_train_block, rft_block, rft_trainer, self.rsync_queue.enqueue)
+                    await rft_train_block(rft_block, rft_trainer, self.rsync_queue.enqueue)
 
                 if random.random() < grpo_prob:
                     grpo_item = await self.reg_client.dequeue(queue_name=GRPO_QUEUE_NAME)
@@ -233,7 +233,7 @@ class TrainerMain:
                     logger.info(f"🔍 [trainerMain] Base config: {grpo_trainer.config.model_dump_json()}")
                     logger.info(f"🔍 [trainerMain] GRPO config: {grpo_trainer.grpo_config.model_dump_json()}")
                     # run in executor to avoid blocking the event loop
-                    await loop.run_in_executor(None, grpo_train_block, grpo_block, grpo_trainer, self.rsync_queue.enqueue)
+                    await grpo_train_block(grpo_block, grpo_trainer, self.rsync_queue.enqueue)
 
             except Exception as e:
                 logger.error(f"❌ [trainerMain] Error: [{type(e)}: {e}]")

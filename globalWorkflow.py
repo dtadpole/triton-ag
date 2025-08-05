@@ -1,6 +1,7 @@
 import yaml
 import asyncio
 import argparse
+from typing import Optional
 from datetime import datetime
 from logger import logger
 from globalRegClient import GlobalRegClient
@@ -39,15 +40,22 @@ class GlobalWorkflow:
             await self.global_reg_client.put(init_var.get("name"), init_var.get("value"))
             logger.info(f"🔢 [GlobalWorkflow] [{self.prefix_tag}] Initialized [{init_var.get('name')}] = [{init_var.get('value')}]")
 
-    async def init_tasks(self, start_epoch: int = 0, start_block: int = 0):
+    async def init_tasks(self,
+                         start_epoch: Optional[int] = None,
+                         start_block: Optional[int] = None,
+                         end_epoch: Optional[int] = None,
+                         end_block: Optional[int] = None,
+                         ):
         global_config = self.config.get("global", {})
-        num_epochs = global_config.get("num_epochs", 100)
-        num_blocks_per_epoch = global_config.get("num_blocks_per_epoch", 16)
+        start_epoch = start_epoch if start_epoch is not None else global_config.get("start_epoch", 0)
+        start_block = start_block if start_block is not None else global_config.get("start_block", 0)
+        end_epoch = end_epoch if end_epoch is not None else global_config.get("end_epoch", 10)
+        end_block = end_block if end_block is not None else global_config.get("end_block", 16)
 
         init_tasks = global_config.get("init_tasks", [])
 
-        for epoch_id in range(start_epoch, num_epochs):
-            for block_id in range(start_block, num_blocks_per_epoch):
+        for epoch_id in range(start_epoch, end_epoch):
+            for block_id in range(start_block, end_block):
                 # iterate through tasks and blocks
                 env_vars = {
                     "prefix_tag": self.prefix_tag,
@@ -138,6 +146,8 @@ if __name__ == "__main__":
     parser.add_argument("--prefix_tag", type=str, default="auto")
     parser.add_argument("--start_epoch", type=int, default=0)
     parser.add_argument("--start_block", type=int, default=0)
+    parser.add_argument("--end_epoch", type=int, default=10)
+    parser.add_argument("--end_block", type=int, default=16)
     args = parser.parse_args()
 
     globalWorkflow = GlobalWorkflow(prefix_tag=args.prefix_tag)

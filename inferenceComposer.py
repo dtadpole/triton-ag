@@ -471,16 +471,16 @@ class ComposerClient:
 
                         try:
                             if 'returns' in step_config:
+                                returns_config = step_config['returns']
                                 step_context_vars['__result__'] = result
                                 # process error_if
-                                if 'error_if' in step_config:
-                                    error_if = self._process_variable(step_config['error_if'], step_context_vars)
+                                if 'error_if' in returns_config:
+                                    error_if = self._process_variable(returns_config['error_if'], step_context_vars)
                                     if error_if:
                                         logger.error(f"🔴 [Composer] [{self.input_tag}] Error in endpoint [{endpoint_class_name}.{endpoint_method_name}]: {result}")
                                         error_encountered = True
                                         break
                                 # now we don't have any errors, process the return in context variables
-                                returns_config = step_config['returns']
                                 if 'context_vars' in returns_config:
                                     step_context_vars = self._process_context_vars(returns_config['context_vars'], step_context_vars)
                                 # process save_to
