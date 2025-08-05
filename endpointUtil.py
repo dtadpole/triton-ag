@@ -52,7 +52,7 @@ class CodeExtractor:
         if not code_blocks:
             code_blocks = [completion]
         return {
-            "code": code_blocks[0],
+            "code": code_blocks[-1],
             "reasoning": '\n'.join(think_blocks)
         }
 

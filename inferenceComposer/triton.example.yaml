@@ -22,6 +22,12 @@ examples:
         return []  # No special initialization inputs needed
 
   generated_code: |
+    # This is a simple triton kernel for element-wise addition. Following are most important optimization techniques:
+    # 1. Coalesced memory access: contiguous offsets + contiguous tensors → coalesced tl.load/store.
+    # 2. Tiling/blocking: BLOCK_SIZE tiles (pid * BLOCK_SIZE + tl.arange(...)) → good occupancy/vectorization.
+    # 3. Branchless tail: mask on loads/stores (offsets < n_elements) → avoids divergent bounds checks.
+    # 4. Compile-time specialization: BLOCK_SIZE: tl.constexpr → JIT unrolling/strength-reduction.
+    
     import torch
     import torch.nn as nn
     import triton
@@ -87,3 +93,9 @@ examples:
 
         def forward(self, a, b):
             return elementwise_add_triton(a, b)
+
+    # Here are some ideas for potential further optimization:
+    # 1. Autotune launch params: @triton.autotune over BLOCK_SIZE/num_warps/num_stages keyed on input size/dtype.
+    # 2. Vectorize per lane: process V>1 elements per thread (e.g., V=4) to better utilize LD/ST bandwidth.
+    # 3. Alignment hints: add tl.multiple_of(offsets, 16) / tl.max_contiguous(offsets, 16) when true to aid vectorization.
+    # 4. Fuse ops: combine add with adjacent elementwise steps (bias/activation) to cut global memory traffic.

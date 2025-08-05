@@ -191,7 +191,7 @@ class ComposerClient:
         generated_code = context_vars['generated_code']
         generated_reasoning = context_vars['generated_reasoning']
         generated_code_path = context_vars.get('generated_code_path', None)
-        logger.info(f"👏 [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{generated_code_path}] [{generated_code[:100]}]... [{generated_reasoning[:100]}...")
+        logger.info(f"👏 [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{generated_code_path}] [{generated_code[:100]}]... [{generated_reasoning[:100]}]...")
 
     def log_kb_eval_ref(self, result: dict, context_vars: dict) -> dict:
         """Process log kb eval ref."""
