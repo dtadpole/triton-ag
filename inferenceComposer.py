@@ -610,7 +610,7 @@ async def main():
     parser.add_argument("--num_turns_per_generation", type=int, default=4)
     parser.add_argument("--use_global_queue", type=str, default=None) # this is the task_name of the global queue
     parser.add_argument("--proc_id", type=str, default=None)
-    parser.add_argument("--module_file", type=str, default="inferenceComposer/exemplar.module.yaml")
+    parser.add_argument("--module_file", type=str, default="inferenceComposer/codeGen.module.yaml")
     parser.add_argument("--prompt_file", type=str, default="inferenceComposer/codeGen.prompt.triton.yaml")
     parser.add_argument("--example_file", type=str, default="inferenceComposer/triton.example.yaml")
     args = parser.parse_args()

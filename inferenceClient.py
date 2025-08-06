@@ -129,7 +129,7 @@ class InferenceClient:
                 logprobs=1 if logprobs else NOT_GIVEN,
                 # top_p=self.top_p,
                 # extra_body={"top_k": self.top_k}
-                extra_body={"truncate_prompt_tokens": self.truncate_prompt_tokens}
+                # extra_body={"truncate_prompt_tokens": self.truncate_prompt_tokens}
             )
             
             # Initialize variables to accumulate streaming response
@@ -149,7 +149,7 @@ class InferenceClient:
                         generated_content += choice.delta.content
                     # Safely access reasoning_content (only available for reasoning models like o1)
                     if hasattr(choice.delta, 'reasoning_content') and choice.delta.reasoning_content:
-                        logger.warning(f"⚠️ [InferenceClient] [Chat completion] Reasoning content: {choice.delta.reasoning_content}")
+                        # logger.warning(f"⚠️ [InferenceClient] [Chat completion] Reasoning content: {choice.delta.reasoning_content}")
                         reasoning_content += choice.delta.reasoning_content
                     # Safely access logprobs
                     if hasattr(choice.delta, 'logprobs') and choice.delta.logprobs:
@@ -186,7 +186,7 @@ class InferenceClient:
                 logprobs=1 if logprobs else NOT_GIVEN,
                 # top_p=self.top_p,
                 # extra_body={"top_k": self.top_k}
-                extra_body={"truncate_prompt_tokens": self.truncate_prompt_tokens}
+                # extra_body={"truncate_prompt_tokens": self.truncate_prompt_tokens}
             )
             
             # Extract text from response

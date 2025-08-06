@@ -246,3 +246,13 @@ docker commit <pid> vllm:vX.Y
 docker tag vllm:vX.Y dtadpole/vllm:vX.Y
 
 ########################################
+
+run GPT-OSS-120b
+
+uv pip install --pre vllm==0.10.1+gptoss \
+  --extra-index-url https://wheels.vllm.ai/gpt-oss/ \
+  --extra-index-url https://download.pytorch.org/whl/nightly/cu128 \
+  --index-strategy unsafe-best-match
+
+# Launch the server:
+vllm serve openai/gpt-oss-120b
