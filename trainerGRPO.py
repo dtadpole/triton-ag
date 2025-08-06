@@ -26,6 +26,7 @@ import time
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import traceback
+from endpointUtil import StatsClient
 from globalUtils import TrainerGRPOBlock
 from globalRegClient import GlobalRegClient
 from globalWorkflow import GlobalWorkflow
@@ -50,6 +51,9 @@ class GRPOConfig(BaseModel):
     reward_epsilon: float = 1e-3
     reward_noise: float = 1e-2
     loss_type: str = "group_max" # "episode" or "token" or "seq_max" or "group_max"
+    use_trajectory_reward: bool = True
+    t_grpo_alpha1: float = 0.3
+    t_grpo_alpha2: float = 0.7
 
     @classmethod
     def from_yaml(cls, file_path: str) -> "GRPOConfig":
@@ -62,7 +66,8 @@ class GRPOConfig(BaseModel):
 class GenerationResult(BaseModel):
     """Result of a single generation"""
     turn_tag: str
-    reward: float # total reward
+    reward: float # total reward for step
+    trajectory_reward: float # total reward for trajectory
     reward_items: Dict[str, float] = {} # individual reward components
     prompt_token_ids: List[int] = [] # prompt tokens
     completion_token_ids: List[int] = [] # completion tokens
@@ -82,6 +87,7 @@ class GenerationResultGroup(BaseModel):
             {
                 'turn_tag': result.turn_tag,
                 'reward': result.reward,
+                'trajectory_reward': result.trajectory_reward,
                 'advantage': advantage,
                 'prompt_token_ids': result.prompt_token_ids,
                 'completion_token_ids': result.completion_token_ids,
@@ -95,19 +101,33 @@ class GenerationResultGroup(BaseModel):
     def _compute_advantages(self, config: GRPOConfig):
         """Compute advantages for the generated tokens"""
         # calculate mean and stdev of the rewards
-        rewards = [result.reward for result in self.results]
-        mean_reward = np.mean(rewards)
-        std_reward = np.std(rewards)
+        step_rewards = np.array([result.reward for result in self.results])
+        mean_step_reward = np.mean(step_rewards)
+        std_step_reward = np.std(step_rewards)
         # whether to scale the rewards
         if config.reward_scale:
-            advantages = [(r - mean_reward) / (std_reward + config.reward_epsilon) for r in rewards]
+            step_advantages = (step_rewards - mean_step_reward) / (std_step_reward + config.reward_epsilon)
         else:
-            advantages = [r - mean_reward for r in rewards]
+            step_advantages = step_rewards - mean_step_reward
         # add noise to the advantages
-        advantages = [a + np.random.normal(0, config.reward_noise) for a in advantages]
-        # return the advantages
-        return advantages
-        
+        step_advantages = step_advantages + np.random.normal(0, config.reward_noise, size=step_advantages.shape)
+        # calculate trajectory advantages if enabled
+        if config.use_trajectory_reward:
+            trajectory_rewards = np.array([result.trajectory_reward for result in self.results])
+            mean_trajectory_reward = np.mean(trajectory_rewards)
+            std_trajectory_reward = np.std(trajectory_rewards)
+            if config.reward_scale:
+                trajectory_advantages = (trajectory_rewards - mean_trajectory_reward) / (std_trajectory_reward + config.reward_epsilon)
+            else:
+                trajectory_advantages = trajectory_rewards - mean_trajectory_reward
+            # add noise to the trajectory advantages
+            trajectory_advantages = trajectory_advantages + np.random.normal(0, config.reward_noise, size=trajectory_advantages.shape)
+            # return total advantages as a weighted sum of step and trajectory advantages
+            return step_advantages * config.t_grpo_alpha1 + trajectory_advantages * config.t_grpo_alpha2
+        # return step advantages if trajectory reward is not used
+        else:
+            return step_advantages
+
 class GenerationDataset(Dataset):
     """Dataset for generation results"""
     def __init__(self, result_groups: List[GenerationResultGroup]):
@@ -358,7 +378,7 @@ def grpo_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_fil
     
     return trainer
 
-def grpo_train_block(block: TrainerGRPOBlock, trainer: GRPOTrainer, callback: Optional[Callable] = None):
+async def grpo_train_block(block: TrainerGRPOBlock, trainer: GRPOTrainer, callback: Optional[Callable] = None):
     """Train the model for one block"""
     logger.info(f"👉 [GRPOTrainer] [{block.input_tag}] GRPO Training started for block...")
 
@@ -376,40 +396,57 @@ def grpo_train_block(block: TrainerGRPOBlock, trainer: GRPOTrainer, callback: Op
     
     result_df = result.df()
 
+    stats_client = StatsClient()
+    REFERENCE_CATEGORY = "reference"
     # for each row in the result_df, create a generation result group
     result_groups = []
     for index, row in result_df.iterrows():
-        if not row['compiled'] or not row['correctness']:
-            # this should not happen, but just in case
-            logger.error(f"❌ [GRPOTrainer] [{block.input_tag}] Invalid Reference Evaluation - Skipping [{row['filename']}] Compiled: [{row['compiled']}] Correctness: [{row['correctness']}]")
-            continue
-
-        folder = os.path.dirname(row['filename'])
-        ref_runtime = row['runtime']
-
         # get task tag from metadata
-        # if 'task_tag' not in row['metadata']:
-        #     logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] Skipping [{row['filename']}] No task tag in metadata")
-        #     continue
-        # task_tag = row['metadata']['task_tag']
+        folder = os.path.dirname(row['filename'])
         task_tag = folder.split('/')[-1].split('=')[-1]
+        #  get reference runtime from stats folder
+        try:
+            # run async task
+            ref_stats = await stats_client.wait_for_stats(
+                prefix_tag=block.prefix_tag,
+                model_tag=REFERENCE_CATEGORY,
+                task_tag=task_tag,
+                category=REFERENCE_CATEGORY,
+                timeout=5.0,
+            )
+            ref_runtime = ref_stats['runtime']
+            logger.info(f"🔍 [GRPOTrainer] [{block.input_tag}] Reference runtime: [{ref_runtime}ms] for [{task_tag}]")
+        except Exception as e:
+            if not row['compiled'] or not row['correctness']:
+                # this should not happen, but just in case
+                logger.error(f"❌ [GRPOTrainer] [{block.input_tag}] Invalid Reference Evaluation - Skipping [{row['filename']}] Compiled: [{row['compiled']}] Correctness: [{row['correctness']}]")
+                continue
+            else:
+                logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] set reference runtime [{row['runtime']}ms] from eval file: [{row['filename']}]")
+                ref_runtime = row['runtime']
 
-        generation_results_by_turn = defaultdict(list)
+        generation_rewards_by_gen = defaultdict(list)
+        generation_rewards_by_turn = defaultdict(list)
         # read in all the gen_xx_completion.json files in the same folder (non-recursive)
-        completion_files = [f for f in os.listdir(folder) if f.startswith('gen_') and f.endswith('_completion.json')]
+        completion_files = sorted([f for f in os.listdir(folder) if f.startswith('gen_') and f.endswith('_completion.json')])
         for completion_file in completion_files:
             try:
                 with open(os.path.join(folder, completion_file), 'r') as f:
                     completion_data = json.load(f)
                 turn_tag = completion_file.replace('_completion.json', '')
+                gen_id = int(turn_tag.split('_')[1]) # gen_id is the second number in the turn_tag, e.g. gen_01_t03 -> 1
                 turn_id = int(turn_tag.split('_')[-1][1:]) # turn_id is the last number in the turn_tag, e.g. gen_01_t03 -> 3
                 # read corresponding gen_xx_eval.json
                 eval_file = completion_file.replace('_completion.json', '_generated_eval.json')
                 if not os.path.exists(os.path.join(folder, eval_file)):
                     logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] No eval file found for [{completion_file}]")
                     continue
-                with open(os.path.join(folder, eval_file), 'r') as f:
+                eval_file_path = os.path.join(folder, eval_file)
+                with open(eval_file_path, 'r') as f:
                     eval_data = json.load(f)
+                    if not eval_data:
+                        logger.error(f"❌ [GRPOTrainer] [{block.input_tag}] No eval data found for [{eval_file_path}]")
+                        continue
                 # ok, now compile all the information together
                 # compiled = eval_data['compiled']
                 correctness = eval_data['correctness']
@@ -424,24 +461,67 @@ def grpo_train_block(block: TrainerGRPOBlock, trainer: GRPOTrainer, callback: Op
                 # split completion_data['logprobs'] into a list of completion ids and logprobs
                 completion_token_ids = [logprob['token_id'] for logprob in completion_data['logprobs']]
                 completion_log_probs = [logprob['logprob'] for logprob in completion_data['logprobs']]
-                # create the generation result object
-                result = GenerationResult(
-                    turn_tag=turn_tag,
-                    reward=reward,
-                    reward_items={
-                        # "compiled": reward_compiled,
-                        "correctness": reward_correctness,
-                        "speedup": reward_speedup,
+
+                # add the generation reward to the generation_rewards_by_gen and generation_rewards_by_turn
+                generation_rewards_by_gen[gen_id].append({
+                    "turn_tag": turn_tag,
+                    "gen_id": gen_id,
+                    "turn_id": turn_id,
+                    "reward": reward, # total reward
+                    "reward_items": {
+                        "correctness": reward_correctness, # correctness reward
+                        "speedup": reward_speedup, # speedup reward
                     },
-                    prompt_token_ids=prompt_token_ids,
-                    completion_token_ids=completion_token_ids,
-                    completion_log_probs=completion_log_probs,
-                )
-                generation_results_by_turn[turn_id].append(result)
+                })
+                generation_rewards_by_turn[turn_tag] = {
+                    "turn_tag": turn_tag,
+                    "gen_id": gen_id,
+                    "turn_id": turn_id,
+                    "reward": reward, # total reward
+                    "reward_items": {
+                        "correctness": reward_correctness, # correctness reward
+                        "speedup": reward_speedup, # speedup reward
+                    },
+                    "prompt_token_ids": prompt_token_ids,
+                    "completion_token_ids": completion_token_ids,
+                    "completion_log_probs": completion_log_probs,
+                }
             except Exception as e:
-                logger.error(f"❌ [GRPOTrainer] [{block.input_tag}] Error processing [{completion_file}]: {e}")
+                logger.error(f"❌ [GRPOTrainer] [{block.input_tag}] Error processing [{completion_file}]: {e}, skipping [{task_tag}] [{turn_tag}]...")
                 traceback.print_exc()
                 continue
+
+        alpha1 = trainer.grpo_config.t_grpo_alpha1
+        alpha2 = trainer.grpo_config.t_grpo_alpha2
+        generation_results_by_turn = defaultdict(list)
+        for turn_tag, turn_rewards in generation_rewards_by_turn.items():
+            gen_id = turn_rewards['gen_id']
+            turn_id = turn_rewards['turn_id']
+            # calculate trajectory reward
+            step_count = len(generation_rewards_by_gen[gen_id])
+            trajectory_reward = np.mean([reward['reward'] for reward in generation_rewards_by_gen[gen_id]])
+            trajectory_reward_correctness = np.mean([reward['reward_items']['correctness'] for reward in generation_rewards_by_gen[gen_id]])
+            trajectory_reward_speedup = np.mean([reward['reward_items']['speedup'] for reward in generation_rewards_by_gen[gen_id]])
+            
+            # create a generation result object
+            result = GenerationResult(
+                turn_tag=turn_tag,
+                reward=turn_rewards['reward'],
+                trajectory_reward=trajectory_reward,
+                reward_items={
+                    "step_reward": turn_rewards['reward'],
+                    "step_correctness": turn_rewards['reward_items']['correctness'],
+                    "step_speedup": turn_rewards['reward_items']['speedup'],
+                    "step_count": step_count,
+                    "trajectory_reward": trajectory_reward,
+                    "trajectory_correctness": trajectory_reward_correctness,
+                    "trajectory_speedup": trajectory_reward_speedup,
+                },
+                prompt_token_ids=turn_rewards['prompt_token_ids'],
+                completion_token_ids=turn_rewards['completion_token_ids'],
+                completion_log_probs=turn_rewards['completion_log_probs'],
+            )
+            generation_results_by_turn[turn_id].append(result)
 
         # iterate over the generation_results_by_turn and create a generation result group for each turn
         for turn_id, generation_results in generation_results_by_turn.items():
@@ -450,9 +530,14 @@ def grpo_train_block(block: TrainerGRPOBlock, trainer: GRPOTrainer, callback: Op
                 logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] Skipping [{folder}] that has only [{len(generation_results)}] results for turn [{turn_id}]")
                 continue
             # check if all the reward are the same, if so, skip
-            if all(result.reward == generation_results[0].reward for result in generation_results):
-                logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] Skipping [{folder}] All rewards are the same: [{generation_results[0].reward}] for [{task_tag}] turn [{turn_id}]")
-                continue
+            if trainer.grpo_config.use_trajectory_reward:
+                if all(result.trajectory_reward == generation_results[0].trajectory_reward for result in generation_results) and all(result.reward == generation_results[0].reward for result in generation_results):
+                    logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] Skipping [{folder}] All rewards are the same: [step: {generation_results[0].reward}, trajectory: {generation_results[0].trajectory_reward}] for [{task_tag}] turn [{turn_id}]")
+                    continue
+            else:
+                if all(result.reward == generation_results[0].reward for result in generation_results):
+                    logger.warning(f"⚠️ [GRPOTrainer] [{block.input_tag}] Skipping [{folder}] All rewards are the same: [step: {generation_results[0].reward}] for [{task_tag}] turn [{turn_id}]")
+                    continue
             result_group = GenerationResultGroup(task_tag=task_tag, turn_id=turn_id, results=generation_results)
             result_groups.append(result_group)
 
@@ -572,10 +657,10 @@ def grpo_get_sample_dataset(tokenizer: AutoTokenizer, size: int = 20) -> Generat
 async def main():
     """Main function for GRPO training"""
     parser = argparse.ArgumentParser(description="Train a model using GRPOTrainer")
-    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.test")
+    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.h")
     parser.add_argument("--epoch_id", type=int, default=0)
     parser.add_argument("--block_id", type=int, default=0)
-    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B_20250801_233446")
+    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B.h_001_12")
     parser.add_argument("--input_dir", type=str, default="~/.codeGenEval")
     parser.add_argument("--output_dir", type=str, default="~/.trainer")
     parser.add_argument("--base_config", type=str, default="trainerBase.yaml")
@@ -605,7 +690,7 @@ async def main():
             input_dir=args.input_dir,
             output_dir=args.output_dir,
         )
-        grpo_train_block(grpo_block, trainer)
+        await grpo_train_block(grpo_block, trainer)
 
 if __name__ == "__main__":
     asyncio.run(main())

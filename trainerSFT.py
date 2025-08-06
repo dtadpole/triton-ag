@@ -141,7 +141,7 @@ def sft_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_file
     
     return trainer
 
-def sft_train_block(block: TrainerSFTBlock, trainer: SFTTrainer, callback: Optional[Callable] = None):
+async def sft_train_block(block: TrainerSFTBlock, trainer: SFTTrainer, callback: Optional[Callable] = None):
     """Train the model for one block"""
     logger.info(f"👉 [SFTTrainer] [{block.input_tag}] SFT Training started for block...")
 
@@ -202,7 +202,7 @@ async def main():
         input_dir=args.input_dir,
         output_dir=args.output_dir,
     )
-    sft_train_block(sft_block, trainer)
+    await sft_train_block(sft_block, trainer)
     
 if __name__ == "__main__":
     asyncio.run(main())

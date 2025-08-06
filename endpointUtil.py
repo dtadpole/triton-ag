@@ -39,11 +39,22 @@ class CodeExtractor:
         pass
     
     def extract_code(self, completion: str) -> str:
-        # find the last ```python block
+        # first extract <think>...</think> block
+        think_blocks = re.findall(r"(<think>.*?</think>)", completion, re.DOTALL)
+        for think_block in think_blocks:
+            completion = completion.replace(think_block, "")
+        # then extract ```python block
         code_blocks = re.findall(r"```python\n(.*?)\n```", completion, re.DOTALL)
-        if len(code_blocks) == 0:
-            return completion
-        return code_blocks[-1]
+        # if not found, try ``` block
+        if not code_blocks:
+            code_blocks = re.findall(r"```\n(.*?)\n```", completion, re.DOTALL)
+        # if still not found, use the whole completion
+        if not code_blocks:
+            code_blocks = [completion]
+        return {
+            "code": code_blocks[-1],
+            "reasoning": '\n'.join(think_blocks)
+        }
 
 
 class FileLock:
@@ -109,19 +120,21 @@ def cleanup_lockfile(lock_file: str):
                     except Exception as e:
                         pass
 
+REFERENCE_CATEGORY = "reference"
 class StatsClient:
     def __init__(self, stats_dir: str = "~/.trainer/stats"):
         self.stats_dir = Path(os.path.expanduser(stats_dir))
         os.makedirs(self.stats_dir, exist_ok=True)
 
     async def add_data_point(self, prefix_tag: str, model_tag: str, task_tag: str, category: str, data: dict):
-        if category == "reference":
+        if category == REFERENCE_CATEGORY:
             # if category is reference, ignore model_tag
             file_path = os.path.join(
                 self.stats_dir,
                 prefix_tag,
+                REFERENCE_CATEGORY,
                 f"{task_tag}",
-                f"{category}.jsonl"
+                f"{REFERENCE_CATEGORY}.jsonl"
             )
         else:
             # save the data to the file
@@ -157,13 +170,14 @@ class StatsClient:
                 cleanup_lockfile(lock_file)
     
     async def wait_for_stats(self, prefix_tag: str, model_tag: str, task_tag: str, category: str, timeout: int = 120, last_n_lines: int = 100) -> dict:
-        if category == "reference":
+        if category == REFERENCE_CATEGORY:
             # if category is reference, ignore model_tag
             file_path = os.path.join(
                 self.stats_dir,
                 prefix_tag,
+                REFERENCE_CATEGORY,
                 f"{task_tag}",
-                f"{category}.jsonl"
+                f"{REFERENCE_CATEGORY}.jsonl"
             )
         else:
             # save the data to the file
@@ -183,7 +197,10 @@ class StatsClient:
                     continue
                 # read the last 50 lines
                 with open(file_path, 'r') as f:
-                    lines = f.readlines()[-last_n_lines:]
+                    lines = f.readlines()
+                    if not lines:
+                        continue
+                    lines = lines[-last_n_lines:]
                 # parse the lines and get 'runtime'
                 last_row = None
                 for line in lines:

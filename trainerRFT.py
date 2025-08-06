@@ -144,7 +144,7 @@ def rft_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_file
     
     return trainer
 
-def rft_train_block(block: TrainerRFTBlock, trainer: RFTTrainer, callback: Optional[Callable] = None):
+async def rft_train_block(block: TrainerRFTBlock, trainer: RFTTrainer, callback: Optional[Callable] = None):
     """Train the model for one block"""
     logger.info(f"👉 [RFTTrainer] [{block.input_tag}] RFT Training started for block...")
 
@@ -223,7 +223,7 @@ async def main():
         input_dir=args.input_dir,
         output_dir=args.output_dir,
     )
-    rft_train_block(rft_block, trainer)
+    await rft_train_block(rft_block, trainer)
     
 if __name__ == "__main__":
     asyncio.run(main())

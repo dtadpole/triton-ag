@@ -182,6 +182,17 @@ class ComposerClient:
         token_per_second = num_completion_tokens / completion_time_seconds if completion_time_seconds > 0 else 0.0
         logger.info(f"👏 [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{conversation_path}] [{f'{num_completion_tokens}'} tokens] in [{completion_time_seconds:.2f}s] [{token_per_second:.2f} tokens/s]")
 
+    def log_code_extraction(self, result: dict, context_vars: dict) -> dict:
+        """Process log code extraction."""
+        run_tag = context_vars.get('run_tag', None)
+        model_tag = context_vars.get('model_tag', None)
+        task_tag = context_vars.get('task_tag', None)
+        turn_tag = context_vars.get('turn_tag', None)
+        generated_code = context_vars['generated_code']
+        generated_reasoning = context_vars['generated_reasoning']
+        generated_code_path = context_vars.get('generated_code_path', None)
+        logger.info(f"👏 [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{generated_code_path}] [{generated_code[:100]}]... [{generated_reasoning[:100]}]...")
+
     def log_kb_eval_ref(self, result: dict, context_vars: dict) -> dict:
         """Process log kb eval ref."""
         run_tag = context_vars.get('run_tag', None)
@@ -471,16 +482,16 @@ class ComposerClient:
 
                         try:
                             if 'returns' in step_config:
+                                returns_config = step_config['returns']
                                 step_context_vars['__result__'] = result
                                 # process error_if
-                                if 'error_if' in step_config:
-                                    error_if = self._process_variable(step_config['error_if'], step_context_vars)
+                                if 'error_if' in returns_config:
+                                    error_if = self._process_variable(returns_config['error_if'], step_context_vars)
                                     if error_if:
                                         logger.error(f"🔴 [Composer] [{self.input_tag}] Error in endpoint [{endpoint_class_name}.{endpoint_method_name}]: {result}")
                                         error_encountered = True
                                         break
                                 # now we don't have any errors, process the return in context variables
-                                returns_config = step_config['returns']
                                 if 'context_vars' in returns_config:
                                     step_context_vars = self._process_context_vars(returns_config['context_vars'], step_context_vars)
                                 # process save_to
@@ -599,7 +610,7 @@ async def main():
     parser.add_argument("--num_turns_per_generation", type=int, default=4)
     parser.add_argument("--use_global_queue", type=str, default=None) # this is the task_name of the global queue
     parser.add_argument("--proc_id", type=str, default=None)
-    parser.add_argument("--module_file", type=str, default="inferenceComposer/exemplar.module.yaml")
+    parser.add_argument("--module_file", type=str, default="inferenceComposer/codeGen.module.yaml")
     parser.add_argument("--prompt_file", type=str, default="inferenceComposer/codeGen.prompt.triton.yaml")
     parser.add_argument("--example_file", type=str, default="inferenceComposer/triton.example.yaml")
     args = parser.parse_args()

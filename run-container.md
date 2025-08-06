@@ -148,7 +148,7 @@ export VLLM_ATTENTION_BACKEND=FLASHINFER
 
 ###
 
-/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-32B --port 8091 --host 0.0.0.0 --api-key dummy --enable-lora --max-lora-rank 128 --max-loras 8 --gpu-memory-utilization 0.9 --max_model_len 16384 --load_format safetensors --guided_decoding_backend guidance --guided-decoding-disable-fallback --enable_auto_tool_choice --tool_call_parser hermes --scheduling_policy priority --enable_chunked_prefill --max_num_batched_tokens 16384 --max_num_seqs 16 --max_log_len 0 --trust_remote_code --enable_prefix_caching --prefix-caching-hash-algo sha256 --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' --return-tokens-as-token-ids --enforce-eager
+/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-32B --port 8091 --host 0.0.0.0 --api-key dummy --enable-lora --max-lora-rank 128 --max-loras 8 --gpu-memory-utilization 0.9 --max_model_len 24576 --load_format safetensors --guided_decoding_backend guidance --guided-decoding-disable-fallback --enable_auto_tool_choice --tool_call_parser hermes --scheduling_policy priority --enable_chunked_prefill --max_num_batched_tokens 8192 --max_num_seqs 16 --max_log_len 0 --trust_remote_code --enable_prefix_caching --prefix-caching-hash-algo sha256 --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' --return-tokens-as-token-ids --enforce-eager
 
 --no-enable-prefix-caching 
 
@@ -170,7 +170,7 @@ curl -X POST http://10.12.0.202:8091/v1/load_lora_adapter \
            "lora_path": "TC_0.1.0_14B.a/checkpoint-300"
          }'
                           
-/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-14B --port 8091 --host 0.0.0.0 --api-key dummy --enable-lora --max-lora-rank 128 --max-loras 8 --gpu-memory-utilization 0.9 --max_model_len 16384 --load_format safetensors --guided_decoding_backend guidance --guided-decoding-disable-fallback --enable_auto_tool_choice --tool_call_parser hermes --scheduling_policy priority --enable_chunked_prefill --max_num_batched_tokens 16384 --max_num_seqs 16 --max_log_len 0 --trust_remote_code --enable_prefix_caching --prefix-caching-hash-algo sha256 --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' --return-tokens-as-token-ids --enforce-eager 
+/root/run.sh python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-14B --port 8091 --host 0.0.0.0 --api-key dummy --enable-lora --max-lora-rank 128 --max-loras 8 --gpu-memory-utilization 0.9 --max_model_len 24576 --load_format safetensors --guided_decoding_backend guidance --guided-decoding-disable-fallback --enable_auto_tool_choice --tool_call_parser hermes --scheduling_policy priority --enable_chunked_prefill --max_num_batched_tokens 8192 --max_num_seqs 16 --max_log_len 0 --trust_remote_code --enable_prefix_caching --prefix-caching-hash-algo sha256 --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' --return-tokens-as-token-ids --enforce-eager 
 
 
 --lora-modules KC_0.1.0_14B/checkpoint-240=KC_0.1.0_14B/checkpoint-240 KC_0.1.0_14B/checkpoint-200=KC_0.1.0_14B/checkpoint-200 KC_0.1.0_14B/checkpoint-180=KC_0.1.0_14B/checkpoint-180 KC_0.1.0_14B/checkpoint-160=KC_0.1.0_14B/checkpoint-160 KC_0.1.0_14B/checkpoint-140=KC_0.1.0_14B/checkpoint-140 
@@ -246,3 +246,13 @@ docker commit <pid> vllm:vX.Y
 docker tag vllm:vX.Y dtadpole/vllm:vX.Y
 
 ########################################
+
+run GPT-OSS-120b
+
+uv pip install --pre vllm==0.10.1+gptoss \
+  --extra-index-url https://wheels.vllm.ai/gpt-oss/ \
+  --extra-index-url https://download.pytorch.org/whl/nightly/cu128 \
+  --index-strategy unsafe-best-match
+
+# Launch the server:
+vllm serve openai/gpt-oss-120b

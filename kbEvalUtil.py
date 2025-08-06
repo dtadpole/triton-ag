@@ -370,7 +370,7 @@ class FunctionCallMapper(ast.NodeVisitor):
         return ".".join(self.scope_stack)
 
     def visit_ClassDef(self, node):
-        print(f"{"  "*len(self.scope_stack)} Inside class: [{".".join(self.scope_stack + [node.name])}]")
+        print(f'{"  "*len(self.scope_stack)} Inside class: [{".".join(self.scope_stack + [node.name])}]')
         self.scope_stack.append(node.name)
         if node.name == "ModelNew":
             self.model_new_class_count += 1
@@ -378,7 +378,7 @@ class FunctionCallMapper(ast.NodeVisitor):
         self.scope_stack.pop()
 
     def visit_FunctionDef(self, node):
-        print(f"{"  "*len(self.scope_stack)} Inside function: [{".".join(self.scope_stack + [node.name])}]")
+        print(f'{"  "*len(self.scope_stack)} Inside function: [{".".join(self.scope_stack + [node.name])}]')
         full_name = ".".join(self.scope_stack + [node.name])
         self.defined_functions[node.name] = full_name  # record mapping for function lookup
         self.scope_stack.append(node.name)
@@ -389,12 +389,12 @@ class FunctionCallMapper(ast.NodeVisitor):
             isinstance(dec.value, ast.Name) and \
             dec.value.id == 'triton' and dec.attr == 'jit':
                 self.triton_jit_functions.add(full_name)
-                print(f"{"  "*len(self.scope_stack)} Function [{full_name}] is [@triton.jit]")
+                print(f'{"  "*len(self.scope_stack)} Function [{full_name}] is [@triton.jit]')
         self.generic_visit(node)
         self.scope_stack.pop()
 
     def visit_AsyncFunctionDef(self, node):
-        print(f"{"  "*len(self.scope_stack)} Inside async function: [{".".join(self.scope_stack + [node.name])}]")
+        print(f'{"  "*len(self.scope_stack)} Inside async function: [{".".join(self.scope_stack + [node.name])}]')
         full_name = ".".join(self.scope_stack + [node.name])
         self.defined_functions[node.name] = full_name
         self.scope_stack.append(node.name)
@@ -408,7 +408,7 @@ class FunctionCallMapper(ast.NodeVisitor):
             # Upgrade to full qualified name if we know it
             qualified_callee = self.defined_functions.get(func_name, func_name)
             self.call_graph[caller].add(qualified_callee)
-            print(f"{"  "*len(self.scope_stack)} Found function call: [{qualified_callee}]")
+            print(f'{"  "*len(self.scope_stack)} Found function call: [{qualified_callee}]')
         self.generic_visit(node)
 
     def _get_call_name(self, node):
