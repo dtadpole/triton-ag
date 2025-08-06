@@ -31,6 +31,18 @@ else
 	docker build --network=host --progress=plain  -t triton_ag .
 endif
 
+build_docker_autoawq: Dockerfile
+ifeq (${IS_DEVSERVER}, 1)
+	$(META_PROXY) docker build -f Dockerfile_autoawq --network=host --progress=plain  -t autoawq .
+else
+	docker build -f Dockerfile_autoawq --network=host --progress=plain  -t autoawq .
+endif
+
+
+env_autoawq:
+	docker run -it  --gpus all --net=host -p 8081:8081 -p 8082:8082 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/autoawq /bin/bash
+
+
 env:
 	docker run -it  --gpus all --net=host -p 8081:8081 -p 8082:8082 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/triton_ag /bin/bash
 
