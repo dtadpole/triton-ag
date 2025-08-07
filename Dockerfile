@@ -83,9 +83,16 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.5/install.sh | b
 RUN pip install \
 "sglang[all]>=0.4.6.post5"
 
-RUN pip install vllm
 
 RUN npm config set proxy http://fwdproxy:8080
 RUN npm config set https-proxy http://fwdproxy:8080
 
 RUN pip install openai-agents==0.0.19
+RUN pip install transformers==4.52.1
+RUN pip install together==1.5.8
+RUN pip install wandb
+RUN pip install duckdb
+RUN pip install autoawq
+RUN pip install unsloth==2025.7.8
+RUN pip install vllm==0.9.1
+RUN pip install llmcompressor
