@@ -13,6 +13,7 @@ from data_processor import load_experiences, format_conversation
 from trainerUtil import _manual_format_conversation
 from tqdm import tqdm
 
+
 # Set up environment
 if is_devserver():
     os.environ['HF_HOME'] = '/root/.cache/'
@@ -118,6 +119,11 @@ def main(config_path):
     else:
         raise ValueError("Output model path not found in config")
 
+    if "output_model_fullprec_path" in model_paths:
+        output_model_fullprec_path = model_paths['output_model_fullprec_path']
+    else:
+        raise ValueError("output_model_fullprec_path not found in config")
+
     data_paths = config['data_paths']
     if "calibration_experience" in data_paths:
         calibration_experience_path = data_paths['calibration_experience']
@@ -131,8 +137,12 @@ def main(config_path):
 
     quant_params_config = config['quantize_params']
 
-    device_map = config["device"] if "device" in config else "auto"
-    tem_full_precision_model = "/tmp/tem_model_path"
+
+
+    if output_model_fullprec_path == "":
+        tem_full_precision_model = "/tmp/tem_model_path"
+    else:
+        tem_full_precision_model = output_model_fullprec_path
 
     # Prepare evaluation data
     if eval_experience == "":
@@ -161,14 +171,14 @@ def main(config_path):
         logger.info("Calculating perplexity of the full precision model...")
         merged_model_for_eval = AutoModelForCausalLM.from_pretrained(
             base_model_path,
-            device_map=device_map,
+            device_map=f"cuda",
             torch_dtype=torch.float16
         )
         merged_model_perplexity = calculate_perplexity(
             merged_model_for_eval,
             tokenizer,
             eval_subset,
-            device=device_map if device_map != "auto" else "cuda"
+            device=f"cuda",
         )
         logger.info(f"Raw model perplexity: {merged_model_perplexity:.4f}")
 
@@ -177,7 +187,7 @@ def main(config_path):
         torch.cuda.empty_cache()
 
         model = AutoAWQForCausalLM.from_pretrained(base_model_path,
-                                            device_map=device_map,
+                                            device_map="auto",
                                             torch_dtype=torch.float16,
                                             safetensors=True)
 
@@ -195,7 +205,7 @@ def main(config_path):
         logger.info("Calculating perplexity of the merged full precision model...")
         merged_model_for_eval = AutoModelForCausalLM.from_pretrained(
             tem_full_precision_model,
-            device_map=device_map,
+            device_map="cuda",
             torch_dtype=torch.float16
         )
         tokenizer = AutoTokenizer.from_pretrained(lora_adapter_path)
@@ -205,7 +215,7 @@ def main(config_path):
             merged_model_for_eval,
             tokenizer,
             eval_subset,
-            device=device_map if device_map != "auto" else "cuda"
+            device="auto"
         )
         logger.info(f"Merged model perplexity: {merged_model_perplexity:.4f}")
 
@@ -215,7 +225,7 @@ def main(config_path):
 
         # Load the full precision model from device for AWQ
         model = AutoAWQForCausalLM.from_pretrained(tem_full_precision_model,
-                                            device_map=device_map,
+                                            device_map="audo",
                                             torch_dtype=torch.float16,
                                             safetensors=True)
 
@@ -276,7 +286,7 @@ def main(config_path):
         awq_model,
         tokenizer,
         eval_subset,
-        device=device_map if device_map != "auto" else "cuda"
+        device="cuda"
     )
     logger.info(f"AWQ quantized model perplexity: {awq_model_perplexity:.4f}")
 
@@ -285,7 +295,7 @@ def main(config_path):
     torch.cuda.empty_cache()
 
     # Remove the temporary full precision model
-    if os.path.exists(tem_full_precision_model):
+    if output_model_fullprec_path == "" and os.path.exists(tem_full_precision_model):
         try:
             shutil.rmtree(tem_full_precision_model)
         except OSError as e:

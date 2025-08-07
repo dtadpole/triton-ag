@@ -53,6 +53,13 @@ mlflow:
 	# mlflow server --host localhost --port 5051
 	mlflow server --host localhost --port 5051 --backend-store-uri sqlite:///mlflow.sqlite
 
+
+lora_merge_compress_autoawq:
+	CUDA_VISIBLE_DEVICES=4 python lora_merge_awq.py
+
+lora_merge_compress:
+	CUDA_VISIBLE_DEVICES=4 python lora_merge_llmcomp_awq.py
+
 kbEval:
 	while true; do python kbEvalServer.py; sleep 1; done
 
