@@ -225,7 +225,7 @@ def main(config_path):
 
         # Load the full precision model from device for AWQ
         model = AutoAWQForCausalLM.from_pretrained(tem_full_precision_model,
-                                            device_map="cuda",
+                                            device_map="auto",
                                             torch_dtype=torch.float16,
                                             safetensors=True)
 
