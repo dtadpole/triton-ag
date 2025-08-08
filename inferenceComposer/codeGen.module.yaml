@@ -110,6 +110,7 @@ module:
             task_tag: "`task_tag`"
             category: "reference"
           returns:
+            error_if: "`__result__ is None or __result__['runtime'] <= 0`"
             context_vars:
               reference_eval: "`__result__`"
               reference_eval_path: "`f'{stats_dir}/{prefix_tag}/reference/{task_tag}/reference.jsonl'`"
@@ -208,8 +209,11 @@ module:
             generated_code: "`generated_code`"
             code_type: "`code_type`" # code_type is the code type
           returns:
+            error_if: "`__result__ is None`"
             context_vars:
-              generated_eval: "`__result__`"
+              reference_runtime: "`reference_eval['runtime']`"
+              speedup: "`reference_runtime / __result__['runtime'] if __result__['runtime'] > 0 and reference_runtime > 0 else 0.0`"
+              generated_eval: '`__result__ | { "reference_runtime": reference_runtime, "speedup": speedup }`'
               generated_eval_path: "`f'{record_folder}/{turn_tag}_generated_eval.json'`"
             save_to:
               - path: "`generated_eval_path`"

@@ -28,6 +28,7 @@ class KbEvalClient:
         self.base_url = kb_eval_config.get('servers', [])[0].get('url', 'http://localhost:44456')
         self.timeout = kb_eval_config.get('servers', [])[0].get('timeout', 450)
         self.num_retries = kb_eval_config.get('servers', [])[0].get('num_retries', 7)
+        self.initial_retry_interval = kb_eval_config.get('servers', [])[0].get('initial_retry_interval', 3)
         self.server_last_refresh_time = time.time()
         self.server_stats = {}
         self.kb_eval_config = kb_eval_config
@@ -91,7 +92,7 @@ class KbEvalClient:
 
                     result = KernelExecResult(**response.json())
                     if (not result.compiled or not result.correctness) and "retriable" in result.metadata and result.metadata["retriable"]:
-                        sleep_seconds = 2 ** retry_count
+                        sleep_seconds = self.initial_retry_interval ** retry_count
                         if retry_count < self.num_retries:
                             # retry_count -= 0.5 # reduce retry count by 0.5 to avoid infinite loop
                             logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Retriable error, retrying... [{retry_count}/{self.num_retries}] in [{sleep_seconds}s]")
@@ -158,7 +159,7 @@ class KbEvalClient:
 
                     result = KernelExecResult(**response.json())
                     if (not result.compiled or not result.correctness) and "retriable" in result.metadata and result.metadata["retriable"]:
-                        sleep_seconds = 2 ** retry_count
+                        sleep_seconds = self.initial_retry_interval ** retry_count
                         if retry_count < self.num_retries:
                             # retry_count -= 0.5 # reduce retry count by 0.5 to avoid infinite loop
                             logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Retriable error, retrying... [{retry_count}/{self.num_retries}] in [{sleep_seconds}s]")
