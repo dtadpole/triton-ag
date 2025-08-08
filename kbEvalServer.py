@@ -70,7 +70,7 @@ def _setup_wandb_logging(prefix_tag: str="test", model_tag: str="local_qwen3-14b
     wandb_run = wandb.init(
         project=f"kb_eval_{prefix_tag}",
         id=f"{model_tag}",
-        name=f"{model_tag}-{datetime.now().strftime('%Y%m%d-%H%M')}",
+        name=f"{model_tag}-{datetime.now().strftime('%m%d-%H%M')}",
         resume="allow",
         reinit="create_new",
         settings=wandb.Settings(init_timeout=10),
