@@ -1,11 +1,11 @@
 # Model Configuration
 model:
-  name: "Qwen/Qwen3-4B-AWQ"
-  # max_seq_length: 32768
+  name: "Qwen/Qwen3-32B"
+  max_seq_length: 32768
   # max_seq_length: 16384
-  max_seq_length: 8192
+  # max_seq_length: 8192
   dtype: null  # Auto-detection
-  load_in_4bit: false
+  load_in_4bit: true
 
 # GPU Configuration
 gpu:
@@ -16,35 +16,35 @@ gpu:
 training:
   # Core training parameters
   num_train_epochs: 1
-  learning_rate: 0.00003 # 3e-5
+  learning_rate: 0.0001 # 3e-5
   max_steps: -1  # Set to -1 for full epochs
   warmup_steps: 10
-  
+
   # Batch settings
   per_device_batch_size: 1
-  gradient_accumulation_steps: 1
-  
+  gradient_accumulation_steps: 2
+
   # Optimization
-  optim: "paged_adamw_8bit"
+  optim: "adamw_torch"
   weight_decay: 0.05
   lr_scheduler_type: "cosine"
   max_grad_norm: 0.75  # Gradient clipping
-  
+
   # Logging and saving
   logging_steps: 1
   save_steps: 100
   save_total_limit: 3
-  output_dir: "../finetune_model_output"
-  
+  output_dir: "./finetune_model_output/sft_t3/"
+
   # System settings
   seed: 3407
   use_custom_loss_masking: true
 
 # LoRA Configuration
 lora:
-  r: 64
-  alpha: 64
-  dropout: 0.05
+  r: 128
+  alpha: 256
+  dropout: 0.00
   target_modules:
     - "q_proj"
     - "k_proj"
@@ -55,14 +55,14 @@ lora:
     - "up_proj"
   bias: "none"
 
-# Data Configuration  
+# Data Configuration
 data:
   processed_dir: "finetune_processed_experiences"
-  
+
   # Data collator settings
   collator:
     pad_to_multiple_of: 8
-  
+
   # DataLoader settings
   dataloader:
     shuffle: true
