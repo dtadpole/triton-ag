@@ -215,7 +215,7 @@ def main(config_path):
             merged_model_for_eval,
             tokenizer,
             eval_subset,
-            device="auto"
+            device="cuda"
         )
         logger.info(f"Merged model perplexity: {merged_model_perplexity:.4f}")
 
@@ -225,7 +225,7 @@ def main(config_path):
 
         # Load the full precision model from device for AWQ
         model = AutoAWQForCausalLM.from_pretrained(tem_full_precision_model,
-                                            device_map="audo",
+                                            device_map="cuda",
                                             torch_dtype=torch.float16,
                                             safetensors=True)
 
