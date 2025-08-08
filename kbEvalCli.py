@@ -359,7 +359,7 @@ def main():
     parser.add_argument("--generated_code", type=str, default="elemAddTriton.py")
     parser.add_argument("--measure_reference", action="store_true")
     parser.add_argument("--device-list", type=str, default="0")
-    parser.add_argument("--max_critical_time", type=int, default=5)
+    parser.add_argument("--max_critical_time", type=int, default=7)
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
