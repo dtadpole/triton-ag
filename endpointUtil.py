@@ -206,6 +206,9 @@ class StatsClient:
                 for line in lines:
                     try:
                         data = json.loads(line)
+                        if data is None:
+                            logger.warning(f"[{os.getpid()}] Ignore null JSON line in [{file_path}]: [{line}]")
+                            continue
                     except json.JSONDecodeError:
                         logger.warning(f"[{os.getpid()}] Ignore invalid JSON line in [{file_path}]: [{line}]")
                         continue
