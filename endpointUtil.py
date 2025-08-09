@@ -191,6 +191,7 @@ class StatsClient:
         # wait until the file exists
         start_time = time.time()
         runtime_list = []
+        last_row = None
         while True:
             try:
                 if not os.path.exists(file_path):
@@ -202,20 +203,22 @@ class StatsClient:
                         continue
                     lines = lines[-last_n_lines:]
                 # parse the lines and get 'runtime'
-                last_row = None
                 for line in lines:
                     try:
                         data = json.loads(line)
                         if data is None:
                             logger.warning(f"[{os.getpid()}] Ignore null JSON line in [{file_path}]: [{line}]")
                             continue
+                        runtime_list.append(data['runtime'])
+                        last_row = data
                     except json.JSONDecodeError:
                         logger.warning(f"[{os.getpid()}] Ignore invalid JSON line in [{file_path}]: [{line}]")
                         continue
-                    runtime_list.append(data['runtime'])
-                    last_row = data
+                    except Exception as e:
+                        logger.warning(f"[{os.getpid()}] Ignore invalid JSON line in [{file_path}]: [{line}] [{type(e).__name__}: {e}]")
+                        continue
                 # break if there is at least one valid runtime
-                if len(runtime_list) > 0:
+                if len(runtime_list) > 0 and last_row is not None:
                     break
             except Exception as e:
                 logger.error(f"[{os.getpid()}] Error waiting for [{file_path}]: [{e}]")
