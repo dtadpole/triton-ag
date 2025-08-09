@@ -169,7 +169,7 @@ class StatsClient:
                 retry_count += 1
                 cleanup_lockfile(lock_file)
     
-    async def wait_for_stats(self, prefix_tag: str, model_tag: str, task_tag: str, category: str, timeout: int = 120, last_n_lines: int = 100) -> dict:
+    async def wait_for_stats(self, prefix_tag: str, model_tag: str, task_tag: str, category: str, timeout: int = 90, last_n_lines: int = 50, return_percentile: str = "25th") -> dict:
         if category == REFERENCE_CATEGORY:
             # if category is reference, ignore model_tag
             file_path = os.path.join(
@@ -241,23 +241,26 @@ class StatsClient:
             '50th': runtime_list[int(len(runtime_list) * 0.5)],
             '75th': runtime_list[int(len(runtime_list) * 0.75)]
         }
-        last_row['runtime'] = percentile_stats['50th']
+        if return_percentile not in percentile_stats:
+            logger.error(f"[{os.getpid()}] Invalid return percentile: [{return_percentile}], must be one of {list(percentile_stats.keys())}")
+            return_percentile = "25th"
+        last_row['runtime'] = percentile_stats[return_percentile]
         last_row['metadata']['stats'] = percentile_stats
         return last_row
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prefix_tag", type=str, default="test")
+    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.m")
     parser.add_argument("--model_tag", type=str, default="fireworks_deepseek-v3")
     parser.add_argument("--task_tag", type=str, default="level1_24_LogSoftmax.py")
     parser.add_argument("--category", type=str, default="reference")
-    parser.add_argument("--timeout", type=int, default=120)
-    parser.add_argument("--last_n_lines", type=int, default=100)
+    parser.add_argument("--timeout", type=int, default=90)
+    parser.add_argument("--last_n_lines", type=int, default=50)
     args = parser.parse_args()
 
     stats_client = StatsClient()
-    result = asyncio.run(stats_client.wait_for_reference_stats(
+    result = asyncio.run(stats_client.wait_for_stats(
         prefix_tag=args.prefix_tag,
         model_tag=args.model_tag,
         task_tag=args.task_tag,
