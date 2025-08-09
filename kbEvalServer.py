@@ -63,14 +63,14 @@ def verify_token(authorization: str = Header(None)):
 wandb_loggers = {} # {prefix_tag: wandb.Run}
 def _setup_wandb_logging(prefix_tag: str="test", model_tag: str="local_qwen3-14b"):
     """Setup logging and tracking"""
-    key = f"{prefix_tag}_{model_tag}"
+    key = f"{prefix_tag}"
     if key in wandb_loggers:
         return wandb_loggers[key]
     
     wandb_run = wandb.init(
         project=f"kb_eval_{prefix_tag}",
-        id=f"{model_tag}",
-        name=f"{model_tag}-{datetime.now().strftime('%m%d-%H%M')}",
+        id=f"{prefix_tag}",
+        name=f"{model_tag}_{datetime.now().strftime('%m%d-%H%M')}",
         resume="allow",
         reinit="create_new",
         settings=wandb.Settings(init_timeout=10),
@@ -623,4 +623,3 @@ if __name__ == "__main__":
     # signal.alarm(args.max_process_time)  # exit after max_process_time seconds
 
     asyncio.run(main(args))
-total

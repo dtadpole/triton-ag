@@ -24,7 +24,7 @@ from datetime import datetime
 from logger import logger
 from armableWatchdog import ArmableWatchdog
 import random
-from endpointUtil import FileLock, cleanup_lockfile
+from configEndpoints import FileLock, cleanup_lockfile
 # from filelock import FileLock, Timeout
 
 KB_EVAL_DIR = os.path.expanduser("~/.kbeval")

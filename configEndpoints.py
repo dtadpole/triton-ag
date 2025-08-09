@@ -8,10 +8,19 @@ import psutil
 from pathlib import Path
 from logger import logger
 from typing import Any
+import duckdb
 
 VALID_RECORD_FORMATS = ["json", "text"]
 
 MAX_LOCK_AGE = 20 # 20 seconds
+
+class DuckDBClient:
+    def __init__(self):
+        pass
+    
+    def sql(self, query: str) -> Any:
+        result = duckdb.sql(query)
+        return result
 
 class Recorder:
     def __init__(self):

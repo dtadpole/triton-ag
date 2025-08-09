@@ -26,7 +26,7 @@ import time
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import traceback
-from endpointUtil import StatsClient
+from configEndpoints import StatsClient
 from globalUtils import TrainerGRPOBlock
 from globalRegClient import GlobalRegClient
 from globalWorkflow import GlobalWorkflow
