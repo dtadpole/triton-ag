@@ -97,6 +97,7 @@ class ConfigInterpreter:
 
                     step_type = step_config['type']
                     if step_type == 'endpoint':
+                        step_name = step_config.get('endpoint', None)
                         success, extra_info = await self._process_endpoint(runtime, step_config, context_vars)
                         if extra_info is not None and 'wait_for' in extra_info:
                             wait_for_start_time = time.time()
@@ -105,7 +106,7 @@ class ConfigInterpreter:
                             timeout = extra_info.get('timeout', 3600)
                             wait_for_config = extra_info.get('config', {})
                             while not wait_for and time.time() - wait_for_start_time < timeout:
-                                logger.info(f"⏳ [_process_steps] Waiting for endpoint: {wait_for_config} [{wait_for}]")
+                                logger.info(f"⏳ [_process_steps] Waiting for endpoint: [{step_name}] {wait_for_config} [{wait_for}]")
                                 await asyncio.sleep(interval)
                                 success, extra_info = await self._process_endpoint(runtime, step_config, context_vars)
                                 wait_for = extra_info.get('wait_for', True)
