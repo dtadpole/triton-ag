@@ -8,7 +8,8 @@
 # MODEL CONFIGURATION
 # ============================================================================
 model:
-  name: "Qwen/Qwen3-14B"  # Model name from Hugging Face
+  # name: "Qwen/Qwen3-14B"  # Model name from Hugging Face
+  name: "openai/gpt-oss-20b"
   tokenizer_name: null  # If null, uses model name as tokenizer
   max_seq_length: 24576  # Maximum sequence length for training
   use_unsloth: true
@@ -65,7 +66,16 @@ lora:
   rank: 128  # LoRA rank (r)
   alpha: 32  # LoRA alpha
   dropout: 0.0  # Use 0.0 for optimal Unsloth performance
-  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+  # target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+  target_modules: "all-linear"
+  target_parameters:
+    - "7.mlp.experts.gate_up_proj"
+    - "7.mlp.experts.down_proj"
+    - "15.mlp.experts.gate_up_proj"
+    - "15.mlp.experts.down_proj"
+    - "23.mlp.experts.gate_up_proj"
+    - "23.mlp.experts.down_proj"
+
   bias: "none"  # Options: "none", "all", "lora_only"
 
 # ============================================================================

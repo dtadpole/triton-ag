@@ -7,17 +7,17 @@ from workflowUtil import get_global_registry_port
 
 
 class WorkflowClient:
-    def __init__(self, prefix_tag: str = "auto", trainer_dir: str = "~/.trainer"):
-        self.config = self._load_config().get("client", {})
+    def __init__(self, config_path: str = "workflow.yaml"):
+        self.config = self._load_config(config_path).get("client", {})
         self.host = self.config.get("host", "localhost")
-        self.port = get_global_registry_port(prefix_tag, trainer_dir)
+        self.port = self.config.get("port", 8488)
         self.base_url = f"http://{self.host}:{self.port}"
         self.retries = self.config.get("retries", 5)
         self.timeout = self.config.get("timeout", 300)
         logger.info(f"🔍 [GlobalRegClient] Initialized with host: {self.host}, port: {self.port}, retries: {self.retries}, timeout: {self.timeout}")
 
     def _load_config(self):
-        with open("globalRegistry.yaml", "r") as f:
+        with open("workflow.yaml", "r") as f:
             return yaml.safe_load(f)
 
     async def keys(self):

@@ -92,7 +92,8 @@ class TrainerLoraConfig(BaseModel):
     rank: int = 64
     alpha: int = 32
     dropout: float = 0.0
-    target_modules: Optional[List[str]] = None
+    target_modules: Optional[List[str] | str] = None
+    target_parameters: Optional[List[str] | str] = None
     bias: str = "none"
 
 class LoggingConfig(BaseModel):
@@ -357,6 +358,7 @@ class BaseTrainer:
                 self.base_model,
                 r=self.config.lora.rank,
                 target_modules=self.config.lora.target_modules,
+                target_parameters=self.config.lora.target_parameters,
                 lora_alpha=self.config.lora.alpha,
                 lora_dropout=self.config.lora.dropout,
                 bias=self.config.lora.bias,
@@ -370,6 +372,7 @@ class BaseTrainer:
                 r=self.config.lora.rank,
                 lora_alpha=self.config.lora.alpha,
                 target_modules=self.config.lora.target_modules,
+                target_parameters=self.config.lora.target_parameters,
                 lora_dropout=self.config.lora.dropout,
                 bias=self.config.lora.bias,
                 task_type=TaskType.CAUSAL_LM,
