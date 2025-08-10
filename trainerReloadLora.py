@@ -1,7 +1,7 @@
 import asyncio
 import argparse
-from globalRegClient import GlobalRegClient
-from globalRegistry import ADAPTER_PREFIX
+from workflowClient import WorkflowClient
+from workflowRegistry import ADAPTER_PREFIX
 from logger import logger
 from trainerUtil import VLLMClient
 
@@ -10,7 +10,7 @@ async def main():
     parser.add_argument("--lora_name", type=str, default=None)
     args = parser.parse_args()
 
-    reg_client = GlobalRegClient()
+    reg_client = WorkflowClient()
 
     vllm_client = VLLMClient()
 

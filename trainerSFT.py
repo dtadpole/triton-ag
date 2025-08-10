@@ -11,9 +11,9 @@ from trainerBase import BaseTrainer, TrainerConfig, TrainerStatus, train_async
 from trainerUtil import format_conversation
 from logger import logger
 import torch
-from globalUtils import TrainerSFTBlock
-from globalRegClient import GlobalRegClient
-from globalWorkflow import GlobalWorkflow
+from workflowUtil import TrainerSFTBlock
+from workflowClient import WorkflowClient
+from workflowServer import WorkflowServer
 
 
 class SFTConfig(BaseModel):

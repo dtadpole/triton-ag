@@ -137,14 +137,14 @@ def get_global_registry_port(prefix_tag:str="auto", trainer_dir:str="~/.trainer"
     else:
         return None
 
-class GlobalUtils:
+class WorkplaceUtil:
     _instance = None # class variable to store the instance
 
     # singleton pattern
     def __new__(cls):
         if cls._instance is None:
             # If no instance exists, create one using the superclass's __new__
-            cls._instance = super(GlobalUtils, cls).__new__(cls)
+            cls._instance = super(WorkplaceUtil, cls).__new__(cls)
         return cls._instance
     
     def __init__(self):

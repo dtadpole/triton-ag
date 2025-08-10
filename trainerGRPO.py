@@ -27,9 +27,9 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import traceback
 from configEndpoints import StatsClient
-from globalUtils import TrainerGRPOBlock
-from globalRegClient import GlobalRegClient
-from globalWorkflow import GlobalWorkflow
+from workflowUtil import TrainerGRPOBlock
+from workflowClient import WorkflowClient
+from workflowServer import WorkflowServer
 
 LATEST_REFERENCE_NAME = "reference_state_latest.pt"
 

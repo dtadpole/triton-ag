@@ -7,10 +7,10 @@ import httpx
 import yaml
 import traceback
 import os
-from globalUtils import MODEL_OVERRIDE_KEY, TrainerGRPOBlock, TrainerRFTBlock, TrainerSFTBlock, get_prefix_tag
+from workflowUtil import MODEL_OVERRIDE_KEY, TrainerGRPOBlock, TrainerRFTBlock, TrainerSFTBlock, get_prefix_tag
 from logger import logger
-from globalWorkflow import GlobalWorkflow
-from globalRegClient import GlobalRegClient
+from workflowServer import WorkflowServer
+from workflowClient import WorkflowClient
 from trainerBase import TrainerConfig
 from trainerSFT import sft_train_block, sft_get_trainer, SFTConfig
 from trainerRFT import rft_train_block, rft_get_trainer, RFTConfig
@@ -28,7 +28,7 @@ class RsyncQueue:
         self.retries = self.rsync_config.get('retries', 3)
         self.timeout = self.rsync_config.get('timeout', 10)
         self.vllm_client = VLLMClient()
-        self.reg_client = GlobalRegClient()
+        self.reg_client = WorkflowClient()
 
     async def get(self, timeout: int = 10):
         return await asyncio.wait_for(self.rsync_queue.get(), timeout=timeout)
@@ -137,7 +137,7 @@ class TrainerMain:
         self.prefix_tag = prefix_tag
         self.rsync_queue = RsyncQueue()
         self.trainer_prefix_tag = get_prefix_tag(prefix_tag)
-        self.reg_client = GlobalRegClient()
+        self.reg_client = WorkflowClient()
 
     async def main_loop_task(self):
         logger.info(f"🌀 [trainerMain] Main loop started for prefix: {self.trainer_prefix_tag}")
@@ -156,7 +156,7 @@ class TrainerMain:
         while True:
             try:
                 # reinitialize the reg_client to avoid stale connection
-                self.reg_client = GlobalRegClient(prefix_tag=self.trainer_prefix_tag)
+                self.reg_client = WorkflowClient(prefix_tag=self.trainer_prefix_tag)
                 # queue name is {task_type}:{task_name}
                 SFT_QUEUE_NAME = 'trainer.sft:sft.1'
                 RFT_QUEUE_NAME = 'trainer.rft:rft.1'

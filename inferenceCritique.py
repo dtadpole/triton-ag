@@ -18,9 +18,9 @@ from transformers import AutoTokenizer
 from inferenceClient import InferenceClient, InferenceClientConfig, load_inference_client_config
 from logger import logger
 from kbEvalTest.kbeval import KernelExecResult
-from globalUtils import CritiqueBlock
-from globalRegClient import GlobalRegClient
-from globalWorkflow import GlobalWorkflow
+from workflowUtil import CritiqueBlock
+from workflowClient import WorkflowClient
+from workflowServer import WorkflowServer
 
 class CritiqueClient:
     def __init__(
@@ -327,7 +327,7 @@ async def main():
     try:
         if args.use_global_registry:
             # get the global registry
-            global_reg_client = GlobalRegClient()
+            global_reg_client = WorkflowClient()
             # get the critiqueBlock from the global registry
             block_json = await global_reg_client.dequeue(f"inference.critique")
             # convert the block_json to a CritiqueBlock object
@@ -349,7 +349,7 @@ async def main():
         await critique_block(block)
 
         if args.use_global_registry:
-            globalWorkflow = GlobalWorkflow(prefix_tag=block.prefix_tag)
+            globalWorkflow = WorkflowServer(prefix_tag=block.prefix_tag)
             await globalWorkflow.post_critique(block)
 
     except Exception as e:

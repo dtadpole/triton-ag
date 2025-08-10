@@ -7,14 +7,11 @@ A web-based Read-Eval-Print Loop using FastAPI with global context
 import uvicorn
 from fastapi import FastAPI, APIRouter
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
 import sys
 import io
-import asyncio
 import traceback
 from logger import logger
-from replUtils import CodeRequest, CodeResponse, load_config
-from workflowUtil import GlobalUtils
+from replUtils import CodeRequest
 
 class ReplServer:
     def __init__(self):
@@ -270,8 +267,7 @@ Type Python code below and press Execute.
 
 
 if __name__ == "__main__":
-    global_utils = GlobalUtils()
-    fastapi = global_utils.fastapi
+    fastapi = FastAPI()
     reg = {"test1": "test1", "test2": "test2"}
     repl_server = ReplServer()
     repl_server.init_default_vars(reg)

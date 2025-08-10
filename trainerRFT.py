@@ -14,9 +14,9 @@ from trainerBase import BaseTrainer, TrainerConfig, TrainerStatus, train_async
 from trainerUtil import format_conversation
 from logger import logger
 import torch
-from globalUtils import TrainerRFTBlock
-from globalRegClient import GlobalRegClient
-from globalWorkflow import GlobalWorkflow
+from workflowUtil import TrainerRFTBlock
+from workflowClient import WorkflowClient
+from workflowServer import WorkflowServer
 
 
 class RFTConfig(BaseModel):

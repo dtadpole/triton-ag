@@ -18,9 +18,9 @@ from transformers import AutoTokenizer
 from inferenceClient import InferenceClient, InferenceClientConfig, load_inference_client_config
 from logger import logger
 from kbEvalClient import KbEvalClient
-from globalUtils import ComposerBlock, MODEL_OVERRIDE_KEY
-from globalRegClient import GlobalRegClient
-from globalWorkflow import GlobalWorkflow
+from workflowUtil import ComposerBlock, MODEL_OVERRIDE_KEY
+from workflowClient import WorkflowClient
+from workflowServer import WorkflowServer
 from configEndpoints import DuckDBClient, Recorder, CodeExtractor, StatsClient
 from configInterpreter import ConfigInterpreter
 
@@ -313,7 +313,7 @@ async def composer_block(block: ComposerBlock, use_global_registry: bool = False
         await asyncio.gather(*queue_workers)
 
         if use_global_registry:
-            globalWorkflow = GlobalWorkflow(prefix_tag=block.prefix_tag)
+            globalWorkflow = WorkflowServer(prefix_tag=block.prefix_tag)
             await globalWorkflow.post_composer(block)
 
         logger.info(f"🎉 [Composer] [{block.input_tag}] Block completed")
@@ -356,7 +356,7 @@ async def main():
             task_name = args.use_global_queue # user configurable name
             QUEUE_NAME = f"{task_type}:{task_name}"
             # get the global registry
-            global_reg_client = GlobalRegClient()
+            global_reg_client = WorkflowClient()
             # get the critiqueBlock from the global registry
             block_json = await global_reg_client.dequeue(QUEUE_NAME)
             # convert the block_json to a ComposerBlock object
@@ -397,7 +397,7 @@ async def main():
         await composer_block(block)
 
         if args.use_global_queue:
-            globalWorkflow = GlobalWorkflow(prefix_tag=block.prefix_tag)
+            globalWorkflow = WorkflowServer(prefix_tag=block.prefix_tag)
             await globalWorkflow.post_composer(args.use_global_queue, block)
 
     except Exception as e:
