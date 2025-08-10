@@ -13,17 +13,6 @@ from workflowRegistry import WorkflowRegistry, QUEUE_PREFIX, ADAPTER_PREFIX
 from workflowUtil import WorkplaceUtil, get_prefix_tag, CodeGenEvalBlock, CritiqueBlock, ExemplarBlock, ReflectionBlock, TrainerSFTBlock, TrainerRFTBlock, TrainerGRPOBlock, ComposerBlock
 from replServer import ReplServer
 
-TASK_TYPE_COMPOSER = "inference.composer"
-TASK_TYPE_GRPO = "trainer.grpo"
-TASK_TYPE_SFT = "trainer.sft"
-TASK_TYPE_RFT = "trainer.rft"
-
-VALID_TASK_TYPES = [
-    TASK_TYPE_COMPOSER,
-    TASK_TYPE_GRPO,
-    TASK_TYPE_SFT,
-    TASK_TYPE_RFT,
-]
 
 class WorkflowServer:
     def __init__(self, config_path: str = "workflow.yaml"):
@@ -71,11 +60,23 @@ class WorkflowServer:
         """
         Add the API endpoints to the router
         """
+        @self.router.get("/workflow/get/{prefix_tag}")
+        async def workflow_get(prefix_tag: str):
+            if prefix_tag not in self.registries:
+                raise HTTPException(status_code=404, detail=f"Prefix tag [{prefix_tag}] not found")
+            return self.registries[prefix_tag].get_workflow_config()
+
         @self.router.get("/keys/{prefix_tag}/{key}")
         async def keys(prefix_tag: str):
             if prefix_tag not in self.registries:
                 raise HTTPException(status_code=404, detail=f"Prefix tag [{prefix_tag}] not found")
             return self.registries[prefix_tag].keys()
+
+        @self.router.get("/exists/{prefix_tag}/{key}")
+        async def exists(prefix_tag: str, key: str):
+            if prefix_tag not in self.registries:
+                raise HTTPException(status_code=404, detail=f"Prefix tag [{prefix_tag}] not found")
+            return self.registries[prefix_tag].exists(key)
 
         @self.router.get("/get/{prefix_tag}/{key}")
         async def get(prefix_tag: str, key: str,
@@ -122,7 +123,7 @@ class WorkflowServer:
                 if create_queue:
                     logger.info(f"🎢 Creating queue [{object_name}]")
                     queue = asyncio.Queue()
-                    reg.put(object_name, queue)
+                    self.registries[prefix_tag].put(object_name, queue)
                 else:
                     raise HTTPException(status_code=404, detail=f"Queue [{queue_name}] not found")
             try:
@@ -142,7 +143,7 @@ class WorkflowServer:
             if queue is None:
                 raise HTTPException(status_code=404, detail=f"Queue [{queue_name}] not found")
             # get timeout from config
-            timeout = reg.workflow_config.get("fastapi", {}).get("dequeue_timeout", 5)
+            timeout = self.config.get("fastapi", {}).get("dequeue_timeout", 5)
             try:
                 item = await asyncio.wait_for(queue.get(), timeout=timeout)
                 logger.info(f"🎢 Dequeued item [{item}] from queue [{queue_name}]")
@@ -159,6 +160,19 @@ class WorkflowServer:
             if queue is None:
                 raise HTTPException(status_code=404, detail=f"Queue [{queue_name}] not found")
             return queue.qsize()
+
+        @self.router.get("/queue/peek/{prefix_tag}/{queue_name}")
+        async def peek(prefix_tag: str, queue_name: str):
+            if prefix_tag not in self.registries:
+                raise HTTPException(status_code=404, detail=f"Prefix tag [{prefix_tag}] not found")
+            object_name = f"{QUEUE_PREFIX}{queue_name}"
+            queue = self.registries[prefix_tag].get(object_name)
+            if queue is None:
+                raise HTTPException(status_code=404, detail=f"Queue [{queue_name}] not found")
+            if queue.qsize() == 0:
+                return None
+            else:
+                return queue._queue[0]
 
     async def _refresh_config_task(self):
         """
@@ -242,8 +256,10 @@ class WorkflowServer:
             # with open(port_file, "w") as f:
             #     f.write(str(listen_port))
 
-            host = self.config.get("fastapi", {}).get("host", "0.0.0.0")
-            port = self.config.get("fastapi", {}).get("port", port)
+            hostname = socket.gethostname()
+            hostname_config = self.config.get("fastapi", {}).get(hostname, {})
+            host = hostname_config.get("host", "0.0.0.0")
+            port = hostname_config.get("port", port)
             server = uvicorn.Server(uvicorn.Config(fastapi, host=host, port=port))
             logger.info(f"FastAPI server listening on: [{host}:{port}]")
 

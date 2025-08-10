@@ -1,9 +1,9 @@
 # built in queues
 queues:
-  - name: trainer.sft:sft.1
-  - name: trainer.rft:rft.1
-  - name: trainer.grpo:grpo.1
-  - name: test:test.1
+  - name: trainer.sft.1
+  - name: trainer.rft.1
+  - name: trainer.grpo.1
+  - name: test.test.1
 
 global:
   prefix_tag: "TC_0.1.0_14B.m"
@@ -13,35 +13,59 @@ global:
   end_block: 24
 
   init_vars:
-    - name: adapter.model_override
+    - name: adapter.model_override.{model_tag}
       value: null
 
-  init_tasks:
-    - type: inference.composer
-      name: codeGenEval.base
-      prefix_tag: "{prefix_tag}"
-      epoch_id: "{epoch_id}"
-      block_id: "{block_id}"
-      provider_name: local
-      model_name: qwen3-14b
-      num_samples: 8
-      num_generations: 8
-      num_turns_per_generation: 4
-      parallel_workers: 12
-      logprobs: true
-      model_override: null
-      template: triton.1
-      input_dir: ~/triton-ag/kernel_bench
-      output_dir: ~/.codeGenEval
+workitems:
+  codeGenEval.init:
+    # below syntax works with ConfigInterpreter
+    steps:
+      - type: endpoint
+        endpoint: workflowClient.enqueue
+        context_vars:
+          item:
+            type: inference
+            name: codeGenEval.base
+            prefix_tag: "`prefix_tag`"
+            epoch_id: "`epoch_id`"
+            block_id: "`block_id`"
+            provider_name: local
+            model_name: qwen3-14b
+            num_samples: 8
+            num_generations: 8
+            num_turns_per_generation: 4
+            parallel_workers: 12
+            logprobs: true
+            model_override: null
+            template: triton.1
+            input_dir: ~/triton-ag/kernel_bench
+            output_dir: ~/.inference/codeGenEval
+        args:
+          prefix_tag: "`prefix_tag`"
+          queue_name: "inference.codeGenEval"
+          item: "`item`"
+          create_queue: true
+      - type: endpoint
+        endpoint: workflowClient.qsize
+        args:
+          prefix_tag: "`prefix_tag`"
+          queue_name: "inference.codeGenEval"
+        returns:
+          context_vars:
+            qsize: "`__result__`"
+          wait_for:
+            condition: "`qsize < 8`"
+            interval: 15
+            timeout: 3600
 
 inference.composer:
   codeGenEval.base:
     default:
       input_dir: ~/.inference/composer/input
       output_dir: ~/.inference/composer/output
-      module_file: inferenceComposer/codeGen.module.yaml
-      prompt_file: inferenceComposer/codeGen.prompt.triton.yaml
-      example_file: inferenceComposer/triton.example.yaml
+      module_file: inference/codeGen.module.yaml
+      prompt_file: inference/codeGen.prompt.triton.yaml
+      example_file: inference/triton.example.yaml
       provider_name: local
       model_name: qwen3-14b
       num_generations: 8
@@ -51,47 +75,41 @@ inference.composer:
       input_tag: kernel_bench
       model_override: null
 
-    post_tasks:
-      - type: trainer.grpo
-        name: grpo.1
-        prefix_tag: "{prefix_tag}"
-        epoch_id: "{epoch_id}"
-        block_id: "{block_id}"
-        input_tag: "{run_tag}"
-        input_dir: ~/.codeGenEval
-      - type: trainer.rft
-        name: rft.1
-        prefix_tag: "{prefix_tag}"
-        epoch_id: "{epoch_id}"
-        block_id: "{block_id}"
-        input_tag: "{run_tag}"
-        input_dir: ~/.codeGenEval
-      # - type: inference.composer
-      #   name: exemplar.deepseek-v3
-      #   prefix_tag: "{prefix_tag}"
-      #   epoch_id: "{epoch_id}"
-      #   block_id: "{block_id}"
-      #   input_tag: "{run_tag}"
-      #   parallel_workers: 8
-      #   input_dir: ~/.codeGenEval
-      #   output_dir: ~/.inference/exemplar.deepseek-v3
-      # - type: inference.composer
-      #   name: exemplar.kimi-k2
-      #   prefix_tag: "{prefix_tag}"
-      #   epoch_id: "{epoch_id}"
-      #   block_id: "{block_id}"
-      #   input_tag: "{run_tag}"
-      #   parallel_workers: 2
-      #   input_dir: ~/.codeGenEval
-      #   output_dir: ~/.inference/exemplar.kimi-k2
+    post_workitems:
+      # the below syntax works with ConfigInterpreter
+      steps:
+        - type: endpoint
+          endpoint: workflowClient.enqueue
+          args:
+            prefix_tag: "{prefix_tag}"
+            queue_name: "trainer.grpo:grpo.1"
+            item:
+              prefix_tag: "{prefix_tag}"
+              epoch_id: "{epoch_id}"
+              block_id: "{block_id}"
+              input_tag: "{run_tag}"
+              input_dir: ~/.codeGenEval
+            create_queue: true
+        - type: endpoint
+          endpoint: workflowClient.enqueue
+          args:
+            prefix_tag: "{prefix_tag}"
+            queue_name: "trainer.grpo:grpo.1"
+            item:
+              prefix_tag: "{prefix_tag}"
+              epoch_id: "{epoch_id}"
+              block_id: "{block_id}"
+              input_tag: "{run_tag}"
+              input_dir: ~/.codeGenEval
+            create_queue: true
 
   exemplar.deepseek-v3:
     default:
       input_dir: ~/.inference/composer/input
       output_dir: ~/.inference/composer/output
-      module_file: inferenceComposer/exemplar.module.yaml
-      prompt_file: inferenceComposer/codeGen.prompt.triton.yaml
-      example_file: inferenceComposer/triton.example.yaml
+      module_file: inference/exemplar.module.yaml
+      prompt_file: inference/codeGen.prompt.triton.yaml
+      example_file: inference/triton.example.yaml
       provider_name: fireworks
       model_name: deepseek-v3
       num_samples: 8 # this is not used, but required by the module
@@ -101,7 +119,7 @@ inference.composer:
       template: triton.1
       model_override: null
 
-    post_tasks:
+    post_workitems:
       - type: trainer.sft
         name: sft.1
         prefix_tag: "{prefix_tag}"
@@ -114,9 +132,9 @@ inference.composer:
     default:
       input_dir: ~/.inference/composer/input
       output_dir: ~/.inference/composer/output
-      module_file: inferenceComposer/exemplar.module.yaml
-      prompt_file: inferenceComposer/codeGen.prompt.triton.yaml
-      example_file: inferenceComposer/triton.example.yaml
+      module_file: inference/exemplar.module.yaml
+      prompt_file: inference/codeGen.prompt.triton.yaml
+      example_file: inference/triton.example.yaml
       provider_name: fireworks
       model_name: kimi-k2
       num_samples: 8 # this is not used, but required by the module
@@ -126,7 +144,7 @@ inference.composer:
       template: triton.1
       model_override: null
 
-    post_tasks:
+    post_workitems:
       - type: trainer.sft
         name: sft.1
         prefix_tag: "{prefix_tag}"

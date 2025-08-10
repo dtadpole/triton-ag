@@ -15,7 +15,7 @@ module:
       steps:
         - type: endpoint
           endpoint: duckdbClient.sql
-          inputs:
+          args:
             query: |
               SELECT filename as kb_filename, content as reference_code
               FROM read_text(['kernel_bench/level1/*.py', 'kernel_bench/level2/*.py'])
@@ -35,7 +35,7 @@ module:
           steps:
             - type: endpoint
               endpoint: queue.put_nowait
-              inputs:
+              args:
                 item:
                   worker: "eval.reference"
                   prefix_tag: "`prefix_tag`"
@@ -56,7 +56,7 @@ module:
               steps:
                 - type: endpoint
                   endpoint: queue.put_nowait
-                  inputs:
+                  args:
                     item:
                       worker: "codeGenEval.custom"
                       prefix_tag: "`prefix_tag`"
@@ -81,7 +81,7 @@ module:
       steps:
         - type: endpoint
           endpoint: kbEvalClient.kb_eval_ref
-          inputs:
+          args:
             run_tag: "`run_tag`"
             model_tag: "`model_tag`"
             task_tag: "`task_tag`"
@@ -104,7 +104,7 @@ module:
               method: "log_kb_eval_ref"
         - type: endpoint
           endpoint: statsClient.add_data_point
-          inputs:
+          args:
             prefix_tag: "`prefix_tag`"
             model_tag: "`model_tag`"
             task_tag: "`task_tag`"
@@ -122,7 +122,7 @@ module:
       steps:
         - type: endpoint
           endpoint: statsClient.wait_for_stats
-          inputs:
+          args:
             prefix_tag: "`prefix_tag`"
             model_tag: "`model_tag`"
             task_tag: "`task_tag`"
@@ -167,7 +167,7 @@ module:
                     add_generation_prompt=True,
                     enable_thinking=True,
                   )`
-              inputs:
+              args:
                 prompt: "`prompt`"
                 # messages: "`messages`"
                 max_tokens: "`max_tokens`"
@@ -207,7 +207,7 @@ module:
                   method: "log_completion"
             - type: endpoint
               endpoint: codeExtractor.extract_code
-              inputs:
+              args:
                 completion: "`completion['completion']`"
               returns:
                 error_if: "`__result__ is None or __result__['code'] is None`"
@@ -227,7 +227,7 @@ module:
                   method: "log_code_extraction"
             - type: endpoint
               endpoint: kbEvalClient.kb_eval
-              inputs:
+              args:
                 run_tag: "`run_tag`"
                 model_tag: "`model_tag`"
                 task_tag: "`task_tag`"
@@ -250,7 +250,7 @@ module:
                   method: "log_kb_eval"
             - type: endpoint
               endpoint: statsClient.add_data_point
-              inputs:
+              args:
                 prefix_tag: "`prefix_tag`"
                 model_tag: "`model_tag`"
                 task_tag: "`task_tag`"

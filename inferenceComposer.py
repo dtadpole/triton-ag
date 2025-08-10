@@ -33,10 +33,10 @@ class ComposerClient:
             self,
             input_tag: str,
             inference_client_config: InferenceClientConfig,
-            module_file: str = "inferenceComposer/codeGen.module.yaml",
-            prompt_file: str = "inferenceComposer/codeGen.prompt.triton.yaml",
-            example_file: str = "inferenceComposer/triton.example.yaml",
-            output_dir: str = "~/.inference/composer",
+            module_file: str = "inference/codeGenEval.module.yaml",
+            prompt_file: str = "inference/triton.prompt.yaml",
+            example_file: str = "inference/triton.example.yaml",
+            output_dir: str = "~/.inference/output",
             stats_dir: str = "~/.trainer/stats",
     ):
         with open(prompt_file, 'r') as f:
@@ -329,8 +329,8 @@ async def main():
     parser.add_argument("--epoch_id", type=int, default=-1)
     parser.add_argument("--block_id", type=int, default=-1)
     parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B.m_003_12")
-    parser.add_argument("--input_dir", type=str, default="~/.codeGenEval", help="Input directory containing Python files")
-    parser.add_argument("--output_dir", type=str, default="~/.inference/composer", help="Output directory for the composer results")
+    parser.add_argument("--input_dir", type=str, default="~/.inference/input", help="Input directory containing Python files")
+    parser.add_argument("--output_dir", type=str, default="~/.inference/output", help="Output directory for the composer results")
     parser.add_argument("--provider", type=str, default="fireworks")  # most cost effective models are deepinfra-r1 and fireworks-v3
     parser.add_argument("--model", type=str, default="deepseek-v3")  # most cost effective models are deepinfra-r1 and fireworks-v3
     parser.add_argument("--model_override", type=str, default=None)
@@ -340,9 +340,9 @@ async def main():
     parser.add_argument("--num_turns_per_generation", type=int, default=4)
     parser.add_argument("--use_global_queue", type=str, default=None) # this is the task_name of the global queue
     parser.add_argument("--proc_id", type=str, default=None)
-    parser.add_argument("--module_file", type=str, default="inferenceComposer/codeGen.module.yaml")
-    parser.add_argument("--prompt_file", type=str, default="inferenceComposer/codeGen.prompt.triton.yaml")
-    parser.add_argument("--example_file", type=str, default="inferenceComposer/triton.example.yaml")
+    parser.add_argument("--module_file", type=str, default="inference/codeGenEval.module.yaml")
+    parser.add_argument("--prompt_file", type=str, default="inference/triton.prompt.yaml")
+    parser.add_argument("--example_file", type=str, default="inference/triton.example.yaml")
     args = parser.parse_args()
 
     if args.proc_id is not None:

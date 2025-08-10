@@ -68,12 +68,12 @@ class ConfigInterpreter:
         else:
             return local_context_vars
 
-    def _process_input_vars(self, input_config: dict, context_vars: dict) -> dict:
+    def _process_args_vars(self, args_config: dict, context_vars: dict) -> dict:
         """Process input variables."""
         result = {}
-        for key, value in input_config.items():
+        for key, value in args_config.items():
             if isinstance(value, dict):
-                result[key] = self._process_input_vars(value, context_vars)
+                result[key] = self._process_args_vars(value, context_vars)
             else:
                 result[key] = self._process_variable(value, context_vars)
         return result
@@ -97,7 +97,20 @@ class ConfigInterpreter:
 
                     step_type = step_config['type']
                     if step_type == 'endpoint':
-                        success = await self._process_endpoint(runtime, step_config, context_vars)
+                        success, extra_info = await self._process_endpoint(runtime, step_config, context_vars)
+                        if extra_info is not None and 'wait_for' in extra_info:
+                            wait_for_start_time = time.time()
+                            wait_for = extra_info.get('wait_for', True)
+                            interval = extra_info.get('interval', 15)
+                            timeout = extra_info.get('timeout', 3600)
+                            wait_for_config = extra_info.get('config', {})
+                            while not wait_for and time.time() - wait_for_start_time < timeout:
+                                logger.info(f"⏳ [_process_steps] Waiting for endpoint: {wait_for_config} [{wait_for}]")
+                                await asyncio.sleep(interval)
+                                success, extra_info = await self._process_endpoint(runtime, step_config, context_vars)
+                                wait_for = extra_info.get('wait_for', True)
+                                interval = extra_info.get('interval', 15)
+                                timeout = extra_info.get('timeout', 3600)
                         if not success:
                             error_encountered = True
                             break
@@ -130,12 +143,16 @@ class ConfigInterpreter:
             return None
 
 
-    async def _process_endpoint(self, runtime: Any, endpoint_config: dict, context_vars: dict) -> bool:
+    async def _process_endpoint(self,
+        runtime: Any,
+        endpoint_config: dict,
+        context_vars: dict,
+    ) -> tuple[bool, Optional[dict]]: # (success, wait_for_info)
         """Process an endpoint."""
         # check if the endpoint config is valid
         if endpoint_config.get('type', None) != "endpoint" or endpoint_config.get('endpoint', None) is None:
             logger.error(f"🔴 [_process_endpoint] Endpoint not found in endpoint config: {endpoint_config}")
-            return False
+            return False, None
 
         # start processing the worker config, create a new context_vars dictionary
         # endpoint_context_vars = self.context_vars | context_vars
@@ -156,7 +173,7 @@ class ConfigInterpreter:
             # assume each step depend on each other, always break the steps if current step fails
             logger.error(f"🔴 [_process_endpoint] Error getting endpoint: {endpoint_config} [{type(e)}: {e}]")
             logger.error(traceback.format_exc())
-            return False
+            return False, None
 
         try:
             if 'context_vars' in endpoint_config:
@@ -165,17 +182,17 @@ class ConfigInterpreter:
         except Exception as e:
             # assume each step depend on each other, always break the steps if current step fails
             logger.error(f"🔴 [_process_endpoint] Error processing endpoint context variables: {endpoint_config['context_vars']} [{type(e)}: {e}]")
-            return False
+            return False, None
 
         try:
-            # get the inputs
-            input_config = endpoint_config.get('inputs', {})
-            input_vars = self._process_input_vars(input_config, context_vars)
+            # get the args
+            args_config = endpoint_config.get('args', {})
+            args_vars = self._process_args_vars(args_config, context_vars)
 
         except Exception as e:
             # assume each step depend on each other, always break the steps if current step fails
-            logger.error(f"🔴 [_process_endpoint] Error processing inputs: {endpoint_config} [{type(e)}: {e}]")
-            return False
+            logger.error(f"🔴 [_process_endpoint] Error processing args: {endpoint_config} [{type(e)}: {e}]")
+            return False, None
 
         try:
             # call the endpoint function
@@ -184,9 +201,9 @@ class ConfigInterpreter:
                 start_time = time.time()
             # check if the endpoint function is async
             if asyncio.iscoroutinefunction(endpoint_function):
-                result = await endpoint_function(**input_vars)
+                result = await endpoint_function(**args_vars)
             else:
-                result = endpoint_function(**input_vars)
+                result = endpoint_function(**args_vars)
             if record_time:
                 end_time = time.time()
                 context_vars['__endpoint_time__'] = end_time - start_time
@@ -196,7 +213,7 @@ class ConfigInterpreter:
             logger.error(f"🔴 [_process_endpoint] Error calling endpoint: {endpoint_config} [{type(e)}: {e}]")
             # log stack track only when actually calling the endpoint
             logger.error(traceback.format_exc())
-            return False
+            return False, None
 
         try:
             if 'returns' in endpoint_config:
@@ -207,7 +224,7 @@ class ConfigInterpreter:
                     error_if = self._process_variable(returns_config['error_if'], context_vars)
                     if error_if:
                         logger.error(f"🔴 [_process_endpoint] Error in endpoint [{endpoint_class_name}.{endpoint_method_name}]: {result}")
-                        return False
+                        return False, None
 
                 # now we don't have any errors, process the return in context variables
                 if 'context_vars' in returns_config:
@@ -235,14 +252,27 @@ class ConfigInterpreter:
                             log_method(result, context_vars)
                     except Exception as e:
                         logger.warning(f"🔴 [_process_endpoint] Error processing logging: {log_config} [{type(e)}: {e}]")
+
+                # process wait_for
+                if 'wait_for' in returns_config:
+                    wait_for_config = returns_config['wait_for']
+                    condition = self._process_variable(wait_for_config['condition'], context_vars)
+                    interval = self._process_variable(wait_for_config['interval'], context_vars)
+                    timeout = self._process_variable(wait_for_config['timeout'], context_vars)
+                    return False, {
+                        "wait_for": condition,
+                        "interval": interval,
+                        "timeout": timeout,
+                        "config": wait_for_config,
+                    }
             
         except Exception as e:
             # assume each step depend on each other, always break the steps if current step fails
             logger.error(f"🔴 [_process_endpoint] Error processing returns: [endpoint_config={endpoint_config}] [{type(e)}: {e}]")
             logger.error(traceback.format_exc())
-            return False
+            return False, None
 
-        return True
+        return True, None
 
 
     async def _process_iterator(self, runtime: Any, iterator_config: dict, context_vars: dict) -> bool:

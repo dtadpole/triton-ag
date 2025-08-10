@@ -31,6 +31,12 @@ class WorkflowRegistry:
             self.workflow_config = yaml.safe_load(f)
         return self.workflow_config
 
+    def get_workflow_config(self):
+        """
+        Get the workflow config
+        """
+        return self.workflow_config
+
     def _load_adapters(self):
         """
         Load the adapters from the config
@@ -137,6 +143,12 @@ class WorkflowRegistry:
         except Exception as e:
             logger.error(f"Error getting keys: {e}")
             return []
+
+    def exists(self, key):
+        """
+        Check if a key exists in the object registry
+        """
+        return key in self.reg
 
     def get(self, key, last_modified_within: Optional[int]=None):
         """

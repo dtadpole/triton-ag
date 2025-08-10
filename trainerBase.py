@@ -54,9 +54,10 @@ class ModelConfig(BaseModel):
     max_seq_length: int = 16384
     use_unsloth: bool = True
     use_gradient_checkpointing: str = "unsloth"
-    load_in_4bit: bool = False
+    load_in_4bit: bool = True
     load_in_8bit: bool = False
-    compute_dtype: str = "bfloat16"
+    full_finetuning: bool = False
+    compute_dtype: Optional[str] = None
 
 class OptimizerConfig(BaseModel):
     """Configuration for optimizer parameters"""
@@ -141,7 +142,7 @@ class TrainerConfig(BaseModel):
                 use_gradient_checkpointing=model_data.get('use_gradient_checkpointing', "unsloth"),
                 load_in_4bit=model_data.get('load_in_4bit', False),
                 load_in_8bit=model_data.get('load_in_8bit', False),
-                compute_dtype=model_data.get('compute_dtype', 'bfloat16')
+                compute_dtype=model_data.get('compute_dtype', None)
             )
         
         if 'training' in config_dict:
@@ -305,9 +306,11 @@ class BaseTrainer:
             # Load model with Unsloth
             model, tokenizer = FastLanguageModel.from_pretrained(
                 model_name=self.config.model.name,
+                dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16) if self.config.model.compute_dtype is not None else None,
                 max_seq_length=self.config.model.max_seq_length,
-                dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16),
                 load_in_4bit=self.config.model.load_in_4bit,
+                load_in_8bit=self.config.model.load_in_8bit,
+                full_finetuning=self.config.model.full_finetuning,
                 use_gradient_checkpointing=self.config.model.use_gradient_checkpointing,
                 # token="hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
             )
@@ -317,7 +320,7 @@ class BaseTrainer:
             model = AutoModelForCausalLM.from_pretrained(
                 self.config.model.name,
                 config=config,
-                torch_dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16),
+                torch_dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16) if self.config.model.compute_dtype is not None else None,
                 device_map="auto",
             )
             model.gradient_checkpointing_enable()
@@ -366,6 +369,7 @@ class BaseTrainer:
                 random_state=self.config.training.seed if self.config.training.seed is not None and self.config.training.seed >= 0 else random.randint(0,2**31),
                 use_rslora=False,  # Use regular LoRA
                 loftq_config=None,
+                autocast_adapter_dtype=False,
             )
         else:
             lora_model = get_peft_model(self.base_model, LoraConfig(
@@ -376,6 +380,7 @@ class BaseTrainer:
                 lora_dropout=self.config.lora.dropout,
                 bias=self.config.lora.bias,
                 task_type=TaskType.CAUSAL_LM,
+                autocast_adapter_dtype=False,
             ))
         
         # Log LoRA information
@@ -828,7 +833,7 @@ def create_sample_training_dataset(tokenizer, size: int = 100, max_length: int =
 async def main():
     """Main training function"""
     parser = argparse.ArgumentParser(description="Train a model using BaseTrainer")
-    parser.add_argument("--prefix-tag", type=str, default="v0.1",
+    parser.add_argument("--prefix-tag", type=str, default="v0.1.a",
                        help="Prefix tag for the training run")
     parser.add_argument("--config", type=str, default="trainerBase.yaml", 
                        help="Path to configuration YAML file")
