@@ -4,7 +4,8 @@ Simple FastAPI REPL
 A web-based Read-Eval-Print Loop using FastAPI with global context
 """
 
-from fastapi import FastAPI
+import uvicorn
+from fastapi import FastAPI, APIRouter
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import sys
@@ -13,96 +14,100 @@ import asyncio
 import traceback
 from logger import logger
 from replUtils import CodeRequest, CodeResponse, load_config
-from globalUtils import GlobalUtils
+from workflowUtil import GlobalUtils
 
-global_utils = GlobalUtils()
-fastapi = global_utils.fastapi
+class ReplServer:
+    def __init__(self):
+        self.router = APIRouter()
+        self.default_context = {
+            "vars": self.get_variables,
+            "reset": self.reset_vars
+        }
+        self.context = self.default_context.copy()
+        self._enable_api_endpoints()
 
-global_namespace = {}
+    def init_default_vars(self, init_data: dict):
+        """Initialize the default context"""
+        for k, v in init_data.items():
+            self.default_context[k] = v
+        self.context = self.default_context.copy()
+        return {"message": "Namespace initialized"}
 
-def execute_code(code: str) -> tuple:
-    """Execute Python code and capture output/errors"""
-    output = io.StringIO()
-    error = None
-    result = None
-    is_exit = False
-    
-    try:
-        # Capture stdout
-        old_stdout = sys.stdout
-        sys.stdout = output
+    def get_variables(self):
+        """Get current variables"""
+        user_vars = {k: str(v) for k, v in self.context.items() 
+                    if not k.startswith('_')}
+        return {"variables": user_vars}
+
+    def reset_vars(self):
+        """Reset the global namespace"""
+        self.context = self.default_context.copy()
+        return {"message": "Namespace reset"}
+
+    def execute_code(self, code: str) -> tuple:
+        """Execute Python code and capture output/errors"""
+        output = io.StringIO()
+        error = None
+        result = None
+        is_exit = False
         
         try:
-            # Try as expression first
+            # Capture stdout
+            old_stdout = sys.stdout
+            sys.stdout = output
+            
             try:
-                result = eval(code, global_namespace)
-            except SyntaxError:
-                # Not an expression, execute as statement
-                exec(code, global_namespace)
-        finally:
-            sys.stdout = old_stdout
+                # Try as expression first
+                try:
+                    result = eval(code, self.context)
+                except SyntaxError:
+                    # Not an expression, execute as statement
+                    exec(code, self.context)
+            finally:
+                sys.stdout = old_stdout
 
-    except SystemExit:
-        is_exit = True
-    except Exception as e:
-        error = traceback.format_exc()
-        logger.error(error)
-    
-    return result, output.getvalue(), error, is_exit
-
-
-@fastapi.post("/repl/execute")
-async def execute(request: CodeRequest):
-    """Execute Python code"""
-    try:
-        result, output, error, is_exit = execute_code(request.code)
+        except SystemExit:
+            is_exit = True
+        except Exception as e:
+            error = traceback.format_exc()
+            logger.error(error)
         
-        return {
-            "result": str(result) if result is not None else None,
-            "output": output if output else None,
-            "error": error,
-            "is_exit": is_exit
-        }
-    
-    except Exception as e:
-        return {
-            "result": None,
-            "output": None,
-            "error": f"Server error: {str(e)}",
-            "is_exit": False
-        }
+        return result, output.getvalue(), error, is_exit
 
+    def _enable_api_endpoints(self):
+        @self.router.post("/repl/execute")
+        async def execute(request: CodeRequest):
+            """Execute Python code"""
+            try:
+                result, output, error, is_exit = self.execute_code(request.code)
+                
+                return {
+                    "result": str(result) if result is not None else None,
+                    "output": output if output else None,
+                    "error": error,
+                    "is_exit": is_exit
+                }
+            
+            except Exception as e:
+                return {
+                    "result": None,
+                    "output": None,
+                    "error": f"Server error: {str(e)}",
+                    "is_exit": False
+                }
 
-@fastapi.get("/repl/vars")
-def get_variables():
-    """Get current variables"""
-    user_vars = {k: str(v) for k, v in global_namespace.items() 
-                if not k.startswith('_')}
-    return {"variables": user_vars}
+        @self.router.get("/repl/vars")
+        def get_variables():
+            return self.get_variables()
 
+        @self.router.post("/repl/reset")
+        def reset_vars():
+            return self.reset_vars()
 
-@fastapi.post("/repl/reset")
-def reset_vars():
-    """Reset the global namespace"""
-    reg = global_namespace['reg']
-    global_namespace.clear()
-    global_namespace['reg'] = reg
-    global_namespace['vars'] = get_variables
-    global_namespace['reset'] = reset_vars
-    return {"message": "Namespace reset"}
-
-def init_vars(reg):
-    """Initialize the global namespace"""
-    global_namespace.clear()
-    global_namespace['reg'] = reg
-    global_namespace['vars'] = get_variables
-    global_namespace['reset'] = reset_vars
-    return {"message": "Namespace initialized"}
-
-@fastapi.get("/repl", response_class=HTMLResponse)
-async def web_repl():
-    """Simple web interface for the REPL"""
-    return """
+        @self.router.get("/repl", response_class=HTMLResponse)
+        async def web_repl():
+            """Simple web interface for the REPL"""
+            return """
 <!DOCTYPE html>
 <html>
 <head>
@@ -261,11 +266,15 @@ Type Python code below and press Execute.
     </script>
 </body>
 </html>
-    """
+"""
 
 
 if __name__ == "__main__":
-    from globalRegistry import GlobalRegistry
-    reg = GlobalRegistry()
-    init_vars(reg)
-    asyncio.run(reg.run())
+    global_utils = GlobalUtils()
+    fastapi = global_utils.fastapi
+    reg = {"test1": "test1", "test2": "test2"}
+    repl_server = ReplServer()
+    repl_server.init_default_vars(reg)
+    fastapi.include_router(repl_server.router)
+
+    uvicorn.run(fastapi, host="0.0.0.0", port=8488)
