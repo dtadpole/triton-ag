@@ -45,11 +45,14 @@ class GRPOConfig(BaseModel):
     discard_long_conversations: bool = True
     clip_ratio_epsilon_lower: float = 0.2
     clip_ratio_epsilon_upper: float = 0.3
+    gspo_clip_ratio_epsilon_lower: float = 3e-4
+    gspo_clip_ratio_epsilon_upper: float = 4e-4
     bound_advantage_range: float = 3.0
     beta: float = 0.0  # KL divergence coefficient
     reward_scale: bool = True
     reward_epsilon: float = 1e-3
     reward_noise: float = 1e-2
+    # loss_type: str = "token" # "episode" or "token" or "seq_max" or "group_max" or "gspo"
     loss_type: str = "gspo" # "episode" or "token" or "seq_max" or "group_max" or "gspo"
     gamma: float = 0.5
 
@@ -139,35 +142,58 @@ class GRPOTrainer(BaseTrainer):
                 raise ValueError(f"❌ [GRPOTrainer] Completion log probabilities and new action log probabilities have different shapes: {completion_log_probs_tensor.shape} != {new_action_log_probs.shape}")
             # log probs is calculated in log space, so we need to subtract the log probabilities
             log_ratio = new_action_log_probs - completion_log_probs_tensor
-            ratio = torch.exp(log_ratio)
 
-            # calculate clipped upper and lower percentage
-            clip_metrics[CLIP_RATIO_UPPER_PERCENTAGE].append(torch.sum(ratio > 1+self.grpo_config.clip_ratio_epsilon_upper).item() * 100.0 / len(new_action_log_probs))
-            clip_metrics[CLIP_RATIO_LOWER_PERCENTAGE].append(torch.sum(ratio < 1-self.grpo_config.clip_ratio_epsilon_lower).item() * 100.0 / len(new_action_log_probs))
+            if self.grpo_config.loss_type == "gspo":
 
-            clamped_ratio = torch.clamp(ratio, 1-self.grpo_config.clip_ratio_epsilon_lower, 1+self.grpo_config.clip_ratio_epsilon_upper)
+                sequence_log_ratio = torch.sum(log_ratio) / len(new_action_log_probs)
+                sequence_ratio = torch.exp(sequence_log_ratio)
 
-            # min ratio advantage is min of ratio_advantage and clamped_ratio_advantage
-            ratio_advantage = torch.min(ratio * advantages[i], clamped_ratio * advantages[i]) # dim: (completion_len)
+                # calculate clipped upper and lower percentage
+                clip_metrics[CLIP_RATIO_UPPER_PERCENTAGE].append(torch.sum(sequence_ratio > 1+self.grpo_config.gspo_clip_ratio_epsilon_upper).item() * 100.0)
+                clip_metrics[CLIP_RATIO_LOWER_PERCENTAGE].append(torch.sum(sequence_ratio < 1-self.grpo_config.gspo_clip_ratio_epsilon_lower).item() * 100.0)
 
-            # calculate clipped upper and lower percentage
-            clip_metrics[BOUND_ADVANTAGE_UPPER_PERCENTAGE].append(torch.sum(ratio_advantage > self.grpo_config.bound_advantage_range).item() * 100.0 / len(new_action_log_probs))
-            clip_metrics[BOUND_ADVANTAGE_LOWER_PERCENTAGE].append(torch.sum(ratio_advantage < -self.grpo_config.bound_advantage_range).item() * 100.0 / len(new_action_log_probs))
+                clamped_sequence_ratio = torch.clamp(sequence_ratio, 1-self.grpo_config.gspo_clip_ratio_epsilon_lower, 1+self.grpo_config.gspo_clip_ratio_epsilon_upper)
 
-            # calculate clipped upper and lower percentage
-            final_ratio_advantage = torch.clamp(ratio_advantage, -self.grpo_config.bound_advantage_range, self.grpo_config.bound_advantage_range)
+                sequence_ratio_advantage = torch.min(sequence_ratio * advantages[i], clamped_sequence_ratio * advantages[i])
 
-            # compute loss
-            if self.grpo_config.loss_type == "episode":
-                loss = -final_ratio_advantage.mean()
-            elif self.grpo_config.loss_type == "token":
-                loss = -torch.sum(final_ratio_advantage) / len(new_action_log_probs)
-            elif self.grpo_config.loss_type == "group_max":
-                loss = -torch.sum(final_ratio_advantage) / group_max_length
-            elif self.grpo_config.loss_type == "seq_max":
-                loss = -torch.sum(final_ratio_advantage) / self.grpo_config.max_seq_length
+                # calculate clipped upper and lower percentage
+                clip_metrics[BOUND_ADVANTAGE_UPPER_PERCENTAGE].append(torch.sum(sequence_ratio_advantage > self.grpo_config.bound_advantage_range).item() * 100.0)
+                clip_metrics[BOUND_ADVANTAGE_LOWER_PERCENTAGE].append(torch.sum(sequence_ratio_advantage < -self.grpo_config.bound_advantage_range).item() * 100.0)
+
+                final_sequence_ratio_advantage = torch.clamp(sequence_ratio_advantage, -self.grpo_config.bound_advantage_range, self.grpo_config.bound_advantage_range)
+
+                loss = -final_sequence_ratio_advantage.mean()
+
             else:
-                raise ValueError(f"❌ [GRPOTrainingGroup] Invalid loss type: {self.grpo_config.loss_type}")
+                ratio = torch.exp(log_ratio)
+
+                # calculate clipped upper and lower percentage
+                clip_metrics[CLIP_RATIO_UPPER_PERCENTAGE].append(torch.sum(ratio > 1+self.grpo_config.clip_ratio_epsilon_upper).item() * 100.0 / len(new_action_log_probs))
+                clip_metrics[CLIP_RATIO_LOWER_PERCENTAGE].append(torch.sum(ratio < 1-self.grpo_config.clip_ratio_epsilon_lower).item() * 100.0 / len(new_action_log_probs))
+
+                clamped_ratio = torch.clamp(ratio, 1-self.grpo_config.clip_ratio_epsilon_lower, 1+self.grpo_config.clip_ratio_epsilon_upper)
+
+                # min ratio advantage is min of ratio_advantage and clamped_ratio_advantage
+                ratio_advantage = torch.min(ratio * advantages[i], clamped_ratio * advantages[i]) # dim: (completion_len)
+
+                # calculate clipped upper and lower percentage
+                clip_metrics[BOUND_ADVANTAGE_UPPER_PERCENTAGE].append(torch.sum(ratio_advantage > self.grpo_config.bound_advantage_range).item() * 100.0 / len(new_action_log_probs))
+                clip_metrics[BOUND_ADVANTAGE_LOWER_PERCENTAGE].append(torch.sum(ratio_advantage < -self.grpo_config.bound_advantage_range).item() * 100.0 / len(new_action_log_probs))
+
+                # calculate clipped upper and lower percentage
+                final_ratio_advantage = torch.clamp(ratio_advantage, -self.grpo_config.bound_advantage_range, self.grpo_config.bound_advantage_range)
+
+                # compute loss
+                if self.grpo_config.loss_type == "episode":
+                    loss = -final_ratio_advantage.mean()
+                elif self.grpo_config.loss_type == "token":
+                    loss = -torch.sum(final_ratio_advantage) / len(new_action_log_probs)
+                elif self.grpo_config.loss_type == "group_max":
+                    loss = -torch.sum(final_ratio_advantage) / group_max_length
+                elif self.grpo_config.loss_type == "seq_max":
+                    loss = -torch.sum(final_ratio_advantage) / self.grpo_config.max_seq_length
+                else:
+                    raise ValueError(f"❌ [GRPOTrainingGroup] Invalid loss type: {self.grpo_config.loss_type}")
             
             batch_loss += loss
 
