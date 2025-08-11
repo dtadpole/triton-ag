@@ -1,9 +1,14 @@
-import pandas as pd
+import torch
+import numpy as np
 from transformers import AutoTokenizer
 from operator import itemgetter
 from itertools import groupby
 
-def grpo_kb_reward(query_result: list[dict], gamma: float = 0.5, tokenizer: AutoTokenizer = None, debug: bool = False) -> dict[str, list[dict]]:
+def grpo_compute_rewards(
+    query_result: list[dict],
+    gamma: float = 0.5,
+    debug: bool = False,
+) -> dict[str, list[dict]]:
     # for each task_tag, group by gen_tag, and return a list of turns, each turn is a sorted list of rows
     results_by_gen = {
         k: list(g) for k, g in groupby(
@@ -52,10 +57,10 @@ def grpo_kb_reward(query_result: list[dict], gamma: float = 0.5, tokenizer: Auto
             "task_tag": item["task_tag"],
             "gen_tag": item["gen_tag"],
             "turn_only_tag": item["turn_only_tag"],
+            "turn_tag": item["turn_tag"],
             "reward": item["reward"],
             "reward_items": item["reward_items"],
             "prompt": item["prompt"],
-            "prompt_ids": tokenizer.encode(item["prompt"]) if tokenizer else None,
             "logprobs": item["logprobs"],
         } for item in value]
         # add the group to the groups dict
@@ -65,6 +70,76 @@ def grpo_kb_reward(query_result: list[dict], gamma: float = 0.5, tokenizer: Auto
             print(key, '=>', [f'{gen["reward"]:.2f}' for gen in value])
 
     return groups
+
+
+def grpo_compute_advantages(
+    groups: dict[str, list[dict]],
+    reward_scale: bool = True,
+    reward_epsilon: float = 1e-3,
+    reward_noise: float = 1e-2,
+    debug: bool = False,
+):
+    """Compute advantages for the generated tokens"""
+    if debug:
+        print('\nComputing advantages\n')
+    for key, group in groups.items():
+        # calculate mean and stdev of the rewards
+        rewards = np.array([result["reward"] for result in group])
+        mean_reward = np.mean(rewards)
+        std_reward = np.std(rewards)
+        # whether to scale the rewards
+        if reward_scale:
+            advantages = (rewards - mean_reward) / (std_reward + reward_epsilon)
+        else:
+            advantages = rewards - mean_reward
+        # add noise to the advantages
+        advantages = advantages + np.random.normal(0, reward_noise, size=advantages.shape)
+        # add the advantages to the group
+        for gen, advantage in zip(group, advantages):
+            gen["advantage"] = advantage
+        if debug:
+            print(key, '=>', [f'{gen["advantage"]:.2f}' for gen in group])
+
+    return groups
+
+"""
+            {
+                'turn_tag': result.turn_tag,
+                'reward': result.reward,
+                'trajectory_reward': result.trajectory_reward,
+                'advantage': advantage,
+                'prompt_token_ids': result.prompt_token_ids,
+                'completion_token_ids': result.completion_token_ids,
+                'completion_log_probs': result.completion_log_probs,
+                'input_ids': result.prompt_token_ids + result.completion_token_ids,
+                'attention_mask': torch.ones_like(torch.tensor(result.prompt_token_ids + result.completion_token_ids)),
+            }
+"""
+
+def grpo_group_to_dataset(
+    group: list[dict],
+    tokenizer: AutoTokenizer,
+):
+    group_dataset = []
+    for result in group:
+        prompt_token_ids = tokenizer.encode(result["prompt"])
+        completion_token_ids = [logprob['token_id'] for logprob in result["logprobs"]]
+        completion_log_probs = [logprob['logprob'] for logprob in result["logprobs"]]
+        input_ids = torch.tensor(prompt_token_ids + completion_token_ids)
+        attention_mask = torch.ones_like(input_ids)
+        group_dataset.append({
+            'task_tag': result["task_tag"],
+            'turn_tag': result["turn_tag"],
+            'reward': result["reward"],
+            'reward_items': result["reward_items"],
+            'advantage': result["advantage"],
+            'prompt_token_ids': prompt_token_ids,
+            'completion_token_ids': completion_token_ids,
+            'completion_log_probs': completion_log_probs,
+            'input_ids': input_ids,
+            'attention_mask': attention_mask,
+        }) 
+    return group_dataset
 
 
 if __name__ == "__main__":
@@ -108,9 +183,21 @@ if __name__ == "__main__":
     result = duckdb.sql(sql)
     print(result)
 
-    groups = grpo_kb_reward(result.df().to_dict(orient="records"), tokenizer=tokenizer, debug=args.debug)
+    groups = grpo_compute_rewards(result.df().to_dict(orient="records"), debug=args.debug)
+    groups = grpo_compute_advantages(groups, debug=args.debug)
     for key, value in groups.items():
         print(f'\n{key}:')
         print('    => rewards: ', [f'{gen["reward"]:.2f}' for gen in value])
+        print('    => advantages: ', [f'{gen["advantage"]:.2f}' for gen in value])
         print('    => len(logprobs): ', [f'{len(gen["logprobs"])}' for gen in value])
-        print('    => len(prompt_ids): ', [f'{len(gen["prompt_ids"])}' for gen in value if gen["prompt_ids"]])
+
+    group_datasets = {key: grpo_group_to_dataset(value, tokenizer) for key, value in groups.items()}
+    for key, value in group_datasets.items():
+        print(f'\n{key}:')
+        print('    => rewards: ', [f'{gen["reward"]:.2f}' for gen in value])
+        print('    => advantages: ', [f'{gen["advantage"]:.2f}' for gen in value])
+        print('    => len(prompt_token_ids): ', [f'{len(gen["prompt_token_ids"])}' for gen in value if gen["prompt_token_ids"]])
+        print('    => len(completion_token_ids): ', [f'{len(gen["completion_token_ids"])}' for gen in value if gen["completion_token_ids"]])
+        print('    => len(completion_log_probs): ', [f'{len(gen["completion_log_probs"])}' for gen in value if gen["completion_log_probs"]])
+        print('    => len(input_ids): ', [f'{len(gen["input_ids"])}' for gen in value if "input_ids" in gen])
+        print('    => len(attention_mask): ', [f'{len(gen["attention_mask"])}' for gen in value if "attention_mask" in gen])

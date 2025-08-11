@@ -333,7 +333,7 @@ class SimpleCollator:
 
     def __call__(self, batch):
         # Extract sequences
-        input_ids = [torch.tensor(item['input_ids']) for item in batch]
+        input_ids = [item['input_ids'].detach().cpu().clone() for item in batch]
 
         # Find max length
         max_len = max(len(seq) for seq in input_ids)

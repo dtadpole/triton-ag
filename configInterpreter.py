@@ -120,6 +120,11 @@ class ConfigInterpreter:
                         if not success:
                             error_encountered = True
                             break
+                    elif step_type == 'code':
+                        success = await self._process_code(runtime, step_config, context_vars)
+                        if not success:
+                            error_encountered = True
+                            break
                     else:
                         logger.error(f"🔴 [_process_steps] Step type not found in step: {step_config}")
                         error_encountered = True
@@ -143,6 +148,56 @@ class ConfigInterpreter:
             logger.error(traceback.format_exc())
             return None
 
+    async def _process_returns(self, runtime: Any, result: Any, returns_config: dict, context_vars: dict) -> tuple[bool, Any]:
+        """Process returns."""
+        # process error_if
+        if 'error_if' in returns_config:
+            error_if = self._process_variable(returns_config['error_if'], context_vars)
+            if error_if:
+                logger.error(f"🔴 [_process_returns] Error in returns: {returns_config}")
+                return False, None
+
+        # now we don't have any errors, process the return in context variables
+        if 'context_vars' in returns_config:
+            self._process_context_vars(returns_config['context_vars'], context_vars)
+
+        # process save_to
+        if 'save_to' in returns_config:
+            for save_to_config in returns_config['save_to']:
+                path = self._process_variable(save_to_config['path'], context_vars)
+                data = self._process_variable(save_to_config['data'], context_vars)
+                format = save_to_config['format'] if 'format' in save_to_config else 'text'
+                runtime.recorder.save(path, data, format=format)
+
+        # process logging
+        if 'logging' in returns_config:
+            log_config = returns_config['logging']
+            try:
+                log_method = getattr(runtime, log_config.get('method', None))
+                if not log_method:
+                    logger.warning(f"🔴 [_process_returns] Logging method not found: {log_config}")
+                # check if log_method is async
+                if asyncio.iscoroutinefunction(log_method):
+                    await log_method(result, context_vars)
+                else:
+                    log_method(result, context_vars)
+            except Exception as e:
+                logger.warning(f"🔴 [_process_endpoint] Error processing logging: {log_config} [{type(e)}: {e}]")
+
+        # process wait_for
+        if 'wait_for' in returns_config:
+            wait_for_config = returns_config['wait_for']
+            condition = self._process_variable(wait_for_config['condition'], context_vars)
+            interval = self._process_variable(wait_for_config['interval'], context_vars)
+            timeout = self._process_variable(wait_for_config['timeout'], context_vars)
+            return False, {
+                "wait_for": condition,
+                "interval": interval,
+                "timeout": timeout,
+                "config": wait_for_config,
+            }
+
+        return True, None
 
     async def _process_endpoint(self,
         runtime: Any,
@@ -220,52 +275,8 @@ class ConfigInterpreter:
             if 'returns' in endpoint_config:
                 returns_config = endpoint_config['returns']
                 context_vars['__result__'] = result
-                # process error_if
-                if 'error_if' in returns_config:
-                    error_if = self._process_variable(returns_config['error_if'], context_vars)
-                    if error_if:
-                        logger.error(f"🔴 [_process_endpoint] Error in endpoint [{endpoint_class_name}.{endpoint_method_name}]: {result}")
-                        return False, None
-
-                # now we don't have any errors, process the return in context variables
-                if 'context_vars' in returns_config:
-                    self._process_context_vars(returns_config['context_vars'], context_vars)
-
-                # process save_to
-                if 'save_to' in returns_config:
-                    for save_to_config in returns_config['save_to']:
-                        path = self._process_variable(save_to_config['path'], context_vars)
-                        data = self._process_variable(save_to_config['data'], context_vars)
-                        format = save_to_config['format'] if 'format' in save_to_config else 'text'
-                        runtime.recorder.save(path, data, format=format)
-
-                # process logging
-                if 'logging' in returns_config:
-                    log_config = returns_config['logging']
-                    try:
-                        log_method = getattr(runtime, log_config.get('method', None))
-                        if not log_method:
-                            logger.warning(f"🔴 [_process_endpoint] Logging method not found: {log_config}")
-                        # check if log_method is async
-                        if asyncio.iscoroutinefunction(log_method):
-                            await log_method(result, context_vars)
-                        else:
-                            log_method(result, context_vars)
-                    except Exception as e:
-                        logger.warning(f"🔴 [_process_endpoint] Error processing logging: {log_config} [{type(e)}: {e}]")
-
-                # process wait_for
-                if 'wait_for' in returns_config:
-                    wait_for_config = returns_config['wait_for']
-                    condition = self._process_variable(wait_for_config['condition'], context_vars)
-                    interval = self._process_variable(wait_for_config['interval'], context_vars)
-                    timeout = self._process_variable(wait_for_config['timeout'], context_vars)
-                    return False, {
-                        "wait_for": condition,
-                        "interval": interval,
-                        "timeout": timeout,
-                        "config": wait_for_config,
-                    }
+                success, extra_info = await self._process_returns(runtime, result, endpoint_config['returns'], context_vars)
+                return success, extra_info
             
         except Exception as e:
             # assume each step depend on each other, always break the steps if current step fails
@@ -275,6 +286,62 @@ class ConfigInterpreter:
 
         return True, None
 
+    async def _process_code(self, runtime: Any, code_config: dict, context_vars: dict) -> bool:
+        """Process a code block."""
+        try:
+            # process context vars
+            if 'context_vars' in code_config:
+                self._process_context_vars(code_config['context_vars'], context_vars)
+
+            # first process the code snippet path
+            code_snippet_path = self._process_variable(code_config.get('code_snippet_path', None), context_vars)
+            if code_snippet_path is not None:
+                try:
+                    with open(code_snippet_path, 'r') as file:
+                        code_snippet = file.read()
+                except Exception as e:
+                    logger.error(f"🔴 [_process_code] Error reading code snippet path: {code_snippet_path} [{type(e)}: {e}]")
+                    return False
+                try:
+                    exec(code_snippet, context_vars)
+                except Exception as e:
+                    logger.error(f"🔴 [_process_code] Error executing code snippet path: {code_snippet_path} [{type(e)}: {e}]")
+                    logger.error(traceback.format_exc())
+                    return False
+
+            # then process the code snippet block, DO NOT use _process_variable here!!!
+            code_snippet_block = code_config.get('code_snippet_block', '')
+            if code_snippet_block:
+                try:
+                    exec(code_snippet_block, context_vars)
+                except Exception as e:
+                    logger.error(f"🔴 [_process_code] Error executing code snippet block: {code_snippet_block} [{type(e)}: {e}]")
+                    logger.error(traceback.format_exc())
+                    return False
+
+            # if returns is configured, process the returns
+            try:
+                if 'returns' in code_config:
+                    returns_config = code_config['returns']
+                    success, _ = await self._process_returns(
+                        runtime,
+                        context_vars['__result__'] if '__result__' in context_vars else None,
+                        returns_config,
+                        context_vars,
+                    )
+                    return success
+                
+            except Exception as e:
+                # assume each step depend on each other, always break the steps if current step fails
+                logger.error(f"🔴 [_process_code] Error processing returns: [code_config={code_config}] [{type(e)}: {e}]")
+                return False
+
+        except Exception as e:
+            logger.error(f"🔴 [_process_code] Error processing code: {code_config} [{type(e)}: {e}]")
+            logger.error(traceback.format_exc())
+            return False
+
+        return True
 
     async def _process_iterator(self, runtime: Any, iterator_config: dict, context_vars: dict) -> bool:
         """Process an iterator."""
@@ -360,13 +427,13 @@ class ConfigInterpreter:
     async def execute(self, runtime: Any, config: dict, context_vars: Optional[dict] = None) -> bool:
         """Execute the config."""
         # start processing the worker config, create a new context_vars dictionary
-        context_vars = (context_vars or {}) | self.context_vars
-        context_vars['__runtime__'] = runtime
-        context_vars['__context__'] = context_vars
+        execute_context_vars = (context_vars or {}) | self.context_vars
+        execute_context_vars['__runtime__'] = runtime
+        execute_context_vars['__context__'] = execute_context_vars
 
         try:
             if 'context_vars' in config:
-                self._process_context_vars(config['context_vars'], context_vars)
+                self._process_context_vars(config['context_vars'], execute_context_vars)
 
         except Exception as e:
             # assume each step depend on each other, always break the steps if current step fails
@@ -374,7 +441,11 @@ class ConfigInterpreter:
             return False
 
         try:
-            return await self._process_steps(runtime, config['steps'], context_vars)
+            success = await self._process_steps(runtime, config['steps'], execute_context_vars)
+            if context_vars and '__result__' in execute_context_vars:
+                context_vars['__result__'] = execute_context_vars['__result__']
+            return success
+
         except Exception as e:
             logger.error(f"🔴 [EndpointInterpreter] Error executing config: {config} [{type(e)}: {e}]")
             logger.error(traceback.format_exc())

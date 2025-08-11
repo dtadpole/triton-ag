@@ -57,7 +57,7 @@ class ModelConfig(BaseModel):
     load_in_4bit: bool = True
     load_in_8bit: bool = False
     full_finetuning: bool = False
-    compute_dtype: Optional[str] = None
+    compute_dtype: str = "bfloat16"
 
 class OptimizerConfig(BaseModel):
     """Configuration for optimizer parameters"""
@@ -142,7 +142,7 @@ class TrainerConfig(BaseModel):
                 use_gradient_checkpointing=model_data.get('use_gradient_checkpointing', "unsloth"),
                 load_in_4bit=model_data.get('load_in_4bit', False),
                 load_in_8bit=model_data.get('load_in_8bit', False),
-                compute_dtype=model_data.get('compute_dtype', None)
+                compute_dtype=model_data.get('compute_dtype', 'bfloat16')
             )
         
         if 'training' in config_dict:
@@ -306,7 +306,7 @@ class BaseTrainer:
             # Load model with Unsloth
             model, tokenizer = FastLanguageModel.from_pretrained(
                 model_name=self.config.model.name,
-                dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16) if self.config.model.compute_dtype is not None else None,
+                dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16),
                 max_seq_length=self.config.model.max_seq_length,
                 load_in_4bit=self.config.model.load_in_4bit,
                 load_in_8bit=self.config.model.load_in_8bit,
@@ -320,7 +320,7 @@ class BaseTrainer:
             model = AutoModelForCausalLM.from_pretrained(
                 self.config.model.name,
                 config=config,
-                torch_dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16) if self.config.model.compute_dtype is not None else None,
+                torch_dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16),
                 device_map="auto",
             )
             model.gradient_checkpointing_enable()
@@ -369,7 +369,7 @@ class BaseTrainer:
                 random_state=self.config.training.seed if self.config.training.seed is not None and self.config.training.seed >= 0 else random.randint(0,2**31),
                 use_rslora=False,  # Use regular LoRA
                 loftq_config=None,
-                autocast_adapter_dtype=False,
+                # autocast_adapter_dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16),
             )
         else:
             lora_model = get_peft_model(self.base_model, LoraConfig(
@@ -380,7 +380,7 @@ class BaseTrainer:
                 lora_dropout=self.config.lora.dropout,
                 bias=self.config.lora.bias,
                 task_type=TaskType.CAUSAL_LM,
-                autocast_adapter_dtype=False,
+                # autocast_adapter_dtype=False,
             ))
         
         # Log LoRA information
