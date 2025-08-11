@@ -327,9 +327,16 @@ class GRPOTrainer(BaseTrainer):
             if self.trainer_status.global_step >= self.config.training.max_steps:
                 break
 
+        try:
+            # always save checkpoint at the end of the block
+            self._save_checkpoint(self.trainer_status.global_step, callback=callback)
+        except Exception as e:
+            logger.error(f"❌ [GRPOTrainer] [{block.input_tag}] Failed to save checkpoint: {e}")
+
         total_time = time.time() - start_time
         logger.info(f"🎉 [{self.__class__.__name__}] [{block.input_tag}] Block completed in [{total_time:.1f}s] - Final global step: [{self.trainer_status.global_step}]")
         progress_bar.close()
+
 
 def grpo_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_file: str = "trainerBase.yaml", grpo_config_file: str = "trainerGRPO.yaml"):
     """Get a GRPO trainer"""
@@ -359,11 +366,11 @@ def grpo_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_fil
 async def main():
     """Main function for GRPO training"""
     parser = argparse.ArgumentParser(description="Train a model using GRPOTrainer")
-    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.m")
+    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.n")
     parser.add_argument("--epoch_id", type=int, default=0)
     parser.add_argument("--block_id", type=int, default=0)
-    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B.m_005_06")
-    parser.add_argument("--input_dir", type=str, default="~/.codeGenEval")
+    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B.n_000_00")
+    parser.add_argument("--input_dir", type=str, default="~/.inference/codeGenEval")
     parser.add_argument("--output_dir", type=str, default="~/.trainer/grpo")
     parser.add_argument("--base_config", type=str, default="trainerBase.yaml")
     parser.add_argument("--grpo_config", type=str, default="trainerGRPO.yaml")

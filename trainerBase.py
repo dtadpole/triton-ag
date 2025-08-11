@@ -689,6 +689,12 @@ class BaseTrainer:
                 if self.trainer_status.global_step >= self.config.training.max_steps:
                     break
 
+        try:
+            # always save checkpoint at the end of the block
+            self._save_checkpoint(self.trainer_status.global_step, callback=callback)
+        except Exception as e:
+            logger.error(f"❌ [{self.__class__.__name__}] [{run_tag}] Failed to save checkpoint: {e}")
+
         total_time = time.time() - start_time
         logger.info(f"🎉 [{self.__class__.__name__}] [{run_tag}] Block completed in [{total_time:.1f}s] - Final global step: [{self.trainer_status.global_step}]")
         progress_bar.close()
