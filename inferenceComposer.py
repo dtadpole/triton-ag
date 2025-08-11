@@ -369,7 +369,7 @@ async def main():
             # get the global registry
             global_reg_client = WorkflowClient(prefix_tag=prefix_tag)
             # get the critiqueBlock from the global registry
-            block_json = await global_reg_client.dequeue(QUEUE_NAME)
+            block_json = await global_reg_client.dequeue(queue_name)
             # convert the block_json to a ComposerBlock object
             block = ComposerBlock(**block_json)
             # process the model override
