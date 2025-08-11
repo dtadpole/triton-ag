@@ -4,6 +4,8 @@ import re
 import asyncio
 import fcntl
 import time
+import httpx
+import yaml
 import psutil
 from pathlib import Path
 from logger import logger
@@ -65,6 +67,109 @@ class CodeExtractor:
             "reasoning": '\n'.join(think_blocks)
         }
 
+class VLLMClient:
+    def __init__(self, short_hostname: str = "two"):
+        self.short_hostname = short_hostname
+        self.vllm_config = self.load_config().get('vllm_clients', {}).get(short_hostname, {})
+        api_key_path = os.path.expanduser(self.vllm_config.get('api_key_path', '~/.keys/local.api.key'))
+        with open(api_key_path, 'r') as f:
+            self.api_key = f.read().strip()
+        self.timeout = self.vllm_config.get('timeout', 60)
+        self.retries = self.vllm_config.get('retries', 3)
+
+    def load_config(self, config_path: str = "configEndpoints.yaml"):
+        """Load config from yaml file"""
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f)
+        return config
+
+    async def load_lora_adapter(self, lora_name: str, lora_path: str):
+        retry_count = 0
+        while retry_count < self.retries:
+            try:
+                retry_count += 1
+                limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
+                async with httpx.AsyncClient(limits=limits, headers={"Connection": "close"}, http2=False) as client:
+                    response = await client.post(
+                        f"http://{self.host}:{self.port}/v1/load_lora_adapter",
+                        json={
+                            "lora_name": lora_name,
+                            "lora_path": lora_path,
+                        },
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {self.api_key}",
+                        },
+                        timeout=self.timeout
+                    )
+                    logger.warning(f"🔍 [VLLMClient] Response: {response.text}") # use text instead of json
+                    response.raise_for_status()
+                    logger.info(f"🔍 [VLLMClient] Loaded lora adapter from [{lora_path}]")
+                    return
+            except Exception as e:
+                logger.warning(f"🔍 [VLLMClient] Error loading lora adapter from [{lora_path}]: {e}")
+                if retry_count < self.retries:
+                    logger.info(f"🔍 [VLLMClient] Retrying to load lora adapter from [{lora_path}] in {2 ** retry_count} seconds")
+                    await asyncio.sleep(2 ** retry_count)
+                else:
+                    logger.error(f"❌ [VLLMClient] Failed to load lora adapter from [{lora_path}] after {self.retries} retries")
+                    raise e
+
+    async def unload_lora_adapter(self, lora_name: str):
+        retry_count = 0
+        while retry_count < self.retries:
+            try:
+                retry_count += 1
+                limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
+                async with httpx.AsyncClient(limits=limits, headers={"Connection": "close"}, http2=False) as client:
+                    response = await client.post(
+                        f"http://{self.host}:{self.port}/v1/unload_lora_adapter",
+                        json={"lora_name": lora_name},
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {self.api_key}",
+                        },
+                        timeout=self.timeout
+                    )
+                    logger.warning(f"🔍 [VLLMClient] Response: {response.text}") # use text instead of json
+                    response.raise_for_status()
+                    logger.info(f"🔍 [VLLMClient] Unloaded lora adapter from [{lora_name}]")
+                    return
+            except Exception as e:
+                logger.warning(f"🔍 [VLLMClient] Error unloading lora adapter from [{lora_name}]: {e}")
+                if retry_count < self.retries:
+                    logger.info(f"🔍 [VLLMClient] Retrying to unload lora adapter from [{lora_name}] in {2 ** retry_count} seconds")
+                    await asyncio.sleep(2 ** retry_count)
+                else:
+                    logger.error(f"❌ [VLLMClient] Failed to unload lora adapter from [{lora_name}] after {self.retries} retries")
+                    raise e
+
+    async def get_models(self):
+        retry_count = 0
+        while retry_count < self.retries:
+            try:
+                retry_count += 1
+                limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
+                async with httpx.AsyncClient(limits=limits, headers={"Connection": "close"}, http2=False) as client:
+                    response = await client.get(
+                        f"http://{self.host}:{self.port}/v1/models",
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {self.api_key}",
+                        },
+                        timeout=self.timeout
+                    )
+                    response.raise_for_status()
+                    logger.info(f"🔍 [VLLMClient] Got models")
+                    return response.json()
+            except Exception as e:
+                logger.warning(f"🔍 [VLLMClient] Error getting models: {e}")
+                if retry_count < self.retries:
+                    logger.info(f"🔍 [VLLMClient] Retrying to get models in {2 ** retry_count} seconds")
+                    await asyncio.sleep(2 ** retry_count)
+                else:
+                    logger.error(f"❌ [VLLMClient] Failed to get models after {self.retries} retries")
+                    raise e
 
 class FileLock:
     def __init__(self, lock_file):

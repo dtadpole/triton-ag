@@ -19,7 +19,8 @@ VALID_TASK_TYPES = [
 
 
 class WorkflowClient:
-    def __init__(self, config_path: str = "workflow.yaml"):
+    def __init__(self, prefix_tag: str, config_path: str = "workflow.yaml"):
+        self.prefix_tag = prefix_tag
         self.config_path = config_path
         self.config = self._load_config(self.config_path)
         self.client_config = self.config.get("client", {})
@@ -53,8 +54,8 @@ class WorkflowClient:
                     raise e
         return None
 
-    async def keys(self, prefix_tag: str):
-        url = f"{self.base_url}/keys/{prefix_tag}"
+    async def keys(self):
+        url = f"{self.base_url}/keys/{self.prefix_tag}"
         retry_count = 0
         while retry_count < self.retries:
             try:
@@ -72,8 +73,8 @@ class WorkflowClient:
                     raise e
         return []
 
-    async def exists(self, prefix_tag: str, key: str):
-        url = f"{self.base_url}/exists/{prefix_tag}/{key}"
+    async def exists(self, key: str):
+        url = f"{self.base_url}/exists/{self.prefix_tag}/{key}"
         retry_count = 0
         while retry_count < self.retries:
             try:
@@ -91,8 +92,8 @@ class WorkflowClient:
                     raise e
         return False
 
-    async def get(self, prefix_tag: str, key: str, last_modified_within: Optional[int]=None):
-        url = f"{self.base_url}/get/{prefix_tag}/{key}"
+    async def get(self, key: str, last_modified_within: Optional[int]=None):
+        url = f"{self.base_url}/get/{self.prefix_tag}/{key}"
         if last_modified_within is not None:
             url += f"?last_modified_within={last_modified_within}"
         retry_count = 0
@@ -112,8 +113,8 @@ class WorkflowClient:
                     raise e
         return None
 
-    async def put(self, prefix_tag: str, key: str, value: Any):
-        url = f"{self.base_url}/put/{prefix_tag}/{key}"
+    async def put(self, key: str, value: Any):
+        url = f"{self.base_url}/put/{self.prefix_tag}/{key}"
         retry_count = 0
         while retry_count < self.retries:
             try:
@@ -131,8 +132,8 @@ class WorkflowClient:
                     raise e
         return None
 
-    async def get_queues(self, prefix_tag: str):
-        url = f"{self.base_url}/queue/list/{prefix_tag}"
+    async def get_queues(self):
+        url = f"{self.base_url}/queue/list/{self.prefix_tag}"
         retry_count = 0
         while retry_count < self.retries:
             try:
@@ -150,11 +151,11 @@ class WorkflowClient:
                     raise e
         return []
     
-    async def enqueue(self, prefix_tag: str, queue_name: str, item: Dict[str, Any], create_queue: bool = False):
+    async def enqueue(self, queue_name: str, item: Dict[str, Any], create_queue: bool = False):
         retry_count = 0
         while retry_count < self.retries:
             try:
-                url = f"{self.base_url}/queue/enqueue/{prefix_tag}/{queue_name}"
+                url = f"{self.base_url}/queue/enqueue/{self.prefix_tag}/{queue_name}"
                 async with httpx.AsyncClient() as client:
                     response = await client.post(url, json={
                         "item": item,
@@ -171,11 +172,11 @@ class WorkflowClient:
                     logger.error(f"Error enqueuing item: [{e}] after [{retry_count}/{self.retries}] retries")
                     raise e
 
-    async def dequeue(self, prefix_tag: str, queue_name: str):
+    async def dequeue(self, queue_name: str):
         retry_count = 0
         while retry_count < self.retries:
             try:
-                url = f"{self.base_url}/queue/dequeue/{prefix_tag}/{queue_name}"
+                url = f"{self.base_url}/queue/dequeue/{self.prefix_tag}/{queue_name}"
                 async with httpx.AsyncClient() as client:
                     response = await client.get(url, timeout=self.timeout)
                     response.raise_for_status()
@@ -189,11 +190,11 @@ class WorkflowClient:
                     logger.error(f"Error dequeuing item: [{e}] after [{retry_count}/{self.retries}] retries")
                     raise e
 
-    async def qsize(self, prefix_tag: str, queue_name: str):
+    async def qsize(self, queue_name: str):
         retry_count = 0
         while retry_count < self.retries:
             try:
-                url = f"{self.base_url}/queue/qsize/{prefix_tag}/{queue_name}"
+                url = f"{self.base_url}/queue/qsize/{self.prefix_tag}/{queue_name}"
                 async with httpx.AsyncClient() as client:
                     logger.info(f"🔍 [GlobalRegClient] Getting queue size via [{url}]")
                     response = await client.get(url, timeout=self.timeout)
@@ -208,11 +209,11 @@ class WorkflowClient:
                     logger.error(f"Error getting queue size: [{e}] after [{retry_count}/{self.retries}] retries")
                     raise e
 
-    async def peek(self, prefix_tag: str, queue_name: str):
+    async def peek(self, queue_name: str):
         retry_count = 0
         while retry_count < self.retries:
             try:
-                url = f"{self.base_url}/queue/peek/{prefix_tag}/{queue_name}"
+                url = f"{self.base_url}/queue/peek/{self.prefix_tag}/{queue_name}"
                 async with httpx.AsyncClient() as client:
                     response = await client.get(url, timeout=self.timeout)
                     response.raise_for_status()
@@ -283,7 +284,7 @@ class WorkflowClient:
             await self._enqueue_post_task(task_type, task_name, post_task, env_vars)
 
 if __name__ == "__main__":
-    client = WorkflowClient()
+    client = WorkflowClient(prefix_tag="test")
     print(asyncio.run(client.get_queues()))
     print(asyncio.run(client.enqueue("test", {"testKey1": "testValue1"})))
     print(asyncio.run(client.enqueue("test", {"testKey2": "testValue2"})))

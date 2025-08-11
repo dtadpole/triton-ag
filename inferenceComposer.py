@@ -325,7 +325,7 @@ async def composer_block(block: ComposerBlock, use_global_registry: bool = False
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.m")
+    parser.add_argument("--prefix_tag", type=str, default="auto")
     parser.add_argument("--epoch_id", type=int, default=-1)
     parser.add_argument("--block_id", type=int, default=-1)
     parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B.m_003_12")
@@ -352,11 +352,16 @@ async def main():
 
     try:
         if args.use_global_queue:
+            if args.prefix_tag == 'auto':
+                logger.error(f"❌ [Composer] --prefix_tag is required")
+                return
+
+            prefix_tag = args.prefix_tag
             task_type = "inference.composer" # hard code for inferenceComposer
             task_name = args.use_global_queue # user configurable name
             QUEUE_NAME = f"{task_type}:{task_name}"
             # get the global registry
-            global_reg_client = WorkflowClient()
+            global_reg_client = WorkflowClient(prefix_tag=prefix_tag)
             # get the critiqueBlock from the global registry
             block_json = await global_reg_client.dequeue(QUEUE_NAME)
             # convert the block_json to a ComposerBlock object

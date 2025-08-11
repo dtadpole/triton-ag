@@ -14,15 +14,20 @@ async def main():
 
     vllm_client = VLLMClient()
 
+    uploaded_set = set()
     if args.lora_name is None:
         keys = await reg_client.keys()
         for key in keys:
             try:
                 if key.startswith(f"{ADAPTER_PREFIX}"):
                     adapter_path = await reg_client.get(key)
-                    logger.info(f"🔍 [trainerReloadLora] Loading adapter [{key}] from [{adapter_path}]")
-                    await vllm_client.load_lora_adapter(adapter_path, adapter_path)
-                    logger.info(f"🔍 [trainerReloadLora] Loaded adapter [{key}] from [{adapter_path}]")
+                    if key not in uploaded_set:
+                        logger.info(f"🔍 [trainerReloadLora] Loading adapter [{key}] from [{adapter_path}]")
+                        await vllm_client.load_lora_adapter(adapter_path, adapter_path)
+                        uploaded_set.add(key)
+                        logger.info(f"🔍 [trainerReloadLora] Loaded adapter [{key}] from [{adapter_path}]")
+                    else:
+                        logger.info(f"🔍 [trainerReloadLora] Skipping adapter [{key}] because it has already been loaded")
             except Exception as e:
                 logger.error(f"🔍 [trainerReloadLora] Error loading adapter [{key}]: {e}")
     else:
