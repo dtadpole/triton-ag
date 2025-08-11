@@ -253,6 +253,17 @@ class WorkflowClient:
             inferenceBlock = ComposerBlock(**(self._get_task_default(task_type, task_name) | task_config))
             await self.enqueue(queue_name, inferenceBlock.model_dump(), create_queue=True)
             logger.info(f"🎢 [GlobalWorkflow] [{self.prefix_tag}] Enqueued to [{task_type}:{task_name}], content: [{inferenceBlock.model_dump()}]")
+        elif task_type == TASK_TYPE_TRAINER:
+            if task_name.startswith("grpo"):
+                trainerBlock = TrainerGRPOBlock(**(self._get_task_default(task_type, task_name) | task_config))
+            elif task_name.startswith("sft"):
+                trainerBlock = TrainerSFTBlock(**(self._get_task_default(task_type, task_name) | task_config))
+            elif task_name.startswith("rft"):
+                trainerBlock = TrainerRFTBlock(**(self._get_task_default(task_type, task_name) | task_config))
+            else:
+                raise ValueError(f"Task [{task_name}] has unknown task type: [{task_type}]")
+            await self.enqueue(queue_name, trainerBlock.model_dump(), create_queue=True)
+            logger.info(f"🎢 [GlobalWorkflow] [{self.prefix_tag}] Enqueued to [{task_type}:{task_name}], content: [{trainerBlock.model_dump()}]")
         elif task_type == TASK_TYPE_SFT:
             trainerSFTBlock = TrainerSFTBlock(**(self._get_task_default(task_type, task_name) | task_config))
             await self.enqueue(queue_name, trainerSFTBlock.model_dump(), create_queue=True)

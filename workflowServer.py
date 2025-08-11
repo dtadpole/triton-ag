@@ -90,7 +90,8 @@ class WorkflowServer:
         async def put(prefix_tag: str, key: str, value: Any = Body(None)):
             if prefix_tag not in self.registries:
                 raise HTTPException(status_code=404, detail=f"Prefix tag [{prefix_tag}] not found")
-            old_value = self.registries[prefix_tag].put(key, value)
+            value_data = value.get('value', None)
+            old_value = self.registries[prefix_tag].put(key, value_data)
             return old_value
 
         @self.router.delete("/delete/{prefix_tag}/{key}")

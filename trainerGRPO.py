@@ -37,6 +37,7 @@ CLIP_RATIO_UPPER_PERCENTAGE = "clip_ratio_upper_pct"
 BOUND_ADVANTAGE_LOWER_PERCENTAGE = "bound_adv_lower_pct"
 BOUND_ADVANTAGE_UPPER_PERCENTAGE = "bound_adv_upper_pct"
 LOG_PROB_AVERAGE_VALUE = "log_prob_avg_value"
+LOG_PROB_AVERAGE_RATIO = "log_prob_avg_ratio"
 
 class GRPOConfig(BaseModel):
     """GRPO configuration"""
@@ -150,6 +151,8 @@ class GRPOTrainer(BaseTrainer):
                 sequence_log_ratio = torch.sum(log_ratio) / len(new_action_log_probs)
                 sequence_ratio = torch.exp(sequence_log_ratio)
 
+                clip_metrics[LOG_PROB_AVERAGE_RATIO].append(sequence_ratio.item())
+
                 # calculate clipped upper and lower percentage
                 clip_metrics[CLIP_RATIO_UPPER_PERCENTAGE].append(torch.sum(sequence_ratio > 1+self.grpo_config.gspo_clip_ratio_epsilon_upper).item() * 100.0)
                 clip_metrics[CLIP_RATIO_LOWER_PERCENTAGE].append(torch.sum(sequence_ratio < 1-self.grpo_config.gspo_clip_ratio_epsilon_lower).item() * 100.0)
@@ -168,6 +171,8 @@ class GRPOTrainer(BaseTrainer):
 
             else:
                 ratio = torch.exp(log_ratio)
+
+                clip_metrics[LOG_PROB_AVERAGE_RATIO].append(ratio.mean().item())
 
                 # calculate clipped upper and lower percentage
                 clip_metrics[CLIP_RATIO_UPPER_PERCENTAGE].append(torch.sum(ratio > 1+self.grpo_config.clip_ratio_epsilon_upper).item() * 100.0 / len(new_action_log_probs))
@@ -236,6 +241,7 @@ class GRPOTrainer(BaseTrainer):
             BOUND_ADVANTAGE_UPPER_PERCENTAGE: [],
             BOUND_ADVANTAGE_LOWER_PERCENTAGE: [],
             LOG_PROB_AVERAGE_VALUE: [],
+            LOG_PROB_AVERAGE_RATIO: [],
         }
         for batch_idx, batch in enumerate(dataloader):
             # Training step
