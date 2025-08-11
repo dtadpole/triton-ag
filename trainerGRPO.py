@@ -329,7 +329,7 @@ class GRPOTrainer(BaseTrainer):
 
         try:
             # always save checkpoint at the end of the block
-            self._save_checkpoint(self.trainer_status.global_step, callback=callback)
+            self._save_checkpoint(self.trainer_status.global_step)
         except Exception as e:
             logger.error(f"❌ [GRPOTrainer] [{block.input_tag}] Failed to save checkpoint: {e}")
 
