@@ -4,19 +4,19 @@ import httpx
 from typing import Any, Dict, Optional
 from logger import logger
 from workflowUtil import get_global_registry_port, CodeGenEvalBlock, CritiqueBlock, ExemplarBlock, ReflectionBlock, TrainerSFTBlock, TrainerRFTBlock, TrainerGRPOBlock, ComposerBlock
+from pydantic import BaseModel
 
-TASK_TYPE_COMPOSER = "inference.composer"
+TASK_TYPE_INFERENCE = "inference"
 TASK_TYPE_GRPO = "trainer.grpo"
 TASK_TYPE_SFT = "trainer.sft"
 TASK_TYPE_RFT = "trainer.rft"
 
 VALID_TASK_TYPES = [
-    TASK_TYPE_COMPOSER,
+    TASK_TYPE_INFERENCE,
     TASK_TYPE_GRPO,
     TASK_TYPE_SFT,
     TASK_TYPE_RFT,
 ]
-
 
 class WorkflowClient:
     def __init__(self, prefix_tag: str, config_path: str = "workflow.yaml"):
@@ -201,7 +201,6 @@ class WorkflowClient:
             try:
                 url = f"{self.base_url}/queue/qsize/{self.prefix_tag}/{queue_name}"
                 async with httpx.AsyncClient() as client:
-                    logger.info(f"🔍 [GlobalRegClient] Getting queue size via [{url}]")
                     response = await client.get(url, timeout=self.timeout)
                     response.raise_for_status()
                     return response.json()
@@ -233,8 +232,8 @@ class WorkflowClient:
                     raise e
         return None
 
-    def _get_task_default(self, task_type: str, task_name: str):
-        return self.config.get(task_type, {}).get(task_name, {}).get("default", {})
+    def _get_task_default(self, queue_type: str, queue_name: str):
+        return self.config.get(queue_type, {}).get(queue_name, {}).get("default", {})
 
     async def _enqueue_post_task(self, task_type: str, task_name: str, task_config: dict, env_vars: dict):
         # clone task_config
@@ -248,21 +247,21 @@ class WorkflowClient:
                 task_config[key] = value.format(**env_vars)
         # enqueue the task
         queue_name = f"{task_type}:{task_name}"
-        if task_type == TASK_TYPE_COMPOSER:
-            composerBlock = ComposerBlock(**(self._get_task_default(task_type, task_name) | task_config))
-            await self.global_reg_client.enqueue(queue_name, composerBlock.model_dump(), create_queue=True)
-            logger.info(f"🎢 [GlobalWorkflow] [{self.prefix_tag}] Enqueued to [{task_type}:{task_name}], content: [{composerBlock.model_dump()}]")
+        if task_type == TASK_TYPE_INFERENCE:
+            inferenceBlock = ComposerBlock(**(self._get_task_default(task_type, task_name) | task_config))
+            await self.enqueue(queue_name, inferenceBlock.model_dump(), create_queue=True)
+            logger.info(f"🎢 [GlobalWorkflow] [{self.prefix_tag}] Enqueued to [{task_type}:{task_name}], content: [{inferenceBlock.model_dump()}]")
         elif task_type == TASK_TYPE_SFT:
             trainerSFTBlock = TrainerSFTBlock(**(self._get_task_default(task_type, task_name) | task_config))
-            await self.global_reg_client.enqueue(queue_name, trainerSFTBlock.model_dump(), create_queue=True)
+            await self.enqueue(queue_name, trainerSFTBlock.model_dump(), create_queue=True)
             logger.info(f"🎢 [GlobalWorkflow] [{self.prefix_tag}] Enqueued to [{task_type}:{task_name}], content: [{trainerSFTBlock.model_dump()}]")
         elif task_type == TASK_TYPE_RFT:
             trainerRFTBlock = TrainerRFTBlock(**(self._get_task_default(task_type, task_name) | task_config))
-            await self.global_reg_client.enqueue(queue_name, trainerRFTBlock.model_dump(), create_queue=True)
+            await self.enqueue(queue_name, trainerRFTBlock.model_dump(), create_queue=True)
             logger.info(f"🎢 [GlobalWorkflow] [{self.prefix_tag}] Enqueued to [{task_type}:{task_name}], content: [{trainerRFTBlock.model_dump()}]")
         elif task_type == TASK_TYPE_GRPO:
             trainerGRPOBlock = TrainerGRPOBlock(**(self._get_task_default(task_type, task_name) | task_config))
-            await self.global_reg_client.enqueue(queue_name, trainerGRPOBlock.model_dump(), create_queue=True)
+            await self.enqueue(queue_name, trainerGRPOBlock.model_dump(), create_queue=True)
             logger.info(f"🎢 [GlobalWorkflow] [{self.prefix_tag}] Enqueued to [{task_type}:{task_name}], content: [{trainerGRPOBlock.model_dump()}]")
         else:
             raise ValueError(f"Task [{task_name}] has unknown task type: [{task_type}]")
@@ -270,23 +269,23 @@ class WorkflowClient:
     def _get_run_tag(self, epoch_id: int, block_id: int):
         return f"{self.prefix_tag}_{epoch_id:03d}_{block_id:02d}"
 
-    async def post_composer(self, task_name: str, composerBlock: ComposerBlock):
-        logger.info(f"⏳ [GlobalWorkflow] [{self.prefix_tag}] Posting composer block: [{composerBlock.model_dump()}]")
+    async def post_block(self, queue_type: str, queue_name: str, block: BaseModel):
+        logger.info(f"⏳ [GlobalWorkflow] [{self.prefix_tag}] [{queue_type}.{queue_name}] Posting block: [{block.model_dump()}]")
         env_vars = {
             "prefix_tag": self.prefix_tag,
-            "epoch_id": composerBlock.epoch_id,
-            "block_id": composerBlock.block_id,
-            "run_tag": self._get_run_tag(composerBlock.epoch_id, composerBlock.block_id),
+            "epoch_id": block.epoch_id,
+            "block_id": block.block_id,
+            "run_tag": self._get_run_tag(block.epoch_id, block.block_id),
         }
-        post_tasks = self.config.get(TASK_TYPE_COMPOSER, {}).get(task_name, {}).get("post_tasks", [])
-        for post_task in post_tasks:
-            task_type = post_task.get("type", None)
-            task_name = post_task.get("name", None)
+        post_workitems = self.config.get(queue_type, {}).get(queue_name, {}).get("post_workitems", [])
+        for post_workitem in post_workitems:
+            task_type = post_workitem.get("type", None)
+            task_name = post_workitem.get("name", None)
             if task_type is None or task_name is None:
-                raise ValueError(f"Task [{post_task}] has no name or type")
+                raise ValueError(f"Task [{post_workitem}] has no name or type")
             if task_type not in VALID_TASK_TYPES:
                 raise ValueError(f"Task [{task_name}] has invalid task type: [{task_type}]")
-            await self._enqueue_post_task(task_type, task_name, post_task, env_vars)
+            await self._enqueue_post_task(task_type, task_name, post_workitem, env_vars)
 
 if __name__ == "__main__":
     client = WorkflowClient(prefix_tag="test")

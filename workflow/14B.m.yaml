@@ -24,12 +24,14 @@ workitems:
       - type: endpoint
         endpoint: workflowClient.enqueue
         context_vars:
+          input_tag: "`f'{prefix_tag}_{epoch_id:03d}_{block_id:02d}'`"
           item:
             type: inference
             name: codeGenEval.base
             prefix_tag: "`prefix_tag`"
             epoch_id: "`epoch_id`"
             block_id: "`block_id`"
+            input_tag: "`input_tag`"
             provider_name: local
             model_name: qwen3-14b
             num_samples: 8
@@ -38,28 +40,26 @@ workitems:
             parallel_workers: 12
             logprobs: true
             model_override: null
-            template: triton.1
-            input_dir: ~/triton-ag/kernel_bench
+            module_file: inference/codeGenEval.module.yaml
+            prompt_file: inference/triton.prompt.yaml
+            example_file: inference/triton.example.yaml
+            input_dir: ~/triton-ag/kernel_bench/level1
             output_dir: ~/.inference/codeGenEval
         args:
-          prefix_tag: "`prefix_tag`"
           queue_name: "inference.codeGenEval"
           item: "`item`"
           create_queue: true
       - type: endpoint
         endpoint: workflowClient.qsize
         args:
-          prefix_tag: "`prefix_tag`"
           queue_name: "inference.codeGenEval"
         returns:
           context_vars:
             qsize: "`__result__`"
-          wait_for:
-            condition: "`qsize < 8`"
-            interval: 15
-            timeout: 3600
+          logging:
+            method: log_qsize
 
-inference.composer:
+inference:
   codeGenEval.base:
     default:
       input_dir: ~/.inference/composer/input
@@ -78,31 +78,20 @@ inference.composer:
 
     post_workitems:
       # the below syntax works with ConfigInterpreter
-      steps:
-        - type: endpoint
-          endpoint: workflowClient.enqueue
-          args:
-            prefix_tag: "{prefix_tag}"
-            queue_name: "trainer.grpo:grpo.1"
-            item:
-              prefix_tag: "{prefix_tag}"
-              epoch_id: "{epoch_id}"
-              block_id: "{block_id}"
-              input_tag: "{run_tag}"
-              input_dir: ~/.codeGenEval
-            create_queue: true
-        - type: endpoint
-          endpoint: workflowClient.enqueue
-          args:
-            prefix_tag: "{prefix_tag}"
-            queue_name: "trainer.grpo:grpo.1"
-            item:
-              prefix_tag: "{prefix_tag}"
-              epoch_id: "{epoch_id}"
-              block_id: "{block_id}"
-              input_tag: "{run_tag}"
-              input_dir: ~/.codeGenEval
-            create_queue: true
+      - type: trainer
+        name: grpo.1
+        prefix_tag: "{prefix_tag}"
+        epoch_id: "{epoch_id}"
+        block_id: "{block_id}"
+        input_tag: "{run_tag}"
+        input_dir: ~/.inference/codeGenEval
+      - type: trainer
+        name: rft.1
+        prefix_tag: "{prefix_tag}"
+        epoch_id: "{epoch_id}"
+        block_id: "{block_id}"
+        input_tag: "{run_tag}"
+        input_dir: ~/.inference/codeGenEval
 
   exemplar.deepseek-v3:
     default:
@@ -117,11 +106,10 @@ inference.composer:
       num_generations: 4 # this is not used, but required by the module
       parallel_workers: 8
       logprobs: false
-      template: triton.1
       model_override: null
 
     post_workitems:
-      - type: trainer.sft
+      - type: trainer
         name: sft.1
         prefix_tag: "{prefix_tag}"
         epoch_id: "{epoch_id}"
@@ -142,11 +130,10 @@ inference.composer:
       num_generations: 4 # this is not used, but required by the module
       parallel_workers: 8
       logprobs: false
-      template: triton.1
       model_override: null
 
     post_workitems:
-      - type: trainer.sft
+      - type: trainer
         name: sft.1
         prefix_tag: "{prefix_tag}"
         epoch_id: "{epoch_id}"
@@ -154,17 +141,15 @@ inference.composer:
         input_tag: "{run_tag}"
         input_dir: ~/.inference/exemplar.kimi-k2
 
-trainer.sft:
+trainer:
   sft.1:
     default:
       output_dir: ~/.trainer
 
-trainer.rft:
   rft.1:
     default:
       output_dir: ~/.trainer
 
-trainer.grpo:
   grpo.1:
     default:
       output_dir: ~/.trainer

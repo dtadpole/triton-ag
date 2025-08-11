@@ -119,6 +119,11 @@ class ComposerClient:
         """Get example generated code from configuration."""
         return self.example_config.get('generated_code', '')
 
+    def log_input_processor(self, result: Any, context_vars: dict) -> dict:
+        """Process log input processor."""
+        input_tag = context_vars.get('input_tag', None)
+        logger.info(f"👏 [Composer] [{input_tag}] [{len(result)} samples]\n{result}")
+
     def log_completion(self, result: dict, context_vars: dict) -> dict:
         run_tag = context_vars.get('run_tag', None)
         model_tag = context_vars.get('model_tag', None)
@@ -325,11 +330,11 @@ async def composer_block(block: ComposerBlock, use_global_registry: bool = False
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prefix_tag", type=str, default="auto")
+    parser.add_argument("--prefix_tag", type=str, default="auto") # "TC_0.1.0_14B.m"
     parser.add_argument("--epoch_id", type=int, default=-1)
     parser.add_argument("--block_id", type=int, default=-1)
     parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B.m_003_12")
-    parser.add_argument("--input_dir", type=str, default="~/.inference/input", help="Input directory containing Python files")
+    parser.add_argument("--input_dir", type=str, default="~/KernelBench/KernelBench/level1", help="Input directory containing Python files")
     parser.add_argument("--output_dir", type=str, default="~/.inference/output", help="Output directory for the composer results")
     parser.add_argument("--provider", type=str, default="fireworks")  # most cost effective models are deepinfra-r1 and fireworks-v3
     parser.add_argument("--model", type=str, default="deepseek-v3")  # most cost effective models are deepinfra-r1 and fireworks-v3
@@ -338,7 +343,7 @@ async def main():
     parser.add_argument("--num_samples", type=int, default=2)
     parser.add_argument("--num_generations", type=int, default=2)
     parser.add_argument("--num_turns_per_generation", type=int, default=4)
-    parser.add_argument("--use_global_queue", type=str, default=None) # this is the task_name of the global queue
+    parser.add_argument("--use_global_queue", type=str, default="inference.codeGenEval") # this is the task_name of the global queue
     parser.add_argument("--proc_id", type=str, default=None)
     parser.add_argument("--module_file", type=str, default="inference/codeGenEval.module.yaml")
     parser.add_argument("--prompt_file", type=str, default="inference/triton.prompt.yaml")
@@ -350,6 +355,8 @@ async def main():
     else:
         PROC_ID = os.environ.get("PROC_ID", None)
 
+    QUEUE_TYPE = "inference"
+
     try:
         if args.use_global_queue:
             if args.prefix_tag == 'auto':
@@ -357,9 +364,8 @@ async def main():
                 return
 
             prefix_tag = args.prefix_tag
-            task_type = "inference.composer" # hard code for inferenceComposer
-            task_name = args.use_global_queue # user configurable name
-            QUEUE_NAME = f"{task_type}:{task_name}"
+            QUEUE_NAME = args.use_global_queue # user configurable name
+            queue_name = f"{QUEUE_TYPE}.{QUEUE_NAME}"
             # get the global registry
             global_reg_client = WorkflowClient(prefix_tag=prefix_tag)
             # get the critiqueBlock from the global registry
@@ -367,18 +373,17 @@ async def main():
             # convert the block_json to a ComposerBlock object
             block = ComposerBlock(**block_json)
             # process the model override
-            if task_name.startswith("codeGen"): # a hack for now. TODO: fix this
+            if "codeGen" in QUEUE_NAME: # a hack for now. TODO: fix this
+                if PROC_ID is None:
+                    error_msg = f"❌ [Composer] [{block.prefix_tag}] Unable to get PROC_ID to update model_override"
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
                 model_override = await global_reg_client.get(f"{MODEL_OVERRIDE_KEY}")
                 if model_override:
                     logger.info(f"🔍 [Composer] [{block.prefix_tag}] Using model override: [{model_override}]")
                     block.model_override = model_override
                     # update model_override in the global registry
-                    if PROC_ID is None:
-                        error_msg = f"❌ [Composer] [{block.prefix_tag}] Unable to get PROC_ID to update model_override [{model_override}]"
-                        logger.error(error_msg)
-                        raise Exception(error_msg)
-                    else:
-                        await global_reg_client.put(f"adapter.{QUEUE_NAME}.model_override.{PROC_ID}", model_override)
+                    await global_reg_client.put(f"adapter.{queue_name}.model_override.{PROC_ID}", model_override)
         else:
             block = ComposerBlock(
                 prefix_tag=args.prefix_tag,
@@ -402,11 +407,11 @@ async def main():
         await composer_block(block)
 
         if args.use_global_queue:
-            globalWorkflow = WorkflowServer(prefix_tag=block.prefix_tag)
-            await globalWorkflow.post_composer(args.use_global_queue, block)
+            global_reg_client = WorkflowClient(prefix_tag=block.prefix_tag)
+            await global_reg_client.post_composer(QUEUE_TYPE, QUEUE_NAME, block)
 
     except Exception as e:
-        logger.error(f"❌ [Composer] [{block.input_tag}] Error running block: [{e}]")
+        logger.error(f"❌ [Composer] Error running block: [{type(e).__name__}: {e}]")
         logger.error(traceback.format_exc())
 
 if __name__ == "__main__":

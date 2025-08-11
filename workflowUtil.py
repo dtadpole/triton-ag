@@ -17,27 +17,24 @@ class TrainerSFTBlock(BaseModel):
     epoch_id: int
     block_id: int
     input_tag: str
-    input_dir: str = Field(default="~/.exemplar")
+    input_dir: str = Field(default="~/.inference/exemplar")
     output_dir: str = Field(default="~/.trainer")
-    test_mode: bool = Field(default=False)
 
 class TrainerRFTBlock(BaseModel):
     prefix_tag: str
     epoch_id: int
     block_id: int
     input_tag: str
-    input_dir: str = Field(default="~/.codeGenEval")
+    input_dir: str = Field(default="~/.inference/codeGenEval")
     output_dir: str = Field(default="~/.trainer")
-    test_mode: bool = Field(default=False)
 
 class TrainerGRPOBlock(BaseModel):
     prefix_tag: str
     epoch_id: int
     block_id: int
     input_tag: str
-    input_dir: str = Field(default="~/.codeGenEval")
+    input_dir: str = Field(default="~/.inference/codeGenEval")
     output_dir: str = Field(default="~/.trainer")
-    test_mode: bool = Field(default=False)
 
 class CodeGenEvalBlock(BaseModel):
     prefix_tag: str
@@ -54,7 +51,6 @@ class CodeGenEvalBlock(BaseModel):
     output_dir: str = Field(default="~/.codeGenEval")
     template: str = Field(default="triton.1")
     logprobs: bool = Field(default=True)
-    test_mode: bool = Field(default=False)
 
 class ExemplarBlock(BaseModel):
     prefix_tag: str
@@ -69,7 +65,6 @@ class ExemplarBlock(BaseModel):
     input_dir: str = Field(default="~/.codeGenEval")
     output_dir: str = Field(default="~/.exemplar")
     template: str = Field(default="triton.1")
-    test_mode: bool = Field(default=False)
 
 class CritiqueBlock(BaseModel):
     prefix_tag: str
@@ -82,7 +77,6 @@ class CritiqueBlock(BaseModel):
     model_override: Optional[str] = Field(default=None)
     input_dir: str = Field(default="~/.codeGenEval")
     output_dir: str = Field(default="~/.critique")
-    test_mode: bool = Field(default=False)
 
 class ReflectionBlock(BaseModel):
     prefix_tag: str
@@ -95,7 +89,6 @@ class ReflectionBlock(BaseModel):
     model_override: Optional[str] = Field(default=None)
     input_dir: str = Field(default="~/.codeGenEval")
     output_dir: str = Field(default="~/.reflection")
-    test_mode: bool = Field(default=False)
 
 class ComposerBlock(BaseModel):
     prefix_tag: str
@@ -104,17 +97,16 @@ class ComposerBlock(BaseModel):
     input_tag: str
     provider_name: str
     model_name: str
-    module_file: str
-    prompt_file: str
-    example_file: str
     num_samples: int
     num_generations: int
     num_turns_per_generation: int = Field(default=4)
     parallel_workers: int = Field(default=16)
     model_override: Optional[str] = Field(default=None)
+    module_file: str = Field(default="inference/codeGen.module.yaml")
+    prompt_file: str = Field(default="inference/triton.prompt.yaml")
+    example_file: str = Field(default="inference/triton.example.yaml")
     input_dir: str = Field(default="~/.inference/composer")
     output_dir: str = Field(default="~/.inference/composer")
-    test_mode: bool = Field(default=False)
 
 def get_prefix_tag(prefix_tag:str="auto", config_path:str="globalWorkflow.yaml"):
     if prefix_tag == "auto":

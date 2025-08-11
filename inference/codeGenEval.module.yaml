@@ -18,15 +18,17 @@ module:
           args:
             query: |
               SELECT filename as kb_filename, content as reference_code
-              FROM read_text(['kernel_bench/level1/*.py', 'kernel_bench/level2/*.py'])
+              FROM read_text('{input_dir}/**/*.py')
               ORDER BY random()
               LIMIT {block.num_samples};
           returns:
             error_if: "`__result__ is None`"
             context_vars:
-              query_result_df: "`__result__.df()`"
+              query_result: "`__result__`"
+            logging:
+              method: "log_input_processor"
         - type: iterator
-          collection: "`[row for idx, row in query_result_df.iterrows()]`"
+          collection: "`[row for idx, row in query_result.df().iterrows()]`"
           context_vars:
             row: "`__item__`"
             run_tag: "`f'{block.prefix_tag}_{block.epoch_id:03d}_{block.block_id:02d}' if block.epoch_id >= 0 and block.block_id >= 0 else f'{block.prefix_tag}_{__runtime_start_time__}'`" # run_tag is the prefix tag + epoch id + block id

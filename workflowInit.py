@@ -9,6 +9,12 @@ class WorkflowInit:
         self.workflowClient = workflow_client
         self.configInterpreter = ConfigInterpreter()
 
+    def log_qsize(self, result: dict, context_vars: dict) -> dict:
+        prefix_tag = context_vars.get('prefix_tag', None)
+        epoch_id = context_vars.get('epoch_id', None)
+        block_id = context_vars.get('block_id', None)
+        logger.info(f"🔍 [WorkflowInit] [{prefix_tag}] [{epoch_id}] [{block_id}] [qsize: {result}]")
+
     async def init(self, args: argparse.Namespace):
         # get workflow config
         workflow_config = await self.workflowClient.get_workflow_config(args.prefix_tag)
@@ -49,7 +55,7 @@ class WorkflowInit:
 async def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.m")
+    parser.add_argument("--prefix_tag", type=str, default="auto") # "TC_0.1.0_14B.m") # "auto"
     parser.add_argument("--workitem", type=str, default="codeGenEval.init")
     parser.add_argument("--start_epoch", type=int, default=-1)
     parser.add_argument("--start_block", type=int, default=-1)
@@ -57,7 +63,11 @@ async def main():
     parser.add_argument("--end_block", type=int, default=-1)
     args = parser.parse_args()
 
-    workflow_client = WorkflowClient()
+    if args.prefix_tag == "auto":
+        logger.error(f"❌ [WorkflowInit] --prefix_tag is required!")
+        return
+
+    workflow_client = WorkflowClient(args.prefix_tag)
     workflow_init = WorkflowInit(workflow_client)
     await workflow_init.init(args)
 
