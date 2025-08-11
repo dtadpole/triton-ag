@@ -257,7 +257,7 @@ class GRPOTrainer(BaseTrainer):
             self._save_checkpoint(self.trainer_status.global_step, callback=callback)
 
 
-    async def train_block(self, block: TrainerGRPOBlock, callback: Optional[Callable] = None):
+    async def train_grpo_block(self, block: TrainerGRPOBlock, callback: Optional[Callable] = None):
         """Train the model for one block"""
         # Create data loader
         context_vars = self.configInterpreter.prepare_context_vars(
@@ -269,7 +269,7 @@ class GRPOTrainer(BaseTrainer):
         )
         success = await self.configInterpreter.execute(
             runtime=self,
-            config=self.module_config.get('input_processor', {}).get('grpo_rewards', {}),
+            config=self.module_config.get('input_processor', {}),
             context_vars=context_vars,
         )
         if not success:
@@ -326,23 +326,6 @@ def grpo_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_fil
     
     return trainer
 
-async def grpo_train_block(block: TrainerGRPOBlock, trainer: GRPOTrainer, callback: Optional[Callable] = None):
-    """Train the model for one block"""
-    logger.info(f"👉 [GRPOTrainer] [{block.input_tag}] GRPO Training started for block...")
-
-    # Train the block
-    try:
-        block.input_dir = os.path.expanduser(block.input_dir)
-        block.output_dir = os.path.expanduser(block.output_dir)
-        # now actually train the block
-        await trainer.train_block(block, callback=callback)
-        logger.info(f"🎯 [GRPOTrainer] [{block.input_tag}] Training completed successfully!")
-    except Exception as e:
-        logger.error(f"❌ [GRPOTrainer] [{block.input_tag}] Training failed: {e}")
-        traceback.print_exc()
-        raise e
-    
-
 async def main():
     """Main function for GRPO training"""
     parser = argparse.ArgumentParser(description="Train a model using GRPOTrainer")
@@ -366,7 +349,10 @@ async def main():
         input_dir=args.input_dir,
         output_dir=args.output_dir,
     )
-    await grpo_train_block(grpo_block, trainer)
+    grpo_block.input_dir = os.path.expanduser(grpo_block.input_dir)
+    grpo_block.output_dir = os.path.expanduser(grpo_block.output_dir)
+
+    await trainer.train_grpo_block(grpo_block)
 
 if __name__ == "__main__":
     asyncio.run(main())

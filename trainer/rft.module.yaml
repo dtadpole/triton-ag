@@ -1,0 +1,71 @@
+module:
+  name: rft
+  # built-in context like `self` has already been set
+  # here we add addotional context variables for easier access by the program
+  # variables will be evaluated sequentially, so that later variables can use earlier variables
+
+  # input processor
+  input_processor:
+    # prepare the input data for grpo training
+    steps:
+      - type: endpoint
+        endpoint: duckdbClient.sql
+        context_vars:
+          input_dir: '`block.input_dir`'
+          input_tag: '`block.input_tag`'
+        args:
+          query: |
+            WITH evals AS (
+                SELECT
+                    filename AS eval_file,
+                    regexp_replace(filename, '_generated_eval\.json$', '') AS stem,
+                    compiled, correctness, runtime
+                FROM read_json_auto('{input_dir}/{input_tag}/**/*_generated_eval.json', filename = true)
+            ),
+            convos AS (
+                SELECT
+                    filename AS conversation_file,
+                    regexp_replace(filename, '_conversation\.json$', '') AS stem,
+                    messages, metadata,
+                    metadata->>'task_tag' AS task_tag, metadata->>'turn_tag' AS turn_tag
+                FROM read_json_auto('{input_dir}/{input_tag}/**/*_conversation.json', filename = true)
+            )
+            SELECT
+                e.compiled, e.correctness, e.runtime,
+                c.messages, c.metadata,
+                e.eval_file, c.conversation_file,
+                c.task_tag, c.turn_tag
+            FROM evals e
+            JOIN convos c USING (stem)
+            ORDER BY task_tag, compiled DESC, correctness DESC, runtime ASC
+        returns:
+          error_if: '`__result__ is None`'
+          context_vars:
+            query_result: '`__result__.df().to_dict(orient="records")`'
+          logging:
+            method: 'log_raw_data'
+      # compute rewards and advantages
+      - type: code
+        code_snippet_path: 'trainer/rft.reward.kb.py'
+        code_snippet_block: |
+          # compute rewards and group by top and bottom buckets
+          top_bucket, bottom_bucket = rft_bucket_by_reward(
+              query_result,
+              return_top_percentile=rft_config.return_top_percentile,
+          )
+          # create rft datasets
+          rft_datasets = rft_bucket_to_dataset(
+              top_bucket,
+              tokenizer,
+              format_conversation,
+              discard_long_conversations=rft_config.discard_long_conversations,
+              max_seq_length=rft_config.max_seq_length,
+          )
+          __result__ = rft_datasets
+          # TODO: save the rft datasets to the .trainer directory
+        returns:
+          error_if: '`__result__ is None`'
+  
+  # queue worker reads from the queue and executes the worker
+  callback:
+    rsync: null

@@ -102,19 +102,6 @@ def grpo_compute_advantages(
 
     return groups
 
-"""
-            {
-                'turn_tag': result.turn_tag,
-                'reward': result.reward,
-                'trajectory_reward': result.trajectory_reward,
-                'advantage': advantage,
-                'prompt_token_ids': result.prompt_token_ids,
-                'completion_token_ids': result.completion_token_ids,
-                'completion_log_probs': result.completion_log_probs,
-                'input_ids': result.prompt_token_ids + result.completion_token_ids,
-                'attention_mask': torch.ones_like(torch.tensor(result.prompt_token_ids + result.completion_token_ids)),
-            }
-"""
 
 def grpo_group_to_dataset(
     group: list[dict],
