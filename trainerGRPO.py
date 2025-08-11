@@ -50,7 +50,7 @@ class GRPOConfig(BaseModel):
     reward_scale: bool = True
     reward_epsilon: float = 1e-3
     reward_noise: float = 1e-2
-    loss_type: str = "group_max" # "episode" or "token" or "seq_max" or "group_max"
+    loss_type: str = "gspo" # "episode" or "token" or "seq_max" or "group_max" or "gspo"
     gamma: float = 0.5
 
     @classmethod
