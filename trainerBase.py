@@ -675,7 +675,7 @@ class BaseTrainer:
                 # Update step counter
                 self.trainer_status.global_step += 1
                 progress_bar.update(1)
-                await asyncio.sleep(0)
+                await asyncio.sleep(0.1)
                 
                 # Log metrics
                 current_lr = self.scheduler.get_last_lr()[0]
@@ -709,7 +709,7 @@ class BaseTrainer:
         total_time = time.time() - start_time
         logger.info(f"🎉 [{self.__class__.__name__}] [{run_tag}] Block completed in [{total_time:.1f}s] - Final global step: [{self.trainer_status.global_step}]")
         progress_bar.close()
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.1)
 
     def _evaluate(self, eval_dataset: Dataset):
         """Evaluate the model on evaluation dataset"""

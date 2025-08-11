@@ -321,7 +321,7 @@ class GRPOTrainer(BaseTrainer):
             self.train_group(group_dataset, callback=callback, total_groups=len(group_datasets))
             # Update step counter
             progress_bar.update(1)
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.1)
 
             # Check if training is complete
             if self.trainer_status.global_step >= self.config.training.max_steps:
@@ -336,7 +336,7 @@ class GRPOTrainer(BaseTrainer):
         total_time = time.time() - start_time
         logger.info(f"🎉 [{self.__class__.__name__}] [{block.input_tag}] Block completed in [{total_time:.1f}s] - Final global step: [{self.trainer_status.global_step}]")
         progress_bar.close()
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.1)
 
 
 def grpo_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_file: str = "trainerBase.yaml", grpo_config_file: str = "trainerGRPO.yaml"):

@@ -7,12 +7,14 @@ from workflowUtil import get_global_registry_port, CodeGenEvalBlock, CritiqueBlo
 from pydantic import BaseModel
 
 TASK_TYPE_INFERENCE = "inference"
+TASK_TYPE_TRAINER = "trainer"
 TASK_TYPE_GRPO = "trainer.grpo"
 TASK_TYPE_SFT = "trainer.sft"
 TASK_TYPE_RFT = "trainer.rft"
 
 VALID_TASK_TYPES = [
     TASK_TYPE_INFERENCE,
+    TASK_TYPE_TRAINER,
     TASK_TYPE_GRPO,
     TASK_TYPE_SFT,
     TASK_TYPE_RFT,

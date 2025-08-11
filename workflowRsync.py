@@ -126,10 +126,10 @@ class RsyncClient:
                 available_lora_adapters = [model['id'] for model in models if model['parent'] is not None]
                 # fine out who is using the lora adapters
                 used_lora_adapters = [lora_path]
-                keys = await self.reg_client.keys()
+                keys = await self.workflowClient.keys()
                 for key in keys:
                     if key.startswith("adapter."):
-                        value = await self.reg_client.get(key, last_modified_within=LAST_MODIFIED_WITHIN)
+                        value = await self.workflowClient.get(key, last_modified_within=LAST_MODIFIED_WITHIN)
                         used_lora_adapters.append(value)
                 # unused lora adapters are the ones in available_lora_adapters but not in used_lora_adapters
                 unused_lora_adapters = [lora_adapter for lora_adapter in available_lora_adapters if lora_adapter not in used_lora_adapters]
@@ -167,7 +167,7 @@ class RsyncClient:
                 await self.vllm_client.load_lora_adapter(checkpoint_name, checkpoint_name)
                 logger.info(f"🔍 [RsyncClient] Loaded lora adapter: [{checkpoint_name}]")
                 # update the model_override in the global registry
-                await self.reg_client.put(MODEL_OVERRIDE_KEY, checkpoint_name)
+                await self.workflowClient.put(MODEL_OVERRIDE_KEY, checkpoint_name)
                 logger.info(f"🔍 [RsyncClient] Model override [{MODEL_OVERRIDE_KEY}] updated to [{checkpoint_name}]")
                 # clean up the unused lora adapters
                 await self.clean_up_lora_adapters(checkpoint_name)

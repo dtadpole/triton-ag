@@ -66,7 +66,7 @@ class WorkflowServer:
                 raise HTTPException(status_code=404, detail=f"Prefix tag [{prefix_tag}] not found")
             return self.registries[prefix_tag].get_workflow_config()
 
-        @self.router.get("/keys/{prefix_tag}/{key}")
+        @self.router.get("/keys/{prefix_tag}")
         async def keys(prefix_tag: str):
             if prefix_tag not in self.registries:
                 raise HTTPException(status_code=404, detail=f"Prefix tag [{prefix_tag}] not found")
