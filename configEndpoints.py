@@ -74,6 +74,8 @@ class VLLMClient:
         api_key_path = os.path.expanduser(self.vllm_config.get('api_key_path', '~/.keys/local.api.key'))
         with open(api_key_path, 'r') as f:
             self.api_key = f.read().strip()
+        self.host = self.vllm_config.get('host', 'localhost')
+        self.port = self.vllm_config.get('port', 8091)
         self.timeout = self.vllm_config.get('timeout', 60)
         self.retries = self.vllm_config.get('retries', 3)
 

@@ -26,7 +26,7 @@ class RFTConfig(BaseModel):
     mask_non_assistant_tokens: bool = True
     mask_non_last_assistant_tokens: bool = True
     discard_long_conversations: bool = True
-    return_top_percentile: float = 0.3
+    return_top_percentile: float = 0.25
 
     @classmethod
     def from_yaml(cls, file_path: str) -> "RFTConfig":

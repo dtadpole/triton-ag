@@ -78,15 +78,22 @@ class RsyncClient:
 
     def enqueue(self, checkpoint_path: str):
         """Enqueue checkpoint path to the rsync_queue"""
-        checkpoint_name = '/'.join(str(os.path.expanduser(checkpoint_path)).split('/')[-2:-1])
-        logger.info(f"📞 [RsyncClient] Enqueue: [{checkpoint_name}] ...")
+        logger.info(f"📞 [RsyncClient] Enqueue path: [{checkpoint_path}] ...")
+        checkpoint_name = '/'.join(str(os.path.expanduser(checkpoint_path)).split('/')[-2:])
+        logger.info(f"📞 [RsyncClient] Enqueue name: [{checkpoint_name}]")
         loop = asyncio.get_event_loop()
-        future = asyncio.run_coroutine_threadsafe(
-            self.workflowClient.enqueue(RSYNC_QUEUE_NAME, {"checkpoint_name": checkpoint_name}),
-            loop
+        # create task to enqueue
+        task = asyncio.create_task(
+            self.workflowClient.enqueue(RSYNC_QUEUE_NAME, {"checkpoint_name": checkpoint_name})
         )
-        logger.info(f"📞 [RsyncClient] Enqueue: [{checkpoint_name}] done.")
-        return future
+        # run task in background
+        logger.info(f"📞 [RsyncClient] Enqueue name: [{checkpoint_name}] done.")
+        # future = asyncio.run_coroutine_threadsafe(
+        #     self.workflowClient.enqueue(RSYNC_QUEUE_NAME, {"checkpoint_name": checkpoint_name}),
+        #     loop
+        # )
+        # logger.info(f"📞 [RsyncClient] Enqueue: [{checkpoint_name}] done.")
+        # return future
 
     async def upload_lora_adapter(self, checkpoint_name: str):
         if not self.rsync_config.get('run_upload', False):
@@ -95,7 +102,7 @@ class RsyncClient:
         # get with timeout
         source_prefix = os.path.expanduser(self.rsync_config.get('rsync_source_prefix', '~/.trainer'))
         target_prefix = self.rsync_config.get('rsync_target_prefix', '192.168.1.205:.trainer')
-        target_path = target_prefix + checkpoint_name
+        target_path = target_prefix + '/' + checkpoint_name
         # rsync_path is the path to the rsync command
         rsync_path = self.rsync_config.get('rsync_path', 'rsync').format(checkpoint_name=checkpoint_name)
         # get a list of files to rsync
