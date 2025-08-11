@@ -527,10 +527,14 @@ class BaseTrainer:
         # Callback
         if callback:
             try:
+                logger.info(f"🔍 [{self.__class__.__name__}] Running callback: {callback}")
                 callback(checkpoint_path)
+                logger.info(f"🔍 [{self.__class__.__name__}] Callback completed")
             except Exception as e:
                 logger.error(f"❌ [{self.__class__.__name__}] Error in callback: {e}")
                 logger.error(traceback.format_exc())
+        else:
+            logger.info(f"🔍 [{self.__class__.__name__}] No callback provided")
         
         logger.info(f"💾 [{self.__class__.__name__}] Checkpoint saved: {checkpoint_path}")
     
@@ -625,7 +629,13 @@ class BaseTrainer:
             if self.config.logging.use_wandb:
                 wandb.log(metrics, step=step)
 
-    def train_block(self, run_tag: str, dataset: Dataset, eval_dataset: Optional[Dataset] = None, callback: Optional[Callable] = None):
+    async def train_block(
+        self,
+        run_tag: str,
+        dataset: Dataset,
+        eval_dataset: Optional[Dataset] = None,
+        callback: Optional[Callable] = None,
+    ):
         """Train the model for one block"""
         # Create data loader
         dataloader = DataLoader(
@@ -665,6 +675,7 @@ class BaseTrainer:
                 # Update step counter
                 self.trainer_status.global_step += 1
                 progress_bar.update(1)
+                await asyncio.sleep(0)
                 
                 # Log metrics
                 current_lr = self.scheduler.get_last_lr()[0]
@@ -698,6 +709,7 @@ class BaseTrainer:
         total_time = time.time() - start_time
         logger.info(f"🎉 [{self.__class__.__name__}] [{run_tag}] Block completed in [{total_time:.1f}s] - Final global step: [{self.trainer_status.global_step}]")
         progress_bar.close()
+        await asyncio.sleep(0)
 
     def _evaluate(self, eval_dataset: Dataset):
         """Evaluate the model on evaluation dataset"""
@@ -787,7 +799,7 @@ async def _train_loop(prefix_tag: str, trainer: BaseTrainer, dataset: Dataset, e
         run_tag = f"{prefix_tag}_{epoch_id:03d}_{block_id:02d}"
 
         # train the model on the block
-        await loop.run_in_executor(None, trainer.train_block, run_tag, dataset, eval_dataset)
+        await trainer.train_block(run_tag, dataset, eval_dataset)
 
         # increment the epoch id
         block_id += 1

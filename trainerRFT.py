@@ -15,10 +15,9 @@ from trainerUtil import format_conversation
 from logger import logger
 import torch
 from workflowUtil import TrainerRFTBlock
-from workflowClient import WorkflowClient
-from workflowServer import WorkflowServer
 from configInterpreter import ConfigInterpreter
 from configEndpoints import DuckDBClient
+from workflowRsync import RsyncClient
 
 
 class RFTConfig(BaseModel):
@@ -105,7 +104,8 @@ class RFTTrainer(BaseTrainer):
 
         logger.info(f"👉 [{self.__class__.__name__}] [{block.input_tag}] Block started with [{len(rft_datasets)}] tasks, Initial global step: [{self.trainer_status.global_step}]")
 
-        super().train_block(block.input_tag, rft_datasets, callback=callback)
+        await super().train_block(block.input_tag, rft_datasets, callback=callback)
+        await asyncio.sleep(1)
 
 
 def rft_get_trainer(
@@ -143,15 +143,16 @@ def rft_get_trainer(
 async def main():
     """Main function for RFT training"""
     parser = argparse.ArgumentParser(description="Train a model using RFTTrainer")
-    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.m")
+    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.n")
     parser.add_argument("--epoch_id", type=int, default=0)
     parser.add_argument("--block_id", type=int, default=0)
-    parser.add_argument("--input_dir", type=str, default="~/.codeGenEval")
+    parser.add_argument("--input_dir", type=str, default="~/.inference/codeGenEval")
     parser.add_argument("--output_dir", type=str, default="~/.trainer/rft")
-    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B.m_005_06") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
+    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B.n_000_00") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
     parser.add_argument("--base_config", type=str, default="trainerBase.yaml")
     parser.add_argument("--rft_config", type=str, default="trainerRFT.yaml")
     parser.add_argument("--module_file", type=str, default="trainer/rft.module.yaml")
+    parser.add_argument("--target_short_hostname", type=str, default="two")
     args = parser.parse_args()
 
     trainer = rft_get_trainer(None, args.prefix_tag, args.base_config, args.rft_config, args.module_file)
@@ -166,7 +167,13 @@ async def main():
     rft_block.input_dir = os.path.expanduser(rft_block.input_dir)
     rft_block.output_dir = os.path.expanduser(rft_block.output_dir)
 
-    await trainer.train_rft_block(rft_block)
-    
+    rsync_client = RsyncClient(prefix_tag=args.prefix_tag, target_short_hostname=args.target_short_hostname)
+
+    loop = asyncio.get_event_loop()
+    # await loop.run_in_executor(None, trainer.train_rft_block, rft_block, rsync_client.enqueue)
+    # asyncio.run_coroutine_threadsafe(trainer.train_rft_block(rft_block, rsync_client.enqueue), loop)
+    await trainer.train_rft_block(rft_block, rsync_client.enqueue)
+    await asyncio.sleep(1)
+
 if __name__ == "__main__":
     asyncio.run(main())

@@ -78,33 +78,35 @@ class RsyncClient:
 
     def enqueue(self, checkpoint_path: str):
         """Enqueue checkpoint path to the rsync_queue"""
-        logger.info(f"📞 [RsyncClient] Enqueue: [{checkpoint_path}]")
+        checkpoint_name = '/'.join(str(os.path.expanduser(checkpoint_path)).split('/')[-2:-1])
+        logger.info(f"📞 [RsyncClient] Enqueue: [{checkpoint_name}] ...")
         loop = asyncio.get_event_loop()
-        loop.create_task(self.workflowClient.enqueue(RSYNC_QUEUE_NAME, {"checkpoint_path": checkpoint_path}))
+        future = asyncio.run_coroutine_threadsafe(
+            self.workflowClient.enqueue(RSYNC_QUEUE_NAME, {"checkpoint_name": checkpoint_name}),
+            loop
+        )
+        logger.info(f"📞 [RsyncClient] Enqueue: [{checkpoint_name}] done.")
+        return future
 
-    async def upload_lora_adapter(self, checkpoint_path: str):
+    async def upload_lora_adapter(self, checkpoint_name: str):
         if not self.rsync_config.get('run_upload', False):
             logger.info(f"🔍 [RsyncClient] Skipping upload because [run_upload] is [false]")
             return
         # get with timeout
         source_prefix = os.path.expanduser(self.rsync_config.get('rsync_source_prefix', '~/.trainer'))
         target_prefix = self.rsync_config.get('rsync_target_prefix', '192.168.1.205:.trainer')
-        rsync_name = checkpoint_path.split('/')[-2] + '/' + checkpoint_path.split('/')[-1]
-        if checkpoint_path.startswith(source_prefix):
-            target_path = checkpoint_path.replace(source_prefix, target_prefix)
-        else:
-            target_path = target_prefix + checkpoint_path
+        target_path = target_prefix + checkpoint_name
         # rsync_path is the path to the rsync command
-        rsync_path = self.rsync_config.get('rsync_path', 'rsync').format(rsync_name=rsync_name)
+        rsync_path = self.rsync_config.get('rsync_path', 'rsync').format(checkpoint_name=checkpoint_name)
         # get a list of files to rsync
         file_list = self.rsync_config.get('file_list', [])
         for file in file_list:
-            source_file = os.path.join(checkpoint_path, file)
+            source_file = os.path.join(source_prefix, checkpoint_name, file)
             # target_file = os.path.join(target_path, file)
             logger.info(f"📞 [RsyncClient] Rsyncing: [{source_file}] to [{target_path}]")
             await rsync_file(source_file, target_path + '/', rsync_path=rsync_path)
         # we are here if rsync is successful
-        logger.info(f"🌐 [RsyncClient] Rsynced: [{checkpoint_path}] to [{target_path}]")
+        logger.info(f"🌐 [RsyncClient] Rsynced: [{checkpoint_name}] to [{target_path}]")
 
     async def clean_up_lora_adapters(self, lora_path: str):
         retry_count = 0
@@ -147,23 +149,22 @@ class RsyncClient:
                 if qsize == 0:
                     logger.info(f"🔍 [RsyncClient] No checkpoint path found, skipping...")
                     continue
-                checkpoint_path = await self.workflowClient.dequeue(queue_name=RSYNC_QUEUE_NAME)
-                checkpoint_path = str(checkpoint_path.get('checkpoint_path', ''))
-                if not checkpoint_path:
+                checkpoint_json = await self.workflowClient.dequeue(queue_name=RSYNC_QUEUE_NAME)
+                checkpoint_name = str(checkpoint_json.get('checkpoint_name', ''))
+                if not checkpoint_name:
                     logger.info(f"🔍 [RsyncClient] No checkpoint path found, skipping...")
                     continue
-                await self.upload_lora_adapter(checkpoint_path)
-                logger.info(f"🔍 [RsyncClient] Uploaded lora adapter: [{checkpoint_path}]")
+                await self.upload_lora_adapter(checkpoint_name)
+                logger.info(f"🔍 [RsyncClient] Uploaded lora adapter: [{checkpoint_name}]")
                 # get the last 2 parts of the checkpoint_path
-                lora_path = checkpoint_path.split('/')[-2] + '/' + checkpoint_path.split('/')[-1]
-                await self.vllm_client.load_lora_adapter(lora_path, lora_path)
-                logger.info(f"🔍 [RsyncClient] Loaded lora adapter: [{lora_path}]")
+                await self.vllm_client.load_lora_adapter(checkpoint_name, checkpoint_name)
+                logger.info(f"🔍 [RsyncClient] Loaded lora adapter: [{checkpoint_name}]")
                 # update the model_override in the global registry
-                await self.reg_client.put(MODEL_OVERRIDE_KEY, lora_path)
-                logger.info(f"🔍 [RsyncClient] Model override [{MODEL_OVERRIDE_KEY}] updated to [{lora_path}]")
+                await self.reg_client.put(MODEL_OVERRIDE_KEY, checkpoint_name)
+                logger.info(f"🔍 [RsyncClient] Model override [{MODEL_OVERRIDE_KEY}] updated to [{checkpoint_name}]")
                 # clean up the unused lora adapters
-                await self.clean_up_lora_adapters(lora_path)
-                logger.info(f"🔍 [RsyncClient] Cleaned up lora adapters: [{lora_path}]")
+                await self.clean_up_lora_adapters(checkpoint_name)
+                logger.info(f"🔍 [RsyncClient] Cleaned up lora adapters: [{checkpoint_name}]")
             except asyncio.TimeoutError:
                 pass
             except Exception as e:

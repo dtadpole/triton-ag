@@ -277,7 +277,11 @@ class WorkflowClient:
             "block_id": block.block_id,
             "run_tag": self._get_run_tag(block.epoch_id, block.block_id),
         }
-        post_workitems = self.config.get(queue_type, {}).get(queue_name, {}).get("post_workitems", [])
+        workflow_config = await self.get_workflow_config(self.prefix_tag)
+        if workflow_config is None:
+            logger.error(f"❌ [GlobalWorkflow] [{self.prefix_tag}] Workflow config not found")
+            return
+        post_workitems = workflow_config.get(queue_type, {}).get(queue_name, {}).get("post_workitems", [])
         for post_workitem in post_workitems:
             task_type = post_workitem.get("type", None)
             task_name = post_workitem.get("name", None)

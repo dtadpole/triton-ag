@@ -28,8 +28,7 @@ import traceback
 from configEndpoints import DuckDBClient, StatsClient
 from configInterpreter import ConfigInterpreter
 from workflowUtil import TrainerGRPOBlock
-from workflowClient import WorkflowClient
-from workflowServer import WorkflowServer
+from workflowRsync import RsyncClient
 
 LATEST_REFERENCE_NAME = "reference_state_latest.pt"
 
@@ -322,7 +321,8 @@ class GRPOTrainer(BaseTrainer):
             self.train_group(group_dataset, callback=callback, total_groups=len(group_datasets))
             # Update step counter
             progress_bar.update(1)
-                
+            await asyncio.sleep(0)
+
             # Check if training is complete
             if self.trainer_status.global_step >= self.config.training.max_steps:
                 break
@@ -336,6 +336,7 @@ class GRPOTrainer(BaseTrainer):
         total_time = time.time() - start_time
         logger.info(f"🎉 [{self.__class__.__name__}] [{block.input_tag}] Block completed in [{total_time:.1f}s] - Final global step: [{self.trainer_status.global_step}]")
         progress_bar.close()
+        await asyncio.sleep(1)
 
 
 def grpo_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_file: str = "trainerBase.yaml", grpo_config_file: str = "trainerGRPO.yaml"):
@@ -375,6 +376,7 @@ async def main():
     parser.add_argument("--base_config", type=str, default="trainerBase.yaml")
     parser.add_argument("--grpo_config", type=str, default="trainerGRPO.yaml")
     parser.add_argument("--module_file", type=str, default="trainer/grpo.module.yaml")
+    parser.add_argument("--target_short_hostname", type=str, default="two")
     args = parser.parse_args()
 
     trainer = grpo_get_trainer(None, args.prefix_tag, args.base_config, args.grpo_config)
@@ -389,7 +391,10 @@ async def main():
     grpo_block.input_dir = os.path.expanduser(grpo_block.input_dir)
     grpo_block.output_dir = os.path.expanduser(grpo_block.output_dir)
 
-    await trainer.train_grpo_block(grpo_block)
+    rsync_client = RsyncClient(prefix_tag=args.prefix_tag, target_short_hostname=args.target_short_hostname)
+
+    await trainer.train_grpo_block(grpo_block, callback=rsync_client.enqueue)
+    await asyncio.sleep(1)
 
 if __name__ == "__main__":
     asyncio.run(main())
