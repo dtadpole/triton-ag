@@ -1,0 +1,70 @@
+# FROM pytorch/pytorch:2.8.0-cuda12.9-cudnn9-runtime
+FROM docker.io/vllm/vllm-openai:gptoss
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=America/Los_Angeles
+
+ARG WORK_DIR=none
+ARG HTTP_PROXY="http://fwdproxy:8080"
+ARG HTTPS_PROXY="http://fwdproxy:8080"
+
+RUN echo 'APT::Sandbox::User "root";' | tee -a /etc/apt/apt.conf.d/10sandbox
+
+# Configure timezone non-interactively
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+
+# add -o APT::Sandbox::User=root for proxy to work
+RUN apt-get -o APT::Sandbox::User=root update && apt-get -o APT::Sandbox::User=root install -y less nano git
+
+# Vllm issue https://github.com/vllm-project/vllm/issues/22525
+# add below items and then run docker container with -v /home/akhojast/triton-ag/encodings/:/etc/encodings/:ro
+
+RUN https_proxy=http://fwdproxy:8080 http_proxy=http://fwdproxy:8080 wget https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken
+RUN https_proxy=http://fwdproxy:8080 http_proxy=http://fwdproxy:8080 wget https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken
+RUN mkdir /etc/encodings && mv o200k_base.tiktoken /etc/encodings && mv cl100k_base.tiktoken /etc/encodings
+ENV TIKTOKEN_ENCODINGS_BASE=/etc/encodings
+
+# ===== NOW ALL PIP INSTALLS USE REGULAR PIP (WHICH POINTS TO PYTHON 3.12) =====
+# Install stable packages first for better caching
+RUN pip install --no-cache-dir \
+    aiohttp \
+    anthropic \
+    autoawq \
+    black \
+    boto3 \
+    flake8 \
+    google-generativeai \
+    h5py \
+    isort \
+    jupyter \
+    jupyterlab \
+    loguru \
+    matplotlib \
+    mcp \
+    "mcp[cli]" \
+    ninja \
+    openai-agents \
+    pandas \
+    protobuf \
+    pydantic \
+    pyyaml \
+    runpod \
+    scikit-learn \
+    sentencepiece \
+    together \
+    triton
+    # unsloth
+
+RUN pip install --ignore-installed mlflow
+
+
+# # Ensure the installed binary is on the `PATH`
+ENV PATH="/root/.local/bin/:$PATH"
+
+RUN pip install openai-agents
+RUN pip install together==1.5.8
+RUN pip install wandb
+RUN pip uninstall -y numpy && pip install numpy==2.2
+RUN ln -sf /usr/bin/python3 /usr/bin/python

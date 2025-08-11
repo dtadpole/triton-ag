@@ -115,3 +115,24 @@ make vllm-qwen3-32b-devserver
 # start local agent kernel coder
 python agent_kernel_coder.py -p cmgdev -m qwen-3-32b
 ```
+
+
+# Use vLLM to serve GPT-OSS-120B model
+
+## Step 0: Download GPT-OSS-120B model to devserver
+Use test command in D80182124 to download the gpt-oss-120b model to your devserver. i.e. run below command in your devserver terminal:
+buck2 run scripts/jingbo25/benchmark:download_hf -- --model openai/gpt-oss-20b --cache_dir=/data/users/akhojast/huggingface/hub
+
+## Step1: Build the docker container for vLLM
+make build_docker_gpt_oss
+
+## Step2: Run the docker container
+make vllm_gpt_oss
+
+## Step3: Once inside the container run the vLLM server
+make vllm_gpt_oss_serve
+
+## Step4: Run the vllm inference agent
+Once the inference server is running, open another terminal and do:
+make vllm_gpt_oss
+python vllm_test/test_gpt_oss_120b.py

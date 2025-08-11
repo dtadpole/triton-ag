@@ -31,6 +31,13 @@ else
 	docker build --network=host --progress=plain  -t triton_ag .
 endif
 
+build_docker_gpt_oss:
+ifeq (${IS_DEVSERVER}, 1)
+	$(META_PROXY) docker build -f Dockerfile_vllm_gpt_oss --network=host --progress=plain  -t triton_ag_v4 .
+else
+	docker build -f Dockerfile_vllm_gpt_oss --network=host --progress=plain  -t triton_ag_v4 .
+endif
+
 build_docker_autoawq: Dockerfile
 ifeq (${IS_DEVSERVER}, 1)
 	$(META_PROXY) docker build -f Dockerfile_autoawq --network=host --progress=plain  -t autoawq .
@@ -48,6 +55,12 @@ env:
 
 vllm_env:
 	docker run -it  --gpus all --net=host -p 8081:8081 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/triton_ag /bin/bash
+
+vllm_gpt_oss:
+	docker run -it  --gpus all --net=host -p 8080:8080 -p 8081:8081 -p 8082:8082 -v /data/users/${USER}/huggingface/hub:/vllm-workspace/hub -v /home/${USER}/triton-ag:/vllm-workspace  -v ~/.keys/:/root/.keys  --entrypoint /bin/bash localhost/triton_ag_v4
+
+vllm_gpt_oss_serve:
+	vllm serve hub/models--openai--gpt-oss-120b/snapshots/bc75b44b8a2a116a0e4c6659bcd1b7969885f423
 
 mlflow:
 	# mlflow server --host localhost --port 5051
