@@ -37,6 +37,7 @@ CLIP_RATIO_LOWER_PERCENTAGE = "clip_ratio_lower_pct"
 CLIP_RATIO_UPPER_PERCENTAGE = "clip_ratio_upper_pct"
 BOUND_ADVANTAGE_LOWER_PERCENTAGE = "bound_adv_lower_pct"
 BOUND_ADVANTAGE_UPPER_PERCENTAGE = "bound_adv_upper_pct"
+LOG_PROB_AVERAGE_VALUE = "log_prob_avg_value"
 
 class GRPOConfig(BaseModel):
     """GRPO configuration"""
@@ -143,6 +144,8 @@ class GRPOTrainer(BaseTrainer):
             # log probs is calculated in log space, so we need to subtract the log probabilities
             log_ratio = new_action_log_probs - completion_log_probs_tensor
 
+            clip_metrics[LOG_PROB_AVERAGE_VALUE].append(torch.mean(new_action_log_probs).item())
+
             if self.grpo_config.loss_type == "gspo":
 
                 sequence_log_ratio = torch.sum(log_ratio) / len(new_action_log_probs)
@@ -233,6 +236,7 @@ class GRPOTrainer(BaseTrainer):
             CLIP_RATIO_LOWER_PERCENTAGE: [],
             BOUND_ADVANTAGE_UPPER_PERCENTAGE: [],
             BOUND_ADVANTAGE_LOWER_PERCENTAGE: [],
+            LOG_PROB_AVERAGE_VALUE: [],
         }
         for batch_idx, batch in enumerate(dataloader):
             # Training step

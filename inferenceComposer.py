@@ -408,7 +408,7 @@ async def main():
 
         if args.use_global_queue:
             global_reg_client = WorkflowClient(prefix_tag=block.prefix_tag)
-            await global_reg_client.post_composer(QUEUE_TYPE, QUEUE_NAME, block)
+            await global_reg_client.post_block(QUEUE_TYPE, QUEUE_NAME, block)
 
     except Exception as e:
         logger.error(f"❌ [Composer] Error running block: [{type(e).__name__}: {e}]")
