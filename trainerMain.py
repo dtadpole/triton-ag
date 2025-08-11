@@ -22,9 +22,9 @@ ALPHA = 1.1
 class TrainerMain:
     def __init__(self, prefix_tag: str):
         self.prefix_tag = prefix_tag
-        self.rsync_client = RsyncClient(prefix_tag)
+        self.rsync_client = RsyncClient(prefix_tag, "two")
         self.trainer_prefix_tag = get_prefix_tag(prefix_tag)
-        self.reg_client = WorkflowClient()
+        self.reg_client = WorkflowClient(prefix_tag=self.trainer_prefix_tag)
 
     async def main_loop_task(self):
         logger.info(f"🌀 [trainerMain] Main loop started for prefix: {self.trainer_prefix_tag}")

@@ -84,7 +84,7 @@ class RsyncClient:
 
     async def upload_lora_adapter(self, checkpoint_path: str):
         if not self.rsync_config.get('run_upload', False):
-            logger.info(f"🔍 [RsyncQueue] Skipping upload because [run_upload] is [false]")
+            logger.info(f"🔍 [RsyncClient] Skipping upload because [run_upload] is [false]")
             return
         # get with timeout
         source_prefix = os.path.expanduser(self.rsync_config.get('rsync_source_prefix', '~/.trainer'))
@@ -101,10 +101,10 @@ class RsyncClient:
         for file in file_list:
             source_file = os.path.join(checkpoint_path, file)
             # target_file = os.path.join(target_path, file)
-            logger.info(f"📞 [RsyncQueue] Rsyncing: [{source_file}] to [{target_path}]")
+            logger.info(f"📞 [RsyncClient] Rsyncing: [{source_file}] to [{target_path}]")
             await rsync_file(source_file, target_path + '/', rsync_path=rsync_path)
         # we are here if rsync is successful
-        logger.info(f"🌐 [RsyncQueue] Rsynced: [{checkpoint_path}] to [{target_path}]")
+        logger.info(f"🌐 [RsyncClient] Rsynced: [{checkpoint_path}] to [{target_path}]")
 
     async def clean_up_lora_adapters(self, lora_path: str):
         retry_count = 0
@@ -127,45 +127,51 @@ class RsyncClient:
                 # unload the unused lora adapters
                 for lora_adapter in unused_lora_adapters:
                     await self.vllm_client.unload_lora_adapter(lora_adapter)
-                    logger.info(f"🔍 [RsyncQueue] Unloaded unused lora adapter: {lora_adapter}")
+                    logger.info(f"🔍 [RsyncClient] Unloaded unused lora adapter: {lora_adapter}")
                 # we are here if everything executed successfully
                 return
             except Exception as e:
                 if retry_count < self.retries:
-                    logger.info(f"🔍 [RsyncQueue] Retrying to load and unload lora adapter: {lora_path} in {2 ** retry_count} seconds")
+                    logger.info(f"🔍 [RsyncClient] Retrying to load and unload lora adapter: {lora_path} in {2 ** retry_count} seconds")
                     await asyncio.sleep(2 ** retry_count)
                     continue
                 else:
-                    logger.error(f"❌ [RsyncQueue] Failed to load and unload lora adapter: {lora_path} after {self.retries} retries")
+                    logger.error(f"❌ [RsyncClient] Failed to load and unload lora adapter: {lora_path} after {self.retries} retries")
                     raise e
 
     async def rsync_task(self):
         """Push rsync task to the rsync_queue"""
         while True:
             try:
+                qsize = await self.workflowClient.qsize(RSYNC_QUEUE_NAME)
+                if qsize == 0:
+                    logger.info(f"🔍 [RsyncClient] No checkpoint path found, skipping...")
+                    continue
                 checkpoint_path = await self.workflowClient.dequeue(queue_name=RSYNC_QUEUE_NAME)
                 checkpoint_path = str(checkpoint_path.get('checkpoint_path', ''))
                 if not checkpoint_path:
-                    logger.info(f"🔍 [RsyncQueue] No checkpoint path found, skipping")
+                    logger.info(f"🔍 [RsyncClient] No checkpoint path found, skipping...")
                     continue
                 await self.upload_lora_adapter(checkpoint_path)
-                logger.info(f"🔍 [RsyncQueue] Uploaded lora adapter: [{checkpoint_path}]")
+                logger.info(f"🔍 [RsyncClient] Uploaded lora adapter: [{checkpoint_path}]")
                 # get the last 2 parts of the checkpoint_path
                 lora_path = checkpoint_path.split('/')[-2] + '/' + checkpoint_path.split('/')[-1]
                 await self.vllm_client.load_lora_adapter(lora_path, lora_path)
-                logger.info(f"🔍 [RsyncQueue] Loaded lora adapter: [{lora_path}]")
+                logger.info(f"🔍 [RsyncClient] Loaded lora adapter: [{lora_path}]")
                 # update the model_override in the global registry
                 await self.reg_client.put(MODEL_OVERRIDE_KEY, lora_path)
-                logger.info(f"🔍 [RsyncQueue] Model override [{MODEL_OVERRIDE_KEY}] updated to [{lora_path}]")
+                logger.info(f"🔍 [RsyncClient] Model override [{MODEL_OVERRIDE_KEY}] updated to [{lora_path}]")
                 # clean up the unused lora adapters
                 await self.clean_up_lora_adapters(lora_path)
-                logger.info(f"🔍 [RsyncQueue] Cleaned up lora adapters: [{lora_path}]")
+                logger.info(f"🔍 [RsyncClient] Cleaned up lora adapters: [{lora_path}]")
             except asyncio.TimeoutError:
                 pass
             except Exception as e:
-                logger.error(f"❌ [RsyncQueue] Error: {e}")
+                logger.error(f"❌ [RsyncClient] Error: {e}")
                 traceback.print_exc()
                 await asyncio.sleep(5)
+            finally:
+                await asyncio.sleep(10)
 
 
 async def main():
@@ -175,7 +181,7 @@ async def main():
     args = parser.parse_args()
 
     if args.prefix_tag == 'auto':
-        logger.error(f"❌ [RsyncClient] --prefix_tag is required")
+        logger.error(f"❌ [RsyncClient] --prefix_tag is required!")
         return
 
     rsync_client = RsyncClient(args.prefix_tag, args.target_short_hostname)

@@ -23,6 +23,11 @@ class WorkflowClient:
         self.prefix_tag = prefix_tag
         self.config_path = config_path
         self.config = self._load_config(self.config_path)
+        self.registry_config = self.config.get("registry", {})
+        if self.prefix_tag not in self.registry_config:
+            error_msg = f"Prefix tag [{self.prefix_tag}] not found in workflow registry! Please check your [{config_path}] file."
+            logger.error(error_msg)
+            raise ValueError(error_msg)
         self.client_config = self.config.get("client", {})
         self.host = self.client_config.get("host", "localhost")
         self.port = self.client_config.get("port", 8488)
