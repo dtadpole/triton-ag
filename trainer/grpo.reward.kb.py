@@ -182,8 +182,10 @@ if __name__ == "__main__":
     #     print('    => len(logprobs): ', [f'{len(gen["logprobs"])}' for gen in value])
 
     group_datasets = {key: grpo_group_to_dataset(value, tokenizer) for key, value in groups.items()}
+    idx = 0
     for key, value in group_datasets.items():
-        print(f'\n{key}:')
+        idx += 1
+        print(f'\n[{idx:02d}] {key}:')
         print('    => rewards: ', [f'{gen["reward"]:.2f}' for gen in value])
         print('    => advantages: ', [f'{gen["advantage"]:.2f}' for gen in value])
         print('    => len(prompt_token_ids): ', [f'{len(gen["prompt_token_ids"])}' for gen in value if gen["prompt_token_ids"]])

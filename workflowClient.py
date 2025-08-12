@@ -3,7 +3,7 @@ import asyncio
 import httpx
 from typing import Any, Dict, Optional
 from logger import logger
-from workflowUtil import get_global_registry_port, CodeGenEvalBlock, CritiqueBlock, ExemplarBlock, ReflectionBlock, TrainerSFTBlock, TrainerRFTBlock, TrainerGRPOBlock, ComposerBlock
+from workflowUtil import CodeGenEvalBlock, CritiqueBlock, ExemplarBlock, ReflectionBlock, TrainerSFTBlock, TrainerRFTBlock, TrainerGRPOBlock, ComposerBlock
 from pydantic import BaseModel
 
 TASK_TYPE_INFERENCE = "inference"
@@ -36,7 +36,7 @@ class WorkflowClient:
         self.base_url = f"http://{self.host}:{self.port}"
         self.retries = self.client_config.get("retries", 5)
         self.timeout = self.client_config.get("timeout", 300)
-        logger.info(f"🔍 [GlobalRegClient] Initialized with host: {self.host}, port: {self.port}, retries: {self.retries}, timeout: {self.timeout}")
+        logger.info(f"🔍 [WorkflowClient] Initialized: [{self.host}:{self.port}]")
 
     def _load_config(self, config_path: str):
         with open(config_path, "r") as f:
