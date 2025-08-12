@@ -14,7 +14,7 @@ import duckdb
 
 VALID_RECORD_FORMATS = ["json", "text"]
 
-MAX_LOCK_AGE = 20 # 20 seconds
+MAX_LOCK_AGE = 30 # 30 seconds
 
 class DuckDBClient:
     def __init__(self):
