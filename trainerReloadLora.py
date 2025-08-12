@@ -3,16 +3,18 @@ import argparse
 from workflowClient import WorkflowClient
 from workflowRegistry import ADAPTER_PREFIX
 from logger import logger
-from trainerUtil import VLLMClient
+from configEndpoints import VLLMClient
 
 async def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--prefix_tag", type=str, required=True)
     parser.add_argument("--lora_name", type=str, default=None)
+    parser.add_argument("--short_hostname", type=str, default="two")
     args = parser.parse_args()
 
-    reg_client = WorkflowClient()
+    reg_client = WorkflowClient(prefix_tag=args.prefix_tag)
 
-    vllm_client = VLLMClient()
+    vllm_client = VLLMClient(short_hostname=args.short_hostname)
 
     uploaded_set = set()
     if args.lora_name is None:

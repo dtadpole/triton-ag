@@ -172,11 +172,11 @@ if __name__ == "__main__":
 
     groups = grpo_compute_rewards(result.df().to_dict(orient="records"), debug=args.debug)
     groups = grpo_compute_advantages(groups, debug=args.debug)
-    for key, value in groups.items():
-        print(f'\n{key}:')
-        print('    => rewards: ', [f'{gen["reward"]:.2f}' for gen in value])
-        print('    => advantages: ', [f'{gen["advantage"]:.2f}' for gen in value])
-        print('    => len(logprobs): ', [f'{len(gen["logprobs"])}' for gen in value])
+    # for key, value in groups.items():
+    #     print(f'\n{key}:')
+    #     print('    => rewards: ', [f'{gen["reward"]:.2f}' for gen in value])
+    #     print('    => advantages: ', [f'{gen["advantage"]:.2f}' for gen in value])
+    #     print('    => len(logprobs): ', [f'{len(gen["logprobs"])}' for gen in value])
 
     group_datasets = {key: grpo_group_to_dataset(value, tokenizer) for key, value in groups.items()}
     for key, value in group_datasets.items():

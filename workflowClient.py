@@ -248,7 +248,7 @@ class WorkflowClient:
             if isinstance(value, str):
                 task_config[key] = value.format(**env_vars)
         # enqueue the task
-        queue_name = f"{task_type}:{task_name}"
+        queue_name = f"{task_type}.{task_name}"
         if task_type == TASK_TYPE_INFERENCE:
             inferenceBlock = ComposerBlock(**(self._get_task_default(task_type, task_name) | task_config))
             await self.enqueue(queue_name, inferenceBlock.model_dump(), create_queue=True)
