@@ -65,6 +65,7 @@ def grpo_compute_rewards(
             "reward_items": item["reward_items"],
             "prompt": item["prompt"],
             "logprobs": item["logprobs"],
+            "runtime": item["runtime"],
         } for item in value]
         # add the group to the groups dict
         groups[key] = group
@@ -121,6 +122,7 @@ def grpo_group_to_dataset(
             'task_tag': result["task_tag"],
             'turn_tag': result["turn_tag"],
             'reward': result["reward"],
+            'runtime': result["runtime"],
             'reward_items': result["reward_items"],
             'advantage': result["advantage"],
             'prompt_token_ids': prompt_token_ids,
@@ -188,6 +190,7 @@ if __name__ == "__main__":
         print(f'\n[{idx:02d}] {key}:')
         print('    => rewards: ', [f'{gen["reward"]:.2f}' for gen in value])
         print('    => advantages: ', [f'{gen["advantage"]:.2f}' for gen in value])
+        print('    => runtime: ', [f'{gen["runtime"]:.2f}' for gen in value])
         print('    => len(prompt_token_ids): ', [f'{len(gen["prompt_token_ids"])}' for gen in value if gen["prompt_token_ids"]])
         print('    => len(completion_token_ids): ', [f'{len(gen["completion_token_ids"])}' for gen in value if gen["completion_token_ids"]])
         print('    => len(completion_log_probs): ', [f'{len(gen["completion_log_probs"])}' for gen in value if gen["completion_log_probs"]])
