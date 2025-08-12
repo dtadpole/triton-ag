@@ -52,6 +52,9 @@ def grpo_compute_rewards(
         # if all the rewards in the group for different gen_tag are 0, then ignore the group
         if all(gen["reward"] == 0.0 for gen in value):
             continue
+        if len(value) == 1:
+            # ignore single item groups
+            continue
         # otherwise, create a group with prompt, logprobs, (including the task_tag and turn_only_tag)
         group = [{
             "task_tag": item["task_tag"],
