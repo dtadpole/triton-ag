@@ -11,7 +11,7 @@ from workflowClient import WorkflowClient
 from configInterpreter import ConfigInterpreter
 from trainerUtil import read_stream
 
-LAST_MODIFIED_WITHIN = 3600
+LAST_MODIFIED_WITHIN = 7200
 RSYNC_QUEUE_NAME = 'rsync.rsync.1'
 
 async def rsync_file(source_path: str, target_path: str, rsync_path: str = "rsync") -> int:

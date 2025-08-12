@@ -68,6 +68,7 @@ lora:
   rank: 128  # LoRA rank (r)
   alpha: 32  # LoRA alpha
   dropout: 0.0  # Use 0.0 for optimal Unsloth performance
+  # target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj", "lm_head"]
   target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
   # target_modules: "all-linear"
   # target_parameters:
@@ -78,6 +79,16 @@ lora:
   #   - "23.mlp.experts.gate_up_proj"
   #   - "23.mlp.experts.down_proj"
   bias: "none"  # Options: "none", "all", "lora_only"
+  # modules_to_save: ["lm_head"] # ["lm_head", "embed_tokens"]
+  rank_pattern :
+    r".*q_proj$": 192,
+    r".*v_proj$": 192,
+    r".*k_proj$": 96,
+    r".*o_proj$": 96,
+    r".*up_proj$": 192,
+    r".*gate_proj$": 96,
+    r".*down_proj$": 96,
+    r".*lm_head$": 256,   # include only if you're adapting the head
 
 # ============================================================================
 # LOGGING CONFIGURATION
