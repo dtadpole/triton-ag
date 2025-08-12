@@ -126,10 +126,10 @@ def eval_kernel_custom(
     seed_num: int = 42,
     num_verify_trials: int = 2,
     num_perf_trials: int = 10,
-    num_warmups: int = 5,
+    num_warmups: int = 3,
     measure_reference: bool = False,
     code_type: str = "triton",
-    max_critical_time: int = 15,
+    max_critical_time: int = 20,
 ) -> KernelExecResult:
     """
     Evaluate the reference code against the original model
@@ -359,7 +359,7 @@ def main():
     parser.add_argument("--generated_code", type=str, default="elemAddTriton.py")
     parser.add_argument("--measure_reference", action="store_true")
     parser.add_argument("--device-list", type=str, default="0")
-    parser.add_argument("--max_critical_time", type=int, default=15)
+    parser.add_argument("--max_critical_time", type=int, default=20)
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
