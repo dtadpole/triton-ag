@@ -260,7 +260,7 @@ class InferenceClient:
                 logprobs=1 if logprobs else NOT_GIVEN,
                 # top_p=self.top_p,
                 # extra_body={"top_k": self.top_k}
-                extra_body={"truncate_prompt_tokens": self.truncate_prompt_tokens}
+                # extra_body={"truncate_prompt_tokens": self.truncate_prompt_tokens}
             )
 
             # Process streaming response
@@ -289,7 +289,7 @@ class InferenceClient:
                 logprobs=1 if logprobs else NOT_GIVEN,
                 # top_p=self.top_p,
                 # extra_body={"top_k": self.top_k}
-                extra_body={"truncate_prompt_tokens": self.truncate_prompt_tokens}
+                # extra_body={"truncate_prompt_tokens": self.truncate_prompt_tokens}
             )
 
             # Extract text from response

@@ -141,8 +141,7 @@ module:
             turn_tag: "`f'{gen_tag}_t{__item__:02d}'`" # turn_tag is gen_01_t03
           steps:
             - type: endpoint
-              endpoint: inferenceClient.completion
-              # endpoint: inferenceClient.chat_completion
+              endpoint: inferenceClient.chat_completion
               context_vars:
                 metadata:
                   "run_tag": "`run_tag`"
@@ -161,55 +160,40 @@ module:
                     {"role": "user", "content": __runtime__.get_user_prompt(__context__)}
                   ]
                   `
-                prompt: |
-                  `__runtime__.tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                    enable_thinking=True,
-                  )`
               args:
-                prompt: "`prompt`"
-                # messages: "`messages`"
+                messages: "`messages`"
                 max_tokens: "`max_tokens`"
-                logprobs: true
+                logprobs: false
               returns:
                 error_if: "`__result__ is None`"
                 context_vars:
+                  completion: "`__result__['content']`"
+                  num_completion_tokens: "`__result__['usage']['completion_tokens'] if 'usage' in __result__ and 'completion_tokens' in __result__['usage'] else 0`"
                   metadata: |
                     `metadata | {
-                      "num_completion_tokens": len(__result__['logprobs']),
+                      "num_completion_tokens": num_completion_tokens,
                       "completion_time_seconds": __endpoint_time__,
-                      "token_per_second": len(__result__['logprobs']) / __endpoint_time__,
+                      "token_per_second": num_completion_tokens / __endpoint_time__,
                     }
                     `
                   messages: |
                     `messages + [
                       {"role": "assistant", "content": __result__['content']}
                     ]`
-                  completion:
-                    "prompt": "`prompt`"
-                    "completion": "`__result__['content']`"
-                    "logprobs": "`__result__['logprobs']`"
-                    "metadata": "`metadata`"
                   conversation:
                     messages: "`messages`"
                     metadata: "`metadata`"
                   conversation_path: "`f'{record_folder}/{turn_tag}_conversation.json'`"
-                  completion_path: "`f'{record_folder}/{turn_tag}_completion.json'`"
                 save_to:
                   - path: "`conversation_path`"
                     data: "`conversation`"
                     format: "json"
-                  - path: "`completion_path`"
-                    data: "`completion`"
-                    format: "json"
                 logging:
-                  method: "log_completion"
+                  method: "log_chat_completion"
             - type: endpoint
               endpoint: codeExtractor.extract_code
               args:
-                completion: "`completion['completion']`"
+                completion: "`completion`"
               returns:
                 error_if: "`__result__ is None or __result__['code'] is None`"
                 context_vars:
