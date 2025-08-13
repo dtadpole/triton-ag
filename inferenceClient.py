@@ -47,14 +47,14 @@ class InferenceClientConfig(BaseModel):
 
 class InferenceClient:
     """Client for OpenAI API using OpenAI client for streaming or non-streaming generation."""
-    
+
     def __init__(
         self,
         config: InferenceClientConfig,
     ):
         """
         Initialize vLLM client.
-        
+
         Args:
             config: InferenceClientConfig
         """
@@ -91,24 +91,24 @@ class InferenceClient:
         except FileNotFoundError:
             logger.info(f"🔑 [InferenceClient] API key not found at [{self.api_key_path}], using [dummy_key]")
             self.api_key = "dummy_key"  # vLLM often doesn't require real auth
-        
+
         # Create OpenAI client for vLLM
         self.openai_client = AsyncOpenAI(
             base_url=self.base_url,
             api_key=self.api_key,
         )
-        
+
         # Print generation mode info
         if self.streaming:
             logger.info(f"🚀 [InferenceClient] Using STREAMING mode with OpenAI client [{self.model_tag}]")
         else:
             # add info magnifying glass emoji
             logger.info(f"🔍 [InferenceClient] Using NON-STREAMING mode with OpenAI client [{self.model_tag}]")
-        
+
     async def _chat_completion(self, messages: List[Dict], max_tokens: int = None, logprobs: bool = False):
         """
         Generate text using OpenAI-compatible API with streaming or non-streaming mode.
-        
+
         Args:
             messages: List of messages as input
             max_tokens: Maximum tokens to generate
@@ -131,12 +131,12 @@ class InferenceClient:
                 # extra_body={"top_k": self.top_k}
                 # extra_body={"truncate_prompt_tokens": self.truncate_prompt_tokens}
             )
-            
+
             # Initialize variables to accumulate streaming response
             generated_content = ""
             reasoning_content = ""
             logprobs_content = []
-            
+
             prompt_tokens = 0
             completion_tokens = 0
 
@@ -188,7 +188,7 @@ class InferenceClient:
                 # extra_body={"top_k": self.top_k}
                 # extra_body={"truncate_prompt_tokens": self.truncate_prompt_tokens}
             )
-            
+
             # Extract text from response
             if response.choices:
                 choice = response.choices[0]
@@ -235,10 +235,10 @@ class InferenceClient:
     async def _completion(self, prompt: str, max_tokens: int = None, logprobs: bool = False):
         """
         Generate text completion using OpenAI-compatible API with streaming or non-streaming mode.
-        
+
         Args:
             prompt: Text prompt for completion
-            
+
         Returns:
             Dict with 'text' data
         """
@@ -246,7 +246,7 @@ class InferenceClient:
 
         generated_content = ""
         logprobs_content = []
-        
+
         if self.streaming:
             # STREAMING MODE: Real-time token streaming using OpenAI client
             stream = await self.openai_client.completions.create(
@@ -262,7 +262,7 @@ class InferenceClient:
                 # extra_body={"top_k": self.top_k}
                 extra_body={"truncate_prompt_tokens": self.truncate_prompt_tokens}
             )
-            
+
             # Process streaming response
             async for chunk in stream:
                 if chunk.choices:
@@ -291,7 +291,7 @@ class InferenceClient:
                 # extra_body={"top_k": self.top_k}
                 extra_body={"truncate_prompt_tokens": self.truncate_prompt_tokens}
             )
-            
+
             # Extract text from response
             if response.choices:
                 choice = response.choices[0]
@@ -318,7 +318,7 @@ class InferenceClient:
                 })
 
         return {'content': generated_content, "logprobs": logprobs_tokenized_content}
-       
+
     async def completion(self, prompt: str, max_tokens: int = None, logprobs: bool = False) -> Dict:
         """
         Generate text completion using OpenAI-compatible API with streaming or non-streaming mode.
@@ -351,7 +351,7 @@ class InferenceClient:
         except Exception as e:
             logger.error(f"❌ [InferenceClient] [Health check] Health check failed: {e}")
             return False
-    
+
     async def get_models(self) -> List[str]:
         """Get available models from the server."""
         try:
@@ -359,11 +359,11 @@ class InferenceClient:
             models_url = f"{self.base_url}/models"
             headers = {"Authorization": f"Bearer {self.api_key}"}
 
-            # use async requests            
+            # use async requests
             async with httpx.AsyncClient() as client:
                 response = await client.get(models_url, headers=headers, timeout=self.timeout)
             response.raise_for_status()
-            
+
             data = response.json()
             models = []
             if 'data' in data:
@@ -388,7 +388,7 @@ def load_inference_client_config(
     if not config_path.exists():
         # Try relative to script directory
         config_path = Path(__file__).parent / config_file
-    
+
     config_yaml = {}
     if config_path.exists():
         with open(config_path, 'r') as f:
@@ -404,7 +404,7 @@ def load_inference_client_config(
     else:
         provider_json = config_yaml[provider_name]['common'] | {"provider_name": provider_name}
         provider_config = ProviderConfig(**provider_json)
-    
+
     if model_short_name not in config_yaml[provider_name]['models']:
         logger.error(f"❌ [InferenceClient] Error: Model [{model_short_name}] not found in config file [{config_file}]")
         raise ValueError(f"Model [{model_short_name}] not found in config file [{config_file}]")
@@ -457,7 +457,7 @@ async def main():
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt}
     ]
-    
+
     if args.api_type == "chat":
         # Use chat completion API
         result = await client.chat_completion(messages)
