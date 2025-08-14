@@ -71,7 +71,7 @@ class GRPOConfig(BaseModel):
 
 class GRPOTrainer(BaseTrainer):
     """GRPO (Generalized Preference Optimization) trainer for preference learning"""
-    
+
     def __init__(self,
         prefix_tag: str,
         grpo_config: GRPOConfig,
@@ -108,7 +108,7 @@ class GRPOTrainer(BaseTrainer):
         }
         context_var_config = self.module_config.get('context_vars', {})
         self.context_vars = self.configInterpreter.prepare_context_vars(self, context_var_config, self.context_vars)
-        
+
 
         logger.info(f"⭐ [GRPOTrainer] Initialized with GRPOConfig: {grpo_config}")
 
@@ -134,7 +134,7 @@ class GRPOTrainer(BaseTrainer):
         # get log probabilities for the completion tokens
         labels = torch.tensor(completion_token_ids, device=self.device)
         action_log_probs = log_probs[:len(completion_token_ids), :].gather(
-            dim=-1, 
+            dim=-1,
             index=labels.unsqueeze(-1)
         ).squeeze(-1)  # (completion_len)
         return action_log_probs
@@ -215,7 +215,7 @@ class GRPOTrainer(BaseTrainer):
             log_ratio = new_action_log_probs - completion_log_probs_tensor
 
             clip_metrics[LOG_PROB_AVERAGE_VALUE].append(torch.mean(new_action_log_probs).item())
-            clip_metrics[LOG_PROB_OVERRIDE_DIFF].append(log_prob_override_mse.item())
+            clip_metrics[LOG_PROB_OVERRIDE_DIFF].append(0.0 if isinstance(log_prob_override_mse, float) else log_prob_override_mse.item())
 
             if self.grpo_config.loss_type == "gspo":
 
@@ -272,7 +272,7 @@ class GRPOTrainer(BaseTrainer):
                     loss = -torch.sum(final_ratio_advantage) / self.grpo_config.max_seq_length
                 else:
                     raise ValueError(f"❌ [GRPOTrainingGroup] Invalid loss type: {self.grpo_config.loss_type}")
-            
+
             batch_loss += loss
 
         return batch_loss
@@ -287,7 +287,7 @@ class GRPOTrainer(BaseTrainer):
             pin_memory=True,
             collate_fn=SimpleCollator(tokenizer=self.tokenizer)
         )
-        
+
         accumulated_loss = 0.0
 
         group_reward_mean = np.mean([result["reward"] for result in group_dataset])
@@ -322,7 +322,7 @@ class GRPOTrainer(BaseTrainer):
         for batch_idx, batch in enumerate(dataloader):
             # Training step
             mini_batch_loss = self._compute_mini_batch_loss(batch, clip_metrics, group_max_length=group_max_length)
-            
+
             # Scale loss for gradient accumulation
             mini_batch_loss = mini_batch_loss * self.config.training.loss_multiplier / len(dataloader) # divide by the group size
             mini_batch_loss.backward()
@@ -331,10 +331,10 @@ class GRPOTrainer(BaseTrainer):
             torch.cuda.empty_cache()
 
             accumulated_loss += mini_batch_loss.item()
-            
+
         # Optimization step (only after entire group is processed, this changes the model parameters)
         grad_norm = self._optimization_step()
-        
+
         # Calculate average loss
         avg_loss = accumulated_loss
         accumulated_loss = 0.0
@@ -362,7 +362,7 @@ class GRPOTrainer(BaseTrainer):
         for key, value in clip_metrics.items():
             metrics[f"clip/{key}"] = np.mean(value)
         self._log_metrics(metrics, self.trainer_status.global_step)
-        
+
         # Save checkpoint
         if self.trainer_status.global_step % self.config.training.save_steps == 0:
             self._save_checkpoint(self.trainer_status.global_step, callback=callback)
@@ -436,14 +436,14 @@ def grpo_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_fil
     except Exception as e:
         logger.error(f"❌ [GRPOTrainer] [{prefix_tag}] Failed to load GRPO configuration: {e}")
         raise e
-    
+
     try:
         trainer = GRPOTrainer(prefix_tag, grpo_config, base_config, base_trainer=base_trainer)
         logger.info(f"⭐ [GRPOTrainer] [{prefix_tag}] Trainer initialized")
     except Exception as e:
         logger.error(f"❌ [GRPOTrainer] [{prefix_tag}] Initialization failed: {e}")
         raise e
-    
+
     return trainer
 
 async def main():
