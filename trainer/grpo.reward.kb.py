@@ -66,6 +66,7 @@ def grpo_compute_rewards(
             "prompt": item["prompt"],
             "logprobs": item["logprobs"],
             "runtime": item["runtime"],
+            "checkpoint_name": item["metadata"]["model_override"].split("/")[-1] if "model_override" in item["metadata"] and item["metadata"]["model_override"] else None,
         } for item in value]
         # add the group to the groups dict
         groups[key] = group
@@ -123,6 +124,7 @@ def grpo_group_to_dataset(
             'turn_tag': result["turn_tag"],
             'reward': result["reward"],
             'runtime': result["runtime"],
+            'checkpoint_name': result["checkpoint_name"],
             'reward_items': result["reward_items"],
             'advantage': result["advantage"],
             'prompt_token_ids': prompt_token_ids,
@@ -140,7 +142,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--gamma", type=float, default=0.5)
-    parser.add_argument("--input_dir", type=str, default="~/.codeGenEval/TC_0.1.0_14B.m_005_05/")
+    parser.add_argument("--input_dir", type=str, required=True)
     parser.add_argument("--tokenizer_name", type=str, default="Qwen/Qwen3-8B")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
@@ -191,6 +193,7 @@ if __name__ == "__main__":
         print('    => rewards: ', [f'{gen["reward"]:.2f}' for gen in value])
         print('    => advantages: ', [f'{gen["advantage"]:.2f}' for gen in value])
         print('    => runtime: ', [f'{gen["runtime"]:.2f}' for gen in value])
+        print('    => checkpoint_number: ', [f'{gen["checkpoint_name"].split("-")[-1] if gen["checkpoint_name"] else None}' for gen in value if "checkpoint_name" in gen])
         print('    => len(prompt_token_ids): ', [f'{len(gen["prompt_token_ids"])}' for gen in value if gen["prompt_token_ids"]])
         print('    => len(completion_token_ids): ', [f'{len(gen["completion_token_ids"])}' for gen in value if gen["completion_token_ids"]])
         print('    => len(completion_log_probs): ', [f'{len(gen["completion_log_probs"])}' for gen in value if gen["completion_log_probs"]])
