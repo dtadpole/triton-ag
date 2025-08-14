@@ -226,8 +226,8 @@ class InferenceClient:
             except Exception as e:
                 traceback.print_exc()
                 if retry_count < self.max_retries:
-                    logger.warning(f"⚠️ [InferenceClient] [Chat completion] Failed: {e} [{retry_count}/{self.max_retries}], retrying in {2 ** retry_count} seconds...")
-                    await asyncio.sleep(2 ** retry_count) # exponential backoff
+                    logger.warning(f"⚠️ [InferenceClient] [Chat completion] Failed: {e} [{retry_count}/{self.max_retries}], retrying in {3 ** retry_count} seconds...")
+                    await asyncio.sleep(3 ** retry_count) # exponential backoff
                 else:
                     logger.error(f"❌ [InferenceClient] [Chat completion] Failed: {e}, giving up...") # give up after max retries
         return None
@@ -330,8 +330,8 @@ class InferenceClient:
                 return await self._completion(prompt, max_tokens=max_tokens, logprobs=logprobs)
             except Exception as e:
                 if retry_count < self.max_retries:
-                    logger.warning(f"⚠️ [InferenceClient] [Completion] Failed: {e} [{retry_count}/{self.max_retries}], retrying in {2 ** retry_count} seconds...")
-                    await asyncio.sleep(2 ** retry_count) # exponential backoff
+                    logger.warning(f"⚠️ [InferenceClient] [Completion] Failed: {e} [{retry_count}/{self.max_retries}], retrying in {3 ** retry_count} seconds...")
+                    await asyncio.sleep(3 ** retry_count) # exponential backoff
                 else:
                     traceback.print_exc()
                     logger.error(f"❌ [InferenceClient] [Completion] Failed: {e}, giving up...") # give up after max retries

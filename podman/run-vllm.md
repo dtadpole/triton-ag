@@ -1,21 +1,29 @@
-#    --kv-cache-dtype fp8_e5m2 --calculate-kv-scales true \
+
+export HF_HUB_DISABLE_XET=1
+export HF_HUB_ENABLE_HF_TRANSFER=0
 
 cd ~/.trainer
 
+    --data-parallel-size 4 \
+    --port 8091 --host 0.0.0.0 
+    --quantization fp8 \
+
 /root/run.sh python -m vllm.entrypoints.openai.api_server \
     --model Qwen/Qwen3-32B \
-    --port 8091 --host 0.0.0.0 \
+    --port 8091 --host :: \
     --api-key dummy \
-    --quantization fp8 \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 4 \
+    --pipeline-parallel-size 1 \
     --enable-lora --max-lora-rank 128 --max-loras 6 \
-    --gpu-memory-utilization 0.95 --max_model_len 20480 \
+    --gpu-memory-utilization 0.95 --max_model_len 24576 \
     --load_format safetensors \
     --trust_remote_code \
     --guided_decoding_backend guidance --guided-decoding-disable-fallback \
     --enable_auto_tool_choice --tool_call_parser hermes \
     --scheduling_policy priority \
     --enable_chunked_prefill --max_num_batched_tokens 2048 \
-    --max_log_len 0 --max_num_seqs 16 \
+    --max_log_len 0 --max_num_seqs 144 \
     --enable_prefix_caching --prefix-caching-hash-algo sha256 \
     --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
     --return-tokens-as-token-ids \
@@ -40,3 +48,6 @@ cd ~/.trainer
     --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
     --return-tokens-as-token-ids \
     --enforce-eager 
+
+
+#    --kv-cache-dtype fp8_e5m2 --calculate-kv-scales true \
