@@ -143,7 +143,7 @@ def rft_get_trainer(
 async def main():
     """Main function for RFT training"""
     parser = argparse.ArgumentParser(description="Train a model using RFTTrainer")
-    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.n")
+    parser.add_argument("--prefix_tag", type=str, default="auto")
     parser.add_argument("--epoch_id", type=int, default=0)
     parser.add_argument("--block_id", type=int, default=0)
     parser.add_argument("--input_dir", type=str, default="~/.inference/codeGenEval")
@@ -167,7 +167,7 @@ async def main():
     rft_block.input_dir = os.path.expanduser(rft_block.input_dir)
     rft_block.output_dir = os.path.expanduser(rft_block.output_dir)
 
-    rsync_client = RsyncClient(prefix_tag=args.prefix_tag, target_short_hostname=args.target_short_hostname)
+    rsync_client = RsyncClient(prefix_tag=args.prefix_tag)
 
     loop = asyncio.get_event_loop()
     # await loop.run_in_executor(None, trainer.train_rft_block, rft_block, rsync_client.enqueue)

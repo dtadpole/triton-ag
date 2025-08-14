@@ -373,7 +373,7 @@ def grpo_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_fil
 async def main():
     """Main function for GRPO training"""
     parser = argparse.ArgumentParser(description="Train a model using GRPOTrainer")
-    parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_14B.n")
+    parser.add_argument("--prefix_tag", type=str, default="auto")
     parser.add_argument("--epoch_id", type=int, default=0)
     parser.add_argument("--block_id", type=int, default=0)
     parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B.n_000_00")
@@ -382,7 +382,6 @@ async def main():
     parser.add_argument("--base_config", type=str, default="trainerBase.yaml")
     parser.add_argument("--grpo_config", type=str, default="trainerGRPO.yaml")
     parser.add_argument("--module_file", type=str, default="trainer/grpo.module.yaml")
-    parser.add_argument("--target_short_hostname", type=str, default="two")
     args = parser.parse_args()
 
     trainer = grpo_get_trainer(None, args.prefix_tag, args.base_config, args.grpo_config)
@@ -397,7 +396,7 @@ async def main():
     grpo_block.input_dir = os.path.expanduser(grpo_block.input_dir)
     grpo_block.output_dir = os.path.expanduser(grpo_block.output_dir)
 
-    rsync_client = RsyncClient(prefix_tag=args.prefix_tag, target_short_hostname=args.target_short_hostname)
+    rsync_client = RsyncClient(prefix_tag=args.prefix_tag)
 
     await trainer.train_grpo_block(grpo_block, callback=rsync_client.enqueue)
     await asyncio.sleep(1)

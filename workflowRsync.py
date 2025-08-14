@@ -32,11 +32,11 @@ async def rsync_file(source_path: str, target_path: str, rsync_path: str = "rsyn
 
     # Create tasks to read stdout and stderr concurrently
     stdout_task = asyncio.create_task(
-        read_stream(process.stdout, "reference", is_error=False)
+        read_stream(process.stdout, "rsync", is_error=False)
     )
     stderr_task = asyncio.create_task(
         read_stream(
-            process.stderr, "reference", is_error=True
+            process.stderr, "rsync", is_error=True
         )  # seems taking warning message as error message
     )
 
@@ -56,10 +56,11 @@ async def rsync_file(source_path: str, target_path: str, rsync_path: str = "rsyn
 
 
 class RsyncClient:
-    def __init__(self, prefix_tag: str, target_short_hostname: str):
+    def __init__(self, prefix_tag: str):
         self.rsync_config = self.load_config().get('rsync', {})
         self.retries = self.rsync_config.get('retries', 3)
         self.timeout = self.rsync_config.get('timeout', 10)
+        target_short_hostname = self.rsync_config.get('vllm_client', 'two')
         self.vllm_client = VLLMClient(target_short_hostname)
         self.workflowClient = WorkflowClient(prefix_tag=prefix_tag)
         self.configInterpreter = ConfigInterpreter()
@@ -148,6 +149,20 @@ class RsyncClient:
                     logger.error(f"❌ [RsyncClient] Failed to load and unload lora adapter: {lora_path} after {self.retries} retries")
                     raise e
 
+    async def handle_rsync_task(self, checkpoint_name: str):
+        # upload the lora adapter
+        await self.upload_lora_adapter(checkpoint_name)
+        logger.info(f"🔍 [RsyncClient] Uploaded lora adapter: [{checkpoint_name}]")
+        # load the lora adapter
+        await self.vllm_client.load_lora_adapter(checkpoint_name, checkpoint_name)
+        logger.info(f"🔍 [RsyncClient] Loaded lora adapter: [{checkpoint_name}]")
+        # update the model_override in the global registry
+        await self.workflowClient.put(MODEL_OVERRIDE_KEY, checkpoint_name)
+        logger.info(f"🔍 [RsyncClient] Model override [{MODEL_OVERRIDE_KEY}] updated to [{checkpoint_name}]")
+        # clean up the unused lora adapters
+        await self.clean_up_lora_adapters(checkpoint_name)
+        logger.info(f"🔍 [RsyncClient] Cleaned up lora adapters: [{checkpoint_name}]")
+
     async def rsync_task(self):
         """Push rsync task to the rsync_queue"""
         while True:
@@ -161,17 +176,7 @@ class RsyncClient:
                 if not checkpoint_name:
                     logger.info(f"🔍 [RsyncClient] No checkpoint path found, skipping...")
                     continue
-                await self.upload_lora_adapter(checkpoint_name)
-                logger.info(f"🔍 [RsyncClient] Uploaded lora adapter: [{checkpoint_name}]")
-                # get the last 2 parts of the checkpoint_path
-                await self.vllm_client.load_lora_adapter(checkpoint_name, checkpoint_name)
-                logger.info(f"🔍 [RsyncClient] Loaded lora adapter: [{checkpoint_name}]")
-                # update the model_override in the global registry
-                await self.workflowClient.put(MODEL_OVERRIDE_KEY, checkpoint_name)
-                logger.info(f"🔍 [RsyncClient] Model override [{MODEL_OVERRIDE_KEY}] updated to [{checkpoint_name}]")
-                # clean up the unused lora adapters
-                await self.clean_up_lora_adapters(checkpoint_name)
-                logger.info(f"🔍 [RsyncClient] Cleaned up lora adapters: [{checkpoint_name}]")
+                await self.handle_rsync_task(checkpoint_name)
             except asyncio.TimeoutError:
                 pass
             except Exception as e:
@@ -185,15 +190,18 @@ class RsyncClient:
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--prefix_tag", type=str, default="auto")
-    parser.add_argument("--target_short_hostname", type=str, default="two")
+    parser.add_argument("--manual_upload", type=str, default=None)
     args = parser.parse_args()
 
     if args.prefix_tag == 'auto':
         logger.error(f"❌ [RsyncClient] --prefix_tag is required!")
         return
 
-    rsync_client = RsyncClient(args.prefix_tag, args.target_short_hostname)
-    await rsync_client.rsync_task()
+    rsync_client = RsyncClient(args.prefix_tag)
+    if args.manual_upload:
+        await rsync_client.handle_rsync_task(args.manual_upload)
+    else:
+        await rsync_client.rsync_task()
 
 if __name__ == "__main__":
     asyncio.run(main())
