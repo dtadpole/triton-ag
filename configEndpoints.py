@@ -78,6 +78,7 @@ class VLLMClient:
         self.port = self.vllm_config.get('port', 8091)
         self.timeout = self.vllm_config.get('timeout', 60)
         self.retries = self.vllm_config.get('retries', 3)
+        logger.info(f"🔍 [VLLMClient] Initialized VLLMClient for [{self.host}:{self.port}]")
 
     def load_config(self, config_path: str = "configEndpoints.yaml"):
         """Load config from yaml file"""
