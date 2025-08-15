@@ -54,8 +54,8 @@ class ComposerClient:
         self.inferenceClient = InferenceClient(config=self.inference_client_config)
         self.tokenizer = self.inferenceClient.tokenizer
         self.model_tag = self.inferenceClient.model_tag
-        # self.output_dir = self._get_output_dir(output_dir)
-        # self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.output_dir = self._get_output_dir(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         self.module_file = module_file
         self.prompt_file = prompt_file
         self.module_config = yaml.safe_load(open(module_file, 'r')).get('module', {})
@@ -202,7 +202,7 @@ class ComposerClient:
         task_tag = context_vars.get('task_tag', None)
         gen_tag = context_vars.get('gen_tag', None)
         logger.info(f"🔍 [Composer] [{run_tag}] Enqueued [{model_tag}] [{task_tag}] [{gen_tag}]...")
-    
+
     async def input_processor(self, block: ComposerBlock):
         """Process input variables."""
         for processor_name, processor_config in self.module_config.get('input_processor', {}).items():
@@ -263,10 +263,10 @@ class ComposerClient:
                     continue
 
                 logger.info(f"👌 [Composer] [{self.input_tag}] [worker {worker_id:02d}] [{worker_name}] completed.")
-            
+
             except asyncio.TimeoutError:
                 continue
-            
+
             except Exception as e:
                 logger.error(f"🔴 [Composer] [{self.input_tag}] Worker [{worker_id:02d}] error: [{type(e)}: {e}]")
                 logger.error(traceback.format_exc())
@@ -336,8 +336,8 @@ async def main():
     parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B.m_003_12")
     parser.add_argument("--input_dir", type=str, default="~/KernelBench/KernelBench/level1", help="Input directory containing Python files")
     parser.add_argument("--output_dir", type=str, default="~/.inference/output", help="Output directory for the composer results")
-    parser.add_argument("--provider", type=str, default="fireworks")  # most cost effective models are deepinfra-r1 and fireworks-v3
-    parser.add_argument("--model", type=str, default="deepseek-v3")  # most cost effective models are deepinfra-r1 and fireworks-v3
+    parser.add_argument("--provider", type=str, default="local")  # most cost effective models are deepinfra-r1 and fireworks-v3
+    parser.add_argument("--model", type=str, default="qwen3-32b-awq")  # most cost effective models are deepinfra-r1 and fireworks-v3
     parser.add_argument("--model_override", type=str, default=None)
     parser.add_argument("--parallel_workers", type=int, default=1)
     parser.add_argument("--num_samples", type=int, default=2)
