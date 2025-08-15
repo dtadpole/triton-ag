@@ -37,8 +37,7 @@ RUN pip install --no-cache-dir \
     scikit-learn \
     sentencepiece \
     together \
-    triton \
-    unsloth
+    triton
 
 # Install frequently changed or version-pinned packages separately
 RUN pip install \
