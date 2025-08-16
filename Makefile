@@ -140,18 +140,18 @@ vllm-qwen3-32b-devserver:
 	--dtype bfloat16 \
 	--return-tokens-as-token-ids \
 	--host "::" \
-	--port 8086
+	--port 8091
 
 
 vllm-qwen3-14b-devserver:
-	CUDA_VISIBLE_DEVICES=4 vllm serve Qwen/Qwen3-14B \
+	CUDA_VISIBLE_DEVICES=5 vllm serve Qwen/Qwen3-14B \
 	--max-model-len 40960 \
 	--enable-auto-tool-choice \
 	--tool-call-parser hermes \
 	--dtype bfloat16 \
 	--return-tokens-as-token-ids \
 	--host "::" \
-	--port 8086
+	--port 8091
 
 
 vllm-qwen3-14b-inference:
@@ -189,7 +189,7 @@ vllm-qwen25-7b-devserver:
 	--tool-call-parser hermes \
 	--tensor-parallel-size 2 \
 	--host "::" \
-	--port 8086
+	--port 8091
 
 sglang-qwen3-8b:
 	sglang serve qwen/qwen3-8b-instruct \
