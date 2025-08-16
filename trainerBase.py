@@ -254,12 +254,15 @@ class BaseTrainer:
         else:
             self.model = self.base_model
 
+        before_init = time.time()
         self.engine, _, _, _ = deepspeed.initialize(
             config=self.deepspeed_config,
             model=self.model,
             model_parameters=self.model.parameters(),
         )
         self.device = self.engine.device
+        after_init = time.time()
+        logger.info(f"🔍 [BaseTrainer-{self.rank}] Deepspeed initialized in [{after_init - before_init:.1f}s]")
 
         # if checkpoint exists, load it
         checkpoint_location = self.checkpoint_path / self.config.training.latest_checkpoint_name
@@ -358,7 +361,11 @@ class BaseTrainer:
     def _checkpoint_exists(self, checkpoint_path: str) -> bool:
         """Check if checkpoint exists"""
         checkpoint_path_obj = Path(checkpoint_path)
-        return (checkpoint_path_obj / CHECKPOINT_READY_FILE).exists()
+        world_size = dist.get_world_size()
+        for i in range(world_size):
+            if not (checkpoint_path_obj / f"{CHECKPOINT_READY_FILE}.{i}").exists():
+                return False
+        return True
 
     def _load_checkpoint(self, checkpoint_location: str):
         """Initialize from checkpoint"""
@@ -430,13 +437,13 @@ class BaseTrainer:
         dist.barrier()
 
         # touch checkpoint ready file
-        (checkpoint_path / CHECKPOINT_READY_FILE).touch()
-
-        # Update latest checkpoint link
-        self._update_latest_checkpoint_link(checkpoint_path)
+        (checkpoint_path / f"{CHECKPOINT_READY_FILE}.{self.rank}").touch()
 
         # callback only on rank 0
         if self.engine.global_rank == 0:
+            # Update latest checkpoint link
+            self._update_latest_checkpoint_link(checkpoint_path)
+
             # Callback
             if callback:
                 try:
