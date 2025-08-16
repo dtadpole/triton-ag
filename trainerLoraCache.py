@@ -21,23 +21,23 @@ class TrainerLoraCache:
         self.cache_folder = os.path.expanduser(cache_dir)
         self.extra_cache_size = extra_cache_size
 
-    def load_lora_model(self, checkpoint_name: Optional[str]=None):
+    def load_checkpoint(self, checkpoint_name: Optional[str]=None):
         if checkpoint_name is None:
-            self.lora_model.set_adapter('default')
-            # self.lora_model.eval()
-            return self.lora_model
+            # return base model if no checkpoint name is provided
+            logger.info(f"Using base model as checkpoint is [None]")
+            return self.base_model
         elif checkpoint_name in self.lora_model.peft_config.keys():
-            logger.info(f"LoRA model {checkpoint_name} already loaded")
+            logger.info(f"LoRA checkpoint {checkpoint_name} already loaded")
             self.lora_model.set_adapter(checkpoint_name)
             # self.lora_model.eval()
             return self.lora_model
         # load new lora model if not already loaded
         lora_path = os.path.join(self.cache_folder, self.prefix_tag, checkpoint_name)
-        logger.info(f"Loading LoRA model from {lora_path}")
+        logger.info(f"Loading LoRA checkpoint from {lora_path}")
         self.lora_model.load_adapter(lora_path, adapter_name=checkpoint_name)
         self.lora_model.set_adapter(checkpoint_name)
         # self.lora_model.eval()
-        logger.info(f"Loaded LoRA model from {lora_path}")
+        logger.info(f"Loaded LoRA checkpoint from {lora_path}")
         self._clean_cache(keep_checkpoint=checkpoint_name)
         return self.lora_model
 
@@ -80,13 +80,13 @@ if __name__ == "__main__":
         cache_dir=args.cache_dir
     )
 
-    trainer_lora_cache.load_lora_model(args.checkpoint_name_3)
-    trainer_lora_cache.load_lora_model(args.checkpoint_name_4)
-    trainer_lora_cache.load_lora_model(args.checkpoint_name_5)
-    trainer_lora_cache.load_lora_model(args.checkpoint_name_6)
-    trainer_lora_cache.load_lora_model(args.checkpoint_name_7)
-    trainer_lora_cache.load_lora_model(args.checkpoint_name_7) # load same checkpoint again to test if it is already loaded
-    trainer_lora_cache.load_lora_model(args.checkpoint_name_1) # put lower number at the end for testing
-    trainer_lora_cache.load_lora_model(args.checkpoint_name_2) # put lower number at the end for testing
+    trainer_lora_cache.load_checkpoint(args.checkpoint_name_3)
+    trainer_lora_cache.load_checkpoint(args.checkpoint_name_4)
+    trainer_lora_cache.load_checkpoint(args.checkpoint_name_5)
+    trainer_lora_cache.load_checkpoint(args.checkpoint_name_6)
+    trainer_lora_cache.load_checkpoint(args.checkpoint_name_7)
+    trainer_lora_cache.load_checkpoint(args.checkpoint_name_7) # load same checkpoint again to test if it is already loaded
+    trainer_lora_cache.load_checkpoint(args.checkpoint_name_1) # put lower number at the end for testing
+    trainer_lora_cache.load_checkpoint(args.checkpoint_name_2) # put lower number at the end for testing
 
     print(list(trainer_lora_cache.lora_model.peft_config.keys()))

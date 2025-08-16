@@ -149,14 +149,14 @@ class GRPOTrainer(BaseTrainer):
         """Get log probabilities for the completion tokens using old model"""
         # gc.collect()
         # torch.cuda.empty_cache()
-        lora_model = self.lora_cache.load_lora_model(checkpoint_name)
+        checkpoint_model = self.lora_cache.load_checkpoint(checkpoint_name)
         input_ids = input_ids.unsqueeze(0).to(self.device)
         # print('input_ids.shape: ', input_ids.shape, input_ids.dtype, input_ids.device)
         attention_mask = attention_mask.unsqueeze(0).to(self.device)
         # print('attention_mask.shape: ', attention_mask.shape, attention_mask.dtype, attention_mask.device)
-        lora_model.eval()
+        checkpoint_model.eval()
         with torch.inference_mode():
-            model_outputs = lora_model(input_ids=input_ids, attention_mask=attention_mask)
+            model_outputs = checkpoint_model(input_ids=input_ids, attention_mask=attention_mask)
             # print('model_outputs.logits.shape: ', model_outputs.logits.shape)
         action_log_probs = self._calculate_log_probs(
             model_outputs.logits[0],
@@ -193,7 +193,7 @@ class GRPOTrainer(BaseTrainer):
             prompt_token_len = len(prompt_token_ids[i])
             new_action_log_probs = self._calculate_log_probs(model_outputs.logits[i], prompt_token_len, completion_token_ids[i])
 
-            if 'checkpoint_name' in batch and batch['checkpoint_name'][i] is not None:
+            if 'checkpoint_name' in batch:
                 completion_log_probs_override = self._calculate_override_log_probs(
                     input_ids[i],
                     attention_mask[i],

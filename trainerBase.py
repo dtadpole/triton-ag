@@ -97,7 +97,7 @@ class TrainerLoraConfig(BaseModel):
     target_parameters: Optional[List[str] | str] = None
     modules_to_save: Optional[List[str] | str] = None
     bias: str = "none"
-    extra_cache_size: int = 1
+    extra_cache_size: int = 0
 
 class LoggingConfig(BaseModel):
     """Configuration for logging parameters"""
