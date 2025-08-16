@@ -1,14 +1,15 @@
 # Set environment variables for optimal performance
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["LC_ALL"]="C"
 
-# Import Unsloth first for optimal performance
-from unsloth import FastLanguageModel
-import unsloth
 import asyncio
 import sys
+import json
+import deepspeed
 import torch
 import torch.optim as optim
+import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset
 from torch.nn.utils import clip_grad_norm_
 from transformers import (
@@ -17,13 +18,14 @@ from transformers import (
     AutoConfig,
     AutoTokenizer,
 )
-import bitsandbytes as bnb
 from peft import (
     TaskType,
     LoraConfig,
     get_peft_model,
     get_peft_model_state_dict,
     set_peft_model_state_dict,
+    PeftConfig,
+    PeftModel,
 )
 from typing import Dict, List, Optional, Any, Callable
 import time
@@ -42,6 +44,11 @@ import argparse
 from logger import logger
 from trainerUtil import SimpleCollator, merge_dicts
 
+TRAINING_STATUS_FILE = "training_status.json"
+ADAPTER_MODEL_FILE = "adapter_model.safetensors"
+CHECKPOINT_READY_FILE = "checkpoint.ready"
+TRAINING_STATE_FILE = "training_state.pt"
+DEEPSPEED_TAG = "ds"
 
 class TrainerStatus(BaseModel):
     """Running status of the trainer"""
@@ -52,12 +59,15 @@ class ModelConfig(BaseModel):
     name: str = 'gpt2'
     tokenizer_name: Optional[str] = None
     max_seq_length: int = 16384
-    use_unsloth: bool = True
-    use_gradient_checkpointing: str = "unsloth"
+    use_unsloth: bool = False
+    use_deepspeed: bool = True
+    deepspeed_config_path: str = "trainerDeepspeed.json"
+    use_gradient_checkpointing: str = "true"
     load_in_4bit: bool = True
     load_in_8bit: bool = False
     full_finetuning: bool = False
     compute_dtype: str = "bfloat16"
+    trust_remote_code: bool = True
 
 class OptimizerConfig(BaseModel):
     """Configuration for optimizer parameters"""
@@ -140,7 +150,6 @@ class TrainerConfig(BaseModel):
                 name=model_data.get('name', 'gpt2'),
                 tokenizer_name=model_data.get('tokenizer_name'),
                 max_seq_length=model_data.get('max_seq_length', 1024),
-                use_unsloth=model_data.get('use_unsloth', True),
                 use_gradient_checkpointing=model_data.get('use_gradient_checkpointing', "unsloth"),
                 load_in_4bit=model_data.get('load_in_4bit', False),
                 load_in_8bit=model_data.get('load_in_8bit', False),
@@ -216,41 +225,44 @@ class TextDataset(Dataset):
 class BaseTrainer:
     """Base trainer for Hugging Face models with step-by-step training implementation"""
 
-    def __init__(self, prefix_tag: str, config: TrainerConfig, status: Optional[TrainerStatus] = None, base_trainer = None):
+    def __init__(self, prefix_tag: str, config: TrainerConfig, status: Optional[TrainerStatus] = None):
         self.prefix_tag = prefix_tag
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        if base_trainer is None:
-            self.trainer_status = status if status is not None else TrainerStatus()
-        else:
-            self.trainer_status = base_trainer.trainer_status
+        # Setup output directory
+        self.checkpoint_path = Path(os.path.expanduser(self.config.training.checkpoint_path)) / self.prefix_tag
+        self.checkpoint_path.mkdir(parents=True, exist_ok=True)
 
-        # Set random seeds for reproducibility
-        self._set_seed()
+        deepspeed.init_distributed(dist_backend="nccl")
+        deepspeed_config_path = Path(os.path.expanduser(self.config.model.deepspeed_config_path))
+        if not deepspeed_config_path.exists():
+            raise FileNotFoundError(f"Deepspeed config file not found: {deepspeed_config_path}")
+        with open(deepspeed_config_path, 'r') as f:
+            self.deepspeed_config = json.load(f)
+
+        self.trainer_status = status if status is not None else TrainerStatus()
 
         # Initialize model and tokenizer
-        if base_trainer is None:
-            self.base_model, self.tokenizer = self._setup_model_and_tokenizer()
-        else:
-            self.base_model = base_trainer.base_model
-            self.tokenizer = base_trainer.tokenizer
+        self.base_model, self.tokenizer = self._setup_model_and_tokenizer()
 
         # Setup LoRA if enabled
-        if base_trainer is None:
-            if self.config.lora.use_lora:
-                self.model = self._setup_lora()
-            else:
-                self.model = self.base_model
+        if self.config.lora.use_lora:
+            self.model = self._setup_lora()
         else:
-            self.model = base_trainer.model
+            self.model = self.base_model
 
-        # Initialize optimizer and scheduler
-        if base_trainer is None:
-            self.optimizer, self.scheduler = self._setup_optimizer_and_scheduler()
-        else:
-            self.optimizer = base_trainer.optimizer
-            self.scheduler = base_trainer.scheduler
+        self.engine, _, _, _ = deepspeed.initialize(
+            config=self.deepspeed_config,
+            model=self.model,
+            model_parameters=self.model.parameters(),
+        )
+        self.device = self.engine.device
+
+        # if checkpoint exists, load it
+        checkpoint_location = self.checkpoint_path / self.config.training.latest_checkpoint_name
+        if self._checkpoint_exists(checkpoint_location):
+            self._load_checkpoint(checkpoint_location)
 
         # Initialize data collator
         self.data_collator = SimpleCollator(
@@ -258,29 +270,12 @@ class BaseTrainer:
             pad_to_multiple_of=8,
         )
 
-        # Setup output directory
-        self.checkpoint_path = Path(os.path.expanduser(config.training.checkpoint_path)) / self.prefix_tag
-
-        self.checkpoint_path.mkdir(parents=True, exist_ok=True)
-
         # Initialize logging
         self.config.logging.wandb_run_id = self.prefix_tag
-        self.config.logging.wandb_run_name = self.prefix_tag + "_" + datetime.now().strftime("%m%d_%H%M%S")
-        if base_trainer is None:
-            self._setup_logging()
-        else:
-            self.config.logging.wandb_run_id = base_trainer.config.logging.wandb_run_id
-            self.config.logging.wandb_run_name = base_trainer.config.logging.wandb_run_name
+        self.config.logging.wandb_run_name = self.prefix_tag + "_" + datetime.now().strftime("%m%d")
+        self._setup_logging()
 
         logger.info(f"🔍 [{self.__class__.__name__}] Config: {self.config.model_dump_json()}")
-
-        # Load checkpoint if specified
-        if base_trainer is None and config.training.latest_checkpoint_name:
-            checkpoint_location = self.checkpoint_path / config.training.latest_checkpoint_name
-            if self._checkpoint_exists(checkpoint_location):
-                self._load_checkpoint(checkpoint_location)
-            else:
-                logger.warning(f"⚠️ [{self.__class__.__name__}] Checkpoint not found: {checkpoint_location} - Starting fresh training")
 
     def short_name(self):
         return 'base'
@@ -305,224 +300,137 @@ class BaseTrainer:
         """Initialize the model and tokenizer using Unsloth"""
         logger.info(f"🚀 [{self.__class__.__name__}] Loading model: {self.config.model.name}")
 
-        if self.config.model.use_unsloth:
-            # Load model with Unsloth
-            model, tokenizer = FastLanguageModel.from_pretrained(
-                model_name=self.config.model.name,
-                dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16),
-                max_seq_length=self.config.model.max_seq_length,
-                load_in_4bit=self.config.model.load_in_4bit,
-                load_in_8bit=self.config.model.load_in_8bit,
-                full_finetuning=self.config.model.full_finetuning,
-                use_gradient_checkpointing=self.config.model.use_gradient_checkpointing,
-                # token="hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
-            )
-        else:
-            config = AutoConfig.from_pretrained(self.config.model.name)
-            config.max_position_embeddings = self.config.model.max_seq_length
-            model = AutoModelForCausalLM.from_pretrained(
-                self.config.model.name,
-                config=config,
-                torch_dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16),
-                device_map="auto",
-            )
+        config = AutoConfig.from_pretrained(self.config.model.name)
+        config.max_position_embeddings = self.config.model.max_seq_length
+        model = AutoModelForCausalLM.from_pretrained(
+            self.config.model.name,
+            config=config,
+            torch_dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16),
+            trust_remote_code=self.config.model.trust_remote_code,
+            # device_map="auto",
+        )
+        model.config.use_cache = False              # required with grad ckpt
+        if self.config.model.use_gradient_checkpointing:
             model.gradient_checkpointing_enable()
-            tokenizer = AutoTokenizer.from_pretrained(self.config.model.name if self.config.model.tokenizer_name is None else self.config.model.tokenizer_name)
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            self.config.model.name if self.config.model.tokenizer_name is None else self.config.model.tokenizer_name)
 
         # Ensure tokenizer has pad token
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        # Special handling for Qwen models
-        is_qwen_model = "qwen" in self.config.model.name.lower()
-        if is_qwen_model:
-            # Ensure Qwen-specific tokenizer settings
-            if hasattr(tokenizer, 'chat_template') and tokenizer.chat_template is None:
-                logger.warning("⚠️ [{self.__class__.__name__}] Qwen model missing chat template, this may cause generation issues")
-
-            # Set trust_remote_code for Qwen models if needed
-            if hasattr(tokenizer, 'trust_remote_code'):
-                tokenizer.trust_remote_code = True
-
-            logger.info(f"🛠️ [{self.__class__.__name__}] Qwen tokenizer configured with chat template: {hasattr(tokenizer, 'chat_template')}")
-
-        # Log model information
-        total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-        logger.info(f"📜 [{self.__class__.__name__}] Model loaded - Total: {total_params:,}, Trainable: {trainable_params:,} ({100 * trainable_params / total_params:.1f}%)")
+        self._print_model_info(model)
 
         return model, tokenizer
 
     def _setup_lora(self):
         """Setup LoRA configuration using Unsloth"""
-        logger.info(f"🛠️ [{self.__class__.__name__}] Setting up LoRA (rank={self.config.lora.rank}, alpha={self.config.lora.alpha})")
+        logger.info(f"🌸 [{self.__class__.__name__}] Setting up LoRA (rank={self.config.lora.rank}, alpha={self.config.lora.alpha})")
 
-        if self.config.model.use_unsloth:
-        # Apply LoRA with Unsloth
-            lora_model = FastLanguageModel.get_peft_model(
-                self.base_model,
-                r=self.config.lora.rank,
-                target_modules=self.config.lora.target_modules,
-                modules_to_save=self.config.lora.modules_to_save,
-                lora_alpha=self.config.lora.alpha,
-                lora_dropout=self.config.lora.dropout,
-                bias=self.config.lora.bias,
-                use_gradient_checkpointing=self.config.model.use_gradient_checkpointing,
-                random_state=self.config.training.seed if self.config.training.seed is not None and self.config.training.seed >= 0 else random.randint(0,2**31),
-                use_rslora=False,  # Use regular LoRA
-                loftq_config=None,
-                # autocast_adapter_dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16),
-            )
+        # Load checkpoint if specified
+        checkpoint_location = self.checkpoint_path / self.config.training.latest_checkpoint_name
+        if self._checkpoint_exists(checkpoint_location):
+            lora_model = PeftModel.from_pretrained(self.base_model, checkpoint_location, is_trainable=True)
+            logger.info(f"🌸 [{self.__class__.__name__}] Loaded LoRA checkpoint: {checkpoint_location}")
         else:
-            lora_model = get_peft_model(self.base_model, TrainerLoraConfig(
+            logger.warning(f"⚠️ [{self.__class__.__name__}] LoRA checkpoint not found: {checkpoint_location} - Starting fresh training...")
+            lora_cfg = LoraConfig(
                 r=self.config.lora.rank,
                 lora_alpha=self.config.lora.alpha,
-                target_modules=self.config.lora.target_modules,
-                target_parameters=self.config.lora.target_parameters,
                 lora_dropout=self.config.lora.dropout,
                 bias=self.config.lora.bias,
                 task_type=TaskType.CAUSAL_LM,
-                # autocast_adapter_dtype=False,
-            ))
+                target_modules=self.config.lora.target_modules,
+            )
+            lora_model = get_peft_model(self.base_model, lora_cfg)
 
-        # Log LoRA information
-        trainable_params = sum(p.numel() for p in lora_model.parameters() if p.requires_grad)
-        total_params = sum(p.numel() for p in lora_model.parameters())
-
-        logger.info(f"🛠️ [{self.__class__.__name__}] LoRA applied - Trainable: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)")
-
-        if trainable_params == 0:
-            logger.error(f"❌ [{self.__class__.__name__}] No trainable parameters found!")
-            raise RuntimeError("No trainable parameters found after LoRA application")
-
+        self._print_model_info(lora_model)
         return lora_model
 
-    def _setup_optimizer_and_scheduler(self):
-        """Setup optimizer and learning rate scheduler"""
-        # Group parameters for weight decay
-        no_decay = ["bias", "LayerNorm.weight", "layer_norm.weight"]
-
-        optimizer_grouped_parameters = [
-            {
-                "params": [p for n, p in self.model.named_parameters()
-                          if p.requires_grad and not any(nd in n for nd in no_decay)],
-                "weight_decay": self.config.optimizer.weight_decay,
-            },
-            {
-                "params": [p for n, p in self.model.named_parameters()
-                          if p.requires_grad and any(nd in n for nd in no_decay)],
-                "weight_decay": 0.0,
-            },
-        ]
-
-        # Create optimizer based on type (using bitsandbytes paged optimizers)
-        optimizer_type = self.config.optimizer.optimizer_type.lower()
-        if optimizer_type == "adamw":
-            # self.optimizer = bnb.optim.PagedAdamW(
-            optimizer = optim.AdamW(
-                optimizer_grouped_parameters,
-                lr=self.config.training.learning_rate,
-                betas=self.config.optimizer.betas,
-                eps=self.config.optimizer.eps
-            )
-        elif optimizer_type == "adam":
-            # self.optimizer = bnb.optim.PagedAdam(
-            optimizer = optim.Adam(
-                optimizer_grouped_parameters,
-                lr=self.config.training.learning_rate,
-                betas=self.config.optimizer.betas,
-                eps=self.config.optimizer.eps
-            )
-        elif optimizer_type == "sgd":
-            # Fall back to standard SGD as bitsandbytes doesn't have paged SGD
-            optimizer = optim.SGD(
-                optimizer_grouped_parameters,
-                lr=self.config.training.learning_rate,
-                momentum=self.config.optimizer.momentum,
-                nesterov=self.config.optimizer.nesterov
-            )
-        else:
-            raise ValueError(f"Unsupported optimizer type: {self.config.optimizer.optimizer_type}")
-
-        # Setup learning rate scheduler
-        scheduler = get_scheduler(
-            self.config.training.scheduler_type,
-            optimizer=optimizer,
-            num_warmup_steps=self.config.training.num_warmup_steps,
-            num_training_steps=self.config.training.max_steps,
-        )
-
-        logger.info(f"⚙️ [{self.__class__.__name__}] Paged optimizer ({optimizer_type}) and scheduler initialized")
-
-        return optimizer, scheduler
+    def _print_model_info(self, model):
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        logger.info(f"🛳️ [{model.__class__.__name__}] loaded - Trainable: [{trainable_params:,}/{total_params:,}] ({100 * trainable_params / total_params:.1f}%)")
 
     def _checkpoint_exists(self, checkpoint_path: str) -> bool:
         """Check if checkpoint exists"""
         checkpoint_path_obj = Path(checkpoint_path)
-
-        # Check for training_state.pt file
-        if checkpoint_path_obj.is_dir():
-            return (checkpoint_path_obj / "training_state.pt").exists()
-        else:
-            return checkpoint_path_obj.exists()
+        return (checkpoint_path_obj / CHECKPOINT_READY_FILE).exists()
 
     def _load_checkpoint(self, checkpoint_location: str):
-        """Load checkpoint for resuming training"""
+        """Initialize from checkpoint"""
+        start_time = time.time()
         logger.info(f"🔄 [{self.__class__.__name__}] Loading checkpoint from: {checkpoint_location}")
 
-        # Get the training state file path
-        checkpoint_path_obj = Path(checkpoint_location)
-        training_state_path = checkpoint_path_obj / "training_state.pt" if checkpoint_path_obj.is_dir() else checkpoint_path_obj
+        dist.barrier()
+        # load training status always
+        training_status_path = checkpoint_location / TRAINING_STATUS_FILE
+        with open(training_status_path, 'r') as f:
+            loaded_status = json.load(f)
+            self.trainer_status = TrainerStatus.model_validate(loaded_status)
+            logger.info(f"🔍 [{self.__class__.__name__}] [RANK={self.engine.global_rank}] Loaded training status: {self.trainer_status.model_dump()}")
 
-        # Load checkpoint
-        checkpoint = torch.load(training_state_path, map_location='cpu')
-
-        # Load model state
-        if self.config.lora.use_lora and 'lora_state_dict' in checkpoint:
-            set_peft_model_state_dict(self.model, checkpoint['lora_state_dict'])
-        elif not self.config.lora.use_lora and 'model_state_dict' in checkpoint:
-            self.model.load_state_dict(checkpoint['model_state_dict'])
+        # load optimizer state and scheduler state if using lora (lora model state is already loaded)
+        if self.config.lora.use_lora:
+            opt_state = torch.load(f"{checkpoint_location}/optim_rank{self.engine.global_rank}.pt", map_location="cpu", weights_only=False)
+            # Build a list with only *this* rank's shard set
+            shard_list = [None] * dist.get_world_size()
+            shard_list[self.engine.global_rank] = opt_state
+            self.engine.optimizer.load_state_dict(shard_list)
+            logger.info(f"🔍 [{self.__class__.__name__}] [RANK={self.engine.global_rank}] Loaded optimizer state from {checkpoint_location}")
+            # load scheduler state if using lora
+            if hasattr(self.engine, "lr_scheduler") and os.path.exists(f"{checkpoint_location}/scheduler.pt"):
+                sch_state = torch.load(f"{checkpoint_location}/scheduler.pt", map_location="cpu", weights_only=False)
+                self.engine.lr_scheduler.load_state_dict(sch_state)
+                logger.info(f"🔍 [{self.__class__.__name__}] [RANK={self.engine.global_rank}] Loaded scheduler state from {checkpoint_location}")
         else:
-            logger.warning(f"⚠️ [{self.__class__.__name__}] Model state not found or incompatible in checkpoint")
+            # load full model only if not using lora
+            self.engine.load_checkpoint(checkpoint_location, tag=DEEPSPEED_TAG)
+            logger.info(f"🔍 [{self.__class__.__name__}] [RANK={self.engine.global_rank}] Loaded full model state")
+        dist.barrier()
 
-        # Load optimizer and scheduler state
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        if 'scheduler_state_dict' in checkpoint:
-            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-
-        # Load training state
-        self.trainer_status.global_step = checkpoint.get('global_step', 0)
-
-        logger.info(f"📜 [{self.__class__.__name__}] Checkpoint loaded - Step: [{self.trainer_status.global_step}]")
+        logger.info(f"📜 [{self.__class__.__name__}] Checkpoint loaded - G-Step: [{self.trainer_status.global_step}] in [{time.time() - start_time:.1f}s]")
 
     def _save_checkpoint(self, step: int, callback: Optional[Callable] = None):
         """Save training checkpoint"""
+        start_time = time.time()
         checkpoint_path = self.checkpoint_path / f"checkpoint-{step}"
         checkpoint_path.mkdir(parents=True, exist_ok=True)
 
-        # Save model and tokenizer
-        self.model.save_pretrained(checkpoint_path)
-        self.tokenizer.save_pretrained(checkpoint_path)
+        dist.barrier()
+        if self.engine.global_rank == 0:
+            # Save config
+            with open(checkpoint_path / "training_config.yaml", 'w') as f:
+                yaml.dump(self.config.model_dump(), f, default_flow_style=False)
+            # save tokenizer
+            self.tokenizer.save_pretrained(checkpoint_path)
+            # save training status
+            training_status_path = checkpoint_path / TRAINING_STATUS_FILE
+            with open(training_status_path, 'w') as f:
+                json.dump(self.trainer_status.model_dump(), f)
 
-        # Save training state
-        checkpoint_state = {
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
-            'global_step': self.trainer_status.global_step,
-            'config': self.config.model_dump(),
-        }
-
+        # directly save optimizer state and lora state if using lora
         if self.config.lora.use_lora:
-            checkpoint_state['lora_state_dict'] = get_peft_model_state_dict(self.model)
+            torch.save(self.engine.optimizer.state_dict(), f"{checkpoint_path}/optim_rank{self.engine.global_rank}.pt")
+            # Scheduler is small & identical on all ranks → save on rank 0
+            if hasattr(self.engine, "lr_scheduler") and self.engine.lr_scheduler is not None and self.engine.global_rank == 0:
+                torch.save(self.engine.lr_scheduler.state_dict(), f"{checkpoint_path}/scheduler.pt")
+            if self.engine.global_rank == 0:
+                if int(self.engine.zero_optimization_stage()) == 3:
+                    with deepspeed.GatheredParameters(self.model.parameters(), modifier_rank=0):
+                        self.engine.module.save_pretrained(checkpoint_path)
+                else:
+                    self.engine.module.save_pretrained(checkpoint_path)
+            else:
+                # save full model using deepspeed only if not using lora
+                self.engine.module.save_checkpoint(checkpoint_path, DEEPSPEED_TAG)
+            dist.barrier()
         else:
-            checkpoint_state['model_state_dict'] = self.model.state_dict()
+            self.engine.save_checkpoint(checkpoint_path, tag=DEEPSPEED_TAG)
 
-        torch.save(checkpoint_state, checkpoint_path / "training_state.pt")
-
-        # Save config
-        with open(checkpoint_path / "training_config.yaml", 'w') as f:
-            yaml.dump(self.config.model_dump(), f, default_flow_style=False)
+        # touch checkpoint ready file
+        (checkpoint_path / CHECKPOINT_READY_FILE).touch()
 
         # Update latest checkpoint link
         self._update_latest_checkpoint_link(checkpoint_path)
@@ -539,7 +447,7 @@ class BaseTrainer:
         else:
             logger.info(f"🔍 [{self.__class__.__name__}] No callback provided")
 
-        logger.info(f"💾 [{self.__class__.__name__}] Checkpoint saved: {checkpoint_path}")
+        logger.info(f"💾 [{self.__class__.__name__}] Checkpoint saved: {checkpoint_path} in [{time.time() - start_time:.1f}s]")
 
     def _update_latest_checkpoint_link(self, checkpoint_path: Path):
         """Update latest checkpoint link"""
@@ -600,7 +508,11 @@ class BaseTrainer:
         loss = loss * self.config.training.loss_multiplier / self.config.training.gradient_accumulation_steps
 
         # Backward pass
-        loss.backward()
+        # if use deepspeed, use deepspeed.backward(loss)
+        if self.config.model.use_deepspeed:
+            self.engine.backward(loss)
+        else:
+            loss.backward()
 
         return loss.item()
 
@@ -610,14 +522,8 @@ class BaseTrainer:
         grad_norm = clip_grad_norm_(self.model.parameters(), self.config.training.max_grad_norm)
         # logger.info(f"🔍 [{self.__class__.__name__}] Grad norm: [{grad_norm:.4f}] max grad norm: [{self.config.training.max_grad_norm:.2f}]")
 
-        # Update parameters
-        self.optimizer.step()
-
-        # Update learning rate
-        self.scheduler.step()
-
-        # Zero gradients
-        self.optimizer.zero_grad()
+        self.engine.step()
+        self.engine.zero_grad()
 
         return grad_norm
 
@@ -681,7 +587,7 @@ class BaseTrainer:
                 await asyncio.sleep(0.1)
 
                 # Log metrics
-                current_lr = self.scheduler.get_last_lr()[0]
+                current_lr = self.engine.get_lr()[0]
                 self._log_metrics({
                     "train/loss": avg_loss,
                     "train/learning_rate": current_lr,
@@ -707,7 +613,7 @@ class BaseTrainer:
             # always save checkpoint at the end of the block
             self._save_checkpoint(self.trainer_status.global_step)
         except Exception as e:
-            logger.error(f"❌ [{self.__class__.__name__}] [{run_tag}] Failed to save checkpoint: {e}")
+            logger.error(f"❌ [{self.__class__.__name__}] [{run_tag}] Failed to save checkpoint: [{type(e).__name__}: {e}]")
 
         total_time = time.time() - start_time
         logger.info(f"🎉 [{self.__class__.__name__}] [{run_tag}] Block completed in [{total_time:.1f}s] - Final global step: [{self.trainer_status.global_step}]")
@@ -854,7 +760,7 @@ def create_sample_training_dataset(tokenizer, size: int = 100, max_length: int =
 async def main():
     """Main training function"""
     parser = argparse.ArgumentParser(description="Train a model using BaseTrainer")
-    parser.add_argument("--prefix-tag", type=str, default="v0.1.a",
+    parser.add_argument("--prefix-tag", type=str, default="auto",
                        help="Prefix tag for the training run")
     parser.add_argument("--config", type=str, default="trainerBase.yaml",
                        help="Path to configuration YAML file")
@@ -862,10 +768,11 @@ async def main():
                        help="Override model name")
     parser.add_argument("--max-steps", type=int, default=None,
                        help="Override maximum training steps")
+    # parser.add_argument("--use-deepspeed", type=bool, action="store_true", default=False,
+    #                    help="Use deepspeed")
+    parser.add_argument("--local_rank", type=int, default=int(os.getenv("LOCAL_RANK", -1)))
+    args, _ = parser.parse_known_args()  # still robust to extras
 
-    args = parser.parse_args()
-
-    # Load configuration
     try:
         config = TrainerConfig.from_yaml(args.config)
         logger.info(f"📜 Configuration loaded from {args.config}")
@@ -881,9 +788,6 @@ async def main():
 
     # Display configuration summary
     logger.info(f"📊 Training Config - Model: {config.model.name}, Steps: {config.training.max_steps}, Batch: {config.training.micro_batch_size}, LR: {config.training.learning_rate}")
-    logger.info(f"⚙️ Optimizer Config - Type: {config.optimizer.optimizer_type}, Weight Decay: {config.optimizer.weight_decay}")
-    if config.lora.use_lora:
-        logger.info(f"🎯 LoRA Config - Rank: {config.lora.rank}, Alpha: {config.lora.alpha}")
 
     # Initialize trainer
     try:
