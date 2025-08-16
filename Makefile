@@ -4,6 +4,8 @@ ENV_VARS ?= PYTHONNOUSERSITE=1 \
 HOST=$(shell hostname)
 IS_DEVSERVER=$(shell hostname | grep -E -c "dev.*\.facebook\.com")
 META_PROXY := https_proxy=http://fwdproxy:8080 http_proxy=http://fwdproxy:8080 ftp_proxy=http://fwdproxy:8080 http_no_proxy='\''\'\'''\''.facebook.com|.tfbnw.net|*.fb.com'\''\'\'
+VLLM_SETTING := VLLM_ALLOW_RUNTIME_LORA_UPDATING=True HF_HUB_DISABLE_XET=1 HF_HUB_ENABLE_HF_TRANSFER=0
+
 
 .PHONY: help finetune finetune-single finetune-2gpu finetune-debug
 
@@ -40,11 +42,13 @@ endif
 
 
 env_autoawq:
-	docker run -it  --gpus all --net=host -p 8081:8081 -p 8082:8082 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/autoawq /bin/bash
-
+	docker run -it  --gpus all --net=host -p 8081:8081 -p 8082:8082 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.inference/:/root/.inference/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/autoawq /bin/bash
 
 env:
-	docker run -it  --gpus all --net=host -p 8081:8081 -p 8082:8082 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/triton_ag /bin/bash
+	docker run -it  --gpus all --net=host -p 8081:8081 -p 8082:8082 -v ~/.trainer/:/root/.trainer/ -v ~/.inference/:/root/.inference/ -v ~/.bashrc:/root/.bashrc -v ~/.netrc:/root/.netrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/triton_ag /bin/bash -c "make wandb_login && /bin/bash"
+
+wandb_login:
+	wandb login --host=https://fairwandb.org
 
 vllm_env:
 	docker run -it  --gpus all --net=host -p 8081:8081 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/triton_ag /bin/bash
@@ -129,22 +133,54 @@ vllm-qwen3-32b:
 	--tool-call-parser hermes
 
 vllm-qwen3-32b-devserver:
-	CUDA_VISIBLE_DEVICES=2 vllm serve Qwen/Qwen3-32B-AWQ \
+	CUDA_VISIBLE_DEVICES=4 vllm serve Qwen/Qwen3-32B-AWQ \
 	--max-model-len 40960 \
 	--enable-auto-tool-choice \
 	--tool-call-parser hermes \
 	--dtype bfloat16 \
+	--return-tokens-as-token-ids \
 	--host "::" \
 	--port 8086
 
+
 vllm-qwen3-14b-devserver:
-	CUDA_VISIBLE_DEVICES=2,5 vllm serve Qwen/Qwen3-14B \
-	--rope-scaling '{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' --max-model-len 131072 \
+	CUDA_VISIBLE_DEVICES=4 vllm serve Qwen/Qwen3-14B \
+	--max-model-len 40960 \
 	--enable-auto-tool-choice \
 	--tool-call-parser hermes \
-	--tensor-parallel-size 2 \
+	--dtype bfloat16 \
+	--return-tokens-as-token-ids \
 	--host "::" \
 	--port 8086
+
+
+vllm-qwen3-14b-inference:
+	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=4 vllm serve Qwen/Qwen3-14B \
+	--enable-lora \
+	--max-lora-rank 128 \
+	--max-loras 8 \
+	--gpu-memory-utilization 0.9 \
+	--max_model_len 24576 \
+	--load_format safetensors \
+	--guided_decoding_backend guidance \
+	--guided-decoding-disable-fallback \
+	--enable_auto_tool_choice \
+	--tool_call_parser hermes \
+	--scheduling_policy priority \
+	--enable_chunked_prefill \
+	--max_num_batched_tokens 8192 \
+	--max_num_seqs 16 \
+	--max_log_len 0 \
+	--trust_remote_code \
+	--enable_prefix_caching \
+	--prefix-caching-hash-algo builtin \
+	--generation-config vllm \
+	--override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
+	--return-tokens-as-token-ids \
+	--enforce-eager \
+	--host "::" \
+	--port 8091
+
 
 vllm-qwen25-7b-devserver:
 	CUDA_VISIBLE_DEVICES=2,5 vllm serve unsloth/Qwen2.5-7B \
@@ -199,3 +235,101 @@ llama.cpp-server-qwen3-32b:
 jupyter:
 	echo ${ENV_VARS}
 	env ${ENV_VARS} jupyter notebook --allow-root --port 8082 --ip 0.0.0.0 --NotebookApp.token='' --NotebookApp.password=''
+
+
+MODEL_TO_SERVE ?= finetune_model_output/sft_t2/qwen3_32b_awq
+
+# MODEL_TO_SERVE ?= Qwen/Qwen3-32B-AWQ
+
+launch_vllm_servers:
+	make launch_vllm1
+	make launch_vllm2
+	make launch_vllm3
+	make vllm_serve
+
+vllm_serve:
+	docker run -itd --ipc host --rm --net=host -v ./nginx_conf/:/etc/nginx/conf.d/ --name vllm_service --replace nginx-lb:latest
+
+launch_vllm1:
+	${META_PROXY} docker run -itd  \
+	--gpus all \
+	--ipc host \
+	--net=host \
+	-p 8001:8001 \
+	-v ~/.bashrc:/root/.bashrc \
+    -v ~/.keys/:/root/.keys/ \
+	-v /data/users/${USER}/:/root/.cache/ \
+	-v ~/.kbeval:/root/.kbeval/ \
+	-v ${PWD}:/workspace/ \
+	--name vllm1 \
+	--replace \
+	--rm \
+	localhost/triton_ag \
+	/bin/bash -c "make serve_model1"
+
+launch_vllm2:
+	${META_PROXY} docker run -itd  \
+	--gpus all \
+	--ipc host \
+	--net=host \
+	-p 8002:8002 \
+	-v ~/.bashrc:/root/.bashrc \
+    -v ~/.keys/:/root/.keys/ \
+	-v /data/users/${USER}/:/root/.cache/ \
+	-v ~/.kbeval:/root/.kbeval/ \
+	-v ${PWD}:/workspace/ \
+	--name vllm2 \
+	--replace \
+	--rm \
+	localhost/triton_ag \
+	/bin/bash -c "make serve_model2"
+
+launch_vllm3:
+	${META_PROXY} docker run -itd  \
+	--gpus all \
+	--ipc host \
+	--net=host \
+	-p 8003:8003 \
+	-v ~/.bashrc:/root/.bashrc \
+    -v ~/.keys/:/root/.keys/ \
+	-v /data/users/${USER}/:/root/.cache/ \
+	-v ~/.kbeval:/root/.kbeval/ \
+	-v ${PWD}:/workspace/ \
+	--name vllm3 \
+	--replace \
+	--rm \
+	localhost/triton_ag \
+	/bin/bash -c "make serve_model3"
+
+serve_model1:
+	CUDA_VISIBLE_DEVICES=2 vllm serve ${MODEL_TO_SERVE} \
+	--rope-scaling '{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' --max-model-len 65536 \
+	--enable-auto-tool-choice \
+	--tool-call-parser hermes \
+	--host "::" \
+	--port 8001
+
+serve_model2:
+	CUDA_VISIBLE_DEVICES=3 vllm serve ${MODEL_TO_SERVE} \
+	--rope-scaling '{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' --max-model-len 65536 \
+	--enable-auto-tool-choice \
+	--tool-call-parser hermes \
+	--host "::" \
+	--port 8002
+
+serve_model3:
+	CUDA_VISIBLE_DEVICES=4 vllm serve ${MODEL_TO_SERVE} \
+	--rope-scaling '{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' --max-model-len 65536 \
+	--enable-auto-tool-choice \
+	--tool-call-parser hermes \
+	--host "::" \
+	--port 8003
+
+vllm-qwen3-32b:
+	CUDA_VISIBLE_DEVICES=2,3 vllm serve Qwen/Qwen3-32B \
+	--rope-scaling '{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' --max-model-len 65536 \
+	--enable-auto-tool-choice \
+	--tool-call-parser hermes \
+	--tensor-parallel-size 2 \
+	--host "::" \
+	--port 8001

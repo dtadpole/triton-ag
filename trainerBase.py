@@ -364,7 +364,6 @@ class BaseTrainer:
                 self.base_model,
                 r=self.config.lora.rank,
                 target_modules=self.config.lora.target_modules,
-                target_parameters=self.config.lora.target_parameters,
                 modules_to_save=self.config.lora.modules_to_save,
                 lora_alpha=self.config.lora.alpha,
                 lora_dropout=self.config.lora.dropout,
@@ -376,7 +375,7 @@ class BaseTrainer:
                 # autocast_adapter_dtype=getattr(torch, self.config.model.compute_dtype, torch.bfloat16),
             )
         else:
-            lora_model = get_peft_model(self.base_model, LoraConfig(
+            lora_model = get_peft_model(self.base_model, TrainerLoraConfig(
                 r=self.config.lora.rank,
                 lora_alpha=self.config.lora.alpha,
                 target_modules=self.config.lora.target_modules,
