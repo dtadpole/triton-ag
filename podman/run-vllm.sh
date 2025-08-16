@@ -6,7 +6,8 @@ export HF_HUB_ENABLE_HF_TRANSFER=0
 podman run -it \
     --security-opt=label=disable \
     --device nvidia.com/gpu=all \
-    --network host --ipc=host \
+    --network host \
+    --shm-size=32g \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -v ~/.trainer:/root/.trainer \
     --env "HF_TOKEN=`cat ~/.keys/huggingface.api.key`" \
