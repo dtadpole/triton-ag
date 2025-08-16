@@ -800,17 +800,17 @@ async def main():
     # Initialize trainer
     try:
         trainer = BaseTrainer(args.prefix_tag, config)
-        logger.info("✅ Trainer initialized")
+        logger.info(f"✅ [BaseTrainer-{trainer.rank}] Trainer initialized")
     except Exception as e:
-        logger.error(f"❌ Trainer initialization failed: {e}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
+        logger.error(f"❌ [BaseTrainer-{trainer.rank}] Trainer initialization failed: {e}")
+        logger.error(f" [BaseTrainer-{trainer.rank}] Traceback: {traceback.format_exc()}")
         sys.exit(1)
 
     # Create datasets
     train_dataset = create_sample_training_dataset(trainer.tokenizer, size=20, max_length=trainer.config.model.max_seq_length)
     eval_dataset = create_sample_training_dataset(trainer.tokenizer, size=2, max_length=trainer.config.model.max_seq_length)
 
-    logger.info(f"📊 Dataset created - Train: {len(train_dataset)}, Eval: {len(eval_dataset)}")
+    logger.info(f"📊 [BaseTrainer-{trainer.rank}] Dataset created - Train: {len(train_dataset)}, Eval: {len(eval_dataset)}")
 
     # Start training
     success = await train_async(args.prefix_tag, trainer, train_dataset, eval_dataset)
