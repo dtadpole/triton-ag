@@ -1,0 +1,151 @@
+# built in queues
+queues:
+  - name: trainer.sft.1
+  - name: trainer.rft.1
+  - name: trainer.grpo.1
+  - name: rsync.rsync.1
+  - name: test.test.1
+
+global:
+  prefix_tag: "TC_0.1.0_32B.b"
+  start_epoch: 60
+  start_block: 0
+  end_epoch: 80
+  end_block: 10
+
+workitems:
+  codeGenEval.init:
+    # below syntax works with ConfigInterpreter
+    steps:
+      - type: endpoint
+        endpoint: workflowClient.enqueue
+        context_vars:
+          input_tag: "`f'{prefix_tag}_{epoch_id:03d}_{block_id:02d}'`"
+          item:
+            type: inference
+            name: codeGenEval.base
+            prefix_tag: "`prefix_tag`"
+            epoch_id: "`epoch_id`"
+            block_id: "`block_id`"
+            input_tag: "`input_tag`"
+            provider_name: h8_1
+            model_name: qwen3-32b
+            num_samples: 20
+            num_generations: 8
+            num_turns_per_generation: 4
+            parallel_workers: 48
+            logprobs: true
+            model_override: null
+            module_file: inference/codeGenEval.module.yaml
+            prompt_file: inference/triton.prompt.yaml
+            example_file: inference/triton.example.yaml
+            input_dir: ~/triton-ag/kernel_bench/level1
+            output_dir: ~/.inference/codeGenEval
+        args:
+          queue_name: "inference.codeGenEval.base"
+          item: "`item`"
+          create_queue: true
+      - type: endpoint
+        endpoint: workflowClient.qsize
+        args:
+          queue_name: "inference.codeGenEval.base"
+        returns:
+          context_vars:
+            qsize: "`__result__`"
+          logging:
+            method: log_qsize
+
+inference:
+  codeGenEval.base:
+    default:
+      input_dir: ~/.inference/composer/input
+      output_dir: ~/.inference/composer/output
+      module_file: inference/codeGen.module.yaml
+      prompt_file: inference/codeGen.prompt.triton.yaml
+      example_file: inference/triton.example.yaml
+      provider_name: local
+      model_name: qwen3-14b
+      num_generations: 8
+      num_turns_per_generation: 4
+      parallel_workers: 32
+      logprobs: true
+      input_tag: kernel_bench
+      model_override: null
+
+    post_workitems:
+      # the below syntax works with ConfigInterpreter
+      - type: trainer
+        name: grpo.1
+        prefix_tag: "{prefix_tag}"
+        epoch_id: "{epoch_id}"
+        block_id: "{block_id}"
+        input_tag: "{run_tag}"
+        input_dir: ~/.inference/codeGenEval
+      # - type: trainer
+      #   name: rft.1
+      #   prefix_tag: "{prefix_tag}"
+      #   epoch_id: "{epoch_id}"
+      #   block_id: "{block_id}"
+      #   input_tag: "{run_tag}"
+      #   input_dir: ~/.inference/codeGenEval
+
+  exemplar.deepseek-v3:
+    default:
+      input_dir: ~/.inference/composer/input
+      output_dir: ~/.inference/composer/output
+      module_file: inference/exemplar.module.yaml
+      prompt_file: inference/codeGen.prompt.triton.yaml
+      example_file: inference/triton.example.yaml
+      provider_name: fireworks
+      model_name: deepseek-v3
+      num_samples: 8 # this is not used, but required by the module
+      num_generations: 4 # this is not used, but required by the module
+      parallel_workers: 8
+      logprobs: false
+      model_override: null
+
+    post_workitems:
+      - type: trainer
+        name: sft.1
+        prefix_tag: "{prefix_tag}"
+        epoch_id: "{epoch_id}"
+        block_id: "{block_id}"
+        input_tag: "{run_tag}"
+        input_dir: ~/.inference/exemplar.deepseek-v3
+
+  exemplar.kimi-k2:
+    default:
+      input_dir: ~/.inference/composer/input
+      output_dir: ~/.inference/composer/output
+      module_file: inference/exemplar.module.yaml
+      prompt_file: inference/codeGen.prompt.triton.yaml
+      example_file: inference/triton.example.yaml
+      provider_name: fireworks
+      model_name: kimi-k2
+      num_samples: 8 # this is not used, but required by the module
+      num_generations: 4 # this is not used, but required by the module
+      parallel_workers: 8
+      logprobs: false
+      model_override: null
+
+    post_workitems:
+      - type: trainer
+        name: sft.1
+        prefix_tag: "{prefix_tag}"
+        epoch_id: "{epoch_id}"
+        block_id: "{block_id}"
+        input_tag: "{run_tag}"
+        input_dir: ~/.inference/exemplar.kimi-k2
+
+trainer:
+  sft.1:
+    default:
+      output_dir: ~/.trainer
+
+  rft.1:
+    default:
+      output_dir: ~/.trainer
+
+  grpo.1:
+    default:
+      output_dir: ~/.trainer

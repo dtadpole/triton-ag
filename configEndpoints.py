@@ -19,7 +19,7 @@ MAX_LOCK_AGE = 30 # 30 seconds
 class DuckDBClient:
     def __init__(self):
         pass
-    
+
     def sql(self, query: str) -> Any:
         result = duckdb.sql(query)
         return result
@@ -27,7 +27,7 @@ class DuckDBClient:
 class Recorder:
     def __init__(self):
         pass
-    
+
     def save(self, path: str, data: Any, format: str = "json"):
         if format not in VALID_RECORD_FORMATS:
             raise ValueError(f"Invalid format: {format}, must be one of {VALID_RECORD_FORMATS}")
@@ -48,7 +48,7 @@ class Recorder:
 class CodeExtractor:
     def __init__(self):
         pass
-    
+
     def extract_code(self, completion: str) -> str:
         # first extract <think>...</think> block
         think_blocks = re.findall(r"(<think>.*?</think>)", completion, re.DOTALL)
@@ -68,7 +68,7 @@ class CodeExtractor:
         }
 
 class VLLMClient:
-    def __init__(self, short_hostname: str = "two"):
+    def __init__(self, short_hostname: str):
         self.short_hostname = short_hostname
         self.vllm_config = self.load_config().get('vllm_clients', {}).get(short_hostname, {})
         api_key_path = os.path.expanduser(self.vllm_config.get('api_key_path', '~/.keys/local.api.key'))
@@ -285,7 +285,7 @@ class StatsClient:
             finally:
                 retry_count += 1
                 cleanup_lockfile(lock_file)
-    
+
     async def wait_for_stats(self, prefix_tag: str, model_tag: str, task_tag: str, category: str, timeout: int = 90, last_n_lines: int = 50, return_percentile: str = "25th") -> dict:
         if category == REFERENCE_CATEGORY:
             # if category is reference, ignore model_tag
