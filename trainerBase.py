@@ -228,7 +228,9 @@ class BaseTrainer:
     def __init__(self, prefix_tag: str, config: TrainerConfig, status: Optional[TrainerStatus] = None):
         self.prefix_tag = prefix_tag
         self.config = config
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        dist.init_process_group("nccl")
+        self.rank = dist.get_rank()
+        self.device = torch.device(f"cuda:{self.rank}" if torch.cuda.is_available() else "cpu")
 
         # Setup output directory
         self.checkpoint_path = Path(os.path.expanduser(self.config.training.checkpoint_path)) / self.prefix_tag
@@ -275,7 +277,7 @@ class BaseTrainer:
         self.config.logging.wandb_run_name = self.prefix_tag + "_" + datetime.now().strftime("%m%d")
         self._setup_logging()
 
-        logger.info(f"🔍 [{self.__class__.__name__}] Config: {self.config.model_dump_json()}")
+        logger.info(f"🔍 [BaseTrainer-{self.rank}] Config: {self.config.model_dump_json()}")
 
     def short_name(self):
         return 'base'
@@ -292,13 +294,13 @@ class BaseTrainer:
             torch.manual_seed(self.config.training.seed)
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(self.config.training.seed)
-            logger.info(f"🎲 [{self.__class__.__name__}] Random seed set to: {self.config.training.seed}")
+            logger.info(f"🎲 [BaseTrainer-{self.rank}] Random seed set to: {self.config.training.seed}")
         else:
-            logger.info(f"🎲 [{self.__class__.__name__}] Using random seed (no fixed seed set)")
+            logger.info(f"🎲 [BaseTrainer-{self.rank}] Using random seed (no fixed seed set)")
 
     def _setup_model_and_tokenizer(self):
         """Initialize the model and tokenizer using Unsloth"""
-        logger.info(f"🚀 [{self.__class__.__name__}] Loading model: {self.config.model.name}")
+        logger.info(f"🚀 [BaseTrainer-{self.rank}] Loading model: {self.config.model.name}")
 
         config = AutoConfig.from_pretrained(self.config.model.name)
         config.max_position_embeddings = self.config.model.max_seq_length
@@ -326,15 +328,15 @@ class BaseTrainer:
 
     def _setup_lora(self):
         """Setup LoRA configuration using Unsloth"""
-        logger.info(f"🌸 [{self.__class__.__name__}] Setting up LoRA (rank={self.config.lora.rank}, alpha={self.config.lora.alpha})")
+        logger.info(f"🌸 [BaseTrainer-{self.rank}] Setting up LoRA (rank={self.config.lora.rank}, alpha={self.config.lora.alpha})")
 
         # Load checkpoint if specified
         checkpoint_location = self.checkpoint_path / self.config.training.latest_checkpoint_name
         if self._checkpoint_exists(checkpoint_location):
             lora_model = PeftModel.from_pretrained(self.base_model, checkpoint_location, is_trainable=True)
-            logger.info(f"🌸 [{self.__class__.__name__}] Loaded LoRA checkpoint: {checkpoint_location}")
+            logger.info(f"🌸 [BaseTrainer-{self.rank}] Loaded LoRA checkpoint: {checkpoint_location}")
         else:
-            logger.warning(f"⚠️ [{self.__class__.__name__}] LoRA checkpoint not found: {checkpoint_location} - Starting fresh training...")
+            logger.warning(f"⚠️ [BaseTrainer-{self.rank}] LoRA checkpoint not found: {checkpoint_location} - Starting fresh training...")
             lora_cfg = LoraConfig(
                 r=self.config.lora.rank,
                 lora_alpha=self.config.lora.alpha,
@@ -351,7 +353,7 @@ class BaseTrainer:
     def _print_model_info(self, model):
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        logger.info(f"🛳️ [{model.__class__.__name__}] loaded - Trainable: [{trainable_params:,}/{total_params:,}] ({100 * trainable_params / total_params:.1f}%)")
+        logger.info(f"🛳️ [BaseTrainer-{self.rank}] loaded - Trainable: [{trainable_params:,}/{total_params:,}] ({100 * trainable_params / total_params:.1f}%)")
 
     def _checkpoint_exists(self, checkpoint_path: str) -> bool:
         """Check if checkpoint exists"""
@@ -361,7 +363,7 @@ class BaseTrainer:
     def _load_checkpoint(self, checkpoint_location: str):
         """Initialize from checkpoint"""
         start_time = time.time()
-        logger.info(f"🔄 [{self.__class__.__name__}] Loading checkpoint from: {checkpoint_location}")
+        logger.info(f"🔄 [BaseTrainer-{self.rank}] Loading checkpoint from: {checkpoint_location}")
 
         dist.barrier()
         # load training status always
@@ -369,7 +371,7 @@ class BaseTrainer:
         with open(training_status_path, 'r') as f:
             loaded_status = json.load(f)
             self.trainer_status = TrainerStatus.model_validate(loaded_status)
-            logger.info(f"🔍 [{self.__class__.__name__}] [RANK={self.engine.global_rank}] Loaded training status: {self.trainer_status.model_dump()}")
+            logger.info(f"🔍 [BaseTrainer-{self.rank}] Loaded training status: {self.trainer_status.model_dump()}")
 
         # load optimizer state and scheduler state if using lora (lora model state is already loaded)
         if self.config.lora.use_lora:
@@ -378,19 +380,19 @@ class BaseTrainer:
             shard_list = [None] * dist.get_world_size()
             shard_list[self.engine.global_rank] = opt_state
             self.engine.optimizer.load_state_dict(shard_list)
-            logger.info(f"🔍 [{self.__class__.__name__}] [RANK={self.engine.global_rank}] Loaded optimizer state from {checkpoint_location}")
+            logger.info(f"🔍 [BaseTrainer-{self.rank}] Loaded optimizer state from {checkpoint_location}")
             # load scheduler state if using lora
             if hasattr(self.engine, "lr_scheduler") and os.path.exists(f"{checkpoint_location}/scheduler.pt"):
                 sch_state = torch.load(f"{checkpoint_location}/scheduler.pt", map_location="cpu", weights_only=False)
                 self.engine.lr_scheduler.load_state_dict(sch_state)
-                logger.info(f"🔍 [{self.__class__.__name__}] [RANK={self.engine.global_rank}] Loaded scheduler state from {checkpoint_location}")
+                logger.info(f"🔍 [BaseTrainer-{self.rank}] Loaded scheduler state from {checkpoint_location}")
         else:
             # load full model only if not using lora
             self.engine.load_checkpoint(checkpoint_location, tag=DEEPSPEED_TAG)
-            logger.info(f"🔍 [{self.__class__.__name__}] [RANK={self.engine.global_rank}] Loaded full model state")
+            logger.info(f"🔍 [BaseTrainer-{self.rank}] Loaded full model state")
         dist.barrier()
 
-        logger.info(f"📜 [{self.__class__.__name__}] Checkpoint loaded - G-Step: [{self.trainer_status.global_step}] in [{time.time() - start_time:.1f}s]")
+        logger.info(f"📜 [BaseTrainer-{self.rank}] Checkpoint loaded - G-Step: [{self.trainer_status.global_step}] in [{time.time() - start_time:.1f}s]")
 
     def _save_checkpoint(self, step: int, callback: Optional[Callable] = None):
         """Save training checkpoint"""
@@ -417,17 +419,15 @@ class BaseTrainer:
             if hasattr(self.engine, "lr_scheduler") and self.engine.lr_scheduler is not None and self.engine.global_rank == 0:
                 torch.save(self.engine.lr_scheduler.state_dict(), f"{checkpoint_path}/scheduler.pt")
             if self.engine.global_rank == 0:
+                # only save one copy of the full lora model
                 if int(self.engine.zero_optimization_stage()) == 3:
                     with deepspeed.GatheredParameters(self.model.parameters(), modifier_rank=0):
                         self.engine.module.save_pretrained(checkpoint_path)
                 else:
                     self.engine.module.save_pretrained(checkpoint_path)
-            else:
-                # save full model using deepspeed only if not using lora
-                self.engine.module.save_checkpoint(checkpoint_path, DEEPSPEED_TAG)
-            dist.barrier()
         else:
             self.engine.save_checkpoint(checkpoint_path, tag=DEEPSPEED_TAG)
+        dist.barrier()
 
         # touch checkpoint ready file
         (checkpoint_path / CHECKPOINT_READY_FILE).touch()
@@ -435,19 +435,21 @@ class BaseTrainer:
         # Update latest checkpoint link
         self._update_latest_checkpoint_link(checkpoint_path)
 
-        # Callback
-        if callback:
-            try:
-                logger.info(f"🔍 [{self.__class__.__name__}] Running callback: {callback}")
-                callback(checkpoint_path)
-                logger.info(f"🔍 [{self.__class__.__name__}] Callback completed")
-            except Exception as e:
-                logger.error(f"❌ [{self.__class__.__name__}] Error in callback: {e}")
-                logger.error(traceback.format_exc())
-        else:
-            logger.info(f"🔍 [{self.__class__.__name__}] No callback provided")
+        # callback only on rank 0
+        if self.engine.global_rank == 0:
+            # Callback
+            if callback:
+                try:
+                    logger.info(f"🔍 [BaseTrainer-{self.rank}] Running callback: {callback}..")
+                    callback(checkpoint_path)
+                    logger.info(f"🔍 [BaseTrainer-{self.rank}] Callback completed.")
+                except Exception as e:
+                    logger.error(f"❌ [BaseTrainer-{self.rank}] Error in callback: [{type(e).__name__}: {e}]")
+                    logger.error(traceback.format_exc())
+            else:
+                logger.info(f"🔍 [BaseTrainer-{self.rank}] No callback provided")
 
-        logger.info(f"💾 [{self.__class__.__name__}] Checkpoint saved: {checkpoint_path} in [{time.time() - start_time:.1f}s]")
+        logger.info(f"💾 [BaseTrainer-{self.rank}] Checkpoint saved: {checkpoint_path} in [{time.time() - start_time:.1f}s]")
 
     def _update_latest_checkpoint_link(self, checkpoint_path: Path):
         """Update latest checkpoint link"""
@@ -478,7 +480,7 @@ class BaseTrainer:
                 config=self.config.model_dump(),
                 resume="allow",
             )
-            logger.info(f"📊 [{self.__class__.__name__}] W&B logging enabled")
+            logger.info(f"📊 [BaseTrainer-{self.rank}] W&B logging enabled")
 
     def _compute_loss(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Compute loss for a batch"""
@@ -529,14 +531,15 @@ class BaseTrainer:
 
     def _log_metrics(self, metrics: Dict[str, float], step: int):
         """Log training metrics"""
-        step = self.trainer_status.global_step
-        if step % self.config.training.logging_steps == 0:
-            # format metrics into a string with .4f format
-            formatted_metrics = {k: f"{v:.4f}" for k, v in metrics.items()}
-            logger.info(f"🔍 [{self.__class__.__name__}] [G-Step={step}] {formatted_metrics}")
+        if self.engine.global_rank == 0:
+            step = self.trainer_status.global_step
+            if step % self.config.training.logging_steps == 0:
+                # format metrics into a string with .4f format
+                formatted_metrics = {k: f"{v:.4f}" for k, v in metrics.items()}
+                logger.info(f"🔍 [BaseTrainer-{self.rank}] [G-Step={step}] {formatted_metrics}")
 
-            if self.config.logging.use_wandb:
-                wandb.log(metrics, step=step)
+                if self.config.logging.use_wandb:
+                    wandb.log(metrics, step=step)
 
     async def train_block(
         self,
@@ -556,17 +559,18 @@ class BaseTrainer:
             collate_fn=self.data_collator
         )
 
-        logger.info(f"👉 [{self.__class__.__name__}] [{run_tag}] Block started with [{len(dataloader)}] micro batches, Initial global step: [{self.trainer_status.global_step}]")
+        logger.info(f"👉 [BaseTrainer-{self.rank}] [{run_tag}] Block started with [{len(dataloader)}] micro batches, Initial global step: [{self.trainer_status.global_step}]")
 
         start_time = time.time()
         accumulated_loss = 0.0
 
         # Create progress bar
-        progress_bar = tqdm(
-            total=len(dataloader),
-            desc=run_tag,
-            initial=0
-        )
+        if self.engine.global_rank == 0:
+            progress_bar = tqdm(
+                total=len(dataloader),
+                desc=run_tag,
+                initial=0
+            )
 
         for batch_idx, batch in enumerate(dataloader):
             # Training step
@@ -583,7 +587,8 @@ class BaseTrainer:
 
                 # Update step counter
                 self.trainer_status.global_step += 1
-                progress_bar.update(1)
+                if self.engine.global_rank == 0:
+                    progress_bar.update(1)
                 await asyncio.sleep(0.1)
 
                 # Log metrics
@@ -598,11 +603,11 @@ class BaseTrainer:
                 }, self.trainer_status.global_step)
 
                 # Save checkpoint
-                if self.trainer_status.global_step % self.config.training.save_steps == 0:
+                if self.trainer_status.global_step % self.config.training.save_steps == 0 and self.engine.global_rank == 0:
                     self._save_checkpoint(self.trainer_status.global_step, callback=callback)
 
                 # Evaluation
-                if eval_dataset and self.trainer_status.global_step % self.config.training.eval_steps == 0:
+                if eval_dataset and self.trainer_status.global_step % self.config.training.eval_steps == 0 and self.engine.global_rank == 0:
                     self._evaluate(eval_dataset)
 
                 # Check if training is complete
@@ -613,16 +618,19 @@ class BaseTrainer:
             # always save checkpoint at the end of the block
             self._save_checkpoint(self.trainer_status.global_step)
         except Exception as e:
-            logger.error(f"❌ [{self.__class__.__name__}] [{run_tag}] Failed to save checkpoint: [{type(e).__name__}: {e}]")
+            logger.error(f"❌ [BaseTrainer-{self.rank}] [{run_tag}] Failed to save checkpoint: [{type(e).__name__}: {e}]")
 
         total_time = time.time() - start_time
-        logger.info(f"🎉 [{self.__class__.__name__}] [{run_tag}] Block completed in [{total_time:.1f}s] - Final global step: [{self.trainer_status.global_step}]")
-        progress_bar.close()
+        logger.info(f"🎉 [BaseTrainer-{self.rank}] [{run_tag}] Block completed in [{total_time:.1f}s] - Final global step: [{self.trainer_status.global_step}]")
+
+        if self.engine.global_rank == 0:
+            progress_bar.close()
+            
         await asyncio.sleep(0.1)
 
     def _evaluate(self, eval_dataset: Dataset):
         """Evaluate the model on evaluation dataset"""
-        logger.info(f"📊 [{self.__class__.__name__}] Running evaluation...")
+        logger.info(f"📊 [BaseTrainer-{self.rank}] Running evaluation...")
 
         self.model.eval()
         eval_dataloader = DataLoader(
@@ -646,7 +654,7 @@ class BaseTrainer:
         avg_eval_loss = total_loss / num_batches
         perplexity = math.exp(avg_eval_loss)
 
-        logger.info(f"📊 [{self.__class__.__name__}] Eval Loss: {avg_eval_loss:.4f}, Perplexity: {perplexity:.2f}")
+        logger.info(f"📊 [BaseTrainer-{self.rank}] Eval Loss: {avg_eval_loss:.4f}, Perplexity: {perplexity:.2f}")
 
         if self.config.logging.use_wandb:
             wandb.log({
@@ -695,7 +703,7 @@ class BaseTrainer:
 
 async def _train_loop(prefix_tag: str, trainer: BaseTrainer, dataset: Dataset, eval_dataset: Optional[Dataset] = None):
     """Main training loop"""
-    logger.info(f"🏋️ [BaseTrainer] Starting training - Total steps: [{trainer.config.training.max_steps}], Batch size: [{trainer.config.training.micro_batch_size}], Block size: [{trainer.config.training.block_size}]")
+    logger.info(f"🏋️ [BaseTrainer-{trainer.rank}] Starting training - Total steps: [{trainer.config.training.max_steps}], Batch size: [{trainer.config.training.micro_batch_size}], Block size: [{trainer.config.training.block_size}]")
 
     # run with asyncio task
     loop = asyncio.get_event_loop()
