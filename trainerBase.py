@@ -580,9 +580,10 @@ class BaseTrainer:
             seed = base_seed + self.rank * 10_000 + worker_id
             torch.manual_seed(seed)
         # create dataloader
+        batch_size = self.config.training.micro_batch_size * self.config.training.gradient_accumulation_steps
         dataloader = DataLoader(
             dataset,
-            batch_size=self.config.training.micro_batch_size,
+            batch_size=batch_size,
             sampler=sampler,
             num_workers=self.config.training.dataloader_num_workers,
             pin_memory=True,
