@@ -145,7 +145,7 @@ vllm-qwen3-32b-devserver:
 
 vllm-qwen3-14b-devserver:
 	CUDA_VISIBLE_DEVICES=5 vllm serve Qwen/Qwen3-14B \
-	--max-model-len 40960 \
+	--max-model-len 24576 \
 	--enable-auto-tool-choice \
 	--tool-call-parser hermes \
 	--dtype bfloat16 \
