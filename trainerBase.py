@@ -50,6 +50,7 @@ class TrainingConfig(BaseModel):
     num_warmup_steps: int = 50
     dataloader_num_workers: int = 1
     loss_multiplier: float = 1.0
+    keep_checkpoint_num: int = 3
     seed: int = -1
 
 class TrainerLoraConfig(BaseModel):
@@ -62,7 +63,6 @@ class TrainerLoraConfig(BaseModel):
     target_parameters: Optional[List[str] | str] = None
     modules_to_save: Optional[List[str] | str] = None
     bias: str = "none"
-    extra_cache_size: int = 0
 
 class LoggingConfig(BaseModel):
     """Configuration for logging parameters"""

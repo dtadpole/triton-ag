@@ -9,6 +9,7 @@ import copy
 import torch
 import torch.optim as optim
 import torch.distributed as dist
+import shutil
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from torch.nn.utils import clip_grad_norm_
 from transformers import (
@@ -301,6 +302,8 @@ class DeepspeedTrainer(BaseTrainer):
         if self.engine.global_rank == 0:
             # Update latest checkpoint link
             self._update_latest_checkpoint_link(checkpoint_path)
+            # clean up old checkpoints
+            self._cleanup_checkpoint(self.checkpoint_path)
 
             # Callback
             if callback:
@@ -321,19 +324,31 @@ class DeepspeedTrainer(BaseTrainer):
         latest_path = self.checkpoint_path / self.config.training.latest_checkpoint_name
 
         # Remove existing link/directory
-        if latest_path.exists():
-            if latest_path.is_symlink():
-                latest_path.unlink()
-            else:
-                import shutil
-                shutil.rmtree(latest_path)
+        if self.engine.global_rank == 0:
+            if latest_path.exists():
+                if latest_path.is_symlink():
+                    latest_path.unlink()
+                else:
+                    shutil.rmtree(latest_path)
 
-        # Create symlink or copy
-        try:
-            latest_path.symlink_to(checkpoint_path.name)
-        except OSError:
-            import shutil
-            shutil.copytree(checkpoint_path, latest_path)
+            # Create symlink or copy
+            try:
+                latest_path.symlink_to(checkpoint_path.name)
+            except OSError:
+                shutil.copytree(checkpoint_path, latest_path)
+
+    def _cleanup_checkpoint(self, checkpoint_path: Path):
+        """Cleanup checkpoint"""
+        if self.engine.global_rank == 0:
+            # check all the folders under checkpoint_path
+            # retain only the latest {self.config.training.keep_checkpoint_num} checkpoints
+            checkpoints = list(checkpoint_path.glob("checkpoint-*"))
+            # remove checkpoint-latest
+            checkpoints.remove(checkpoint_path / self.config.training.latest_checkpoint_name)
+            checkpoints.sort(key=lambda x: int(x.name.split("-")[1]))
+            for checkpoint in checkpoints[:-self.config.training.keep_checkpoint_num]:
+                logger.info(f"🔍 [DeepspeedTrainer-{self.rank}] Removing checkpoint: {checkpoint}")
+                shutil.rmtree(checkpoint)
 
     def _setup_logging(self):
         """Setup logging and tracking"""
@@ -687,7 +702,7 @@ async def main():
         sys.exit(1)
 
     # Create datasets
-    train_dataset = create_sample_training_dataset(trainer.tokenizer, size=20, max_length=trainer.config.model.max_seq_length)
+    train_dataset = create_sample_training_dataset(trainer.tokenizer, size=40, max_length=trainer.config.model.max_seq_length)
     eval_dataset = create_sample_training_dataset(trainer.tokenizer, size=2, max_length=trainer.config.model.max_seq_length)
 
     logger.info(f"📊 [DeepspeedTrainer-{trainer.rank}] Dataset created - Train: {len(train_dataset)}, Eval: {len(eval_dataset)}")
