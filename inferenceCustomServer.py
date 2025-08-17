@@ -283,7 +283,7 @@ if __name__ == '__main__':
     # get host and port from config file, or from command line arguments if provided
     server_config = from_yaml(args.config).get("server", {})
     host = server_config.get("host", "0.0.0.0") if args.host is None else args.host
-    port = server_config.get("port", 8499) if args.port is None else args.port
+    port = server_config.get("port", 8092) if args.port is None else args.port
 
     fastapi = FastAPI()
     inference_server = InferenceCustomServer(args.config)

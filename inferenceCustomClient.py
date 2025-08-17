@@ -18,8 +18,8 @@ class InferenceCustomClient:
             raise ValueError(f"Provider {provider_name} not found in config file [{config_path}]")
         self.provider_name = provider_name
         self.provider_config = self.raw_config.get(provider_name, {})
-        self.base_url = self.provider_config.get("base_url", "http://localhost:8499/v1")
-        self.num_retries = self.provider_config.get("num_retries", 3)
+        self.base_url = self.provider_config.get("base_url", "http://localhost:8092/v1")
+        self.num_retries = self.provider_config.get("num_retries", 4)
         self.timeout = self.provider_config.get("timeout", 300)
         self.initial_retry_interval = self.provider_config.get('initial_retry_interval', 3)
         self.max_retry_interval = self.provider_config.get('max_retry_interval', 300)
