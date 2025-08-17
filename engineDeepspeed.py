@@ -43,7 +43,7 @@ import yaml
 import argparse
 from logger import logger
 from trainerUtil import SimpleCollator, merge_dicts
-from trainerBase import BaseTrainer, TrainerConfig, TrainerStatus, TextDataset
+from engineBase import EngineBase, EngineConfig, TrainerStatus, create_sample_training_dataset
 
 TRAINING_STATUS_FILE = "training_status.json"
 ADAPTER_MODEL_FILE = "adapter_model.safetensors"
@@ -51,12 +51,12 @@ CHECKPOINT_READY_FILE = "checkpoint.ready"
 TRAINING_STATE_FILE = "training_state.pt"
 DEEPSPEED_TAG = "ds"
 
-class DeepspeedTrainer(BaseTrainer):
+class EngineDeepspeed(EngineBase):
     """Base trainer for Hugging Face models with step-by-step training implementation"""
 
-    def __init__(self, prefix_tag: str, config: TrainerConfig, status: Optional[TrainerStatus] = None):
-        self.prefix_tag = prefix_tag
-        self.config = config
+    def __init__(self, prefix_tag: str, config: EngineConfig, status: Optional[TrainerStatus] = None):
+        super().__init__(prefix_tag, config, status)
+        # for now keep these with deepspeed init
         if os.environ.get("LOCAL_RANK") is not None and os.environ.get("WORLD_SIZE") is not None:
             dist.init_process_group("nccl")
             self.rank = dist.get_rank()
@@ -66,10 +66,6 @@ class DeepspeedTrainer(BaseTrainer):
             self.rank = 0
             self.world_size = 1
             self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-
-        # Setup output directory
-        self.checkpoint_path = Path(os.path.expanduser(self.config.training.checkpoint_path)) / self.prefix_tag
-        self.checkpoint_path.mkdir(parents=True, exist_ok=True)
 
         deepspeed.init_distributed(dist_backend="nccl")
         deepspeed_config_path = Path(os.path.expanduser(self.config.model.deepspeed_config_path))
@@ -98,7 +94,7 @@ class DeepspeedTrainer(BaseTrainer):
         )
         self.device = self.engine.device
         after_init = time.time()
-        logger.info(f"🔍 [DeepspeedTrainer-{self.rank}] Deepspeed initialized in [{after_init - before_init:.1f}s]")
+        logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Deepspeed initialized in [{after_init - before_init:.1f}s]")
 
         # if checkpoint exists, load it
         checkpoint_location = self.checkpoint_path / self.config.training.latest_checkpoint_name
@@ -116,12 +112,12 @@ class DeepspeedTrainer(BaseTrainer):
         self.config.logging.wandb_run_name = self.prefix_tag + "_" + datetime.now().strftime("%m%d")
         self._setup_logging()
 
-        logger.info(f"🔍 [DeepspeedTrainer-{self.rank}] Config: {self.config.model_dump_json()}")
+        logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Config: {self.config.model_dump_json()}")
 
     def short_name(self):
         return 'ds'
 
-    def _update_config(self, config: TrainerConfig):
+    def _update_config(self, config: EngineConfig):
         """Update config"""
         self.config = config
 
@@ -133,13 +129,13 @@ class DeepspeedTrainer(BaseTrainer):
             torch.manual_seed(self.config.training.seed)
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(self.config.training.seed)
-            logger.info(f"🎲 [DeepspeedTrainer-{self.rank}] Random seed set to: {self.config.training.seed}")
+            logger.info(f"🎲 [{self.__class__.__name__}-{self.rank}] Random seed set to: {self.config.training.seed}")
         else:
-            logger.info(f"🎲 [DeepspeedTrainer-{self.rank}] Using random seed (no fixed seed set)")
+            logger.info(f"🎲 [{self.__class__.__name__}-{self.rank}] Using random seed (no fixed seed set)")
 
     def _setup_model_and_tokenizer(self):
         """Initialize the model and tokenizer using Unsloth"""
-        logger.info(f"🚀 [DeepspeedTrainer-{self.rank}] Loading model: {self.config.model.name}")
+        logger.info(f"🚀 [{self.__class__.__name__}-{self.rank}] Loading model: {self.config.model.name}")
 
         config = AutoConfig.from_pretrained(self.config.model.name)
         config.max_position_embeddings = self.config.model.max_seq_length
@@ -167,7 +163,7 @@ class DeepspeedTrainer(BaseTrainer):
 
     def _setup_lora(self):
         """Setup LoRA configuration using Unsloth"""
-        logger.info(f"🌸 [DeepspeedTrainer-{self.rank}] Setting up LoRA (rank={self.config.lora.rank}, alpha={self.config.lora.alpha})")
+        logger.info(f"🌸 [{self.__class__.__name__}-{self.rank}] Setting up LoRA (rank={self.config.lora.rank}, alpha={self.config.lora.alpha})")
 
         lora_cfg = LoraConfig(
             r=self.config.lora.rank,
@@ -182,18 +178,13 @@ class DeepspeedTrainer(BaseTrainer):
         checkpoint_location = self.checkpoint_path / self.config.training.latest_checkpoint_name
         if self._checkpoint_exists(checkpoint_location):
             lora_model = PeftModel.from_pretrained(self.base_model, checkpoint_location, is_trainable=True)
-            logger.info(f"🌸 [DeepspeedTrainer-{self.rank}] Loaded LoRA checkpoint: {checkpoint_location}")
+            logger.info(f"🌸 [{self.__class__.__name__}-{self.rank}] Loaded LoRA checkpoint: {checkpoint_location}")
         else:
-            logger.warning(f"⚠️ [DeepspeedTrainer-{self.rank}] LoRA checkpoint not found: {checkpoint_location} - Starting fresh training...")
+            logger.warning(f"⚠️ [{self.__class__.__name__}-{self.rank}] LoRA checkpoint not found: {checkpoint_location} - Starting fresh training...")
             lora_model = get_peft_model(self.base_model, lora_cfg)
 
         self._print_model_info(lora_model)
         return lora_model, lora_cfg
-
-    def _print_model_info(self, model):
-        total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        logger.info(f"🛳️ [DeepspeedTrainer-{self.rank}] loaded - Trainable: [{trainable_params:,}/{total_params:,}] ({100 * trainable_params / total_params:.1f}%)")
 
     def _checkpoint_exists(self, checkpoint_path: str) -> bool:
         """Check if checkpoint exists"""
@@ -206,7 +197,7 @@ class DeepspeedTrainer(BaseTrainer):
     def _load_checkpoint(self, checkpoint_location: str):
         """Initialize from checkpoint"""
         start_time = time.time()
-        logger.info(f"🔄 [DeepspeedTrainer-{self.rank}] Loading checkpoint from: {checkpoint_location}")
+        logger.info(f"🔄 [{self.__class__.__name__}-{self.rank}] Loading checkpoint from: {checkpoint_location}")
 
         if self.world_size > 1: dist.barrier()
         # load training status always
@@ -214,7 +205,7 @@ class DeepspeedTrainer(BaseTrainer):
         with open(training_status_path, 'r') as f:
             loaded_status = json.load(f)
             self.status = TrainerStatus.model_validate(loaded_status)
-            logger.info(f"🔍 [DeepspeedTrainer-{self.rank}] Loaded training status: {self.status.model_dump()}")
+            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Loaded training status: {self.status.model_dump()}")
 
         # load optimizer state and scheduler state if using lora (lora model state is already loaded)
         if self.config.lora.use_lora:
@@ -223,19 +214,19 @@ class DeepspeedTrainer(BaseTrainer):
             shard_list = [None] * dist.get_world_size()
             shard_list[self.engine.global_rank] = opt_state
             self.engine.optimizer.load_state_dict(shard_list)
-            logger.info(f"🔍 [DeepspeedTrainer-{self.rank}] Loaded optimizer state from {checkpoint_location}")
+            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Loaded optimizer state from {checkpoint_location}")
             # load scheduler state if using lora
             if hasattr(self.engine, "lr_scheduler") and os.path.exists(f"{checkpoint_location}/scheduler.pt"):
                 sch_state = torch.load(f"{checkpoint_location}/scheduler.pt", map_location="cpu", weights_only=False)
                 self.engine.lr_scheduler.load_state_dict(sch_state)
-                logger.info(f"🔍 [DeepspeedTrainer-{self.rank}] Loaded scheduler state from {checkpoint_location}")
+                logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Loaded scheduler state from {checkpoint_location}")
         else:
             # load full model only if not using lora
             self.engine.load_checkpoint(checkpoint_location, tag=DEEPSPEED_TAG)
-            logger.info(f"🔍 [DeepspeedTrainer-{self.rank}] Loaded full model state")
+            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Loaded full model state")
         if self.world_size > 1: dist.barrier()
 
-        logger.info(f"📜 [DeepspeedTrainer-{self.rank}] Checkpoint loaded - G-Step: [{self.status.global_step}] in [{time.time() - start_time:.1f}s]")
+        logger.info(f"📜 [{self.__class__.__name__}-{self.rank}] Checkpoint loaded - G-Step: [{self.status.global_step}] in [{time.time() - start_time:.1f}s]")
 
     def _save_checkpoint(self, step: int, callback: Optional[Callable] = None):
         """Save training checkpoint"""
@@ -266,7 +257,7 @@ class DeepspeedTrainer(BaseTrainer):
                 # lora_params = [p for n, p in self.engine.module.named_parameters() if "lora" in n.lower()]
                 lora_params = get_peft_model_state_dict(self.engine.module)
                 num_lora_params = sum(p.numel() for p in lora_params)
-                logger.info(f"🔍 [DeepspeedTrainer-{self.rank}] Gathering lora parameters: {num_lora_params:,}")
+                logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Gathering lora parameters: {num_lora_params:,}")
                 ctx = deepspeed.zero.GatheredParameters(lora_params, modifier_rank=0)
                 with ctx:
                     # if self.world_size > 1: dist.barrier()
@@ -274,14 +265,14 @@ class DeepspeedTrainer(BaseTrainer):
                     peft_sd = lora_params # get_peft_model_state_dict(self.engine.module)
                     peft_sd_cpu = {k: v.clone().cpu() for k, v in peft_sd.items()}
                     num_peft_params = sum(p.numel() for p in peft_sd_cpu.values())
-                    logger.info(f"🔍 [DeepspeedTrainer-{self.rank}] Peft state dict: {num_peft_params:,}")
+                    logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Peft state dict: {num_peft_params:,}")
                     if self.engine.global_rank == 0:
                         # add barrier to ensure we have peft_sd on all ranks
                         base_model_copy = copy.deepcopy(self.base_model)
                         temp_peft_model = get_peft_model(base_model_copy, self.lora_cfg, adapter_name="temp") # on cpu
                         temp_peft_model.load_state_dict(peft_sd_cpu, strict=False) # on cpu
                         temp_peft_model.save_pretrained(checkpoint_path, safe_serialization=True)
-                        logger.info(f"🔍 [DeepspeedTrainer-{self.rank}] Saved lora model to {checkpoint_path}")
+                        logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Saved lora model to {checkpoint_path}")
                         # clean up
                         del base_model_copy
                         del temp_peft_model
@@ -308,47 +299,16 @@ class DeepspeedTrainer(BaseTrainer):
             # Callback
             if callback:
                 try:
-                    logger.info(f"🔍 [DeepspeedTrainer-{self.rank}] Running callback: {callback}..")
+                    logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Running callback: {callback}..")
                     callback(checkpoint_path)
-                    logger.info(f"🔍 [DeepspeedTrainer-{self.rank}] Callback completed.")
+                    logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Callback completed.")
                 except Exception as e:
-                    logger.error(f"❌ [DeepspeedTrainer-{self.rank}] Error in callback: [{type(e).__name__}: {e}]")
+                    logger.error(f"❌ [{self.__class__.__name__}-{self.rank}] Error in callback: [{type(e).__name__}: {e}]")
                     logger.error(traceback.format_exc())
             else:
-                logger.info(f"🔍 [DeepspeedTrainer-{self.rank}] No callback provided")
+                logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] No callback provided")
 
-        logger.info(f"💾 [DeepspeedTrainer-{self.rank}] Checkpoint saved: {checkpoint_path} in [{time.time() - start_time:.1f}s]")
-
-    def _update_latest_checkpoint_link(self, checkpoint_path: Path):
-        """Update latest checkpoint link"""
-        latest_path = self.checkpoint_path / self.config.training.latest_checkpoint_name
-
-        # Remove existing link/directory
-        if self.engine.global_rank == 0:
-            if latest_path.exists():
-                if latest_path.is_symlink():
-                    latest_path.unlink()
-                else:
-                    shutil.rmtree(latest_path)
-
-            # Create symlink or copy
-            try:
-                latest_path.symlink_to(checkpoint_path.name)
-            except OSError:
-                shutil.copytree(checkpoint_path, latest_path)
-
-    def _cleanup_checkpoint(self, checkpoint_path: Path):
-        """Cleanup checkpoint"""
-        if self.engine.global_rank == 0:
-            # check all the folders under checkpoint_path
-            # retain only the latest {self.config.training.keep_checkpoint_num} checkpoints
-            checkpoints = list(checkpoint_path.glob("checkpoint-*"))
-            # remove checkpoint-latest
-            checkpoints.remove(checkpoint_path / self.config.training.latest_checkpoint_name)
-            checkpoints.sort(key=lambda x: int(x.name.split("-")[1]))
-            for checkpoint in checkpoints[:-self.config.training.keep_checkpoint_num]:
-                logger.info(f"🔍 [DeepspeedTrainer-{self.rank}] Removing checkpoint: {checkpoint}")
-                shutil.rmtree(checkpoint)
+        logger.info(f"💾 [{self.__class__.__name__}-{self.rank}] Checkpoint saved: {checkpoint_path} in [{time.time() - start_time:.1f}s]")
 
     def _setup_logging(self):
         """Setup logging and tracking"""
@@ -361,7 +321,7 @@ class DeepspeedTrainer(BaseTrainer):
                     config=self.config.model_dump(),
                     resume="allow",
                 )
-                logger.info(f"📊 [DeepspeedTrainer-{self.rank}] W&B logging enabled")
+                logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] W&B logging enabled")
 
     def _compute_loss(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Compute loss for a batch"""
@@ -392,10 +352,7 @@ class DeepspeedTrainer(BaseTrainer):
 
         # Backward pass
         # if use deepspeed, use deepspeed.backward(loss)
-        if self.config.model.use_deepspeed:
-            self.engine.backward(loss)
-        else:
-            loss.backward()
+        self.engine.backward(loss)
 
         return loss.item()
 
@@ -417,7 +374,7 @@ class DeepspeedTrainer(BaseTrainer):
             if step % self.config.training.logging_steps == 0:
                 # format metrics into a string with .4f format
                 formatted_metrics = {k: f"{v:.4f}" for k, v in metrics.items()}
-                logger.info(f"🔍 [DeepspeedTrainer-{self.rank}] [G-Step={step}] {formatted_metrics}")
+                logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] [G-Step={step}] {formatted_metrics}")
 
                 if self.config.logging.use_wandb:
                     wandb.log(metrics, step=step)
@@ -455,7 +412,7 @@ class DeepspeedTrainer(BaseTrainer):
             worker_init_fn=worker_init_fn,
         )
 
-        logger.info(f"👉 [DeepspeedTrainer-{self.rank}] [{run_tag}] Block started with [{len(dataloader)}] micro batches, Initial global step: [{self.status.global_step}]")
+        logger.info(f"👉 [{self.__class__.__name__}-{self.rank}] [{run_tag}] Block started with [{len(dataloader)}] micro batches, Initial global step: [{self.status.global_step}]")
 
         start_time = time.time()
         accumulated_loss = 0.0
@@ -514,10 +471,10 @@ class DeepspeedTrainer(BaseTrainer):
             # always save checkpoint at the end of the block
             self._save_checkpoint(self.status.global_step)
         except Exception as e:
-            logger.error(f"❌ [DeepspeedTrainer-{self.rank}] [{run_tag}] Failed to save checkpoint: [{type(e).__name__}: {e}]")
+            logger.error(f"❌ [{self.__class__.__name__}-{self.rank}] [{run_tag}] Failed to save checkpoint: [{type(e).__name__}: {e}]")
 
         total_time = time.time() - start_time
-        logger.info(f"🎉 [DeepspeedTrainer-{self.rank}] [{run_tag}] Block completed in [{total_time:.1f}s] - Final global step: [{self.status.global_step}]")
+        logger.info(f"🎉 [{self.__class__.__name__}-{self.rank}] [{run_tag}] Block completed in [{total_time:.1f}s] - Final global step: [{self.status.global_step}]")
 
         if self.engine.global_rank == 0:
             progress_bar.close()
@@ -526,7 +483,7 @@ class DeepspeedTrainer(BaseTrainer):
 
     def _evaluate(self, eval_dataset: Dataset):
         """Evaluate the model on evaluation dataset"""
-        logger.info(f"📊 [DeepspeedTrainer-{self.rank}] Running evaluation...")
+        logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] Running evaluation...")
 
         self.engine.eval()
         eval_dataloader = DataLoader(
@@ -550,7 +507,7 @@ class DeepspeedTrainer(BaseTrainer):
         avg_eval_loss = total_loss / num_batches
         perplexity = math.exp(avg_eval_loss)
 
-        logger.info(f"📊 [DeepspeedTrainer-{self.rank}] Eval Loss: {avg_eval_loss:.4f}, Perplexity: {perplexity:.2f}")
+        logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] Eval Loss: {avg_eval_loss:.4f}, Perplexity: {perplexity:.2f}")
 
         if self.config.logging.use_wandb:
             wandb.log({
@@ -597,9 +554,9 @@ class DeepspeedTrainer(BaseTrainer):
 
         return generated_text.strip()
 
-async def _train_loop(prefix_tag: str, trainer: BaseTrainer, dataset: Dataset, eval_dataset: Optional[Dataset] = None):
+async def _train_loop(prefix_tag: str, trainer: EngineBase, dataset: Dataset, eval_dataset: Optional[Dataset] = None):
     """Main training loop"""
-    logger.info(f"🏋️ [DeepspeedTrainer-{trainer.rank}] Starting training - Total steps: [{trainer.config.training.max_steps}], Batch size: [{trainer.config.training.micro_batch_size}], Block size: [{trainer.config.training.block_size}]")
+    logger.info(f"🏋️ [{trainer.__class__.__name__}-{trainer.rank}] Starting training - Total steps: [{trainer.config.training.max_steps}], Batch size: [{trainer.config.training.micro_batch_size}], Block size: [{trainer.config.training.block_size}]")
 
     # run with asyncio task
     loop = asyncio.get_event_loop()
@@ -630,7 +587,7 @@ async def _train_loop(prefix_tag: str, trainer: BaseTrainer, dataset: Dataset, e
     if trainer.config.logging.use_wandb:
         wandb.finish()
 
-async def train_async(prefix_tag: str, trainer: BaseTrainer, train_dataset: Dataset, eval_dataset: Dataset) -> bool:
+async def train_async(prefix_tag: str, trainer: EngineBase, train_dataset: Dataset, eval_dataset: Dataset) -> bool:
     """Train the model asynchronously"""
     # Run sync function in thread pool
     try:
@@ -642,42 +599,22 @@ async def train_async(prefix_tag: str, trainer: BaseTrainer, train_dataset: Data
         logger.error(f"Traceback: {traceback.format_exc()}")
         return False
 
-def create_sample_training_dataset(tokenizer, size: int = 100, max_length: int = 512) -> TextDataset:
-    """Create a sample dataset for CLI training"""
-    # Sample conversations for training
-    conversations = [
-        "Human: What is artificial intelligence?\nAssistant: Artificial intelligence (AI) is the simulation of human intelligence in machines that are programmed to think and learn like humans.",
-        "Human: How do neural networks work?\nAssistant: Neural networks are computing systems inspired by biological neural networks. They consist of interconnected nodes (neurons) that process information through weighted connections.",
-        "Human: What is machine learning?\nAssistant: Machine learning is a subset of AI that enables computers to learn and improve from experience without being explicitly programmed for every task.",
-        "Human: Explain deep learning.\nAssistant: Deep learning is a subset of machine learning that uses artificial neural networks with multiple layers to model and understand complex patterns in data.",
-        "Human: What are transformers in AI?\nAssistant: Transformers are a type of neural network architecture that uses self-attention mechanisms to process sequential data, revolutionizing natural language processing.",
-        "Human: How does training work?\nAssistant: Training involves feeding data to a model, calculating errors, and adjusting parameters to minimize those errors through backpropagation.",
-        "Human: What is fine-tuning?\nAssistant: Fine-tuning is the process of taking a pre-trained model and further training it on a specific task or dataset to improve its performance on that particular task.",
-        "Human: What is LoRA?\nAssistant: LoRA (Low-Rank Adaptation) is a technique that fine-tunes large language models efficiently by updating only a small number of parameters while keeping most of the model frozen.",
-    ]
-
-    # Repeat to reach desired size
-    repeated_conversations = (conversations * (size // len(conversations) + 1))[:size]
-    return TextDataset(repeated_conversations, tokenizer, max_length)
-
 
 async def main():
     """Main training function"""
-    parser = argparse.ArgumentParser(description="Train a model using BaseTrainer")
-    parser.add_argument("--prefix-tag", type=str, default="auto",
+    parser = argparse.ArgumentParser(description="Train a model using EngineDeepspeed")
+    parser.add_argument("--prefix-tag", type=str, default="auto.deepspeed",
                        help="Prefix tag for the training run")
-    parser.add_argument("--config", type=str, default="trainerBase.yaml",
+    parser.add_argument("--config", type=str, default="engineBase.yaml",
                        help="Path to configuration YAML file")
     parser.add_argument("--model-name", type=str, default=None,
                        help="Override model name")
     parser.add_argument("--max-steps", type=int, default=None,
                        help="Override maximum training steps")
-    # parser.add_argument("--use-deepspeed", type=bool, action="store_true", default=False,
-    #                    help="Use deepspeed")
     args, _ = parser.parse_known_args()  # still robust to extras
 
     try:
-        config = TrainerConfig.from_yaml(args.config)
+        config = EngineConfig.from_yaml(args.config)
         logger.info(f"📜 Configuration loaded from {args.config}")
     except Exception as e:
         logger.error(f"❌ Failed to load configuration: {e}")
@@ -694,18 +631,18 @@ async def main():
 
     # Initialize trainer
     try:
-        trainer = DeepspeedTrainer(args.prefix_tag, config)
-        logger.info(f"✅ [DeepspeedTrainer-{trainer.rank}] Trainer initialized")
+        trainer = EngineDeepspeed(args.prefix_tag, config)
+        logger.info(f"✅ [{trainer.__class__.__name__}-{trainer.rank}] Trainer initialized")
     except Exception as e:
-        logger.error(f"❌ [DeepspeedTrainer] Trainer initialization failed: {e}")
-        logger.error(f" [DeepspeedTrainer] Traceback: {traceback.format_exc()}")
+        logger.error(f"❌ [{trainer.__class__.__name__}] Trainer initialization failed: {e}")
+        logger.error(f" [{trainer.__class__.__name__}] Traceback: {traceback.format_exc()}")
         sys.exit(1)
 
     # Create datasets
     train_dataset = create_sample_training_dataset(trainer.tokenizer, size=40, max_length=trainer.config.model.max_seq_length)
     eval_dataset = create_sample_training_dataset(trainer.tokenizer, size=2, max_length=trainer.config.model.max_seq_length)
 
-    logger.info(f"📊 [DeepspeedTrainer-{trainer.rank}] Dataset created - Train: {len(train_dataset)}, Eval: {len(eval_dataset)}")
+    logger.info(f"📊 [{trainer.__class__.__name__}-{trainer.rank}] Dataset created - Train: {len(train_dataset)}, Eval: {len(eval_dataset)}")
 
     # Start training
     success = await train_async(args.prefix_tag, trainer, train_dataset, eval_dataset)
