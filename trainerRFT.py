@@ -2,10 +2,7 @@ import os
 import sys
 import json
 import duckdb
-import unsloth
-from torch.utils.data import Dataset
-from transformers import AutoTokenizer
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, Optional, Any, Callable
 import yaml
 import asyncio
 import argparse
@@ -36,7 +33,7 @@ class RFTConfig(BaseModel):
         rft_config = config.get('rft', {})
         return cls(**rft_config)
 
-class RFTTrainer(BaseTrainer):
+class RFTTrainer():
     """Rejection Fine-Tuning trainer for conversational datasets"""
     
     def __init__(self,
@@ -48,7 +45,12 @@ class RFTTrainer(BaseTrainer):
         base_trainer: BaseTrainer = None,
     ):
         """Initialize RFT trainer"""
-        super().__init__(prefix_tag, base_config, status, base_trainer)
+        if base_trainer is None:
+            self.base_trainer = BaseTrainer(prefix_tag, base_config, status)
+        else:
+            self.base_trainer = base_trainer
+        self.tokenizer = self.base_trainer.tokenizer
+        self.status = self.base_trainer.status
         self.configInterpreter = ConfigInterpreter()
         self.duckdbClient = DuckDBClient()
         self.rft_config = rft_config
@@ -102,9 +104,9 @@ class RFTTrainer(BaseTrainer):
 
         rft_datasets = context_vars.get('__result__', {})
 
-        logger.info(f"👉 [{self.__class__.__name__}] [{block.input_tag}] Block started with [{len(rft_datasets)}] tasks, Initial global step: [{self.trainer_status.global_step}]")
+        logger.info(f"👉 [RFTTrainer] [{block.input_tag}] Block started with [{len(rft_datasets)}] tasks, Initial global step: [{self.base_trainer.status.global_step}]")
 
-        await super().train_block(block.input_tag, rft_datasets, callback=callback)
+        await self.base_trainer.train_block(block.input_tag, rft_datasets, callback=callback)
         await asyncio.sleep(1)
 
 

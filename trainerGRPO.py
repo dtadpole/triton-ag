@@ -69,7 +69,7 @@ class GRPOConfig(BaseModel):
         return cls(**grpo_config)
 
 
-class GRPOTrainer(BaseTrainer):
+class GRPOTrainer():
     """GRPO (Generalized Preference Optimization) trainer for preference learning"""
 
     def __init__(self,
@@ -82,7 +82,12 @@ class GRPOTrainer(BaseTrainer):
         # reference_model: Optional[torch.nn.Module] = None,
     ):
         """Initialize GRPO trainer"""
-        super().__init__(prefix_tag, base_config, status, base_trainer)
+        if base_trainer is None:
+            self.base_trainer = BaseTrainer(prefix_tag, base_config, status)
+        else:
+            self.base_trainer = base_trainer
+        self.tokenizer = self.base_trainer.tokenizer
+        self.status = self.base_trainer.status
         self.configInterpreter = ConfigInterpreter()
         self.duckdbClient = DuckDBClient()
         self.grpo_config = grpo_config
