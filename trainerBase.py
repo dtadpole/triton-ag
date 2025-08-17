@@ -7,10 +7,11 @@ import asyncio
 import sys
 import json
 import deepspeed
+from deepspeed.runtime.zero.partition_parameters import GatheredParameters
 import torch
 import torch.optim as optim
 import torch.distributed as dist
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from torch.nn.utils import clip_grad_norm_
 from transformers import (
     get_scheduler,
@@ -191,7 +192,6 @@ class TrainerConfig(BaseModel):
             logging=logging_config
         )
 
-
 class TextDataset(Dataset):
     """Simple text dataset for language modeling"""
 
@@ -228,9 +228,15 @@ class BaseTrainer:
     def __init__(self, prefix_tag: str, config: TrainerConfig, status: Optional[TrainerStatus] = None):
         self.prefix_tag = prefix_tag
         self.config = config
-        dist.init_process_group("nccl")
-        self.rank = dist.get_rank()
-        self.device = torch.device(f"cuda:{self.rank}" if torch.cuda.is_available() else "cpu")
+        if os.environ.get("LOCAL_RANK") is not None and os.environ.get("WORLD_SIZE") is not None:
+            dist.init_process_group("nccl")
+            self.rank = dist.get_rank()
+            self.world_size = dist.get_world_size()
+            self.device = torch.device(f"cuda:{self.rank}" if torch.cuda.is_available() else "cpu")
+        else:
+            self.rank = 0
+            self.world_size = 1
+            self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
         # Setup output directory
         self.checkpoint_path = Path(os.path.expanduser(self.config.training.checkpoint_path)) / self.prefix_tag
@@ -372,7 +378,7 @@ class BaseTrainer:
         start_time = time.time()
         logger.info(f"🔄 [BaseTrainer-{self.rank}] Loading checkpoint from: {checkpoint_location}")
 
-        dist.barrier()
+        if self.world_size > 1: dist.barrier()
         # load training status always
         training_status_path = checkpoint_location / TRAINING_STATUS_FILE
         with open(training_status_path, 'r') as f:
@@ -397,7 +403,7 @@ class BaseTrainer:
             # load full model only if not using lora
             self.engine.load_checkpoint(checkpoint_location, tag=DEEPSPEED_TAG)
             logger.info(f"🔍 [BaseTrainer-{self.rank}] Loaded full model state")
-        dist.barrier()
+        if self.world_size > 1: dist.barrier()
 
         logger.info(f"📜 [BaseTrainer-{self.rank}] Checkpoint loaded - G-Step: [{self.trainer_status.global_step}] in [{time.time() - start_time:.1f}s]")
 
@@ -407,7 +413,7 @@ class BaseTrainer:
         checkpoint_path = self.checkpoint_path / f"checkpoint-{step}"
         checkpoint_path.mkdir(parents=True, exist_ok=True)
 
-        dist.barrier()
+        if self.world_size > 1: dist.barrier()
         if self.engine.global_rank == 0:
             # Save config
             with open(checkpoint_path / "training_config.yaml", 'w') as f:
@@ -428,13 +434,16 @@ class BaseTrainer:
             if self.engine.global_rank == 0:
                 # only save one copy of the full lora model
                 if int(self.engine.zero_optimization_stage()) == 3:
-                    with deepspeed.GatheredParameters(self.model.parameters(), modifier_rank=0):
-                        self.engine.module.save_pretrained(checkpoint_path)
+                    # TODO: change below to lora parameters only
+                    lora_params = [p for n, p in self.engine.module.named_parameters() if p.requires_grad]
+                    with GatheredParameters(lora_params, modifier_rank=0):
+                        peft_sd = get_peft_model_state_dict(self.engine.module)
+                        self.engine.module.save_pretrained(checkpoint_path, state_dict=peft_sd)
                 else:
                     self.engine.module.save_pretrained(checkpoint_path)
         else:
             self.engine.save_checkpoint(checkpoint_path, tag=DEEPSPEED_TAG)
-        dist.barrier()
+        if self.world_size > 1: dist.barrier()
 
         # touch checkpoint ready file
         (checkpoint_path / f"{CHECKPOINT_READY_FILE}.{self.rank}").touch()
@@ -479,15 +488,16 @@ class BaseTrainer:
 
     def _setup_logging(self):
         """Setup logging and tracking"""
-        if self.config.logging.use_wandb:
-            wandb.init(
-                project=self.config.logging.wandb_project,
-                id=self.config.logging.wandb_run_id,
-                name=self.config.logging.wandb_run_name,
-                config=self.config.model_dump(),
-                resume="allow",
-            )
-            logger.info(f"📊 [BaseTrainer-{self.rank}] W&B logging enabled")
+        if self.engine.global_rank == 0:
+            if self.config.logging.use_wandb:
+                wandb.init(
+                    project=self.config.logging.wandb_project,
+                    id=self.config.logging.wandb_run_id,
+                    name=self.config.logging.wandb_run_name,
+                    config=self.config.model_dump(),
+                    resume="allow",
+                )
+                logger.info(f"📊 [BaseTrainer-{self.rank}] W&B logging enabled")
 
     def _compute_loss(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Compute loss for a batch"""
@@ -557,13 +567,27 @@ class BaseTrainer:
     ):
         """Train the model for one block"""
         # Create data loader
+        sampler  = DistributedSampler(
+            dataset,
+            num_replicas=dist.get_world_size(),
+            rank=self.rank,
+            shuffle=True,
+            drop_last=True,
+        )
+        def worker_init_fn(worker_id):
+            # make dataloader workers deterministic but distinct per rank/worker
+            base_seed = 1234
+            seed = base_seed + self.rank * 10_000 + worker_id
+            torch.manual_seed(seed)
+        # create dataloader
         dataloader = DataLoader(
             dataset,
             batch_size=self.config.training.micro_batch_size,
-            shuffle=True,
+            sampler=sampler,
             num_workers=self.config.training.dataloader_num_workers,
             pin_memory=True,
-            collate_fn=self.data_collator
+            collate_fn=self.data_collator,
+            worker_init_fn=worker_init_fn,
         )
 
         logger.info(f"👉 [BaseTrainer-{self.rank}] [{run_tag}] Block started with [{len(dataloader)}] micro batches, Initial global step: [{self.trainer_status.global_step}]")
@@ -785,7 +809,6 @@ async def main():
                        help="Override maximum training steps")
     # parser.add_argument("--use-deepspeed", type=bool, action="store_true", default=False,
     #                    help="Use deepspeed")
-    parser.add_argument("--local_rank", type=int, default=int(os.getenv("LOCAL_RANK", -1)))
     args, _ = parser.parse_known_args()  # still robust to extras
 
     try:
@@ -809,8 +832,8 @@ async def main():
         trainer = BaseTrainer(args.prefix_tag, config)
         logger.info(f"✅ [BaseTrainer-{trainer.rank}] Trainer initialized")
     except Exception as e:
-        logger.error(f"❌ [BaseTrainer-{trainer.rank}] Trainer initialization failed: {e}")
-        logger.error(f" [BaseTrainer-{trainer.rank}] Traceback: {traceback.format_exc()}")
+        logger.error(f"❌ [BaseTrainer] Trainer initialization failed: {e}")
+        logger.error(f" [BaseTrainer] Traceback: {traceback.format_exc()}")
         sys.exit(1)
 
     # Create datasets
