@@ -3,6 +3,8 @@ import re
 import json
 import time
 import asyncio
+import inspect
+import ast
 import traceback
 import argparse
 import yaml
@@ -16,6 +18,58 @@ import duckdb
 from logger import logger
 from itertools import groupby
 from operator import itemgetter
+
+async def read_stream(stream, prefix: str, is_error: bool = False):
+    """Read from a stream and print each line with a prefix."""
+    while True:
+        line = await stream.readline()
+        if not line:
+            break
+        # Decode bytes to string and strip newline
+        output = line.decode("utf-8").rstrip()
+        if is_error:
+            logger.error(f"[{prefix}] {output}")
+        else:
+            logger.info(f"[{prefix}] {output}")
+
+async def run_command(command: str, prefix: str = "run_command") -> int:
+    """
+    Rsync a file from source to target path
+    """
+    # run command: rsync -azP <source_path> <target_path>
+    process = await asyncio.create_subprocess_shell(
+        command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=os.environ.copy(),
+    )
+
+    logger.info(f"[{prefix}] START ====================")
+    logger.info(f"[{prefix}] command: {command}")
+
+    # Create tasks to read stdout and stderr concurrently
+    stdout_task = asyncio.create_task(
+        read_stream(process.stdout, prefix, is_error=False)
+    )
+    stderr_task = asyncio.create_task(
+        read_stream(
+            process.stderr, prefix, is_error=True
+        )  # seems taking warning message as error message
+    )
+
+    # Wait for the process to complete
+    return_code = await process.wait()
+
+    # Wait for all output to be processed
+    await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+    if process.returncode != 0:
+        logger.error(f"[{prefix}] return code: {process.returncode}")
+    else:
+        logger.info(f"[{prefix}] return code: {process.returncode}")
+
+    logger.info(f"[{prefix}] END ====================")
+
+    return return_code
 
 class ConfigInterpreter:
 
@@ -125,6 +179,11 @@ class ConfigInterpreter:
                         if not success:
                             error_encountered = True
                             break
+                    elif step_type == 'command':
+                        success = await self._process_command(runtime, step_config, context_vars)
+                        if not success:
+                            error_encountered = True
+                            break
                     else:
                         logger.error(f"🔴 [_process_steps] Step type not found in step: {step_config}")
                         error_encountered = True
@@ -147,6 +206,29 @@ class ConfigInterpreter:
             logger.error(f"🔴 [_process_steps] error: [{type(e)}: {e}]")
             logger.error(traceback.format_exc())
             return None
+
+    async def _process_logging(self, runtime: Any, result: Any, logging_config: dict, context_vars: dict) -> bool:
+        """Process logging."""
+        try:
+            if 'info' in logging_config:
+                message = self._process_variable(logging_config['info'], context_vars)
+                logger.info(f"🔍 [_process_logging] {message}")
+            elif 'warning' in logging_config:
+                message = self._process_variable(logging_config['warning'], context_vars)
+                logger.warning(f"🔍 [_process_logging] {message}")
+            elif 'error' in logging_config:
+                message = self._process_variable(logging_config['error'], context_vars)
+                logger.error(f"🔍 [_process_logging] {message}")
+            elif 'method' in logging_config:
+                log_method = getattr(runtime, logging_config['method'])
+                # check if log_method is async
+                if asyncio.iscoroutinefunction(log_method):
+                    await log_method(result, context_vars)
+                else:
+                    log_method(result, context_vars)
+        except Exception as e:
+            logger.warning(f"🔴 [_process_endpoint] Error processing logging: {log_config} [{type(e)}: {e}]")
+
 
     async def _process_returns(self, runtime: Any, result: Any, returns_config: dict, context_vars: dict) -> tuple[bool, Any]:
         """Process returns."""
@@ -172,17 +254,7 @@ class ConfigInterpreter:
         # process logging
         if 'logging' in returns_config:
             log_config = returns_config['logging']
-            try:
-                log_method = getattr(runtime, log_config.get('method', None))
-                if not log_method:
-                    logger.warning(f"🔴 [_process_returns] Logging method not found: {log_config}")
-                # check if log_method is async
-                if asyncio.iscoroutinefunction(log_method):
-                    await log_method(result, context_vars)
-                else:
-                    log_method(result, context_vars)
-            except Exception as e:
-                logger.warning(f"🔴 [_process_endpoint] Error processing logging: {log_config} [{type(e)}: {e}]")
+            await self._process_logging(runtime, result, log_config, context_vars)
 
         # process wait_for
         if 'wait_for' in returns_config:
@@ -312,12 +384,42 @@ class ConfigInterpreter:
             # then process the code snippet block, DO NOT use _process_variable here!!!
             code_snippet_block = code_config.get('code_snippet_block', '')
             if code_snippet_block:
-                try:
-                    exec(code_snippet_block, context_vars)
-                except Exception as e:
-                    logger.error(f"🔴 [_process_code] Error executing code snippet block: {code_snippet_block} [{type(e)}: {e}]")
-                    logger.error(traceback.format_exc())
-                    return False
+                if code_config.get('async', False):
+                    try:
+                        code = compile(code_snippet_block, "<exec>", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+                        # Run exec — this binds a coroutine object into the namespace under "_"
+                        # ns = {"some_async_func": some_async_func}
+                        coro = exec(code, context_vars)
+                        # coro = exec(code, ns)
+                        # exec() itself returns None, but with this flag,
+                        # the code object *evaluates* to a coroutine object and
+                        # gets assigned to the special key "__await__" behavior.
+                        # The trick is: exec() doesn't return it, but it *is* the last expression.
+                        # So instead we capture it like this:
+                        # exec(code_snippet_block, context_vars)
+                        maybe_coro = context_vars.get("__async__")
+                        if inspect.iscoroutine(maybe_coro):
+                            result = await maybe_coro
+                            context_vars['__result__'] = result
+                        else:
+                            if maybe_coro is not None:
+                                logger.error(f"🔴 [_process_code] Error executing code snippet block: {code_snippet_block} [__async__] is not a coroutine [{type(maybe_coro)}]")
+                                return False
+                            else:
+                                # if __async__ is not defined, execute the code snippet block
+                                logger.error(f"🔴 [_process_code] Error executing code snippet block: {code_snippet_block} [__async__] function not defined")
+                                return False
+                    except Exception as e:
+                        logger.error(f"🔴 [_process_code] Error executing code snippet block: {code_snippet_block} [{type(e)}: {e}]")
+                        logger.error(traceback.format_exc())
+                        return False
+                else:
+                    try:
+                        exec(code_snippet_block, context_vars)
+                    except Exception as e:
+                        logger.error(f"🔴 [_process_code] Error executing code snippet block: {code_snippet_block} [{type(e)}: {e}]")
+                        logger.error(traceback.format_exc())
+                        return False
 
             # if returns is configured, process the returns
             try:
@@ -341,6 +443,24 @@ class ConfigInterpreter:
             logger.error(traceback.format_exc())
             return False
 
+        return True
+
+    async def _process_command(self, runtime: Any, command_config: dict, context_vars: dict) -> bool:
+        """Process a command."""
+        commands_config = command_config.get('commands', [])
+        for single_command_config in commands_config:
+            try:
+                command = self._process_variable(single_command_config, context_vars)
+                # logger.info(f"🔍 [_process_command] Running command: {command}")
+                return_code = await run_command(command, prefix=command_config.get('prefix', 'run_command'))
+                if return_code != 0:
+                    logger.error(f"🔴 [_process_command] Error running command: {command} [{return_code}]")
+                    return False
+            except Exception as e:
+                logger.error(f"🔴 [_process_command] Error processing command: {single_command_config} [{type(e)}: {e}]")
+                logger.error(traceback.format_exc())
+                return False
+        # if all commands are successful, return True
         return True
 
     async def _process_iterator(self, runtime: Any, iterator_config: dict, context_vars: dict) -> bool:

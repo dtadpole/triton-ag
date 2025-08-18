@@ -3,21 +3,17 @@ import asyncio
 import httpx
 from typing import Any, Dict, Optional
 from logger import logger
-from workflowUtil import CodeGenEvalBlock, CritiqueBlock, ExemplarBlock, ReflectionBlock, TrainerSFTBlock, TrainerRFTBlock, TrainerGRPOBlock, ComposerBlock
+from workflowUtil import TrainerSFTBlock, TrainerRFTBlock, TrainerGRPOBlock, ComposerBlock, WorkflowSyncBlock
 from pydantic import BaseModel
 
 TASK_TYPE_INFERENCE = "inference"
 TASK_TYPE_TRAINER = "trainer"
-TASK_TYPE_GRPO = "trainer.grpo"
-TASK_TYPE_SFT = "trainer.sft"
-TASK_TYPE_RFT = "trainer.rft"
+TASK_TYPE_SYNC = "sync"
 
 VALID_TASK_TYPES = [
     TASK_TYPE_INFERENCE,
     TASK_TYPE_TRAINER,
-    TASK_TYPE_GRPO,
-    TASK_TYPE_SFT,
-    TASK_TYPE_RFT,
+    TASK_TYPE_SYNC,
 ]
 
 class WorkflowClient:
@@ -267,18 +263,10 @@ class WorkflowClient:
                 raise ValueError(f"Task [{task_name}] has unknown task type: [{task_type}]")
             await self.enqueue(queue_name, trainerBlock.model_dump(), create_queue=True)
             logger.info(f"🎢 [GlobalWorkflow] [{self.prefix_tag}] Enqueued to [{task_type}:{task_name}], content: [{trainerBlock.model_dump()}]")
-        elif task_type == TASK_TYPE_SFT:
-            trainerSFTBlock = TrainerSFTBlock(**(self._get_task_default(task_type, task_name) | task_config))
-            await self.enqueue(queue_name, trainerSFTBlock.model_dump(), create_queue=True)
-            logger.info(f"🎢 [GlobalWorkflow] [{self.prefix_tag}] Enqueued to [{task_type}:{task_name}], content: [{trainerSFTBlock.model_dump()}]")
-        elif task_type == TASK_TYPE_RFT:
-            trainerRFTBlock = TrainerRFTBlock(**(self._get_task_default(task_type, task_name) | task_config))
-            await self.enqueue(queue_name, trainerRFTBlock.model_dump(), create_queue=True)
-            logger.info(f"🎢 [GlobalWorkflow] [{self.prefix_tag}] Enqueued to [{task_type}:{task_name}], content: [{trainerRFTBlock.model_dump()}]")
-        elif task_type == TASK_TYPE_GRPO:
-            trainerGRPOBlock = TrainerGRPOBlock(**(self._get_task_default(task_type, task_name) | task_config))
-            await self.enqueue(queue_name, trainerGRPOBlock.model_dump(), create_queue=True)
-            logger.info(f"🎢 [GlobalWorkflow] [{self.prefix_tag}] Enqueued to [{task_type}:{task_name}], content: [{trainerGRPOBlock.model_dump()}]")
+        elif task_type == TASK_TYPE_SYNC:
+            syncBlock = WorkflowSyncBlock(**(self._get_task_default(task_type, task_name) | task_config))
+            await self.enqueue(queue_name, syncBlock.model_dump(), create_queue=True)
+            logger.info(f"🎢 [GlobalWorkflow] [{self.prefix_tag}] Enqueued to [{task_type}:{task_name}], content: [{syncBlock.model_dump()}]")
         else:
             raise ValueError(f"Task [{task_name}] has unknown task type: [{task_type}]")
 

@@ -24,7 +24,8 @@ class ProviderConfig(BaseModel):
     base_url: str = Field()
     api_key_path: str = Field()
     streaming: bool = Field(default=True)
-    max_retries: int = Field(default=3)
+    num_retries: int = Field(default=3)
+    initial_retry_interval: int = Field(default=3)
     timeout: int = Field(default=300)
     trust_remote_code: bool = Field(default=False)
 
@@ -65,7 +66,8 @@ class InferenceClient:
         self.base_url = config.provider.base_url
         self.api_key_path = config.provider.api_key_path
         self.streaming = config.provider.streaming
-        self.max_retries = config.provider.max_retries
+        self.num_retries = config.provider.num_retries
+        self.initial_retry_interval = config.provider.initial_retry_interval
         self.timeout = config.provider.timeout
         # model config
         self.model_short_name = config.model.model_short_name
@@ -219,15 +221,16 @@ class InferenceClient:
         Generate text using OpenAI-compatible API with streaming or non-streaming mode.
         """
         retry_count = 0
-        while retry_count < self.max_retries:
+        while retry_count < self.num_retries:
             retry_count += 1
             try:
                 return await self._chat_completion(messages, max_tokens=max_tokens, logprobs=logprobs)
             except Exception as e:
                 traceback.print_exc()
-                if retry_count < self.max_retries:
-                    logger.warning(f"⚠️ [InferenceClient] [Chat completion] Failed: {e} [{retry_count}/{self.max_retries}], retrying in {3 ** retry_count} seconds...")
-                    await asyncio.sleep(3 ** retry_count) # exponential backoff
+                if retry_count < self.num_retries:
+                    sleep_time = self.initial_retry_interval ** retry_count
+                    logger.warning(f"⚠️ [InferenceClient] [Chat completion] Failed: {e} [{retry_count}/{self.num_retries}], retrying in {sleep_time} seconds...")
+                    await asyncio.sleep(sleep_time) # exponential backoff
                 else:
                     logger.error(f"❌ [InferenceClient] [Chat completion] Failed: {e}, giving up...") # give up after max retries
         return None
@@ -324,14 +327,15 @@ class InferenceClient:
         Generate text completion using OpenAI-compatible API with streaming or non-streaming mode.
         """
         retry_count = 0
-        while retry_count < self.max_retries:
+        while retry_count < self.num_retries:
             retry_count += 1
             try:
                 return await self._completion(prompt, max_tokens=max_tokens, logprobs=logprobs)
             except Exception as e:
-                if retry_count < self.max_retries:
-                    logger.warning(f"⚠️ [InferenceClient] [Completion] Failed: {e} [{retry_count}/{self.max_retries}], retrying in {3 ** retry_count} seconds...")
-                    await asyncio.sleep(3 ** retry_count) # exponential backoff
+                if retry_count < self.num_retries:
+                    sleep_time = self.initial_retry_interval ** retry_count
+                    logger.warning(f"⚠️ [InferenceClient] [Completion] Failed: {e} [{retry_count}/{self.num_retries}], retrying in {sleep_time} seconds...")
+                    await asyncio.sleep(sleep_time) # exponential backoff
                 else:
                     traceback.print_exc()
                     logger.error(f"❌ [InferenceClient] [Completion] Failed: {e}, giving up...") # give up after max retries

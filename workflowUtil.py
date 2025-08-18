@@ -12,6 +12,14 @@ REG_DIR = ".reg"
 
 MODEL_OVERRIDE_KEY = "adapter.model_override"
 
+class WorkflowSyncBlock(BaseModel):
+    prefix_tag: str
+    epoch_id: int
+    block_id: int
+    input_tag: str
+    context_vars: dict = Field(default={})
+    module_file: str = Field(default="workflow/sync.module.vllm.yaml")
+
 class TrainerSFTBlock(BaseModel):
     prefix_tag: str
     epoch_id: int

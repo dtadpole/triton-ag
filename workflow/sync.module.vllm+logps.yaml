@@ -1,0 +1,33 @@
+tasks:
+  - type: command
+    commands:
+      - "rsync -azP --rsync-path 'mkdir -p .trainer/{checkpoint_name} && rsync' ~/.trainer/{checkpoint_name}/adapter_config.json {server_hostname}:.trainer/{checkpoint_name}"
+      - "rsync -azP --rsync-path 'mkdir -p .trainer/{checkpoint_name} && rsync' ~/.trainer/{checkpoint_name}/adapter_model.safetensors {server_hostname}:.trainer/{checkpoint_name}"
+  - type: endpoint
+    endpoint: vllm_client.load_adapter
+    input:
+      - checkpoint_name: "`checkpoint_name`"
+      - adapter_path: "`adapter_path`"
+    output:
+      - adapter_path: "`adapter_path`"
+  - type: endpoint
+    endpoint: vllm_client.unload_adapter
+    input:
+      - checkpoint_name: "`checkpoint_name`"
+      - adapter_path: "`adapter_path`"
+    output:
+      - adapter_path: "`adapter_path`"
+  - type: endpoint
+    endpoint: custom_client.load_lora_adapter
+    input:
+      - checkpoint_name: "`checkpoint_name`"
+      - adapter_path: "`adapter_path`"
+    output:
+      - adapter_path: "`adapter_path`"
+  - type: endpoint
+    endpoint: custom_client.unload_lora_adapter
+    input:
+      - checkpoint_name: "`checkpoint_name`"
+      - adapter_path: "`adapter_path`"
+    output:
+      - adapter_path: "`adapter_path`"
