@@ -13,22 +13,20 @@ def from_yaml(path):
 
 class InferenceCustomClient:
     def __init__(self, provider_name: str, config_path="inferenceCustom.yaml"):
-        self.raw_config = from_yaml(config_path).get("provider", {})
+        self.raw_config = from_yaml(config_path).get("providers", {})
         if provider_name not in self.raw_config:
             raise ValueError(f"Provider {provider_name} not found in config file [{config_path}]")
         self.provider_name = provider_name
         self.provider_config = self.raw_config.get(provider_name, {})
         self.base_url = self.provider_config.get("base_url", "http://localhost:8092/v1")
-        self.num_retries = self.provider_config.get("num_retries", 4)
-        self.timeout = self.provider_config.get("timeout", 300)
+        self.hostname = self.base_url.split('://')[1].split(':')[0]
+        self.port = self.base_url.split(':')[2].split('/')[0]
+        self.api_key_path = os.path.expanduser(self.provider_config.get('api_key_path', '~/.keys/local.api.key'))
+        with open(self.api_key_path, 'r') as f:
+            self.api_key = f.read().strip()
+        self.num_retries = self.provider_config.get('num_retries', 3)
         self.initial_retry_interval = self.provider_config.get('initial_retry_interval', 3)
-        self.max_retry_interval = self.provider_config.get('max_retry_interval', 300)
-        self.api_key_path = os.path.expanduser(self.provider_config.get("api_key_path", None))
-        if self.api_key_path:
-            with open(self.api_key_path, "r") as f:
-                self.api_key = f.read().strip()
-        else:
-            self.api_key = None
+        self.timeout = self.provider_config.get('timeout', 300)
 
     async def get_models(self):
         retry_count = 0
@@ -63,7 +61,7 @@ class InferenceCustomClient:
                     logger.error(f"❌ [InferenceCustomClient] [{self.provider_name}] [get_models] Failed after {retry_count} retries")
                     return None
 
-    async def load_lora_adapter(self, adapter_name: str, adapter_path: str = None):
+    async def load_lora_adapter(self, lora_name: str, lora_path: str = None):
         retry_count = 0
         while retry_count < self.num_retries:
             try:
@@ -73,8 +71,8 @@ class InferenceCustomClient:
                     response = await client.post(
                         f"{self.base_url}/load_lora_adapter",
                         json={
-                            "lora_name": adapter_name,
-                            "lora_path": adapter_path if adapter_path else adapter_name,
+                            "lora_name": lora_name,
+                            "lora_path": lora_path if lora_path else lora_name,
                         },
                         headers={
                             "Content-Type": "application/json",
@@ -100,7 +98,7 @@ class InferenceCustomClient:
                     logger.error(f"❌ [InferenceCustomClient] [{self.provider_name}] [load_lora_adapter] Failed after {retry_count} retries")
                     return None
 
-    async def unload_lora_adapter(self, adapter_name: str):
+    async def unload_lora_adapter(self, lora_name: str):
         retry_count = 0
         while retry_count < self.num_retries:
             try:
@@ -110,14 +108,14 @@ class InferenceCustomClient:
                     response = await client.post(
                         f"{self.base_url}/unload_lora_adapter", 
                         json={
-                            "lora_name": adapter_name,
+                            "lora_name": lora_name,
                         },
                         headers={
                             "Content-Type": "application/json",
                             "Authorization": f"Bearer {self.api_key}",
                         },
                         timeout=self.timeout
-                    )   
+                    )
 
                     response.raise_for_status()
 

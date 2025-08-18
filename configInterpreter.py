@@ -212,13 +212,13 @@ class ConfigInterpreter:
         try:
             if 'info' in logging_config:
                 message = self._process_variable(logging_config['info'], context_vars)
-                logger.info(f"🔍 [_process_logging] {message}")
+                logger.info(f"[_process_logging] {message}")
             elif 'warning' in logging_config:
                 message = self._process_variable(logging_config['warning'], context_vars)
-                logger.warning(f"🔍 [_process_logging] {message}")
+                logger.warning(f"[_process_logging] {message}")
             elif 'error' in logging_config:
                 message = self._process_variable(logging_config['error'], context_vars)
-                logger.error(f"🔍 [_process_logging] {message}")
+                logger.error(f"[_process_logging] {message}")
             elif 'method' in logging_config:
                 log_method = getattr(runtime, logging_config['method'])
                 # check if log_method is async

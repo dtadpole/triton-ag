@@ -1,33 +1,93 @@
-tasks:
-  - type: command
-    commands:
-      - "rsync -azP --rsync-path 'mkdir -p .trainer/{checkpoint_name} && rsync' ~/.trainer/{checkpoint_name}/adapter_config.json {server_hostname}:.trainer/{checkpoint_name}"
-      - "rsync -azP --rsync-path 'mkdir -p .trainer/{checkpoint_name} && rsync' ~/.trainer/{checkpoint_name}/adapter_model.safetensors {server_hostname}:.trainer/{checkpoint_name}"
-  - type: endpoint
-    endpoint: vllm_client.load_adapter
-    input:
-      - checkpoint_name: "`checkpoint_name`"
-      - adapter_path: "`adapter_path`"
-    output:
-      - adapter_path: "`adapter_path`"
-  - type: endpoint
-    endpoint: vllm_client.unload_adapter
-    input:
-      - checkpoint_name: "`checkpoint_name`"
-      - adapter_path: "`adapter_path`"
-    output:
-      - adapter_path: "`adapter_path`"
-  - type: endpoint
-    endpoint: custom_client.load_lora_adapter
-    input:
-      - checkpoint_name: "`checkpoint_name`"
-      - adapter_path: "`adapter_path`"
-    output:
-      - adapter_path: "`adapter_path`"
-  - type: endpoint
-    endpoint: custom_client.unload_lora_adapter
-    input:
-      - checkpoint_name: "`checkpoint_name`"
-      - adapter_path: "`adapter_path`"
-    output:
-      - adapter_path: "`adapter_path`"
+sync_task:
+  # required context variables:
+  # - prefix_tag
+  # - checkpoint_name
+  # - vllm_provider
+  # - custom_provider
+  # - vllm_host
+  steps:
+    - type: command
+      commands:
+        - |
+          rsync -azP --rsync-path 'mkdir -p .trainer/{checkpoint_name} && rsync' \
+              ~/.trainer/{checkpoint_name}/adapter_config.json \
+              {vllm_host}:.trainer/{checkpoint_name}/
+        - |
+          rsync -azP --rsync-path 'mkdir -p .trainer/{checkpoint_name} && rsync' \
+              ~/.trainer/{checkpoint_name}/adapter_model.safetensors \
+              {vllm_host}:.trainer/{checkpoint_name}/
+    # load the lora adapter to vllm
+    - type: code
+      code_snippet_path: 'workflow/sync.vllm.lora.py'
+      code_snippet_block: |
+        __async__ = load_lora_adapters(vllm_provider, checkpoint_name)
+      async: true
+      returns:
+        logging:
+          info: "✅ Loaded adapter: {checkpoint_name} to vllm [{vllm_provider}]"
+    # load the lora adapter to logps server
+    - type: code
+      code_snippet_path: 'workflow/sync.custom.logps.py'
+      code_snippet_block: |
+        __async__ = load_custom_adapters(custom_provider, checkpoint_name)
+      async: true
+      returns:
+        logging:
+          info: "✅ Loaded adapter: {checkpoint_name} to custom server [{custom_provider}]"
+    # get unused lora adapters
+    - type: code
+      code_snippet_path: 'workflow/sync.vllm.unused.py'
+      code_snippet_block: |
+        # get unused lora adapters
+        __async__ = get_unused_lora_adapters(
+            prefix_tag=prefix_tag,
+            vllm_provider=vllm_provider,
+            recent_checkpoint_name=checkpoint_name,
+        )
+      async: true
+      returns:
+        logging:
+          info: "✅ Unused adapters: {__result__}"
+    - type: iterator
+      collection: "`__result__`"
+      steps:
+        # for each unused lora adapter, unload it from vllm
+        - type: code
+          code_snippet_path: 'workflow/sync.vllm.lora.py'
+          code_snippet_block: |
+            __async__ = unload_lora_adapters(vllm_provider, __item__)
+          async: true
+          returns:
+            logging:
+              info: "✅ Unloaded LoRA adapter: {__item__} from vllm [{vllm_provider}]"
+        # for each unused lora adapter, unload it from logps server
+        - type: code
+          code_snippet_path: 'workflow/sync.custom.logps.py'
+          code_snippet_block: |
+            __async__ = unload_custom_adapters(custom_provider, __item__)
+          async: true
+          returns:
+            logging:
+              info: "✅ Unloaded LoRA adapter: {__item__} from custom server [{custom_provider}]"
+    - type: endpoint
+      endpoint: workflowClient.put
+      args:
+        key: "adapter.model_override"
+        value: "`checkpoint_name`"
+      returns:
+        logging:
+          info: "✅ Updated [adapter.model_override] to [{checkpoint_name}]"
+
+enqueue_task:
+  steps:
+    - type: endpoint
+      endpoint: workflowClient.enqueue
+      input:
+        - queue_name: "`queue_name`"
+        - item:
+          - checkpoint_name: "`checkpoint_name`"
+            server_hostname: "`vllm_provider`"
+        - create_queue: true
+      returns:
+        logging:
+          method: "log_enqueue"

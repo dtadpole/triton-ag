@@ -23,7 +23,7 @@ sync_task:
       async: true
       returns:
         logging:
-          info: "Loaded adapter: {checkpoint_name}"
+          info: "✅ Loaded adapter: {checkpoint_name} to vllm [{vllm_provider}]"
     # get unused lora adapters
     - type: code
       code_snippet_path: 'workflow/sync.vllm.unused.py'
@@ -37,7 +37,7 @@ sync_task:
       async: true
       returns:
         logging:
-          info: "Unused adapters: {__result__}"
+          info: "✅ Unused adapters: {__result__}"
     - type: iterator
       collection: "`__result__`"
       steps:
@@ -49,7 +49,15 @@ sync_task:
           async: true
           returns:
             logging:
-              info: "Unloaded LoRA adapter: {__item__}"
+              info: "✅ Unloaded LoRA adapter: {__item__} from vllm [{vllm_provider}]"
+    - type: endpoint
+      endpoint: workflowClient.put
+      args:
+        key: "adapter.model_override"
+        value: "`checkpoint_name`"
+      returns:
+        logging:
+          info: "✅ Updated [adapter.model_override] to [{checkpoint_name}]"
 
 enqueue_task:
   steps:
