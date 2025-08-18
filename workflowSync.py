@@ -98,11 +98,12 @@ class WorkflowSync:
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--prefix_tag", type=str, default='TC_0.1.0_32B.b') # "auto.workflow.sync")
-    parser.add_argument("--module_file", type=str, default="workflow/sync.module.vllm.yaml")
+    parser.add_argument("--module_file", type=str, default="workflow/sync.module.vllm+logps.yaml")
     parser.add_argument("--queue_name", type=str, default="sync.sync.1")
     parser.add_argument("--manual_sync_checkpoint", type=str, default='TC_0.1.0_32B.b/checkpoint-1500')
     parser.add_argument("--manual_sync_context", type=str, default="""{
         "vllm_provider": "h8_1",
+        "custom_provider": "h8_1",
         "vllm_host": "devvm3317.eag0.facebook.com"
     }""")
     args = parser.parse_args()

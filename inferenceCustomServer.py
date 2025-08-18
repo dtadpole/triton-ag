@@ -78,6 +78,9 @@ class InferenceCustomServer:
         self.adapter_name_to_model_id = {}
         self._enable_api_endpoints()
 
+    def _model_id_to_adapter_name(self, model_id: str):
+        return model_id.replace('.', '_')
+
     def _enable_api_endpoints(self):
         """
         Add the API endpoints to the router
@@ -118,7 +121,7 @@ class InferenceCustomServer:
         async def load_lora_adapter(request: LoadLoraAdapterRequest):
             lora_path = os.path.join(self.model_path, request.lora_path)
             model_id = os.path.basename(os.path.dirname(lora_path)) + '/' + os.path.basename(lora_path)
-            lora_adapter_name = model_id.replace('.', '_')
+            lora_adapter_name = self._model_id_to_adapter_name(model_id)
             self.adapter_name_to_model_id[lora_adapter_name] = model_id
             # get lora adapter name from path
             if lora_adapter_name in self.lora_model.peft_config.keys():
@@ -144,7 +147,7 @@ class InferenceCustomServer:
         
         @self.router.post("/unload_lora_adapter")
         async def unload_lora_adapter(request: UnloadLoraAdapterRequest):
-            lora_adapter_name = request.lora_name.replace('.', '_')
+            lora_adapter_name = self._model_id_to_adapter_name(request.lora_name)
             if lora_adapter_name not in self.lora_model.peft_config.keys():
                 raise HTTPException(status_code=404, detail=f"LoRA checkpoint [{lora_adapter_name}] not found")
             self.lora_model.delete_adapter(lora_adapter_name)
@@ -155,7 +158,7 @@ class InferenceCustomServer:
 
         @self.router.post("/logps")
         async def get_logps(request: ProbRequest) -> ProbResponse:
-            model_or_adapter_name = request.model_name.replace('.', '_')
+            model_or_adapter_name = self._model_id_to_adapter_name(request.model_name)
             if request.model_name != self.model_name and model_or_adapter_name not in self.lora_model.peft_config.keys():
                 raise HTTPException(
                     status_code=404,

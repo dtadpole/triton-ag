@@ -27,9 +27,9 @@ sync_task:
           info: "✅ Loaded adapter: {checkpoint_name} to vllm [{vllm_provider}]"
     # load the lora adapter to logps server
     - type: code
-      code_snippet_path: 'workflow/sync.custom.logps.py'
+      code_snippet_path: 'workflow/sync.custom.lora.py'
       code_snippet_block: |
-        __async__ = load_custom_adapters(custom_provider, checkpoint_name)
+        __async__ = load_lora_adapters(custom_provider, checkpoint_name)
       async: true
       returns:
         logging:
@@ -47,7 +47,7 @@ sync_task:
       async: true
       returns:
         logging:
-          info: "✅ Unused adapters: {__result__}"
+          info: "✅ Unused VLLM adapters: {__result__} on server [{vllm_provider}]"
     - type: iterator
       collection: "`__result__`"
       steps:
@@ -60,11 +60,27 @@ sync_task:
           returns:
             logging:
               info: "✅ Unloaded LoRA adapter: {__item__} from vllm [{vllm_provider}]"
+    - type: code
+      code_snippet_path: 'workflow/sync.custom.unused.py'
+      code_snippet_block: |
+        # get unused lora adapters
+        __async__ = get_unused_lora_adapters(
+            prefix_tag=prefix_tag,
+            custom_provider=custom_provider,
+            recent_checkpoint_name=checkpoint_name,
+        )
+      async: true
+      returns:
+        logging:
+          info: "✅ Unused Custom adapters: {__result__} on server [{custom_provider}]"
+    - type: iterator
+      collection: "`__result__`"
+      steps:
         # for each unused lora adapter, unload it from logps server
         - type: code
-          code_snippet_path: 'workflow/sync.custom.logps.py'
+          code_snippet_path: 'workflow/sync.custom.lora.py'
           code_snippet_block: |
-            __async__ = unload_custom_adapters(custom_provider, __item__)
+            __async__ = unload_lora_adapters(custom_provider, __item__)
           async: true
           returns:
             logging:
