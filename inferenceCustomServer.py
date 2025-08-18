@@ -24,7 +24,7 @@ class ProbRequest(BaseModel):
 class ProbResponse(BaseModel):
     model_name: str
     input_ids: List[int]
-    gen_logps: List[float]
+    logps: List[float]
 
 class GenerateRequest(BaseModel):
     model_name: str
@@ -34,9 +34,9 @@ class GenerateRequest(BaseModel):
 
 class GenerateResponse(BaseModel):
     model_name: str
-    text: str
-    gen_token_ids: List[int]
-    gen_logps: List[float]
+    completion: str
+    completion_ids: List[int]
+    completion_logps: List[float]
 
 class LoadLoraAdapterRequest(BaseModel):
     lora_name: str
@@ -184,7 +184,11 @@ class InferenceCustomServer:
                     raise HTTPException(status_code=500, detail=result['status'])
             except asyncio.TimeoutError:
                 raise HTTPException(status_code=504, detail="Probability inference timeout")
-            return ProbResponse(model_name=request.model_name, input_ids=result['input_ids'], gen_logps=result['gen_logps'])
+            return ProbResponse(
+                model_name=request.model_name,
+                input_ids=result['input_ids'],
+                logps=result['logps']
+            )
 
     def _calculate_prob(self, work_items):
         # calculate max_len for all work_items
@@ -244,7 +248,7 @@ class InferenceCustomServer:
                         for i, item in enumerate(work_items):
                             result = {
                                 "input_ids": item['input_ids'],
-                                "gen_logps": per_token_logps[i, :len(item['input_ids'])].tolist(),
+                                "logps": per_token_logps[i, :len(item['input_ids'])].tolist(),
                                 "status": "success",
                             }
                             item['result_queue'].put_nowait(result)
@@ -254,7 +258,7 @@ class InferenceCustomServer:
                         for i, item in enumerate(work_items):
                             result = {
                                 "input_ids": item['input_ids'],
-                                "gen_logps": [],
+                                "logps": [],
                                 "status": "error",
                                 "error": f'[{type(e).__name__}]: {e}',
                             }

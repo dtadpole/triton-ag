@@ -157,7 +157,9 @@ class InferenceCustomClient:
                     
                     response.raise_for_status()
 
-                    return response.json()
+                    result = response.json()
+                    logger.info(f"🔍 [InferenceCustomClient] [{self.provider_name}] [logps] Got response: {result}")
+                    return result
 
             except Exception as e:
                 logger.warning(f"🔍 [InferenceCustomClient] [{self.provider_name}] [logps]: [{e}] [{retry_count}/{self.num_retries}]")

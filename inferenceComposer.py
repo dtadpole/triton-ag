@@ -16,6 +16,7 @@ import duckdb
 from pathlib import Path
 from transformers import AutoTokenizer
 from inferenceClient import InferenceClient, InferenceClientConfig, load_inference_client_config
+from inferenceCustomClient import InferenceCustomClient
 from logger import logger
 from kbEvalClient import KbEvalClient
 from workflowUtil import ComposerBlock, MODEL_OVERRIDE_KEY
@@ -33,6 +34,8 @@ class ComposerClient:
             self,
             input_tag: str,
             inference_client_config: InferenceClientConfig,
+            custom_provider: str,
+            model_override: str = None,
             module_file: str = "inference/codeGenEval.module.yaml",
             prompt_file: str = "inference/triton.prompt.yaml",
             example_file: str = "inference/triton.example.yaml",
@@ -52,8 +55,13 @@ class ComposerClient:
         self.configInterpreter = ConfigInterpreter()
         self.inference_client_config = inference_client_config
         self.inferenceClient = InferenceClient(config=self.inference_client_config)
+        self.provider_name = self.inference_client_config.provider.provider_name
+        self.model_name = self.inference_client_config.model.model_name
+        self.model_override = model_override
         self.tokenizer = self.inferenceClient.tokenizer
         self.model_tag = self.inferenceClient.model_tag
+        self.custom_provider = custom_provider
+        self.inferenceCustomClient = InferenceCustomClient(provider_name=self.custom_provider)
         self.output_dir = self._get_output_dir(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.module_file = module_file
@@ -145,6 +153,15 @@ class ComposerClient:
         completion_time_seconds = context_vars.get('__endpoint_time__', None)
         token_per_second = num_completion_tokens / completion_time_seconds if completion_time_seconds > 0 else 0.0
         logger.info(f"👏 [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{conversation_path}] [{f'{num_completion_tokens}'} tokens] in [{completion_time_seconds:.2f}s] [{token_per_second:.2f} tokens/s]")
+
+    def log_logps(self, result: dict, context_vars: dict) -> dict:
+        """Process log logps."""
+        run_tag = context_vars.get('run_tag', None)
+        model_tag = context_vars.get('model_tag', None)
+        task_tag = context_vars.get('task_tag', None)
+        turn_tag = context_vars.get('turn_tag', None)
+        completion_time_seconds = context_vars.get('__endpoint_time__', None)
+        logger.info(f"👏 [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{result['input_ids']}] [{result['logps']}] in [{completion_time_seconds:.2f}s]")
 
     def log_code_extraction(self, result: dict, context_vars: dict) -> dict:
         """Process log code extraction."""
@@ -290,8 +307,8 @@ async def composer_block(block: ComposerBlock, use_global_registry: bool = False
         )
 
         # override the model name
-        if block.model_override:
-            config.model.model_name = block.model_override
+        # if block.model_override:
+        #     config.model.model_name = block.model_override
 
         # start running the block
         logger.info(f"🔍 [Composer] [{block.input_tag}] Starting block...")
@@ -299,6 +316,8 @@ async def composer_block(block: ComposerBlock, use_global_registry: bool = False
         composerClient = ComposerClient(
             input_tag=block.input_tag,
             inference_client_config=config,
+            custom_provider=block.custom_provider,
+            model_override=block.model_override,
             module_file=block.module_file,
             prompt_file=block.prompt_file,
             example_file=block.example_file,
@@ -330,22 +349,23 @@ async def composer_block(block: ComposerBlock, use_global_registry: bool = False
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prefix_tag", type=str, default="auto") # "TC_0.1.0_14B.m"
+    parser.add_argument("--prefix_tag", type=str, default="auto.inference.composer") # "TC_0.1.0_14B.m"
     parser.add_argument("--epoch_id", type=int, default=-1)
     parser.add_argument("--block_id", type=int, default=-1)
-    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B.m_003_12")
+    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_32B.b_006_05")
     parser.add_argument("--input_dir", type=str, default="~/KernelBench/KernelBench/level1", help="Input directory containing Python files")
     parser.add_argument("--output_dir", type=str, default="~/.inference/output", help="Output directory for the composer results")
-    parser.add_argument("--provider", type=str, default="local")  # most cost effective models are deepinfra-r1 and fireworks-v3
-    parser.add_argument("--model", type=str, default="qwen3-32b-awq")  # most cost effective models are deepinfra-r1 and fireworks-v3
+    parser.add_argument("--provider", type=str, default="h8_2")  # most cost effective models are deepinfra-r1 and fireworks-v3
+    parser.add_argument("--model", type=str, default="qwen3-32b")  # most cost effective models are deepinfra-r1 and fireworks-v3
+    parser.add_argument("--custom_provider", type=str, default="h8_2")
     parser.add_argument("--model_override", type=str, default=None)
     parser.add_argument("--parallel_workers", type=int, default=1)
     parser.add_argument("--num_samples", type=int, default=2)
     parser.add_argument("--num_generations", type=int, default=2)
-    parser.add_argument("--num_turns_per_generation", type=int, default=4)
+    parser.add_argument("--num_turns_per_generation", type=int, default=2)
     parser.add_argument("--use_global_queue", type=str, default=None) # this is the task_name of the global queue
     parser.add_argument("--proc_id", type=str, default=None)
-    parser.add_argument("--module_file", type=str, default="inference/codeGenEval.module.yaml")
+    parser.add_argument("--module_file", type=str, default="inference/codeGenEval.module.logps.yaml")
     parser.add_argument("--prompt_file", type=str, default="inference/triton.prompt.yaml")
     parser.add_argument("--example_file", type=str, default="inference/triton.example.yaml")
     args = parser.parse_args()
@@ -399,6 +419,7 @@ async def main():
                 num_generations=args.num_generations,
                 num_turns_per_generation=args.num_turns_per_generation,
                 parallel_workers=args.parallel_workers,
+                custom_provider=args.custom_provider,
                 model_override=args.model_override,
                 input_dir=args.input_dir,
                 output_dir=args.output_dir,

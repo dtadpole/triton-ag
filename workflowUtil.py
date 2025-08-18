@@ -109,6 +109,7 @@ class ComposerBlock(BaseModel):
     num_generations: int
     num_turns_per_generation: int = Field(default=4)
     parallel_workers: int = Field(default=16)
+    custom_provider: str = Field(default="local")
     model_override: Optional[str] = Field(default=None)
     module_file: str = Field(default="inference/codeGen.module.yaml")
     prompt_file: str = Field(default="inference/triton.prompt.yaml")

@@ -99,6 +99,7 @@ class InferenceClient:
             base_url=self.base_url,
             api_key=self.api_key,
         )
+        logger.info(f"🔍 [InferenceClient] OpenAI client created with base_url [{self.base_url}] and api_key [{self.api_key_path}]")
 
         # Print generation mode info
         if self.streaming:
@@ -107,7 +108,7 @@ class InferenceClient:
             # add info magnifying glass emoji
             logger.info(f"🔍 [InferenceClient] Using NON-STREAMING mode with OpenAI client [{self.model_tag}]")
 
-    async def _chat_completion(self, messages: List[Dict], max_tokens: int = None, logprobs: bool = False):
+    async def _chat_completion(self, messages: List[Dict], max_tokens: int = None, logprobs: bool = False, model_override: str = None):
         """
         Generate text using OpenAI-compatible API with streaming or non-streaming mode.
 
@@ -122,7 +123,7 @@ class InferenceClient:
         if self.streaming:
             # STREAMING MODE: Real-time token streaming using OpenAI client
             stream = await self.openai_client.chat.completions.create(
-                model=self.model_name,
+                model=model_override or self.model_name,
                 messages=messages,
                 temperature=self.temperature,
                 max_tokens=max_tokens,
@@ -179,7 +180,7 @@ class InferenceClient:
         else:
             # NON-STREAMING MODE: Single response using OpenAI client
             response = await self.openai_client.chat.completions.create(
-                model=self.model_name,
+                model=model_override or self.model_name,
                 messages=messages,
                 temperature=self.temperature,
                 max_tokens=max_tokens,
@@ -216,7 +217,7 @@ class InferenceClient:
 
         return return_message
 
-    async def chat_completion(self, messages: List[Dict], max_tokens: int = None, logprobs: bool = False) -> Dict:
+    async def chat_completion(self, messages: List[Dict], max_tokens: int = None, logprobs: bool = False, model_override: str = None) -> Dict:
         """
         Generate text using OpenAI-compatible API with streaming or non-streaming mode.
         """
@@ -224,7 +225,7 @@ class InferenceClient:
         while retry_count < self.num_retries:
             retry_count += 1
             try:
-                return await self._chat_completion(messages, max_tokens=max_tokens, logprobs=logprobs)
+                return await self._chat_completion(messages, max_tokens=max_tokens, logprobs=logprobs, model_override=model_override)
             except Exception as e:
                 traceback.print_exc()
                 if retry_count < self.num_retries:
@@ -235,7 +236,7 @@ class InferenceClient:
                     logger.error(f"❌ [InferenceClient] [Chat completion] Failed: {e}, giving up...") # give up after max retries
         return None
 
-    async def _completion(self, prompt: str, max_tokens: int = None, logprobs: bool = False):
+    async def _completion(self, prompt: str, max_tokens: int = None, logprobs: bool = False, model_override: str = None):
         """
         Generate text completion using OpenAI-compatible API with streaming or non-streaming mode.
 
@@ -253,7 +254,7 @@ class InferenceClient:
         if self.streaming:
             # STREAMING MODE: Real-time token streaming using OpenAI client
             stream = await self.openai_client.completions.create(
-                model=self.model_name,
+                model=model_override or self.model_name,
                 prompt=prompt,
                 temperature=self.temperature,
                 max_tokens=max_tokens,
@@ -282,7 +283,7 @@ class InferenceClient:
         else:
             # NON-STREAMING MODE: Single response using OpenAI client
             response = await self.openai_client.completions.create(
-                model=self.model_name,
+                model=model_override or self.model_name,
                 prompt=prompt,
                 temperature=self.temperature,
                 max_tokens=max_tokens,
@@ -322,7 +323,7 @@ class InferenceClient:
 
         return {'content': generated_content, "logprobs": logprobs_tokenized_content}
 
-    async def completion(self, prompt: str, max_tokens: int = None, logprobs: bool = False) -> Dict:
+    async def completion(self, prompt: str, max_tokens: int = None, logprobs: bool = False, model_override: str = None) -> Dict:
         """
         Generate text completion using OpenAI-compatible API with streaming or non-streaming mode.
         """
@@ -330,11 +331,11 @@ class InferenceClient:
         while retry_count < self.num_retries:
             retry_count += 1
             try:
-                return await self._completion(prompt, max_tokens=max_tokens, logprobs=logprobs)
+                return await self._completion(prompt, max_tokens=max_tokens, logprobs=logprobs, model_override=model_override)
             except Exception as e:
                 if retry_count < self.num_retries:
                     sleep_time = self.initial_retry_interval ** retry_count
-                    logger.warning(f"⚠️ [InferenceClient] [Completion] Failed: {e} [{retry_count}/{self.num_retries}], retrying in {sleep_time} seconds...")
+                    logger.warning(f"⚠️ [InferenceClient] [Completion] Failed: [{type(e).__name__}] {e} [{retry_count}/{self.num_retries}], retrying in {sleep_time} seconds...")
                     await asyncio.sleep(sleep_time) # exponential backoff
                 else:
                     traceback.print_exc()
