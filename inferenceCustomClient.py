@@ -158,7 +158,7 @@ class InferenceCustomClient:
                     response.raise_for_status()
 
                     result = response.json()
-                    logger.info(f"🔍 [InferenceCustomClient] [{self.provider_name}] [logps] Got response: {result}")
+                    # logger.info(f"🔍 [InferenceCustomClient] [{self.provider_name}] [logps] Got response: {result}")
                     return result
 
             except Exception as e:

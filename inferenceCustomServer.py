@@ -1,5 +1,6 @@
 import os
 import random
+import time
 from collections import defaultdict
 from typing import List, Dict, Any
 from pydantic import BaseModel
@@ -243,6 +244,7 @@ class InferenceCustomServer:
                     work_items = work_items_by_model[selected_model_name][:self.mini_batch_size]
                     work_items_by_model[selected_model_name] = work_items_by_model[selected_model_name][self.mini_batch_size:]
                     try:
+                        start_time = time.time()
                         per_token_logps = self._calculate_prob(work_items)
                         # for each work item, return the log probabilities for its input_ids, cut to the length of input_ids
                         for i, item in enumerate(work_items):
@@ -252,8 +254,10 @@ class InferenceCustomServer:
                                 "status": "success",
                             }
                             item['result_queue'].put_nowait(result)
-
-                        logger.info(f"Probability worker [{selected_model_name}] completed [{len(work_items)}] items. [{[len(item['input_ids']) for item in work_items]}]")
+                        elapsed_time = time.time() - start_time
+                        total_tokens = sum([len(item['input_ids']) for item in work_items])
+                        token_per_second = total_tokens / elapsed_time if elapsed_time > 0 else 0.0
+                        logger.info(f"Probability worker [{selected_model_name}] completed [{len(work_items)}] items. [{[len(item['input_ids']) for item in work_items]}] in [{elapsed_time:.2f}s] [{token_per_second:.2f} tokens/s]")
                     except Exception as e:
                         for i, item in enumerate(work_items):
                             result = {

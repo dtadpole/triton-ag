@@ -161,7 +161,10 @@ class ComposerClient:
         task_tag = context_vars.get('task_tag', None)
         turn_tag = context_vars.get('turn_tag', None)
         completion_time_seconds = context_vars.get('__endpoint_time__', None)
-        logger.info(f"👏 [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{result['input_ids']}] [{result['logps']}] in [{completion_time_seconds:.2f}s]")
+        len_input_ids = len(result['input_ids'])
+        len_logps = len(result['logps'])
+        token_per_second = len_logps / completion_time_seconds if completion_time_seconds > 0 else 0.0
+        logger.info(f"📈 [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{len_input_ids} input_ids] [{len_logps} logps] in [{completion_time_seconds:.2f}s] [{token_per_second:.2f} tokens/s]")
 
     def log_code_extraction(self, result: dict, context_vars: dict) -> dict:
         """Process log code extraction."""
