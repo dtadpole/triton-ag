@@ -298,19 +298,6 @@ class EngineDeepspeed(EngineBase):
 
         logger.info(f"💾 [{self.__class__.__name__}-{self.rank}] Checkpoint saved: {checkpoint_path} in [{time.time() - start_time:.1f}s]")
 
-    def _setup_logging(self):
-        """Setup logging and tracking"""
-        if self.engine.global_rank == 0:
-            if self.config.logging.use_wandb:
-                wandb.init(
-                    project=self.config.logging.wandb_project,
-                    id=self.config.logging.wandb_run_id,
-                    name=self.config.logging.wandb_run_name,
-                    config=self.config.model_dump(),
-                    resume="allow",
-                )
-                logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] W&B logging enabled")
-
     def _compute_loss(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Compute loss for a batch"""
         # Move tensors to device

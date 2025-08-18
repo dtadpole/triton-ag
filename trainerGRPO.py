@@ -1,6 +1,4 @@
 import os
-import os
-from datetime import datetime
 import gc
 import torch
 import torch.nn.functional as F
@@ -11,19 +9,16 @@ import asyncio
 import argparse
 import json
 from pydantic import BaseModel
-from peft import get_peft_model_state_dict, set_peft_model_state_dict, PeftModel
-from engineBase import EngineBase, EngineConfig, TrainerStatus
-from trainerUtil import format_conversation, SimpleCollator
+from engineBase import EngineBase, EngineConfig
+from trainerUtil import SimpleCollator
 from logger import logger
 import time
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import traceback
-from trainerLoraCache import TrainerLoraCache
-from configEndpoints import DuckDBClient, StatsClient
+from configEndpoints import DuckDBClient
 from configInterpreter import ConfigInterpreter
 from workflowUtil import TrainerGRPOBlock
-from workflowRsync import RsyncClient
+from workflowSync import WorkflowSync
 
 LATEST_REFERENCE_NAME = "reference_state_latest.pt"
 
@@ -33,7 +28,7 @@ BOUND_ADVANTAGE_LOWER_PERCENTAGE = "bound_adv_lower_pct"
 BOUND_ADVANTAGE_UPPER_PERCENTAGE = "bound_adv_upper_pct"
 LOG_PROB_AVERAGE_VALUE = "log_prob_avg_value"
 LOG_PROB_AVERAGE_RATIO = "log_prob_avg_ratio"
-LOG_PROB_OVERRIDE_DIFF = "log_prob_override_diff"
+LOG_PROB_CUSTOM_DIFF = "log_prob_custom_diff"
 
 class GRPOConfig(BaseModel):
     """GRPO configuration"""
@@ -49,8 +44,8 @@ class GRPOConfig(BaseModel):
     reward_scale: bool = True
     reward_epsilon: float = 1e-3
     reward_noise: float = 1e-2
-    # loss_type: str = "token" # "episode" or "token" or "seq_max" or "group_max" or "gspo"
-    loss_type: str = "gspo" # "episode" or "token" or "seq_max" or "group_max" or "gspo"
+    # loss_type: str = "token" # "episode" or "token" or "seq_max" or "gspo"
+    loss_type: str = "gspo" # "episode" or "token" or "seq_max" or "gspo"
     gamma: float = 0.5
 
     @classmethod
@@ -159,17 +154,17 @@ class GRPOTrainer():
         return action_log_probs
     '''
 
-    def _compute_mini_batch_loss(self, batch: Dict[str, Any], clip_metrics: Dict[str, List[float]], group_max_length: Optional[int] = None):
+    def _compute_mini_batch_loss(self, batch: Dict[str, Any], clip_metrics: Dict[str, List[float]]):
         """Compute loss for the generated tokens"""
         # turn_tags = batch['turn_tag']
         # rewards = batch['reward']
         advantages = batch['advantage']
-        prompt_token_ids = batch['prompt_token_ids']
-        completion_token_ids = batch['completion_token_ids']
-        completion_log_probs = batch['completion_log_probs_override'] if 'completion_log_probs_override' in batch else batch['completion_log_probs']
+        prompt_token_ids = batch['logp_server_prompt_ids']
+        completion_token_ids = batch['logp_server_completion_ids']
+        # vllm_completion_log_probs = batch['vllm_completion_log_probs']
+        log_probs = batch['logp_server_logps']
         input_ids = batch['input_ids'].to(self.engine.device)
         attention_mask = batch['attention_mask'].to(self.engine.device)
-        checkpoint_names = batch['checkpoint_name'] if 'checkpoint_name' in batch else [None] * len(batch['input_ids'])
 
         model_outputs = self.engine.model(input_ids=input_ids, attention_mask=attention_mask)
 
@@ -190,9 +185,9 @@ class GRPOTrainer():
             #     completion_log_probs_tensor = completion_log_probs_override
             #     log_prob_override_mse = torch.mean(torch.abs(torch.tensor(completion_log_probs[i], device=self.device) - completion_log_probs_tensor))
             # else:
-            completion_log_probs_tensor = torch.tensor(completion_log_probs[i], device=self.engine.device)
+            completion_log_probs_tensor = torch.tensor(log_probs[i][len(prompt_token_ids[i])-1:len(prompt_token_ids[i])-1+len(completion_token_ids[i])], device=self.engine.device)
             # log_prob_override_mse is always zero here
-            log_prob_override_mse = 0.0
+            log_prob_custom_diff = torch.mean(torch.abs(new_action_log_probs - completion_log_probs_tensor))
 
             # calculate log ratio (in log space is subtraction)
             if completion_log_probs_tensor.shape != new_action_log_probs.shape:
@@ -201,7 +196,7 @@ class GRPOTrainer():
             log_ratio = new_action_log_probs - completion_log_probs_tensor
 
             clip_metrics[LOG_PROB_AVERAGE_VALUE].append(torch.mean(new_action_log_probs).item())
-            clip_metrics[LOG_PROB_OVERRIDE_DIFF].append(0.0 if isinstance(log_prob_override_mse, float) else log_prob_override_mse.item())
+            clip_metrics[LOG_PROB_CUSTOM_DIFF].append(log_prob_custom_diff.item())
 
             if self.grpo_config.loss_type == "gspo":
 
@@ -252,8 +247,6 @@ class GRPOTrainer():
                     loss = -final_ratio_advantage.mean()
                 elif self.grpo_config.loss_type == "token":
                     loss = -torch.sum(final_ratio_advantage) / len(new_action_log_probs)
-                elif self.grpo_config.loss_type == "group_max":
-                    loss = -torch.sum(final_ratio_advantage) / group_max_length
                 elif self.grpo_config.loss_type == "seq_max":
                     loss = -torch.sum(final_ratio_advantage) / self.grpo_config.max_seq_length
                 else:
@@ -288,9 +281,6 @@ class GRPOTrainer():
         group_reward_items_mean = {k: np.mean(v) for k, v in group_reward_items.items()}
         group_reward_items_std = {k: np.std(v) for k, v in group_reward_items.items()}
 
-        # group_max_length = max(len(result['input_ids']) for result in group_dataset)
-        group_max_length = max(len(result['completion_token_ids']) for result in group_dataset)
-
         self.engine.model.train()
         clip_metrics = {
             CLIP_RATIO_UPPER_PERCENTAGE: [],
@@ -299,11 +289,11 @@ class GRPOTrainer():
             BOUND_ADVANTAGE_LOWER_PERCENTAGE: [],
             LOG_PROB_AVERAGE_VALUE: [],
             LOG_PROB_AVERAGE_RATIO: [],
-            LOG_PROB_OVERRIDE_DIFF: [],
+            LOG_PROB_CUSTOM_DIFF: [],
         }
         for batch_idx, batch in enumerate(dataloader):
             # Training step
-            mini_batch_loss = self._compute_mini_batch_loss(batch, clip_metrics, group_max_length=group_max_length)
+            mini_batch_loss = self._compute_mini_batch_loss(batch, clip_metrics)
 
             # Scale loss for gradient accumulation
             mini_batch_loss = mini_batch_loss * self.engine.config.training.loss_multiplier / len(dataloader) # divide by the group size
@@ -445,7 +435,6 @@ async def main():
     parser.add_argument("--input_tag", type=str, default="TC_0.1.0_32B.b_006_05")
     parser.add_argument("--input_dir", type=str, default="~/.inference/codeGenEval")
     parser.add_argument("--output_dir", type=str, default="~/.trainer/grpo")
-    parser.add_argument("--engine_config", type=str, default="engineBase.yaml")
     parser.add_argument("--grpo_config", type=str, default="trainerGRPO.yaml")
     parser.add_argument("--module_file", type=str, default="trainer/grpo.module.yaml")
     args = parser.parse_args()
@@ -468,9 +457,9 @@ async def main():
     grpo_block.input_dir = os.path.expanduser(grpo_block.input_dir)
     grpo_block.output_dir = os.path.expanduser(grpo_block.output_dir)
 
-    rsync_client = RsyncClient(prefix_tag=args.prefix_tag)
+    sync_client = WorkflowSync(prefix_tag=args.prefix_tag, queue_name='sync.sync.1')
 
-    await trainer.train_grpo_block(grpo_block, callback=rsync_client.enqueue)
+    await trainer.train_grpo_block(grpo_block, callback=sync_client.enqueue)
     await asyncio.sleep(1)
 
 if __name__ == "__main__":

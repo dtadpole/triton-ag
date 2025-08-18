@@ -11,7 +11,7 @@ from logger import logger
 from workflowUtil import TrainerRFTBlock
 from configInterpreter import ConfigInterpreter
 from configEndpoints import DuckDBClient
-from workflowRsync import RsyncClient
+from workflowSync import WorkflowSync
 
 
 class RFTConfig(BaseModel):
@@ -145,7 +145,6 @@ async def main():
     parser.add_argument("--input_dir", type=str, default="~/.inference/codeGenEval")
     parser.add_argument("--output_dir", type=str, default="~/.trainer/rft")
     parser.add_argument("--input_tag", type=str, default="TC_0.1.0_32B.b_006_05") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
-    parser.add_argument("--engine_config", type=str, default="engineBase.yaml")
     parser.add_argument("--rft_config", type=str, default="trainerRFT.yaml")
     parser.add_argument("--module_file", type=str, default="trainer/rft.module.yaml")
     parser.add_argument("--target_short_hostname", type=str, default="two")
@@ -169,12 +168,12 @@ async def main():
     rft_block.input_dir = os.path.expanduser(rft_block.input_dir)
     rft_block.output_dir = os.path.expanduser(rft_block.output_dir)
 
-    rsync_client = RsyncClient(prefix_tag=args.prefix_tag)
+    sync_client = WorkflowSync(prefix_tag=args.prefix_tag, queue_name='sync.sync.1')
 
     loop = asyncio.get_event_loop()
     # await loop.run_in_executor(None, trainer.train_rft_block, rft_block, rsync_client.enqueue)
     # asyncio.run_coroutine_threadsafe(trainer.train_rft_block(rft_block, rsync_client.enqueue), loop)
-    await trainer.train_rft_block(rft_block, rsync_client.enqueue)
+    await trainer.train_rft_block(rft_block, sync_client.enqueue)
     await asyncio.sleep(1)
 
 if __name__ == "__main__":

@@ -29,14 +29,23 @@ module:
                     prompt, completion, logprobs, metadata,
                     metadata->>'task_tag' AS task_tag, metadata->>'gen_tag' AS gen_tag, metadata->>'turn_tag' AS turn_tag
                 FROM read_json_auto('{input_dir}/{input_tag}/**/*_completion.json', filename = true)
+            ),
+            logps AS (
+                SELECT
+                    filename AS logps_file,
+                    regexp_replace(filename, '_logps\.json$', '') AS stem,
+                    prompt_ids, completion_ids, input_ids, logps
+                FROM read_json_auto('{input_dir}/{input_tag}/**/*_logps.json', filename = true)
             )
             SELECT
                 e.compiled, e.correctness, e.runtime, e.ref_runtime,
                 c.prompt, c.completion, c.logprobs, c.metadata,
                 e.eval_file, c.completion_file,
+                l.prompt_ids, l.completion_ids, l.input_ids, l.logps,
                 c.task_tag, c.gen_tag, c.turn_tag
             FROM evals e
             JOIN comps c USING (stem)
+            JOIN logps l USING (stem)
             ORDER BY task_tag, gen_tag, turn_tag
         returns:
           error_if: '`__result__ is None`'
