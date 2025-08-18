@@ -55,7 +55,7 @@ async def rsync_file(source_path: str, target_path: str, rsync_path: str = "rsyn
     return return_code
 
 
-class RsyncClient:
+class SyncClient:
     def __init__(self, prefix_tag: str):
         self.rsync_config = self.load_config().get('rsync', {})
         self.retries = self.rsync_config.get('retries', 3)
@@ -71,7 +71,7 @@ class RsyncClient:
     def put(self, checkpoint_path: str):
         self.rsync_queue.put_nowait(checkpoint_path)
 
-    def load_config(self, config_path: str = "workflowRsync.yaml"):
+    def load_config(self, config_path: str = "workflowSync.yaml"):
         """Load config from yaml file"""
         with open(config_path, "r") as f:
             config = yaml.safe_load(f)
@@ -197,7 +197,7 @@ async def main():
         logger.error(f"❌ [RsyncClient] --prefix_tag is required!")
         return
 
-    rsync_client = RsyncClient(args.prefix_tag)
+    rsync_client = SyncClient(args.prefix_tag)
     if args.manual_upload:
         await rsync_client.handle_rsync_task(args.manual_upload)
     else:

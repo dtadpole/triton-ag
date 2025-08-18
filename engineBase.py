@@ -3,14 +3,15 @@ import shutil
 import wandb
 import torch
 import torch.distributed as dist
+from datetime import datetime
 from pathlib import Path
 from pydantic import BaseModel
 from abc import ABC, abstractmethod
 from typing import Optional, List, Callable, Dict
 import yaml
-from trainerUtil import merge_dicts
 from logger import logger
 from torch.utils.data import Dataset
+from trainerUtil import SimpleCollator, merge_dicts
 
 class TrainerStatus(BaseModel):
     """Running status of the trainer"""
@@ -185,13 +186,13 @@ class TextDataset(Dataset):
 class EngineBase(ABC):
 
     @classmethod
-    def create_engine(cls, config: EngineConfig, status: Optional[TrainerStatus] = None):
+    def create_engine(cls, prefix_tag: str, config: EngineConfig, status: Optional[TrainerStatus] = None):
         if config.model.engine == "deepspeed":
-            from engineDeepspeed import DeepspeedEngine
-            return DeepspeedEngine(config, status)
+            from engineDeepspeed import EngineDeepspeed
+            return EngineDeepspeed(prefix_tag, config, status)
         elif config.model.engine == "unsloth":
-            from engineUnsloth import UnslothEngine
-            return UnslothEngine(config, status)
+            from engineUnsloth import EngineUnsloth
+            return EngineUnsloth(prefix_tag, config, status)
 
     """Base training engine for Hugging Face models with step-by-step training implementation"""
     def __init__(self, prefix_tag: str, config: EngineConfig, status: Optional[TrainerStatus] = None):
@@ -202,14 +203,40 @@ class EngineBase(ABC):
         # Setup output directory
         self.checkpoint_path = Path(os.path.expanduser(self.config.training.checkpoint_path)) / self.prefix_tag
         self.checkpoint_path.mkdir(parents=True, exist_ok=True)
+        # Initialize logging
+        self.config.logging.wandb_run_id = self.prefix_tag
+        self.config.logging.wandb_run_name = self.prefix_tag + "_" + datetime.now().strftime("%m%d")
+        # setup logging
+        self._setup_logging()
 
     def short_name(self):
         return 'base'
+
+    def _update_config(self, config: EngineConfig):
+        """Update config"""
+        if type(config) != EngineConfig:
+            raise ValueError(f"❌ [{self.__class__.__name__}] Invalid config type: [{type(config)}]")
+        self.config = config
 
     def _print_model_info(self, model):
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         logger.info(f"🛳️ [{self.__class__.__name__}] loaded - Trainable: [{trainable_params:,}/{total_params:,}] ({100 * trainable_params / total_params:.1f}%)")
+
+    @abstractmethod
+    def _backward_step(self, loss: torch.Tensor):
+        """Execute a backward step"""
+        pass
+
+    @abstractmethod
+    def _optimization_step(self):
+        """Execute optimization step with gradient clipping"""
+        pass
+
+    @abstractmethod
+    def _get_current_lr(self):
+        """Get current learning rate"""
+        pass
 
     @abstractmethod
     def _checkpoint_exists(self, checkpoint_path: str) -> bool:

@@ -5,7 +5,6 @@ import json
 import deepspeed
 import gc
 import copy
-# from deepspeed.runtime.zero.partition_parameters import GatheredParameters
 import torch
 import torch.optim as optim
 import torch.distributed as dist
@@ -13,7 +12,6 @@ import shutil
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from torch.nn.utils import clip_grad_norm_
 from transformers import (
-    get_scheduler,
     AutoModelForCausalLM,
     AutoConfig,
     AutoTokenizer,
@@ -96,30 +94,20 @@ class EngineDeepspeed(EngineBase):
         after_init = time.time()
         logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Deepspeed initialized in [{after_init - before_init:.1f}s]")
 
-        # if checkpoint exists, load it
-        checkpoint_location = self.checkpoint_path / self.config.training.latest_checkpoint_name
-        if self._checkpoint_exists(checkpoint_location):
-            self._load_checkpoint(checkpoint_location)
-
         # Initialize data collator
         self.data_collator = SimpleCollator(
             tokenizer=self.tokenizer,
             pad_to_multiple_of=8,
         )
-
-        # Initialize logging
-        self.config.logging.wandb_run_id = self.prefix_tag
-        self.config.logging.wandb_run_name = self.prefix_tag + "_" + datetime.now().strftime("%m%d")
-        self._setup_logging()
-
         logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Config: {self.config.model_dump_json()}")
+
+        # if checkpoint exists, load it
+        checkpoint_location = self.checkpoint_path / self.config.training.latest_checkpoint_name
+        if self._checkpoint_exists(checkpoint_location):
+            self._load_checkpoint(checkpoint_location)
 
     def short_name(self):
         return 'ds'
-
-    def _update_config(self, config: EngineConfig):
-        """Update config"""
-        self.config = config
 
     def _set_seed(self):
         """Set random seeds for reproducibility"""
@@ -340,6 +328,10 @@ class EngineDeepspeed(EngineBase):
 
         return loss
 
+    def _backward_step(self, loss: torch.Tensor):
+        """Execute a backward step"""
+        self.engine.backward(loss)
+
     def _train_step(self, batch: Dict[str, torch.Tensor]) -> float:
         """Execute a single training step"""
         self.engine.train()
@@ -351,8 +343,7 @@ class EngineDeepspeed(EngineBase):
         loss = loss * self.config.training.loss_multiplier / self.config.training.gradient_accumulation_steps
 
         # Backward pass
-        # if use deepspeed, use deepspeed.backward(loss)
-        self.engine.backward(loss)
+        self._backward_step(loss)
 
         return loss.item()
 
@@ -367,17 +358,9 @@ class EngineDeepspeed(EngineBase):
 
         return grad_norm
 
-    def _log_metrics(self, metrics: Dict[str, float], step: int):
-        """Log training metrics"""
-        if self.engine.global_rank == 0:
-            step = self.status.global_step
-            if step % self.config.training.logging_steps == 0:
-                # format metrics into a string with .4f format
-                formatted_metrics = {k: f"{v:.4f}" for k, v in metrics.items()}
-                logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] [G-Step={step}] {formatted_metrics}")
-
-                if self.config.logging.use_wandb:
-                    wandb.log(metrics, step=step)
+    def _get_current_lr(self):
+        """Get current learning rate"""
+        return self.engine.get_lr()[0]
 
     async def train_block(
         self,
@@ -445,7 +428,7 @@ class EngineDeepspeed(EngineBase):
                 await asyncio.sleep(0.1)
 
                 # Log metrics
-                current_lr = self.engine.get_lr()[0]
+                current_lr = self._get_current_lr()
                 self._log_metrics({
                     "train/loss": avg_loss,
                     "train/learning_rate": current_lr,

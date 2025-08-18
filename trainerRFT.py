@@ -1,16 +1,13 @@
 import os
-import sys
 import json
-import duckdb
 from typing import Dict, Optional, Any, Callable
 import yaml
 import asyncio
 import argparse
 from pydantic import BaseModel
-from trainerBase import BaseTrainer, TrainerConfig, TrainerStatus, train_async
+from engineBase import EngineBase, EngineConfig, TrainerStatus
 from trainerUtil import format_conversation
 from logger import logger
-import torch
 from workflowUtil import TrainerRFTBlock
 from configInterpreter import ConfigInterpreter
 from configEndpoints import DuckDBClient
@@ -37,20 +34,15 @@ class RFTTrainer():
     """Rejection Fine-Tuning trainer for conversational datasets"""
     
     def __init__(self,
+        engine: EngineBase,
         prefix_tag: str,
         rft_config: RFTConfig,
-        base_config: TrainerConfig,
         module_file: str = "trainer/rft.module.yaml",
-        status: Optional[TrainerStatus] = None,
-        base_trainer: BaseTrainer = None,
     ):
         """Initialize RFT trainer"""
-        if base_trainer is None:
-            self.base_trainer = BaseTrainer(prefix_tag, base_config, status)
-        else:
-            self.base_trainer = base_trainer
-        self.tokenizer = self.base_trainer.tokenizer
-        self.status = self.base_trainer.status
+        self.engine = engine
+        self.tokenizer = self.engine.tokenizer
+        self.status = self.engine.status
         self.configInterpreter = ConfigInterpreter()
         self.duckdbClient = DuckDBClient()
         self.rft_config = rft_config
@@ -104,25 +96,25 @@ class RFTTrainer():
 
         rft_datasets = context_vars.get('__result__', {})
 
-        logger.info(f"👉 [RFTTrainer] [{block.input_tag}] Block started with [{len(rft_datasets)}] tasks, Initial global step: [{self.base_trainer.status.global_step}]")
+        logger.info(f"👉 [RFTTrainer] [{block.input_tag}] Block started with [{len(rft_datasets)}] tasks, Initial global step: [{self.engine.status.global_step}]")
 
-        await self.base_trainer.train_block(block.input_tag, rft_datasets, callback=callback)
+        await self.engine.train_block(block.input_tag, rft_datasets, callback=callback)
         await asyncio.sleep(1)
 
 
 def rft_get_trainer(
-    base_trainer: BaseTrainer,
+    engine: EngineBase,
     prefix_tag: str,
-    base_config_file: str = "trainerBase.yaml",
+    engine_config_file: str = "engineBase.yaml",
     rft_config_file: str = "trainerRFT.yaml",
     module_file: str = "trainer/rft.module.yaml",
 ):
     """Get a RFT trainer"""
     try:
-        base_config = TrainerConfig.from_yaml(base_config_file, override_yaml_path=rft_config_file)
-        logger.info(f"⚙️ [RFTTrainer] [{prefix_tag}] Base configuration loaded from [{base_config_file}]")
+        engine._update_config(EngineConfig.from_yaml(engine_config_file, override_yaml_path=rft_config_file))
+        logger.info(f"⚙️ [RFTTrainer] [{prefix_tag}] Engine config [{engine.__class__.__name__}] loaded from [{engine_config_file}]")
     except Exception as e:
-        logger.error(f"❌ [RFTTrainer] [{prefix_tag}] Failed to load base configuration: {e}")
+        logger.error(f"❌ [RFTTrainer] [{prefix_tag}] Engine config [{engine.__class__.__name__}] failed to load: [{type(e)}] {e}")
         raise e
 
     try:
@@ -133,7 +125,7 @@ def rft_get_trainer(
         raise e
 
     try:
-        trainer = RFTTrainer(prefix_tag, rft_config, base_config, module_file=module_file, base_trainer=base_trainer)
+        trainer = RFTTrainer(engine=engine, prefix_tag=prefix_tag, rft_config=rft_config, module_file=module_file)
         logger.info(f"⭐ [RFTTrainer] [{prefix_tag}] Trainer initialized")
     except Exception as e:
         logger.error(f"❌ [RFTTrainer] [{prefix_tag}] Initialization failed: {e}")
@@ -145,19 +137,27 @@ def rft_get_trainer(
 async def main():
     """Main function for RFT training"""
     parser = argparse.ArgumentParser(description="Train a model using RFTTrainer")
-    parser.add_argument("--prefix_tag", type=str, default="auto")
+    parser.add_argument("--engine", type=str, default="unsloth")
+    parser.add_argument("--engine_config", type=str, default="engineBase.yaml")
+    parser.add_argument("--prefix_tag", type=str, default="auto.trainer.rft")
     parser.add_argument("--epoch_id", type=int, default=0)
     parser.add_argument("--block_id", type=int, default=0)
     parser.add_argument("--input_dir", type=str, default="~/.inference/codeGenEval")
     parser.add_argument("--output_dir", type=str, default="~/.trainer/rft")
-    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B.n_000_00") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
-    parser.add_argument("--base_config", type=str, default="trainerBase.yaml")
+    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_32B.b_006_05") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
+    parser.add_argument("--engine_config", type=str, default="engineBase.yaml")
     parser.add_argument("--rft_config", type=str, default="trainerRFT.yaml")
     parser.add_argument("--module_file", type=str, default="trainer/rft.module.yaml")
     parser.add_argument("--target_short_hostname", type=str, default="two")
     args = parser.parse_args()
 
-    trainer = rft_get_trainer(None, args.prefix_tag, args.base_config, args.rft_config, args.module_file)
+    if args.engine == "unsloth":
+        import unsloth
+
+    engine_config = EngineConfig.from_yaml(args.engine_config)
+    engine_config.model.engine = args.engine
+    engine = EngineBase.create_engine(args.prefix_tag, engine_config) # no status for testing
+    trainer = rft_get_trainer(engine, args.prefix_tag, args.engine_config, args.rft_config, args.module_file)
     rft_block = TrainerRFTBlock(
         prefix_tag=args.prefix_tag,
         epoch_id=args.epoch_id,

@@ -1,11 +1,7 @@
 import os
-import sys
 import os
 from datetime import datetime
-from collections import defaultdict
 import gc
-import duckdb
-import unsloth
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -16,12 +12,9 @@ import argparse
 import json
 from pydantic import BaseModel
 from peft import get_peft_model_state_dict, set_peft_model_state_dict, PeftModel
-from trainerBase import BaseTrainer, TrainerConfig, TrainerStatus, train_async
+from engineBase import EngineBase, EngineConfig, TrainerStatus
 from trainerUtil import format_conversation, SimpleCollator
 from logger import logger
-import random
-import math
-import shutil
 import time
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -73,33 +66,27 @@ class GRPOTrainer():
     """GRPO (Generalized Preference Optimization) trainer for preference learning"""
 
     def __init__(self,
+        engine: EngineBase,
         prefix_tag: str,
         grpo_config: GRPOConfig,
-        base_config: TrainerConfig,
         module_file: str = "trainer/grpo.module.yaml",
-        status: Optional[TrainerStatus] = None,
-        base_trainer: BaseTrainer = None,
-        # reference_model: Optional[torch.nn.Module] = None,
     ):
         """Initialize GRPO trainer"""
-        if base_trainer is None:
-            self.base_trainer = BaseTrainer(prefix_tag, base_config, status)
-        else:
-            self.base_trainer = base_trainer
-        self.tokenizer = self.base_trainer.tokenizer
-        self.status = self.base_trainer.status
+        self.engine = engine
+        self.tokenizer = self.engine.tokenizer
+        self.status = self.engine.status
         self.configInterpreter = ConfigInterpreter()
         self.duckdbClient = DuckDBClient()
         self.grpo_config = grpo_config
         self.module_file = module_file
         self.module_config = yaml.safe_load(open(module_file, 'r')).get('module', {})
-        self.lora_cache = TrainerLoraCache(
-            prefix_tag,
-            self.base_model,
-            self.model,
-            extra_cache_size=base_config.lora.extra_cache_size,
-            cache_dir=base_config.training.checkpoint_path,
-        )
+        # self.lora_cache = TrainerLoraCache(
+        #     prefix_tag,
+        #     self.engine.model,
+        #     self.engine.model,
+        #     extra_cache_size=self.engine.config.lora.extra_cache_size,
+        #     cache_dir=self.engine.config.training.checkpoint_path,
+        # )
         self.context_vars = {
             # built-in context vars
             "self": self,
@@ -137,13 +124,14 @@ class GRPOTrainer():
         output_completion_logits = logits[prompt_token_len-1:-1, :]
         log_probs = F.log_softmax(output_completion_logits, dim=-1) # dim: (completion_len, vocab_size)
         # get log probabilities for the completion tokens
-        labels = torch.tensor(completion_token_ids, device=self.device)
+        labels = torch.tensor(completion_token_ids, device=self.engine.device)
         action_log_probs = log_probs[:len(completion_token_ids), :].gather(
             dim=-1,
             index=labels.unsqueeze(-1)
         ).squeeze(-1)  # (completion_len)
         return action_log_probs
 
+    '''
     def _calculate_override_log_probs(self,
                                       input_ids: torch.Tensor,
                                       attention_mask: torch.Tensor,
@@ -169,6 +157,7 @@ class GRPOTrainer():
             completion_token_ids,
         )
         return action_log_probs
+    '''
 
     def _compute_mini_batch_loss(self, batch: Dict[str, Any], clip_metrics: Dict[str, List[float]], group_max_length: Optional[int] = None):
         """Compute loss for the generated tokens"""
@@ -178,19 +167,11 @@ class GRPOTrainer():
         prompt_token_ids = batch['prompt_token_ids']
         completion_token_ids = batch['completion_token_ids']
         completion_log_probs = batch['completion_log_probs_override'] if 'completion_log_probs_override' in batch else batch['completion_log_probs']
-        input_ids = batch['input_ids'].to(self.device)
-        attention_mask = batch['attention_mask'].to(self.device)
+        input_ids = batch['input_ids'].to(self.engine.device)
+        attention_mask = batch['attention_mask'].to(self.engine.device)
         checkpoint_names = batch['checkpoint_name'] if 'checkpoint_name' in batch else [None] * len(batch['input_ids'])
 
-        # use 'default' adapter for new logits calculation
-        if isinstance(self.model, PeftModel):
-            self.model.set_adapter('default')
-        # clear cache
-        gc.collect()
-        torch.cuda.empty_cache()
-        # get logits from model
-        self.model.train()
-        model_outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+        model_outputs = self.engine.model(input_ids=input_ids, attention_mask=attention_mask)
 
         batch_loss = 0.0
         for i in range(len(advantages)): # for each generation result in the batch
@@ -198,20 +179,20 @@ class GRPOTrainer():
             prompt_token_len = len(prompt_token_ids[i])
             new_action_log_probs = self._calculate_log_probs(model_outputs.logits[i], prompt_token_len, completion_token_ids[i])
 
-            if 'checkpoint_name' in batch:
-                completion_log_probs_override = self._calculate_override_log_probs(
-                    input_ids[i],
-                    attention_mask[i],
-                    prompt_token_len,
-                    completion_token_ids[i],
-                    checkpoint_names[i],
-                )
-                completion_log_probs_tensor = completion_log_probs_override
-                log_prob_override_mse = torch.mean(torch.abs(torch.tensor(completion_log_probs[i], device=self.device) - completion_log_probs_tensor))
-            else:
-                completion_log_probs_tensor = torch.tensor(completion_log_probs[i], device=self.device)
-                # log_prob_override_mse is always zero here
-                log_prob_override_mse = 0.0
+            # if 'checkpoint_name' in batch:
+            #     completion_log_probs_override = self._calculate_override_log_probs(
+            #         input_ids[i],
+            #         attention_mask[i],
+            #         prompt_token_len,
+            #         completion_token_ids[i],
+            #         checkpoint_names[i],
+            #     )
+            #     completion_log_probs_tensor = completion_log_probs_override
+            #     log_prob_override_mse = torch.mean(torch.abs(torch.tensor(completion_log_probs[i], device=self.device) - completion_log_probs_tensor))
+            # else:
+            completion_log_probs_tensor = torch.tensor(completion_log_probs[i], device=self.engine.device)
+            # log_prob_override_mse is always zero here
+            log_prob_override_mse = 0.0
 
             # calculate log ratio (in log space is subtraction)
             if completion_log_probs_tensor.shape != new_action_log_probs.shape:
@@ -286,9 +267,9 @@ class GRPOTrainer():
         """Train the model for one group"""
         dataloader = DataLoader(
             group_dataset,
-            batch_size=self.config.training.micro_batch_size,
+            batch_size=self.engine.config.training.micro_batch_size,
             shuffle=True,
-            num_workers=self.config.training.dataloader_num_workers,
+            num_workers=self.engine.config.training.dataloader_num_workers,
             pin_memory=True,
             collate_fn=SimpleCollator(tokenizer=self.tokenizer)
         )
@@ -310,11 +291,7 @@ class GRPOTrainer():
         # group_max_length = max(len(result['input_ids']) for result in group_dataset)
         group_max_length = max(len(result['completion_token_ids']) for result in group_dataset)
 
-        # if model is lora, set lora to 'default'
-        if isinstance(self.model, PeftModel):
-            self.model.set_adapter('default')
-        # set model to train mode
-        self.model.train()
+        self.engine.model.train()
         clip_metrics = {
             CLIP_RATIO_UPPER_PERCENTAGE: [],
             CLIP_RATIO_LOWER_PERCENTAGE: [],
@@ -329,8 +306,8 @@ class GRPOTrainer():
             mini_batch_loss = self._compute_mini_batch_loss(batch, clip_metrics, group_max_length=group_max_length)
 
             # Scale loss for gradient accumulation
-            mini_batch_loss = mini_batch_loss * self.config.training.loss_multiplier / len(dataloader) # divide by the group size
-            mini_batch_loss.backward()
+            mini_batch_loss = mini_batch_loss * self.engine.config.training.loss_multiplier / len(dataloader) # divide by the group size
+            self.engine._backward_step(mini_batch_loss)
 
             # del outputs
             torch.cuda.empty_cache()
@@ -338,16 +315,16 @@ class GRPOTrainer():
             accumulated_loss += mini_batch_loss.item()
 
         # Optimization step (only after entire group is processed, this changes the model parameters)
-        grad_norm = self._optimization_step()
+        grad_norm = self.engine._optimization_step()
 
         # Calculate average loss
         avg_loss = accumulated_loss
         accumulated_loss = 0.0
 
-        self.trainer_status.global_step += 1
+        self.engine.status.global_step += 1
 
         # Log metrics
-        current_lr = self.scheduler.get_last_lr()[0]
+        current_lr = self.engine._get_current_lr()
         metrics = {
             "train/loss": avg_loss,
             "train/learning_rate": current_lr,
@@ -366,11 +343,11 @@ class GRPOTrainer():
             metrics[f"reward/item_{key}_std"] = value
         for key, value in clip_metrics.items():
             metrics[f"clip/{key}"] = np.mean(value)
-        self._log_metrics(metrics, self.trainer_status.global_step)
+        self.engine._log_metrics(metrics, self.engine.status.global_step)
 
         # Save checkpoint
-        if self.trainer_status.global_step % self.config.training.save_steps == 0:
-            self._save_checkpoint(self.trainer_status.global_step, callback=callback)
+        if self.engine.status.global_step % self.engine.config.training.save_steps == 0:
+            self.engine._save_checkpoint(self.engine.status.global_step, callback=callback)
 
 
     async def train_grpo_block(self, block: TrainerGRPOBlock, callback: Optional[Callable] = None):
@@ -394,7 +371,7 @@ class GRPOTrainer():
 
         group_datasets = context_vars.get('__result__', {})
 
-        logger.info(f"👉 [{self.__class__.__name__}] [{block.input_tag}] Block started with [{len(group_datasets)}] groups, Initial global step: [{self.trainer_status.global_step}]")
+        logger.info(f"👉 [{self.__class__.__name__}] [{block.input_tag}] Block started with [{len(group_datasets)}] groups, Initial global step: [{self.engine.status.global_step}]")
 
         start_time = time.time()
         # Create progress bar
@@ -411,28 +388,34 @@ class GRPOTrainer():
             await asyncio.sleep(0.1)
 
             # Check if training is complete
-            if self.trainer_status.global_step >= self.config.training.max_steps:
+            if self.engine.status.global_step >= self.engine.config.training.max_steps:
                 break
 
         try:
             # always save checkpoint at the end of the block
-            self._save_checkpoint(self.trainer_status.global_step)
+            self.engine._save_checkpoint(self.engine.status.global_step)
         except Exception as e:
             logger.error(f"❌ [GRPOTrainer] [{block.input_tag}] Failed to save checkpoint: {e}")
 
         total_time = time.time() - start_time
-        logger.info(f"🎉 [{self.__class__.__name__}] [{block.input_tag}] Block completed in [{total_time:.1f}s] - Final global step: [{self.trainer_status.global_step}]")
+        logger.info(f"🎉 [{self.__class__.__name__}] [{block.input_tag}] Block completed in [{total_time:.1f}s] - Final global step: [{self.engine.status.global_step}]")
         progress_bar.close()
         await asyncio.sleep(0.1)
 
 
-def grpo_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_file: str = "trainerBase.yaml", grpo_config_file: str = "trainerGRPO.yaml"):
+def grpo_get_trainer(
+    engine: EngineBase,
+    prefix_tag: str,
+    engine_config_file: str = "engineBase.yaml",
+    grpo_config_file: str = "trainerGRPO.yaml",
+    module_file: str = "trainer/grpo.module.yaml",
+):
     """Get a GRPO trainer"""
     try:
-        base_config = TrainerConfig.from_yaml(base_config_file, override_yaml_path=grpo_config_file)
-        logger.info(f"⚙️ [GRPOTrainer] [{prefix_tag}] Base configuration loaded from [{base_config_file}]")
+        engine._update_config(EngineConfig.from_yaml(engine_config_file, override_yaml_path=grpo_config_file))
+        logger.info(f"⚙️ [GRPOTrainer] [{prefix_tag}] Engine config [{engine.__class__.__name__}] loaded from [{engine_config_file}]")
     except Exception as e:
-        logger.error(f"❌ [GRPOTrainer] [{prefix_tag}] Failed to load base configuration: {e}")
+        logger.error(f"❌ [GRPOTrainer] [{prefix_tag}] Engine config [{engine.__class__.__name__}] failed to load: [{type(e)}] {e}")
         raise e
 
     try:
@@ -443,7 +426,7 @@ def grpo_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_fil
         raise e
 
     try:
-        trainer = GRPOTrainer(prefix_tag, grpo_config, base_config, base_trainer=base_trainer)
+        trainer = GRPOTrainer(engine=engine, prefix_tag=prefix_tag, grpo_config=grpo_config, module_file=module_file)
         logger.info(f"⭐ [GRPOTrainer] [{prefix_tag}] Trainer initialized")
     except Exception as e:
         logger.error(f"❌ [GRPOTrainer] [{prefix_tag}] Initialization failed: {e}")
@@ -454,18 +437,26 @@ def grpo_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_fil
 async def main():
     """Main function for GRPO training"""
     parser = argparse.ArgumentParser(description="Train a model using GRPOTrainer")
-    parser.add_argument("--prefix_tag", type=str, default="auto")
+    parser.add_argument("--engine", type=str, default="unsloth")
+    parser.add_argument("--engine_config", type=str, default="engineBase.yaml")
+    parser.add_argument("--prefix_tag", type=str, default="auto.trainer.grpo")
     parser.add_argument("--epoch_id", type=int, default=0)
     parser.add_argument("--block_id", type=int, default=0)
-    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B.n_004_01")
+    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_32B.b_006_05")
     parser.add_argument("--input_dir", type=str, default="~/.inference/codeGenEval")
     parser.add_argument("--output_dir", type=str, default="~/.trainer/grpo")
-    parser.add_argument("--base_config", type=str, default="trainerBase.yaml")
+    parser.add_argument("--engine_config", type=str, default="engineBase.yaml")
     parser.add_argument("--grpo_config", type=str, default="trainerGRPO.yaml")
     parser.add_argument("--module_file", type=str, default="trainer/grpo.module.yaml")
     args = parser.parse_args()
 
-    trainer = grpo_get_trainer(None, args.prefix_tag, args.base_config, args.grpo_config)
+    if args.engine == "unsloth":
+        import unsloth
+
+    engine_config = EngineConfig.from_yaml(args.engine_config)
+    engine_config.model.engine = args.engine
+    engine = EngineBase.create_engine(args.prefix_tag, engine_config) # no status for testing
+    trainer = grpo_get_trainer(engine, args.prefix_tag, args.engine_config, args.grpo_config)
     grpo_block = TrainerGRPOBlock(
         prefix_tag=args.prefix_tag,
         epoch_id=args.epoch_id,

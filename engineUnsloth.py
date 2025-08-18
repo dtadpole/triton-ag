@@ -38,7 +38,7 @@ import wandb
 import yaml
 import argparse
 from logger import logger
-from trainerUtil import SimpleCollator, merge_dicts
+from trainerUtil import SimpleCollator
 from engineBase import EngineBase, EngineConfig, TrainerStatus, create_sample_training_dataset
 
 
@@ -68,15 +68,6 @@ class EngineUnsloth(EngineBase):
             pad_to_multiple_of=8,
         )
 
-        # Setup output directory
-        self.checkpoint_path = Path(os.path.expanduser(config.training.checkpoint_path)) / self.prefix_tag
-        self.checkpoint_path.mkdir(parents=True, exist_ok=True)
-
-        # Initialize logging
-        self.config.logging.wandb_run_id = self.prefix_tag
-        self.config.logging.wandb_run_name = self.prefix_tag + "_" + datetime.now().strftime("%m%d")
-        self._setup_logging()
-
         logger.info(f"🔍 [{self.__class__.__name__}] Config: {self.config.model_dump_json()}")
 
         # Load checkpoint if specified
@@ -90,10 +81,6 @@ class EngineUnsloth(EngineBase):
     def short_name(self):
         return 'unsloth'
 
-    def _update_config(self, config: EngineConfig):
-        """Update config"""
-        self.config = config
-
     def _setup_model_and_tokenizer(self):
         """Initialize the model and tokenizer using Unsloth"""
         logger.info(f"🚀 [{self.__class__.__name__}] Loading model: {self.config.model.name}")
@@ -106,7 +93,7 @@ class EngineUnsloth(EngineBase):
             load_in_4bit=self.config.model.load_in_4bit,
             load_in_8bit=self.config.model.load_in_8bit,
             full_finetuning=self.config.model.full_finetuning,
-            use_gradient_checkpointing=self.config.model.use_gradient_checkpointing,
+            use_gradient_checkpointing="unsloth" if self.config.model.use_gradient_checkpointing else None,
             # token="hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
         )
         # Ensure tokenizer has pad token
@@ -298,6 +285,10 @@ class EngineUnsloth(EngineBase):
 
         return loss
 
+    def _backward_step(self, loss: torch.Tensor):
+        """Execute a backward step"""
+        loss.backward()
+
     def _train_step(self, batch: Dict[str, torch.Tensor]) -> float:
         """Execute a single training step"""
         self.model.train()
@@ -309,7 +300,7 @@ class EngineUnsloth(EngineBase):
         loss = loss * self.config.training.loss_multiplier / self.config.training.gradient_accumulation_steps
 
         # Backward pass
-        loss.backward()
+        self._backward_step(loss)
 
         return loss.item()
 
@@ -329,6 +320,10 @@ class EngineUnsloth(EngineBase):
         self.optimizer.zero_grad()
 
         return grad_norm
+
+    def _get_current_lr(self):
+        """Get current learning rate"""
+        return self.scheduler.get_last_lr()[0]
 
     async def train_block(
         self,
@@ -379,7 +374,7 @@ class EngineUnsloth(EngineBase):
                 await asyncio.sleep(0.1)
 
                 # Log metrics
-                current_lr = self.scheduler.get_last_lr()[0]
+                current_lr = self._get_current_lr()
                 self._log_metrics({
                     "train/loss": avg_loss,
                     "train/learning_rate": current_lr,
