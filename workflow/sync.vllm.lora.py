@@ -21,7 +21,7 @@ async def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--vllm_provider", type=str, default="h8_1")
-    parser.add_argument("--action", type=str, default="load", choices=["load", "unload", "get"]) # load, unload, get
+    parser.add_argument("--action", type=str, default="get", choices=["load", "unload", "get"]) # load, unload, get
     parser.add_argument("--checkpoint_name", type=str, default="TC_0.1.0_32B.b/checkpoint-1500")
     args = parser.parse_args()
 

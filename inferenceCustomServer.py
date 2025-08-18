@@ -75,6 +75,7 @@ class InferenceCustomServer:
         self.model.eval()
         self.model.requires_grad_(False)
         self.worker_queue = asyncio.Queue()
+        self.adapter_name_to_model_id = {}
         self._enable_api_endpoints()
 
     def _enable_api_endpoints(self):
@@ -93,9 +94,13 @@ class InferenceCustomServer:
             }
             # add lora adapters
             for adapter_name in self.lora_model.peft_config.keys():
+                if adapter_name in self.adapter_name_to_model_id:
+                    model_id = self.adapter_name_to_model_id[adapter_name]
+                else:
+                    model_id = adapter_name
                 if adapter_name != 'default':
                     result['data'].append({
-                        "id": adapter_name,
+                        "id": model_id,
                         "object": "model",
                         "parent": self.model_name,
                     })
@@ -104,7 +109,7 @@ class InferenceCustomServer:
         @self.router.get("/configs")
         async def get_configs() -> Dict[str, Any]:
             return {
-                "model_name": self.model_name,
+                "base_model_name": self.model_name,
                 "max_seq_len": self.max_seq_len,
                 "mini_batch_size": self.mini_batch_size,
             }
@@ -112,7 +117,9 @@ class InferenceCustomServer:
         @self.router.post("/load_lora_adapter")
         async def load_lora_adapter(request: LoadLoraAdapterRequest):
             lora_path = os.path.join(self.model_path, request.lora_path)
-            lora_adapter_name = os.path.basename(os.path.dirname(lora_path)).replace('.', '_') + '/' + os.path.basename(lora_path)
+            model_id = os.path.basename(os.path.dirname(lora_path)) + '/' + os.path.basename(lora_path)
+            lora_adapter_name = model_id.replace('.', '_')
+            self.adapter_name_to_model_id[lora_adapter_name] = model_id
             # get lora adapter name from path
             if lora_adapter_name in self.lora_model.peft_config.keys():
                 logger.info(f"LoRA checkpoint {lora_adapter_name} already loaded")

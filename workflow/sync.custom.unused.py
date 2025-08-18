@@ -1,15 +1,15 @@
 import asyncio
 
-async def get_unused_lora_adapters(prefix_tag: str, vllm_provider: str, recent_checkpoint_name: str = None, last_modified_within=7200):
-    from configEndpoints import VLLMClient
+async def get_unused_lora_adapters(prefix_tag: str, custom_provider: str, recent_checkpoint_name: str = None, last_modified_within=7200):
+    from inferenceCustomClient import InferenceCustomClient
     from workflowClient import WorkflowClient
     ADAPTER_PREFIX = "adapter."
-    # get the vllm client
-    vllm_client = VLLMClient(provider_name=vllm_provider)
+    # get the custom client
+    custom_client = InferenceCustomClient(provider_name=custom_provider)
     # get the workflow client
     workflowClient = WorkflowClient(prefix_tag=prefix_tag)
     # find out all the loaded lora adapters
-    models = await vllm_client.get_models()
+    models = await custom_client.get_models()
     models = models.get('data', [])
     # print('models', models)
     available_lora_adapters = [model['id'] for model in models if model['parent'] is not None]
@@ -29,13 +29,13 @@ async def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--prefix_tag", type=str, default="auto.workflow.vllm")
-    parser.add_argument("--vllm_provider", type=str, default="h8_1")
+    parser.add_argument("--custom_provider", type=str, default="h8_1")
     parser.add_argument("--recent_checkpoint_name", type=str, default="TC_0.1.0_32B.b/checkpoint-1500")
     args = parser.parse_args()
 
     unused_lora_adapters = await get_unused_lora_adapters(
         prefix_tag=args.prefix_tag,
-        vllm_provider=args.vllm_provider,
+        custom_provider=args.custom_provider,
         recent_checkpoint_name=args.recent_checkpoint_name,
     )
     import json
