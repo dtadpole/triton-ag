@@ -45,7 +45,7 @@ env_autoawq:
 	docker run -it  --gpus all --net=host -p 8081:8081 -p 8082:8082 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.inference/:/root/.inference/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/autoawq /bin/bash
 
 env:
-	docker run -it  --gpus all --net=host -p 8081:8081 -p 8082:8082 -v ~/.trainer/:/root/.trainer/ -v ~/.inference/:/root/.inference/ -v ~/.bashrc:/root/.bashrc -v ~/.netrc:/root/.netrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/triton_ag /bin/bash -c "make wandb_login && /bin/bash"
+	docker run -it  --gpus all --net=host -p 8081:8081 -p 8082:8082 -v ~/.trainer/:/root/.trainer/ -v ~/.workflow/:/root/.workflow/ -v ~/.inference/:/root/.inference/ -v ~/.bashrc:/root/.bashrc -v ~/.netrc:/root/.netrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/triton_ag /bin/bash -c "make wandb_login && /bin/bash"
 
 wandb_login:
 	wandb login --host=https://fairwandb.org
@@ -126,11 +126,6 @@ vllm-qwen3-8b:
 	--enable-auto-tool-choice \
 	--tool-call-parser hermes
 
-vllm-qwen3-32b:
-	vllm serve unsloth/Qwen3-32B-bnb-4bit \
-	--max_model_len 40960 \
-	--enable-auto-tool-choice \
-	--tool-call-parser hermes
 
 vllm-qwen3-32b-devserver:
 	CUDA_VISIBLE_DEVICES=4 vllm serve Qwen/Qwen3-32B-AWQ \
@@ -143,43 +138,46 @@ vllm-qwen3-32b-devserver:
 	--port 8091
 
 
+vllm_env:
+	${VLLM_SETTING} docker run -it \
+    --security-opt=label=disable \
+    --device nvidia.com/gpu=all \
+    --network host \
+    --shm-size=32g \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -v ~/.trainer:/root/.trainer \
+    -e HTTP_PROXY -e HTTPS_PROXY -e NO_PROXY \
+    -e http_proxy -e https_proxy -e no_proxy \
+	-v ~/.inference/:/root/.inference/ \
+	-v ~/.bashrc:/root/.bashrc -v ~/.netrc:/root/.netrc \
+	-v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ \
+	-v /data/users/${USER}/:/root/.cache/ \
+	-v ~/.kbeval:/root/.kbeval/ \
+	-v ${PWD}:/workspace/ \
+    docker://dtadpole/vllm:v0.7 \
+	/bin/bash -c "source /root/.venv/bin/activate && cd /workspace/ && /bin/bash"
+
 vllm-qwen3-14b-devserver:
-	CUDA_VISIBLE_DEVICES=5 vllm serve Qwen/Qwen3-14B \
-	--max-model-len 24576 \
-	--enable-auto-tool-choice \
-	--tool-call-parser hermes \
-	--dtype bfloat16 \
-	--return-tokens-as-token-ids \
-	--host "::" \
-	--port 8091
-
-
-vllm-qwen3-14b-inference:
-	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=4 vllm serve Qwen/Qwen3-14B \
-	--enable-lora \
-	--max-lora-rank 128 \
-	--max-loras 8 \
-	--gpu-memory-utilization 0.9 \
-	--max_model_len 24576 \
-	--load_format safetensors \
-	--guided_decoding_backend guidance \
-	--guided-decoding-disable-fallback \
-	--enable_auto_tool_choice \
-	--tool_call_parser hermes \
-	--scheduling_policy priority \
-	--enable_chunked_prefill \
-	--max_num_batched_tokens 8192 \
-	--max_num_seqs 16 \
-	--max_log_len 0 \
-	--trust_remote_code \
-	--enable_prefix_caching \
-	--prefix-caching-hash-algo builtin \
-	--generation-config vllm \
-	--override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
-	--return-tokens-as-token-ids \
-	--enforce-eager \
-	--host "::" \
-	--port 8091
+	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=4,5 python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen3-14B \
+    --port 8091 --host :: \
+    --api-key dummy \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 2 \
+    --pipeline-parallel-size 1 \
+    --enable-lora --max-lora-rank 128 --max-loras 6 \
+    --gpu-memory-utilization 0.95 --max_model_len 24576 \
+    --load_format safetensors \
+    --trust_remote_code \
+    --guided_decoding_backend guidance --guided-decoding-disable-fallback \
+    --enable_auto_tool_choice --tool_call_parser hermes \
+    --scheduling_policy priority \
+    --enable_chunked_prefill --max_num_batched_tokens 2048 \
+    --max_log_len 0 --max_num_seqs 144 \
+    --enable_prefix_caching --prefix-caching-hash-algo builtin \
+    --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
+    --return-tokens-as-token-ids \
+    --enforce-eager
 
 
 vllm-qwen25-7b-devserver:
