@@ -87,4 +87,4 @@ RUN pip install --no-cache-dir \
     -r requirements_devserver.txt
 
 # Install cron, move to the top next time when rearrange the Dockerfile
-RUN apt-get -o APT::Sandbox::User=root update && apt-get -o APT::Sandbox::User=root install -y cron
+RUN apt-get -o APT::Sandbox::User=root update && apt-get -o APT::Sandbox::User=root install -y cron tmux sshfs fuse3
