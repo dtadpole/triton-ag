@@ -3,9 +3,9 @@ ENV_VARS ?= PYTHONNOUSERSITE=1 \
         PYTHONPATH=${PYTHONPATH}:${PWD}
 HOST=$(shell hostname)
 IS_DEVSERVER=$(shell hostname | grep -E -c "dev.*\.facebook\.com")
-META_PROXY := https_proxy=http://fwdproxy:8080 http_proxy=http://fwdproxy:8080 ftp_proxy=http://fwdproxy:8080 http_no_proxy='\''\'\'''\''.facebook.com|.tfbnw.net|*.fb.com'\''\'\'
+META_PROXY := https_proxy=http://fwdproxy:8080 http_proxy=http://fwdproxy:8080 ftp_proxy=http://fwdproxy:8080 no_proxy='\''\'\'''\''.facebook.com|.tfbnw.net|*.fb.com'\''\'\'
 VLLM_SETTING := VLLM_ALLOW_RUNTIME_LORA_UPDATING=True HF_HUB_DISABLE_XET=1 HF_HUB_ENABLE_HF_TRANSFER=0
-
+NAS_SERVER_IPV6 := 2401:db00:22c:260b:face:0:28:0
 
 .PHONY: help finetune finetune-single finetune-2gpu finetune-debug
 
@@ -33,7 +33,7 @@ else
 	docker build --network=host --progress=plain  -t triton_ag .
 endif
 
-build_docker_autoawq: Dockerfile
+build_docker_autoawq: Dockerfile_autoawq
 ifeq (${IS_DEVSERVER}, 1)
 	$(META_PROXY) docker build -f Dockerfile_autoawq --network=host --progress=plain  -t autoawq .
 else
@@ -41,11 +41,41 @@ else
 endif
 
 
+build_docker_nas: Dockerfile_nas
+ifeq (${IS_DEVSERVER}, 1)
+	$(META_PROXY) docker build -f Dockerfile_nas --network=host --progress=plain  -t nas .
+else
+	docker build -f Dockerfile_nas --network=host --progress=plain  -t nas .
+endif
+
+
 env_autoawq:
 	docker run -it  --gpus all --net=host -p 8081:8081 -p 8082:8082 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.inference/:/root/.inference/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/autoawq /bin/bash
 
 env:
-	docker run -it  --gpus all --net=host -p 8081:8081 -p 8082:8082 -v ~/.trainer/:/root/.trainer/ -v ~/.inference/:/root/.inference/ -v ~/.bashrc:/root/.bashrc -v ~/.netrc:/root/.netrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/triton_ag /bin/bash -c "make wandb_login && /bin/bash"
+	docker run -it \
+		--gpus all \
+		--cap-add SYS_ADMIN \
+		--net=host \
+		--shm-size=8g \
+		--mount type=bind,source=/home/jingbo25/bucket/,target=/root/code_gen,bind-propagation=rslave \
+		-v ~/.ssh/:/root/.ssh:ro \
+		-v ~/.trainer/:/root/.trainer/ \
+		-v ~/.workflow/:/root/.workflow/ \
+		-v ~/.inference/:/root/.inference/ \
+		-v ~/.bashrc:/root/.bashrc \
+		-v ~/.netrc:/root/.netrc \
+		-v ~/.gitconfig:/root/.gitconfig \
+		-v ~/.keys/:/root/.keys/ \
+		-v /data/users/${USER}/:/root/.cache/ \
+		-v ~/.kbeval:/root/.kbeval/ \
+		-v ${PWD}:/workspace/ \
+		--cap-add SYS_ADMIN \
+		--device /dev/fuse \
+		--security-opt apparmor:unconfined \
+		--privileged \
+		localhost/triton_ag \
+		/bin/bash -c "make wandb_login && /bin/bash"
 
 wandb_login:
 	wandb login --host=https://fairwandb.org
@@ -103,6 +133,20 @@ kbEvalLocal3:
 codeRunServer:
 	mcp dev codeRunServer.py
 
+
+mount_nas:
+	$(META_PROXY) docker run -it \
+	--name nfs-client \
+	--replace \
+	--net=host \
+	--restart unless-stopped \
+	--privileged \
+	--cap-add SYS_ADMIN \
+	--device /dev/fuse \
+	-v ${PWD}/code_gen:/mnt/nas \
+	nas /bin/bash
+	# sh -c "mkdir -p /mnt/nas && mount -t nfs4 -o vers=4,port=8081 [${NAS_SERVER_IPV6}]:/ /mnt/nas && tail -f /dev/null"
+
 # Fine-tuning targets
 finetune:
 	@echo "Starting data parallel fine-tuning on 4 GPUs..."
@@ -118,16 +162,10 @@ finetune-single:
 
 finetune-2gpu:
 	@echo "Starting data parallel fine-tuning on 2 GPUs..."
-	bash -c "CUDA_VISIBLE_DEVICES=2,3 torchrun --nproc_per_node=2 --master_port=29500 finetune_unsloth.py"
+	bash -c "CUDA_VISIBLE_DEVICES=4,5 torchrun --nproc_per_node=2 --master_port=29500 finetune_unsloth.py"
 
 vllm-qwen3-8b:
 	vllm serve unsloth/DeepSeek-R1-0528-Qwen3-8B-bnb-4bit \
-	--max_model_len 40960 \
-	--enable-auto-tool-choice \
-	--tool-call-parser hermes
-
-vllm-qwen3-32b:
-	vllm serve unsloth/Qwen3-32B-bnb-4bit \
 	--max_model_len 40960 \
 	--enable-auto-tool-choice \
 	--tool-call-parser hermes
@@ -140,46 +178,49 @@ vllm-qwen3-32b-devserver:
 	--dtype bfloat16 \
 	--return-tokens-as-token-ids \
 	--host "::" \
-	--port 8086
+	--port 8091
 
+
+vllm_env:
+	${VLLM_SETTING} docker run -it \
+    --security-opt=label=disable \
+    --device nvidia.com/gpu=all \
+    --network host \
+    --shm-size=32g \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -v ~/.trainer:/root/.trainer \
+    -e HTTP_PROXY -e HTTPS_PROXY -e NO_PROXY \
+    -e http_proxy -e https_proxy -e no_proxy \
+	-v ~/.inference/:/root/.inference/ \
+	-v ~/.bashrc:/root/.bashrc -v ~/.netrc:/root/.netrc \
+	-v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ \
+	-v /data/users/${USER}/:/root/.cache/ \
+	-v ~/.kbeval:/root/.kbeval/ \
+	-v ${PWD}:/workspace/ \
+    docker://dtadpole/vllm:v0.7 \
+	/bin/bash -c "source /root/.venv/bin/activate && cd /workspace/ && /bin/bash"
 
 vllm-qwen3-14b-devserver:
-	CUDA_VISIBLE_DEVICES=4 vllm serve Qwen/Qwen3-14B \
-	--max-model-len 40960 \
-	--enable-auto-tool-choice \
-	--tool-call-parser hermes \
-	--dtype bfloat16 \
-	--return-tokens-as-token-ids \
-	--host "::" \
-	--port 8086
-
-
-vllm-qwen3-14b-inference:
-	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=4 vllm serve Qwen/Qwen3-14B \
-	--enable-lora \
-	--max-lora-rank 128 \
-	--max-loras 8 \
-	--gpu-memory-utilization 0.9 \
-	--max_model_len 24576 \
-	--load_format safetensors \
-	--guided_decoding_backend guidance \
-	--guided-decoding-disable-fallback \
-	--enable_auto_tool_choice \
-	--tool_call_parser hermes \
-	--scheduling_policy priority \
-	--enable_chunked_prefill \
-	--max_num_batched_tokens 8192 \
-	--max_num_seqs 16 \
-	--max_log_len 0 \
-	--trust_remote_code \
-	--enable_prefix_caching \
-	--prefix-caching-hash-algo builtin \
-	--generation-config vllm \
-	--override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
-	--return-tokens-as-token-ids \
-	--enforce-eager \
-	--host "::" \
-	--port 8091
+	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=4,5 python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen3-14B \
+    --port 8091 --host :: \
+    --api-key dummy \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 2 \
+    --pipeline-parallel-size 1 \
+    --enable-lora --max-lora-rank 128 --max-loras 6 \
+    --gpu-memory-utilization 0.95 --max_model_len 24576 \
+    --load_format safetensors \
+    --trust_remote_code \
+    --guided_decoding_backend guidance --guided-decoding-disable-fallback \
+    --enable_auto_tool_choice --tool_call_parser hermes \
+    --scheduling_policy priority \
+    --enable_chunked_prefill --max_num_batched_tokens 2048 \
+    --max_log_len 0 --max_num_seqs 144 \
+    --enable_prefix_caching --prefix-caching-hash-algo builtin \
+    --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
+    --return-tokens-as-token-ids \
+    --enforce-eager
 
 
 vllm-qwen25-7b-devserver:
@@ -189,7 +230,7 @@ vllm-qwen25-7b-devserver:
 	--tool-call-parser hermes \
 	--tensor-parallel-size 2 \
 	--host "::" \
-	--port 8086
+	--port 8091
 
 sglang-qwen3-8b:
 	sglang serve qwen/qwen3-8b-instruct \
