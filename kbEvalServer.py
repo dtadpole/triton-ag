@@ -19,7 +19,7 @@ from fastapi import FastAPI, Body, HTTPException, Header, Depends, Request
 from kbEvalTest.kbeval import KernelExecResult
 from logger import logger
 from pydantic import BaseModel, Field
-from kbEvalUtil import on_process_timeout
+from kbEvalUtil import on_process_timeout, KB_EVAL_DIR
 
 KB_EVAL_TOKEN = None
 
@@ -28,8 +28,6 @@ TOTAL_ERROR_COUNTER = 0
 MAX_ERROR_COUNT = 10
 START_TIME = time.time()
 MAX_RUN_TIME = 2 * 3600 # restart periods in seconds
-
-KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
 
 # Create app
 app = FastAPI()
@@ -66,7 +64,7 @@ def _setup_wandb_logging(prefix_tag: str="test", model_tag: str="local_qwen3-14b
     key = f"{prefix_tag}"
     if key in wandb_loggers:
         return wandb_loggers[key]
-    
+
     wandb_run = wandb.init(
         project=f"kb_eval_{prefix_tag}",
         id=f"{prefix_tag}",
@@ -237,7 +235,7 @@ async def kb_eval_ref(
             error_msg = f"[KB Eval] [reference] kbEvalCli.py could not generate the result file in time [{elapsed_time:.2f}s]. Missing file [{result_json_path}]"
             logger.error(error_msg)
             raise FileNotFoundError(error_msg)
-        
+
         with open(result_json_path, "r") as f:
             result_json = json.load(f)
             logger.info(f"[KB Eval] [reference] retrieved result json from [{result_json_path}]\n{json.dumps(result_json, indent=4)}")
@@ -401,7 +399,7 @@ async def kb_eval(
             error_msg = f"[KB Eval] [{eval_tag}] kbEvalCli.py could not generate the result file in time [{elapsed_time:.2f}s]. Missing file [{result_json_path}]"
             logger.error(error_msg)
             raise FileNotFoundError(error_msg)
-        
+
         # read the result from {temp_dir}/kbeval_{eval_tag}.json
         with open(result_json_path, "r") as f:
             result_json = json.load(f)

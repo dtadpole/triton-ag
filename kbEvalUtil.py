@@ -15,6 +15,12 @@ import ast
 import signal
 import argparse
 from collections import defaultdict
+from util import is_devserver
+
+if is_devserver():
+    KB_EVAL_DIR = "shared/.kbeval"
+else:
+    KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
 
 MAX_LOCK_AGE = 20 # seconds
 
