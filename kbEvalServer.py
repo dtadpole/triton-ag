@@ -19,7 +19,8 @@ from fastapi import FastAPI, Body, HTTPException, Header, Depends, Request
 from kbEvalTest.kbeval import KernelExecResult
 from logger import logger
 from pydantic import BaseModel, Field
-from kbEvalUtil import on_process_timeout, KB_EVAL_DIR
+from kbEvalUtil import on_process_timeout
+from util import KB_EVAL_DIR
 
 KB_EVAL_TOKEN = None
 

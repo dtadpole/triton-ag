@@ -30,6 +30,12 @@ def is_devserver() -> bool:
     hostname = socket.gethostname()
     return "facebook.com" in hostname
 
+## Define the global data folders
+if is_devserver():
+    KB_EVAL_DIR = "shared/.kbeval"
+else:
+    KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
+
 
 def init_logging(agent_name: str):
     # enable_verbose_stdout_logging()
