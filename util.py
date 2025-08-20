@@ -46,6 +46,11 @@ if is_devserver():
 else:
     TRAINER_DIR = "~/.trainer"
 
+if is_devserver():
+    WORKFLOW_DIR = "shared/.workflow"
+else:
+    WORKFLOW_DIR = "~/.workflow"
+
 def init_logging(agent_name: str):
     # enable_verbose_stdout_logging()
     # stdout_logger = logging.getLogger("agents")

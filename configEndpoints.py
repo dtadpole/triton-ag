@@ -50,7 +50,7 @@ class CodeExtractor:
     def __init__(self):
         pass
 
-    def extract_code(self, completion: str) -> str:
+    def extract_code(self, completion: str) -> dict:
         # first extract <think>...</think> block
         think_blocks = re.findall(r"(<think>.*?</think>)", completion, re.DOTALL)
         for think_block in think_blocks:

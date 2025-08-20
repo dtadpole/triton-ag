@@ -564,13 +564,17 @@ class BaseTrainer:
     def _setup_logging(self):
         """Setup logging and tracking"""
         if self.config.logging.use_wandb:
-            wandb.init(
-                project=self.config.logging.wandb_project,
-                id=self.config.logging.wandb_run_id,
-                name=self.config.logging.wandb_run_name,
-                config=self.config.model_dump(),
-                resume="allow",
-            )
+            if wandb.run is not None:
+                pass
+            else:
+                # wandb.init(
+                #     project=self.config.logging.wandb_project,
+                #     id=self.config.logging.wandb_run_id,
+                #     name=self.config.logging.wandb_run_name,
+                #     config=self.config.model_dump(),
+                #     resume="allow",
+                # )
+                pass
             logger.info(f"📊 [{self.__class__.__name__}] W&B logging enabled")
 
     def _compute_loss(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:

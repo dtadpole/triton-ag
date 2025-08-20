@@ -60,6 +60,8 @@ env_start:
 		--cap-add SYS_ADMIN \
 		--net=host \
 		--shm-size=128g \
+		--ulimit nofile=65536:65536 \
+		--ulimit nproc=4096:4096 \
 		--mount type=bind,source=/home/jingbo25/bucket/,target=/root/code_gen,bind-propagation=rslave \
 		-v ~/.ssh/:/root/.ssh \
 		-v ~/.trainer/:/root/.trainer/ \

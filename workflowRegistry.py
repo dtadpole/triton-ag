@@ -6,13 +6,14 @@ import time
 import asyncio
 from typing import Optional
 from loguru import logger
+from util import WORKFLOW_DIR
 
 QUEUE_PREFIX = "queue."
 ADAPTER_PREFIX = "adapter."
 
 # create a singleton class to store global variables
 class WorkflowRegistry:
-    def __init__(self, prefix_tag: str, workflow_config_path: str, data_dir: str = "~/.workflow"):
+    def __init__(self, prefix_tag: str, workflow_config_path: str, data_dir: str = WORKFLOW_DIR):
         self.prefix_tag = prefix_tag
         self.workflow_config_path = workflow_config_path
         self.workflow_config = self._load_workflow_config()
@@ -169,7 +170,7 @@ class WorkflowRegistry:
         except Exception as e:
             logger.error(f"Error getting {key}: {e}")
             return None
-    
+
     def put(self, key, value):
         """
         Put a value into the object registry
@@ -194,7 +195,7 @@ class WorkflowRegistry:
         except Exception as e:
             logger.error(f"Error getting {key}: {e}")
             return None
-        
+
     def delete(self, key):
         """
         Delete a key from the object registry
@@ -207,7 +208,7 @@ class WorkflowRegistry:
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--workflow_dir", type=str, default="~/.workflow")
+    parser.add_argument("--workflow_dir", type=str, default=WORKFLOW_DIR)
     parser.add_argument("--prefix_tag", type=str, default="auto")
     args = parser.parse_args()
 
