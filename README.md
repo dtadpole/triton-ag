@@ -103,6 +103,36 @@ with-proxy python agent_kernel_coder.py -p deepseek -m deepseek-chat
 
 This will create a new working directory under `_run_{ddd}` and generate kernel implementation.
 
+## Setup shared drive on meta's devserver
+
+We use sshfs to mount a shared drive on devserver. We use the devserver devgpu139.cco2.facebook.com to host the shared drive, and other devservers can mount the shared drive to read and write model artifacts.
+
+```
+ssh host: devgpu139.cco2.facebook.com
+ssh port: 8081
+```
+To mount the shared drive on your devserver, run the following command on your devserver:
+```
+cd ~/.ssh
+ssh-keygen -t rsa -b 4096 -f id_rsa_{mykey_name}
+scp -P 8081 id_rsa_{mykey_name}.pub devgpu139.cco2.facebook.com:/tmp/
+
+# log on the host devserver devgpu139.cco2.facebook.com
+ssh devgpu139.cco2.facebook.com
+docker exec -it ssh-server /bin/bash
+cat /tmp/id_rsa_{mykey_name}.pub >> /home/testuser/.ssh/authorized_keys
+chown codegen:codegen /home/codegen/.ssh/authorized_keys
+chmod 600 /home/codegen/.ssh/authorized_keys
+
+# use make command to mount the shared drive on your devserver
+
+# in the client host, this command will start the container and mount the shared drive
+make env_start
+# in the docker environment
+make mount_shared_drive
+```
+The shared drive will be shared/ in the current working directory.
+
 ## How to host your own LLM service on devserver
 ```
 # create an empty API key
