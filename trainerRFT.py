@@ -18,7 +18,7 @@ from workflowUtil import TrainerRFTBlock
 from configInterpreter import ConfigInterpreter
 from configEndpoints import DuckDBClient
 from workflowRsync import RsyncClient
-
+from util import INFERENCE_DIR
 
 class RFTConfig(BaseModel):
     """RFT configuration"""
@@ -38,7 +38,7 @@ class RFTConfig(BaseModel):
 
 class RFTTrainer(BaseTrainer):
     """Rejection Fine-Tuning trainer for conversational datasets"""
-    
+
     def __init__(self,
         prefix_tag: str,
         rft_config: RFTConfig,
@@ -136,7 +136,7 @@ def rft_get_trainer(
     except Exception as e:
         logger.error(f"❌ [RFTTrainer] [{prefix_tag}] Initialization failed: {e}")
         raise e
-    
+
     return trainer
 
 
@@ -146,7 +146,7 @@ async def main():
     parser.add_argument("--prefix_tag", type=str, default="auto")
     parser.add_argument("--epoch_id", type=int, default=0)
     parser.add_argument("--block_id", type=int, default=0)
-    parser.add_argument("--input_dir", type=str, default="~/.inference/codeGenEval")
+    parser.add_argument("--input_dir", type=str, default=INFERENCE_DIR + "/codeGenEval")
     parser.add_argument("--output_dir", type=str, default="~/.trainer/rft")
     parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B.n_000_00") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
     parser.add_argument("--base_config", type=str, default="trainerBase.yaml")
