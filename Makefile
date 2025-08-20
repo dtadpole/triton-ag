@@ -60,19 +60,16 @@ env_start:
 		--cap-add SYS_ADMIN \
 		--net=host \
 		--shm-size=128g \
+		--pids-limit -1 \
 		--ulimit nofile=65536:65536 \
-		--ulimit nproc=4096:4096 \
-		--mount type=bind,source=/home/jingbo25/bucket/,target=/root/code_gen,bind-propagation=rslave \
+		--ulimit nproc=-1:-1\
+		--ulimit memlock=-1:-1 \
 		-v ~/.ssh/:/root/.ssh \
-		-v ~/.trainer/:/root/.trainer/ \
-		-v ~/.workflow/:/root/.workflow/ \
-		-v ~/.inference/:/root/.inference/ \
 		-v ~/.bashrc:/root/.bashrc \
 		-v ~/.netrc:/root/.netrc \
 		-v ~/.gitconfig:/root/.gitconfig \
 		-v ~/.keys/:/root/.keys/ \
 		-v /data/users/${USER}/:/root/.cache/ \
-		-v ~/.kbeval:/root/.kbeval/ \
 		-v ${PWD}:/workspace/ \
 		--cap-add SYS_ADMIN \
 		--device /dev/fuse \
