@@ -163,12 +163,12 @@ vllm_env:
 	/bin/bash -c "source /root/.venv/bin/activate && cd /workspace/ && /bin/bash"
 
 vllm-qwen3-14b-devserver:
-	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=2,3,4,5 python -m vllm.entrypoints.openai.api_server \
+	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=2,3 python -m vllm.entrypoints.openai.api_server \
     --model Qwen/Qwen3-14B \
     --port 8091 --host :: \
     --api-key dummy \
     --data-parallel-size 1 \
-    --tensor-parallel-size 4 \
+    --tensor-parallel-size 2 \
     --pipeline-parallel-size 1 \
     --enable-lora --max-lora-rank 128 --max-loras 6 \
     --gpu-memory-utilization 0.95 --max_model_len 24576 \

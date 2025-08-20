@@ -10,6 +10,7 @@ from workflowUtil import MODEL_OVERRIDE_KEY
 from workflowClient import WorkflowClient
 from configInterpreter import ConfigInterpreter
 from trainerUtil import read_stream
+from util import TRAINER_DIR
 
 LAST_MODIFIED_WITHIN = 7200
 RSYNC_QUEUE_NAME = 'rsync.rsync.1'
@@ -101,7 +102,7 @@ class RsyncClient:
             logger.info(f"🔍 [RsyncClient] Skipping upload because [run_upload] is [false]")
             return
         # get with timeout
-        source_prefix = os.path.expanduser(self.rsync_config.get('rsync_source_prefix', '~/.trainer'))
+        source_prefix = os.path.expanduser(self.rsync_config.get('rsync_source_prefix', TRAINER_DIR))
         target_prefix = self.rsync_config.get('rsync_target_prefix', '192.168.1.205:.trainer')
         target_path = target_prefix + '/' + checkpoint_name
         # rsync_path is the path to the rsync command

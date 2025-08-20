@@ -198,7 +198,7 @@ async def kb_eval_ref(
 
         eval_tag = "reference"
         # pre-compile the reference code
-        command = f"timeout --foreground --signal=SIGTERM --kill-after={MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code {reference_file_path} --measure_reference --device-list {','.join([str(device) for device in DEVICES])} --code_type pytorch --quiet"
+        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code reference_code.py --measure_reference --device-list {','.join([str(device) for device in DEVICES])} --code_type pytorch --quiet"
         process = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
@@ -366,7 +366,7 @@ async def kb_eval(
         # logger.info(f"[KB Eval] [{eval_tag}] generated_file_path: [{generated_file_path}]")
 
         # pre-compile the generated code
-        command = f"timeout --foreground --signal=SIGTERM --kill-after={MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code {reference_file_path} --generated_code {generated_file_path} --device-list {','.join([str(device) for device in DEVICES])} --code_type {code_type} --quiet"
+        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code reference_code.py --generated_code generated_code.py --device-list {','.join([str(device) for device in DEVICES])} --code_type {code_type} --quiet"
         process = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,

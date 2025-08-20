@@ -14,6 +14,7 @@ import torch
 from workflowUtil import TrainerSFTBlock
 from workflowClient import WorkflowClient
 from workflowServer import WorkflowServer
+from util import TRAINER_DIR
 
 
 class SFTConfig(BaseModel):
@@ -33,14 +34,14 @@ class SFTConfig(BaseModel):
 
 class MessageDataset(Dataset):
     """Dataset class for handling conversational message data for SFT training"""
-    
-    def __init__(self, 
-                 messages_list: List[Dict[str, Any]], 
-                 tokenizer: AutoTokenizer, 
+
+    def __init__(self,
+                 messages_list: List[Dict[str, Any]],
+                 tokenizer: AutoTokenizer,
                  sft_config: SFTConfig):
         """
         Initialize the MessageDataset
-        
+
         Args:
             messages_list: List of conversation dictionaries, each containing 'messages' key
             tokenizer: Tokenizer to use for encoding
@@ -48,7 +49,7 @@ class MessageDataset(Dataset):
         """
         self.tokenizer = tokenizer
         self.sft_config = sft_config
-        
+
         # Ensure tokenizer has necessary tokens
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -63,7 +64,7 @@ class MessageDataset(Dataset):
                 mask_non_assistant_tokens=sft_config.mask_non_assistant_tokens,
                 mask_non_last_assistant_tokens=sft_config.mask_non_last_assistant_tokens,
             )
-            
+
             # Convert tensors to lists for the data collator
             assert isinstance(formatted_data['input_ids'], torch.Tensor)
             assert isinstance(formatted_data['attention_mask'], torch.Tensor)
@@ -72,7 +73,7 @@ class MessageDataset(Dataset):
             attention_mask = formatted_data['attention_mask'].flatten().tolist()
             labels = formatted_data['labels'].flatten().tolist()
             assert len(input_ids) == len(attention_mask) == len(labels)
-            
+
             # Handle sequence length
             if len(input_ids) > self.sft_config.max_seq_length:
                 if self.sft_config.discard_long_conversations:
@@ -83,7 +84,7 @@ class MessageDataset(Dataset):
                     input_ids = input_ids[:self.sft_config.max_seq_length]
                     attention_mask = attention_mask[:self.sft_config.max_seq_length]
                     labels = labels[:self.sft_config.max_seq_length]
-            
+
             condensed_data = {
                 'input_ids': input_ids,
                 'attention_mask': attention_mask,
@@ -93,16 +94,16 @@ class MessageDataset(Dataset):
             self.messages_list.append(condensed_data)
 
         logger.info(f"📊 [MessageDataset] Loaded [{len(self.messages_list)}] conversations, sft_config=[{sft_config}]")
-    
+
     def __len__(self):
         return len(self.messages_list)
-    
+
     def __getitem__(self, idx):
         return self.messages_list[idx]
 
 class SFTTrainer(BaseTrainer):
     """Supervised Fine-Tuning trainer for conversational datasets"""
-    
+
     def __init__(self, prefix_tag: str, sft_config: SFTConfig, base_config: TrainerConfig, status: Optional[TrainerStatus] = None, base_trainer: BaseTrainer = None):
         """Initialize SFT trainer"""
         super().__init__(prefix_tag, base_config, status, base_trainer)
@@ -138,7 +139,7 @@ def sft_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_file
     except Exception as e:
         logger.error(f"❌ [SFTTrainer] [{prefix_tag}] Initialization failed: {e}")
         raise e
-    
+
     return trainer
 
 async def sft_train_block(block: TrainerSFTBlock, trainer: SFTTrainer, callback: Optional[Callable] = None):
@@ -155,21 +156,21 @@ async def sft_train_block(block: TrainerSFTBlock, trainer: SFTTrainer, callback:
 
         # query from search_path folder, find all the conversation_*.json files, and load them into a dataframe
         result = duckdb.sql(f"""SELECT filename, messages, metadata
-                            FROM read_json_auto('{search_path}/**/*_conversation.json', sample_size=-1, ignore_errors=true) 
+                            FROM read_json_auto('{search_path}/**/*_conversation.json', sample_size=-1, ignore_errors=true)
                             WHERE messages[3]['content'] IS NOT NULL
                         """)
-        
+
         result_df = result.df()
         # create a dataset from result_df['messages']
         message_dataset = MessageDataset(result_df['messages'].tolist(), trainer.tokenizer, trainer.sft_config)
 
         logger.info(f"📊 [SFTTrainer] [{block.input_tag}] Dataset created - Train: {len(message_dataset)}")
-    
+
     except Exception as e:
         error_msg = f"❌ [SFTTrainer] [{block.input_tag}] Failed to load dataset: [{type(e)}: {e}]"
         logger.error(error_msg)
         raise e
-    
+
     # train the block
     try:
         trainer.train_block(block.input_tag, message_dataset, callback=callback)
@@ -187,7 +188,7 @@ async def main():
     parser.add_argument("--epoch_id", type=int, default=0)
     parser.add_argument("--block_id", type=int, default=0)
     parser.add_argument("--input_dir", type=str, default="~/.codeGenEval")
-    parser.add_argument("--output_dir", type=str, default="~/.trainer")
+    parser.add_argument("--output_dir", type=str, default=TRAINER_DIR)
     parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B_20250801_211407") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
     parser.add_argument("--base_config", type=str, default="trainerBase.yaml")
     parser.add_argument("--sft_config", type=str, default="trainerSFT.yaml")
@@ -203,6 +204,6 @@ async def main():
         output_dir=args.output_dir,
     )
     await sft_train_block(sft_block, trainer)
-    
+
 if __name__ == "__main__":
     asyncio.run(main())
