@@ -318,9 +318,9 @@ async def composer_block(block: ComposerBlock, use_global_registry: bool = False
         # wait for the queue workers to complete
         await asyncio.gather(*queue_workers)
 
-        if use_global_registry:
-            globalWorkflow = WorkflowServer(prefix_tag=block.prefix_tag)
-            await globalWorkflow.post_composer(block)
+        # if use_global_registry:
+        #     globalWorkflow = WorkflowServer(prefix_tag=block.prefix_tag)
+        #     await globalWorkflow.post_composer(block)
 
         logger.info(f"🎉 [Composer] [{block.input_tag}] Block completed")
 
