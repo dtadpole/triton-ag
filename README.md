@@ -138,8 +138,23 @@ make vllm_gpt_oss
 python vllm_test/test_gpt_oss_120b.py
 
 
-## Measure TPS
+# Measure TPS
+
+## Using custom benchmark
 
 ### Step 1: Run the server: make vllm_gpt_oss_serve
 
 ### Step 2: Run the client: python vllm_test/benchmark_gpt_oss_v2
+
+## Using vLLM benchmark
+vLLM also offers several benchmarking tools. It does not seem we're able to set reasoning levels for the model however it can simulate several scenarios.
+
+### Step 1: Run the server: make vllm_gpt_oss_serve
+
+### Step 2: Download the ShareGPT_V3_unfiltered_cleaned_split (# wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json) and then run
+
+vllm bench serve   --backend vllm   --model hub/models--openai--gpt-oss-120b/snapshots/bc75b44b8a2a116a0e4c6659bcd1b7969885f423   --endpoint /v1/completions   --dataset-name sharegpt   --dataset-path ShareGPT_V3_unfiltered_cleaned_split.json   --num-prompts 100
+
+You can also use a random dataset and run an offline benchmark with the following command:
+
+vllm bench throughput --model hub/models--openai--gpt-oss-120b/snapshots/bc75b44b8a2a116a0e4c6659bcd1b7969885f423 --dataset-name random --input_len 256
