@@ -136,3 +136,10 @@ make vllm_gpt_oss_serve
 Once the inference server is running, open another terminal and do:
 make vllm_gpt_oss
 python vllm_test/test_gpt_oss_120b.py
+
+
+## Measure TPS
+
+### Step 1: Run the server: make vllm_gpt_oss_serve
+
+### Step 2: Run the client: python vllm_test/benchmark_gpt_oss_v2
