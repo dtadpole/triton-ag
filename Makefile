@@ -52,36 +52,40 @@ endif
 env_autoawq:
 	docker run -it  --gpus all --net=host -p 8081:8081 -p 8082:8082 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.inference/:/root/.inference/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/autoawq /bin/bash
 
-env:
-	docker run -it \
+env_start:
+	docker run -d \
+		--name codegen \
+		--replace \
 		--gpus all \
 		--cap-add SYS_ADMIN \
 		--net=host \
-		--shm-size=8g \
-		--mount type=bind,source=/home/jingbo25/bucket/,target=/root/code_gen,bind-propagation=rslave \
-		-v ~/.ssh/:/root/.ssh:ro \
-		-v ~/.trainer/:/root/.trainer/ \
-		-v ~/.workflow/:/root/.workflow/ \
-		-v ~/.inference/:/root/.inference/ \
+		--shm-size=128g \
+		--pids-limit -1 \
+		--ulimit nofile=65536:65536 \
+		--ulimit nproc=-1:-1\
+		--ulimit memlock=-1:-1 \
+		-v ~/.ssh/:/root/.ssh \
 		-v ~/.bashrc:/root/.bashrc \
 		-v ~/.netrc:/root/.netrc \
 		-v ~/.gitconfig:/root/.gitconfig \
 		-v ~/.keys/:/root/.keys/ \
 		-v /data/users/${USER}/:/root/.cache/ \
-		-v ~/.kbeval:/root/.kbeval/ \
 		-v ${PWD}:/workspace/ \
 		--cap-add SYS_ADMIN \
 		--device /dev/fuse \
 		--security-opt apparmor:unconfined \
 		--privileged \
 		localhost/triton_ag \
-		/bin/bash -c "make wandb_login && /bin/bash"
+		/bin/bash -c "make wandb_login && make mount_shared_drive && tail -f /dev/null"
+
+env:
+	docker exec -it codegen /bin/bash
 
 wandb_login:
 	wandb login --host=https://fairwandb.org
 
-vllm_env:
-	docker run -it  --gpus all --net=host -p 8081:8081 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/triton_ag /bin/bash
+mount_shared_drive:
+	sshfs -o IdentityFile=/root/.ssh/id_rsa_shared -p 8081 codegen@devgpu139.cco2.facebook.com:/shared/ shared/
 
 mlflow:
 	# mlflow server --host localhost --port 5051
@@ -97,55 +101,12 @@ lora_merge_compress:
 kbEval:
 	while true; do python kbEvalServer.py; sleep 1; done
 
-kbEvalLocal1:
-	docker run -itd  \
-	--gpus all \
-	--net=host -p 8081:8081 -p 8082:8082 \
-	-v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ \
-	-v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ \
-	--name kblocal_1 \
-	--replace \
-	localhost/triton_ag \
-	/bin/bash -c "python kbEvalServer.py --local_host --port 5678 --device 5"
-
-kbEvalLocal2:
-	docker run -itd  \
-	--gpus all \
-	--net=host -p 8081:8081 -p 8082:8082 \
-	-v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ \
-	-v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ \
-	--name kblocal_2 \
-	--replace \
-	localhost/triton_ag \
-	/bin/bash -c "python kbEvalServer.py --local_host --port 5677 --device 6"
-
-kbEvalLocal3:
-	docker run -itd  \
-	--gpus all \
-	--net=host -p 8081:8081 -p 8082:8082 \
-	-v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ \
-	-v /data/users/${USER}/:/root/.cache/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ \
-	--name kblocal_3 \
-	--replace \
-	localhost/triton_ag \
-	/bin/bash -c "python kbEvalServer.py --local_host --port 5676 --device 7"
+kbeval_local:
+	python kbEvalServer.py --local_host --port 5676 --device 7
 
 codeRunServer:
 	mcp dev codeRunServer.py
 
-
-mount_nas:
-	$(META_PROXY) docker run -it \
-	--name nfs-client \
-	--replace \
-	--net=host \
-	--restart unless-stopped \
-	--privileged \
-	--cap-add SYS_ADMIN \
-	--device /dev/fuse \
-	-v ${PWD}/code_gen:/mnt/nas \
-	nas /bin/bash
-	# sh -c "mkdir -p /mnt/nas && mount -t nfs4 -o vers=4,port=8081 [${NAS_SERVER_IPV6}]:/ /mnt/nas && tail -f /dev/null"
 
 # Fine-tuning targets
 finetune:
@@ -201,7 +162,7 @@ vllm_env:
 	/bin/bash -c "source /root/.venv/bin/activate && cd /workspace/ && /bin/bash"
 
 vllm-qwen3-14b-devserver:
-	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=4,5 python -m vllm.entrypoints.openai.api_server \
+	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=2,3 python -m vllm.entrypoints.openai.api_server \
     --model Qwen/Qwen3-14B \
     --port 8091 --host :: \
     --api-key dummy \

@@ -31,6 +31,7 @@ from configEndpoints import DuckDBClient, StatsClient
 from configInterpreter import ConfigInterpreter
 from workflowUtil import TrainerGRPOBlock
 from workflowRsync import RsyncClient
+from util import INFERENCE_DIR, TRAINER_DIR
 
 LATEST_REFERENCE_NAME = "reference_state_latest.pt"
 
@@ -453,8 +454,8 @@ async def main():
     parser.add_argument("--epoch_id", type=int, default=0)
     parser.add_argument("--block_id", type=int, default=0)
     parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B.n_004_01")
-    parser.add_argument("--input_dir", type=str, default="~/.inference/codeGenEval")
-    parser.add_argument("--output_dir", type=str, default="~/.trainer/grpo")
+    parser.add_argument("--input_dir", type=str, default=INFERENCE_DIR + "/codeGenEval")
+    parser.add_argument("--output_dir", type=str, default=TRAINER_DIR + "/grpo")
     parser.add_argument("--base_config", type=str, default="trainerBase.yaml")
     parser.add_argument("--grpo_config", type=str, default="trainerGRPO.yaml")
     parser.add_argument("--module_file", type=str, default="trainer/grpo.module.yaml")

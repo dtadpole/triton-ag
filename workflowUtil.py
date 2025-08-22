@@ -6,6 +6,7 @@ from logger import logger
 from datetime import datetime
 from pydantic import BaseModel, Field
 from typing import Optional
+from util import INFERENCE_DIR, TRAINER_DIR
 
 REG_PORT_FILE = ".reg.port"
 REG_DIR = ".reg"
@@ -17,24 +18,24 @@ class TrainerSFTBlock(BaseModel):
     epoch_id: int
     block_id: int
     input_tag: str
-    input_dir: str = Field(default="~/.inference/exemplar")
-    output_dir: str = Field(default="~/.trainer")
+    input_dir: str = Field(default=INFERENCE_DIR + "/exemplar")
+    output_dir: str = Field(default=TRAINER_DIR)
 
 class TrainerRFTBlock(BaseModel):
     prefix_tag: str
     epoch_id: int
     block_id: int
     input_tag: str
-    input_dir: str = Field(default="~/.inference/codeGenEval")
-    output_dir: str = Field(default="~/.trainer")
+    input_dir: str = Field(default=INFERENCE_DIR + "/codeGenEval")
+    output_dir: str = Field(default=TRAINER_DIR)
 
 class TrainerGRPOBlock(BaseModel):
     prefix_tag: str
     epoch_id: int
     block_id: int
     input_tag: str
-    input_dir: str = Field(default="~/.inference/codeGenEval")
-    output_dir: str = Field(default="~/.trainer")
+    input_dir: str = Field(default=INFERENCE_DIR + "/codeGenEval")
+    output_dir: str = Field(default=TRAINER_DIR)
 
 class CodeGenEvalBlock(BaseModel):
     prefix_tag: str
@@ -105,8 +106,8 @@ class ComposerBlock(BaseModel):
     module_file: str = Field(default="inference/codeGen.module.yaml")
     prompt_file: str = Field(default="inference/triton.prompt.yaml")
     example_file: str = Field(default="inference/triton.example.yaml")
-    input_dir: str = Field(default="~/.inference/composer")
-    output_dir: str = Field(default="~/.inference/composer")
+    input_dir: str = Field(default=INFERENCE_DIR + "/composer")
+    output_dir: str = Field(default=INFERENCE_DIR + "/composer")
 
 def get_prefix_tag(prefix_tag:str="auto", config_path:str="globalWorkflow.yaml"):
     if prefix_tag == "auto":
@@ -118,11 +119,11 @@ def get_prefix_tag(prefix_tag:str="auto", config_path:str="globalWorkflow.yaml")
     else:
         return prefix_tag
 
-def get_global_registry_dir(prefix_tag:str="auto", trainer_dir:str="~/.trainer"):
+def get_global_registry_dir(prefix_tag:str="auto", trainer_dir:str=TRAINER_DIR):
     prefix_tag = get_prefix_tag(prefix_tag)
     return os.path.join(os.path.expanduser(trainer_dir), prefix_tag, REG_DIR)
 
-def get_global_registry_port(prefix_tag:str="auto", trainer_dir:str="~/.trainer"):
+def get_global_registry_port(prefix_tag:str="auto", trainer_dir:str=TRAINER_DIR):
     prefix_tag = get_prefix_tag(prefix_tag)
     port_file = os.path.join(get_global_registry_dir(prefix_tag, trainer_dir), REG_PORT_FILE)
     if os.path.exists(port_file):

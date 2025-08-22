@@ -16,6 +16,7 @@ import signal
 import argparse
 from collections import defaultdict
 
+
 MAX_LOCK_AGE = 20 # seconds
 
 def on_critical_alarm(signum, frame):

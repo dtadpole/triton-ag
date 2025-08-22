@@ -6,6 +6,7 @@ from peft import PeftModel
 import argparse
 from logger import logger
 from typing import Optional
+from util import TRAINER_DIR
 
 class TrainerLoraCache:
     def __init__(self,
@@ -13,7 +14,7 @@ class TrainerLoraCache:
                  base_model: nn.Module,
                  lora_model: nn.Module,
                  extra_cache_size: int = 2,
-                 cache_dir: str = "~/.trainer",
+                 cache_dir: str = TRAINER_DIR,
     ):
         self.prefix_tag = prefix_tag
         self.base_model = base_model
@@ -55,7 +56,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--prefix_tag", type=str, required=True)
     parser.add_argument("--cache_size", type=int, default=2)
-    parser.add_argument("--cache_dir", type=str, default="~/.trainer")
+    parser.add_argument("--cache_dir", type=str, default=TRAINER_DIR)
     parser.add_argument("--base_model", type=str, default="Qwen/Qwen3-14B")
     parser.add_argument("--checkpoint_name_1", type=str, default="checkpoint-2000")
     parser.add_argument("--checkpoint_name_2", type=str, default="checkpoint-2050")

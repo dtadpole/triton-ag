@@ -41,6 +41,7 @@ import yaml
 import argparse
 from logger import logger
 from trainerUtil import SimpleCollator, merge_dicts
+from util import TRAINER_DIR
 
 
 class TrainerStatus(BaseModel):
@@ -78,7 +79,7 @@ class TrainingConfig(BaseModel):
     save_steps: int = 20
     eval_steps: int = 20
     logging_steps: int = 1
-    checkpoint_path: str = "~/.trainer"
+    checkpoint_path: str = TRAINER_DIR
     latest_checkpoint_name: Optional[str] = "checkpoint-latest"
     max_grad_norm: float = 0.1
     scheduler_type: str = "cosine"
@@ -563,13 +564,17 @@ class BaseTrainer:
     def _setup_logging(self):
         """Setup logging and tracking"""
         if self.config.logging.use_wandb:
-            wandb.init(
-                project=self.config.logging.wandb_project,
-                id=self.config.logging.wandb_run_id,
-                name=self.config.logging.wandb_run_name,
-                config=self.config.model_dump(),
-                resume="allow",
-            )
+            if wandb.run is not None:
+                pass
+            else:
+                # wandb.init(
+                #     project=self.config.logging.wandb_project,
+                #     id=self.config.logging.wandb_run_id,
+                #     name=self.config.logging.wandb_run_name,
+                #     config=self.config.model_dump(),
+                #     resume="allow",
+                # )
+                pass
             logger.info(f"📊 [{self.__class__.__name__}] W&B logging enabled")
 
     def _compute_loss(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:

@@ -11,6 +11,7 @@ from pathlib import Path
 from logger import logger
 from typing import Any
 import duckdb
+from util import TRAINER_DIR
 
 VALID_RECORD_FORMATS = ["json", "text"]
 
@@ -49,7 +50,7 @@ class CodeExtractor:
     def __init__(self):
         pass
 
-    def extract_code(self, completion: str) -> str:
+    def extract_code(self, completion: str) -> dict:
         # first extract <think>...</think> block
         think_blocks = re.findall(r"(<think>.*?</think>)", completion, re.DOTALL)
         for think_block in think_blocks:
@@ -239,7 +240,7 @@ def cleanup_lockfile(lock_file: str):
 
 REFERENCE_CATEGORY = "reference"
 class StatsClient:
-    def __init__(self, stats_dir: str = "~/.trainer/stats"):
+    def __init__(self, stats_dir: str = TRAINER_DIR + "/stats"):
         self.stats_dir = Path(os.path.expanduser(stats_dir))
         os.makedirs(self.stats_dir, exist_ok=True)
 

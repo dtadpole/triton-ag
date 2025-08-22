@@ -40,7 +40,7 @@ class WorkflowClient:
 
     def _load_config(self, config_path: str):
         with open(config_path, "r") as f:
-            return yaml.safe_load(f)    
+            return yaml.safe_load(f)
 
     async def get_workflow_config(self, prefix_tag: str):
         url = f"{self.base_url}/workflow/get/{prefix_tag}"
@@ -91,7 +91,7 @@ class WorkflowClient:
                     return response.json()
             except Exception as e:
                 retry_count += 1
-                if retry_count < self.retries:  
+                if retry_count < self.retries:
                     logger.warning(f"Error checking if key exists: {e}, retrying in {2 ** retry_count} seconds [{retry_count}/{self.retries}]")
                     await asyncio.sleep(2 ** retry_count)
                 else:
@@ -107,13 +107,13 @@ class WorkflowClient:
         while retry_count < self.retries:
             try:
                 async with httpx.AsyncClient() as client:
-                    response = await client.get(url, timeout=self.timeout)  
+                    response = await client.get(url, timeout=self.timeout)
                     response.raise_for_status()
                     return response.json()
             except Exception as e:
                 retry_count += 1
                 if retry_count < self.retries:
-                    logger.warning(f"Error getting key: {e}, retrying in {2 ** retry_count} seconds [{retry_count}/{self.retries}]")    
+                    logger.warning(f"Error getting key: {e}, retrying in {2 ** retry_count} seconds [{retry_count}/{self.retries}]")
                     await asyncio.sleep(2 ** retry_count)
                 else:
                     logger.error(f"Error getting key: [{e}] after [{retry_count}/{self.retries}] retries")
@@ -157,7 +157,7 @@ class WorkflowClient:
                     logger.error(f"Error getting queues: [{e}] after [{retry_count}/{self.retries}] retries")
                     raise e
         return []
-    
+
     async def enqueue(self, queue_name: str, item: Dict[str, Any], create_queue: bool = False):
         retry_count = 0
         while retry_count < self.retries:

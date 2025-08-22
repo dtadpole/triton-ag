@@ -20,6 +20,7 @@ from kbEvalTest.kbeval import KernelExecResult
 from logger import logger
 from pydantic import BaseModel, Field
 from kbEvalUtil import on_process_timeout
+from util import KB_EVAL_DIR
 
 KB_EVAL_TOKEN = None
 
@@ -28,8 +29,6 @@ TOTAL_ERROR_COUNTER = 0
 MAX_ERROR_COUNT = 10
 START_TIME = time.time()
 MAX_RUN_TIME = 2 * 3600 # restart periods in seconds
-
-KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
 
 # Create app
 app = FastAPI()
@@ -66,7 +65,7 @@ def _setup_wandb_logging(prefix_tag: str="test", model_tag: str="local_qwen3-14b
     key = f"{prefix_tag}"
     if key in wandb_loggers:
         return wandb_loggers[key]
-    
+
     wandb_run = wandb.init(
         project=f"kb_eval_{prefix_tag}",
         id=f"{prefix_tag}",
@@ -199,7 +198,7 @@ async def kb_eval_ref(
 
         eval_tag = "reference"
         # pre-compile the reference code
-        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code {reference_file_path} --measure_reference --device-list {','.join([str(device) for device in DEVICES])} --code_type pytorch --quiet"
+        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code reference_code.py --measure_reference --device-list {','.join([str(device) for device in DEVICES])} --code_type pytorch --quiet"
         process = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
@@ -237,7 +236,7 @@ async def kb_eval_ref(
             error_msg = f"[KB Eval] [reference] kbEvalCli.py could not generate the result file in time [{elapsed_time:.2f}s]. Missing file [{result_json_path}]"
             logger.error(error_msg)
             raise FileNotFoundError(error_msg)
-        
+
         with open(result_json_path, "r") as f:
             result_json = json.load(f)
             logger.info(f"[KB Eval] [reference] retrieved result json from [{result_json_path}]\n{json.dumps(result_json, indent=4)}")
@@ -367,7 +366,7 @@ async def kb_eval(
         # logger.info(f"[KB Eval] [{eval_tag}] generated_file_path: [{generated_file_path}]")
 
         # pre-compile the generated code
-        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code {reference_file_path} --generated_code {generated_file_path} --device-list {','.join([str(device) for device in DEVICES])} --code_type {code_type} --quiet"
+        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code reference_code.py --generated_code generated_code.py --device-list {','.join([str(device) for device in DEVICES])} --code_type {code_type} --quiet"
         process = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
@@ -401,7 +400,7 @@ async def kb_eval(
             error_msg = f"[KB Eval] [{eval_tag}] kbEvalCli.py could not generate the result file in time [{elapsed_time:.2f}s]. Missing file [{result_json_path}]"
             logger.error(error_msg)
             raise FileNotFoundError(error_msg)
-        
+
         # read the result from {temp_dir}/kbeval_{eval_tag}.json
         with open(result_json_path, "r") as f:
             result_json = json.load(f)

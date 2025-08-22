@@ -12,6 +12,7 @@ from logger import logger
 from workflowRegistry import WorkflowRegistry, QUEUE_PREFIX, ADAPTER_PREFIX
 from workflowUtil import get_prefix_tag, CodeGenEvalBlock, CritiqueBlock, ExemplarBlock, ReflectionBlock, TrainerSFTBlock, TrainerRFTBlock, TrainerGRPOBlock, ComposerBlock
 from replServer import ReplServer
+from util import WORKFLOW_DIR
 
 
 class WorkflowServer:
@@ -29,7 +30,7 @@ class WorkflowServer:
             if prefix_tag not in self.registries:
                 # we found a new prefix tag, so we need to create a new registry
                 workflow_config_path = registry_item.get("config_path", "workflow/example.yaml")
-                workflow_data_dir = registry_item.get("data_dir", "~/.workflow")
+                workflow_data_dir = registry_item.get("data_dir", WORKFLOW_DIR)
                 workflow_registry = WorkflowRegistry(
                     workflow_config_path=workflow_config_path,
                     prefix_tag=prefix_tag,
@@ -113,7 +114,7 @@ class WorkflowServer:
         async def enqueue(
             prefix_tag: str,
             queue_name: str,
-            item: Dict[str, Any] = Body(...), 
+            item: Dict[str, Any] = Body(...),
             create_queue: bool = Body(default=False)
         ):
             if prefix_tag not in self.registries:
@@ -194,13 +195,13 @@ class WorkflowServer:
         """
         while True:
             try:
-                interval = self.config.get("_refresh_workflow_task", {}).get("interval", 15)    
+                interval = self.config.get("_refresh_workflow_task", {}).get("interval", 15)
                 for prefix_tag, registry in self.registries.items():
                     try:
                         registry._load_workflow_config()
                     except Exception as e:
                         logger.error(f"Error refreshing workflow for prefix tag [{prefix_tag}]: [{type(e).__name__}] {e}")
-            except Exception as e:  
+            except Exception as e:
                 logger.error(f"Error refreshing workflow: {e}")
             finally:
                 await asyncio.sleep(interval)
@@ -227,7 +228,7 @@ class WorkflowServer:
         Save the queues to the config
         """
         while True:
-            try:    
+            try:
                 interval = self.config.get("_save_queue_task", {}).get("interval", 15)
                 for prefix_tag, registry in self.registries.items():
                     try:
@@ -277,7 +278,7 @@ class WorkflowServer:
 
             tasks.append(self._save_queue_task())
             logger.info(f"🚀 Starting task [self._save_queue_task]")
-            
+
             tasks.append(self._save_adapter_task())
             logger.info(f"🚀 Starting task [self._save_adapter_task]")
 

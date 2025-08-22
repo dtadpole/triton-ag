@@ -140,7 +140,7 @@ class ConfigInterpreter:
             if error_encountered:
                 logger.error(f"🔴 [_process_steps] Error encountered in step: {step_config}")
                 return None
-            
+
             return True
 
         except Exception as e:
@@ -275,9 +275,9 @@ class ConfigInterpreter:
             if 'returns' in endpoint_config:
                 returns_config = endpoint_config['returns']
                 context_vars['__result__'] = result
-                success, extra_info = await self._process_returns(runtime, result, endpoint_config['returns'], context_vars)
+                success, extra_info = await self._process_returns(runtime, result, returns_config, context_vars)
                 return success, extra_info
-            
+
         except Exception as e:
             # assume each step depend on each other, always break the steps if current step fails
             logger.error(f"🔴 [_process_endpoint] Error processing returns: [endpoint_config={endpoint_config}] [{type(e)}: {e}]")
@@ -330,7 +330,7 @@ class ConfigInterpreter:
                         context_vars,
                     )
                     return success
-                
+
             except Exception as e:
                 # assume each step depend on each other, always break the steps if current step fails
                 logger.error(f"🔴 [_process_code] Error processing returns: [code_config={code_config}] [{type(e)}: {e}]")
@@ -385,7 +385,7 @@ class ConfigInterpreter:
             elif isinstance(collection, dict):
                 for key, value in collection.items():
                     context_vars['__key__'] = key
-                    context_vars['__item__'] = value                
+                    context_vars['__item__'] = value
                     # add roe level context vars
                     try:
                         if 'context_vars' in iterator_config:
@@ -399,7 +399,7 @@ class ConfigInterpreter:
                     if not success:
                         logger.error(f"🔴 [_process_iterator] Error processing [__key__: {key}]: [__item__: {value}]")
                         return False
-            elif isinstance(collection, Iterable):  
+            elif isinstance(collection, Iterable):
                 for item in collection:
                     context_vars['__item__'] = item
                     # add roe level context vars
@@ -421,7 +421,7 @@ class ConfigInterpreter:
 
         except Exception as e:
             logger.error(f"🔴 [_process_iterator] Error processing iterator: {iterator_config['iterator']} [{type(e)}: {e}]")
-        
+
         return True
 
     async def execute(self, runtime: Any, config: dict, context_vars: Optional[dict] = None) -> bool:
@@ -457,6 +457,6 @@ class ConfigInterpreter:
         context_vars = (context_vars or {}) | self.context_vars
         context_vars['__runtime__'] = runtime
         context_vars['__context__'] = context_vars
-        
+
         # process the context variables
         return self._process_context_vars(context_config, context_vars)

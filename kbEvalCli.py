@@ -25,9 +25,9 @@ from logger import logger
 from armableWatchdog import ArmableWatchdog
 import random
 from configEndpoints import FileLock, cleanup_lockfile
+from util import KB_EVAL_DIR
 # from filelock import FileLock, Timeout
 
-KB_EVAL_DIR = os.path.expanduser("~/.kbeval")
 
 def verify_correctness(
     original_model_instance: nn.Module,
@@ -92,7 +92,7 @@ def verify_correctness(
                 # check output value difference
                 if torch.allclose(
                     output, output_new, atol=1e-02, rtol=1e-02
-                ): 
+                ):
                     passed_trials += 1
                 else:
                     max_diff = torch.max(torch.abs(output - output_new)).item()
@@ -254,7 +254,7 @@ def eval_kernel_custom(
                                 runtime=runtime_stats["mean"],
                                 runtime_stats=runtime_stats,
                             )
-                        
+
                         else:
                             try:
                                 custom_model = ModelNew(*init_inputs)
@@ -318,7 +318,7 @@ def eval_kernel_custom(
                     "compilation_error": format_exception(e),
                 },
             )
-        
+
         except CorrectnessError as e:
             logger.warning(f"[KB_Eval_Cli] [{task_tag}/{eval_tag}] Correctness error: [{type(e)}] [{e}]")
             return KernelExecResult(
