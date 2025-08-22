@@ -59,17 +59,18 @@ def verify_token(authorization: str = Header(None)):
 
     return True
 
+# W&B loggers
 wandb_loggers = {} # {prefix_tag: wandb.Run}
 def _setup_wandb_logging(prefix_tag: str="test", model_tag: str="local_qwen3-14b"):
     """Setup logging and tracking"""
     key = f"{prefix_tag}"
     if key in wandb_loggers:
         return wandb_loggers[key]
-
+    # Group by wandb log in the same way as in the shared folder
     wandb_run = wandb.init(
-        project=f"kb_eval_{prefix_tag}",
-        id=f"{prefix_tag}",
-        name=f"{model_tag}_{datetime.now().strftime('%m%d-%H%M')}",
+        project=f"kb_kbeval",
+        name=f"{prefix_tag}_{model_tag}_{datetime.now().strftime('%m%d-%H%M')}",
+        id=f"{model_tag}",
         resume="allow",
         reinit="create_new",
         settings=wandb.Settings(init_timeout=10),
@@ -522,12 +523,16 @@ async def _check_total_error_count():
                 logger.error(f"⭐ Elapsed time [{ELAPSED_TIME:.2f}s] is greater than {MAX_RUN_TIME/3600:.2f} hours, exiting... [parent process will restart]")
                 # loop = asyncio.get_event_loop()
                 # loop.stop()
-                # exit(1)
+                for key, wandb_run in wandb_loggers.items():
+                    wandb_run.finish()
+                exit(1)
             if TOTAL_ERROR_COUNTER > MAX_ERROR_COUNT:
                 logger.error(f"❌ Total error count [{TOTAL_ERROR_COUNTER}] is greater than {MAX_ERROR_COUNT}!")
                 # loop = asyncio.get_event_loop()
                 # loop.stop()
-                # exit(1)
+                for key, wandb_run in wandb_loggers.items():
+                    wandb_run.finish()
+                exit(1)
             elif TOTAL_ERROR_COUNTER > 0 and counter % print_interval == 0:
                 logger.warning(f"⚠️ Total error count is {TOTAL_ERROR_COUNTER}, continuing...")
         finally:
