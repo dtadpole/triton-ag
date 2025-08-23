@@ -3,7 +3,7 @@ import asyncio
 import httpx
 from typing import Any, Dict, Optional
 from logger import logger
-from workflowUtil import TrainerSFTBlock, TrainerRFTBlock, TrainerGRPOBlock, ComposerBlock, WorkflowSyncBlock
+from workflowUtil import InferenceBlock, WorkflowSyncBlock
 from pydantic import BaseModel
 
 TASK_TYPE_INFERENCE = "inference"

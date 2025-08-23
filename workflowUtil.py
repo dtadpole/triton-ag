@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 MODEL_OVERRIDE_KEY = "adapter.model_override"
 
 class WorkflowSyncBlock(BaseModel):
-    sync_name: str
+    name: str
     prefix_tag: str
     epoch_id: int
     block_id: int
@@ -18,7 +18,7 @@ class WorkflowSyncBlock(BaseModel):
     context_vars: dict = Field(default={})
 
 class TrainerBlock(BaseModel):
-    trainer_name: str
+    name: str
     prefix_tag: str
     epoch_id: int
     block_id: int
@@ -28,7 +28,7 @@ class TrainerBlock(BaseModel):
     context_vars: dict = Field(default={})
 
 class InferenceBlock(BaseModel):
-    inference_name: str
+    name: str
     prefix_tag: str
     epoch_id: int
     block_id: int

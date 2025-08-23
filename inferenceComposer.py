@@ -19,7 +19,7 @@ from inferenceClient import InferenceClient, InferenceClientConfig, load_inferen
 from inferenceCustomClient import InferenceCustomClient
 from logger import logger
 from kbEvalClient import KbEvalClient
-from workflowUtil import ComposerBlock, MODEL_OVERRIDE_KEY
+from workflowUtil import InferenceBlock, MODEL_OVERRIDE_KEY
 from workflowClient import WorkflowClient
 from workflowServer import WorkflowServer
 from configEndpoints import DuckDBClient, Recorder, CodeExtractor, StatsClient
@@ -223,7 +223,7 @@ class ComposerClient:
         gen_tag = context_vars.get('gen_tag', None)
         logger.info(f"🔍 [Composer] [{run_tag}] Enqueued [{model_tag}] [{task_tag}] [{gen_tag}]...")
 
-    async def input_processor(self, block: ComposerBlock):
+    async def input_processor(self, block: InferenceBlock):
         """Process input variables."""
         for processor_name, processor_config in self.module_config.get('input_processor', {}).items():
             try:
@@ -299,7 +299,7 @@ class ComposerClient:
         logger.info(f"🎯 [Composer] [{self.input_tag}] Worker [{worker_id:02d}] completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
 
 
-async def composer_block(block: ComposerBlock, use_global_registry: bool = False):
+async def run_inference_block(block: InferenceBlock, use_global_registry: bool = False):
     """
     Run one batch of code generation and evaluation.
     """
@@ -352,25 +352,27 @@ async def composer_block(block: ComposerBlock, use_global_registry: bool = False
 
 async def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--name", type=str, default="codeGenEval.base") # "TC_0.1.0_14B.m"
     parser.add_argument("--prefix_tag", type=str, default="auto.inference.composer") # "TC_0.1.0_14B.m"
     parser.add_argument("--epoch_id", type=int, default=-1)
     parser.add_argument("--block_id", type=int, default=-1)
     parser.add_argument("--input_tag", type=str, default="TC_0.1.0_32B.b_006_05")
     parser.add_argument("--input_dir", type=str, default="~/KernelBench/KernelBench/level1", help="Input directory containing Python files")
     parser.add_argument("--output_dir", type=str, default="~/.inference/output", help="Output directory for the composer results")
-    parser.add_argument("--provider", type=str, default="h8_2")  # most cost effective models are deepinfra-r1 and fireworks-v3
-    parser.add_argument("--model", type=str, default="qwen3-32b")  # most cost effective models are deepinfra-r1 and fireworks-v3
-    parser.add_argument("--custom_provider", type=str, default="h8_2")
-    parser.add_argument("--model_override", type=str, default=None)
     parser.add_argument("--parallel_workers", type=int, default=1)
     parser.add_argument("--num_samples", type=int, default=2)
     parser.add_argument("--num_generations", type=int, default=2)
     parser.add_argument("--num_turns_per_generation", type=int, default=2)
+    parser.add_argument("--model_name", type=str, default="qwen3-32b")  # most cost effective models are deepinfra-r1 and fireworks-v3
+    parser.add_argument("--vllm_providers", type=str, default="local")
+    parser.add_argument("--logp_providers", type=str, default="local")
+    parser.add_argument("--kbeval_providers", type=str, default="local")
     parser.add_argument("--use_global_queue", type=str, default=None) # this is the task_name of the global queue
     parser.add_argument("--proc_id", type=str, default=None)
     parser.add_argument("--module_file", type=str, default="inference/codeGenEval.module.vllm+logp.yaml")
     parser.add_argument("--prompt_file", type=str, default="inference/triton.prompt.yaml")
     parser.add_argument("--example_file", type=str, default="inference/triton.example.yaml")
+    parser.add_argument("--context", type=str, default="{}")
     args = parser.parse_args()
 
     if args.proc_id is not None:
@@ -394,7 +396,7 @@ async def main():
             # get the critiqueBlock from the global registry
             block_json = await global_reg_client.dequeue(queue_name)
             # convert the block_json to a ComposerBlock object
-            block = ComposerBlock(**block_json)
+            block = InferenceBlock(**block_json)
             # process the model override
             if "codeGen" in QUEUE_NAME: # a hack for now. TODO: fix this
                 if PROC_ID is None:
@@ -408,27 +410,29 @@ async def main():
                     # update model_override in the global registry
                     await global_reg_client.put(f"adapter.{queue_name}.model_override.{PROC_ID}", model_override)
         else:
-            block = ComposerBlock(
+            block = InferenceBlock(
+                name=args.name,
                 prefix_tag=args.prefix_tag,
                 epoch_id=args.epoch_id,
                 block_id=args.block_id,
                 input_tag=args.input_tag,
-                provider_name=args.provider,
-                model_name=args.model,
-                module_file=args.module_file,
-                prompt_file=args.prompt_file,
-                example_file=args.example_file,
                 num_samples=args.num_samples,
                 num_generations=args.num_generations,
                 num_turns_per_generation=args.num_turns_per_generation,
                 parallel_workers=args.parallel_workers,
-                custom_provider=args.custom_provider,
-                model_override=args.model_override,
+                model_name=args.model_name,
+                vllm_providers=args.vllm_providers.split(","),
+                logp_providers=args.logp_providers.split(","),
+                kbeval_providers=args.kbeval_providers.split(","),
+                module_file=args.module_file,
+                prompt_file=args.prompt_file,
+                example_file=args.example_file,
                 input_dir=args.input_dir,
                 output_dir=args.output_dir,
+                context=json.loads(args.context),
             )
         # run the block
-        await composer_block(block)
+        await run_inference_block(block)
 
         if args.use_global_queue:
             global_reg_client = WorkflowClient(prefix_tag=block.prefix_tag)
