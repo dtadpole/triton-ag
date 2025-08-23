@@ -5,117 +5,48 @@ import traceback
 from logger import logger
 from datetime import datetime
 from pydantic import BaseModel, Field
-from typing import Optional
-
-REG_PORT_FILE = ".reg.port"
-REG_DIR = ".reg"
 
 MODEL_OVERRIDE_KEY = "adapter.model_override"
 
 class WorkflowSyncBlock(BaseModel):
+    sync_name: str
     prefix_tag: str
     epoch_id: int
     block_id: int
     input_tag: str
-    context_vars: dict = Field(default={})
     module_file: str = Field(default="workflow/sync.module.vllm.yaml")
+    context_vars: dict = Field(default={})
 
-class TrainerSFTBlock(BaseModel):
+class TrainerBlock(BaseModel):
+    trainer_name: str
     prefix_tag: str
     epoch_id: int
     block_id: int
     input_tag: str
-    input_dir: str = Field(default="~/.inference/exemplar")
+    input_dir: str = Field(default="~/.inference/output")
     output_dir: str = Field(default="~/.trainer")
+    context_vars: dict = Field(default={})
 
-class TrainerRFTBlock(BaseModel):
+class InferenceBlock(BaseModel):
+    inference_name: str
     prefix_tag: str
     epoch_id: int
     block_id: int
     input_tag: str
-    input_dir: str = Field(default="~/.inference/codeGenEval")
-    output_dir: str = Field(default="~/.trainer")
-
-class TrainerGRPOBlock(BaseModel):
-    prefix_tag: str
-    epoch_id: int
-    block_id: int
-    input_tag: str
-    input_dir: str = Field(default="~/.inference/codeGenEval")
-    output_dir: str = Field(default="~/.trainer")
-
-class CodeGenEvalBlock(BaseModel):
-    prefix_tag: str
-    epoch_id: int
-    block_id: int
-    provider_name: str
     model_name: str
-    num_samples: int
-    num_generations: int
+    num_samples: int = Field(default=20)
+    num_generations: int = Field(default=8)
     num_turns_per_generation: int = Field(default=4)
-    parallel_tasks: int = Field(default=24)
-    model_override: Optional[str] = Field(default=None)
-    input_dir: str = Field(default="~/triton-ag/kernel_bench")
-    output_dir: str = Field(default="~/.codeGenEval")
-    template: str = Field(default="triton.1")
-    logprobs: bool = Field(default=True)
-
-class ExemplarBlock(BaseModel):
-    prefix_tag: str
-    epoch_id: int
-    block_id: int
-    input_tag: str
-    provider_name: str
-    model_name: str
-    num_generations: int
-    parallel_tasks: int = Field(default=16)
-    model_override: Optional[str] = Field(default=None)
-    input_dir: str = Field(default="~/.codeGenEval")
-    output_dir: str = Field(default="~/.exemplar")
-    template: str = Field(default="triton.1")
-
-class CritiqueBlock(BaseModel):
-    prefix_tag: str
-    epoch_id: int
-    block_id: int
-    input_tag: str
-    provider_name: str
-    model_name: str
-    parallel_tasks: int = Field(default=16)
-    model_override: Optional[str] = Field(default=None)
-    input_dir: str = Field(default="~/.codeGenEval")
-    output_dir: str = Field(default="~/.critique")
-
-class ReflectionBlock(BaseModel):
-    prefix_tag: str
-    epoch_id: int
-    block_id: int
-    input_tag: str
-    provider_name: str
-    model_name: str
-    parallel_tasks: int = Field(default=16)
-    model_override: Optional[str] = Field(default=None)
-    input_dir: str = Field(default="~/.codeGenEval")
-    output_dir: str = Field(default="~/.reflection")
-
-class ComposerBlock(BaseModel):
-    prefix_tag: str
-    epoch_id: int
-    block_id: int
-    input_tag: str
-    provider_name: str
-    model_name: str
-    num_samples: int
-    num_generations: int
-    num_turns_per_generation: int = Field(default=4)
-    parallel_workers: int = Field(default=16)
-    custom_provider: str = Field(default="local")
-    model_override: Optional[str] = Field(default=None)
-    module_file: str = Field(default="inference/codeGen.module.yaml")
+    parallel_workers: int = Field(default=32)
+    vllm_providers: list[str] = Field(default=["local"])
+    logp_providers: list[str] = Field(default=["local"])
+    kbeval_providers: list[str] = Field(default=["local"])
+    module_file: str = Field(default="inference/codeGen.module.vllm+logp.yaml")
     prompt_file: str = Field(default="inference/triton.prompt.yaml")
     example_file: str = Field(default="inference/triton.example.yaml")
-    input_dir: str = Field(default="~/.inference/composer")
-    output_dir: str = Field(default="~/.inference/composer")
+    input_dir: str = Field(default="~/KernelBench/KernelBench")
+    output_dir: str = Field(default="~/.inference/output")
+    context: dict = Field(default={})
 
 def get_prefix_tag(prefix_tag:str="auto", config_path:str="globalWorkflow.yaml"):
     if prefix_tag == "auto":
@@ -126,16 +57,3 @@ def get_prefix_tag(prefix_tag:str="auto", config_path:str="globalWorkflow.yaml")
         return loaded_prefix_tag
     else:
         return prefix_tag
-
-def get_global_registry_dir(prefix_tag:str="auto", trainer_dir:str="~/.trainer"):
-    prefix_tag = get_prefix_tag(prefix_tag)
-    return os.path.join(os.path.expanduser(trainer_dir), prefix_tag, REG_DIR)
-
-def get_global_registry_port(prefix_tag:str="auto", trainer_dir:str="~/.trainer"):
-    prefix_tag = get_prefix_tag(prefix_tag)
-    port_file = os.path.join(get_global_registry_dir(prefix_tag, trainer_dir), REG_PORT_FILE)
-    if os.path.exists(port_file):
-        with open(port_file, "r") as f:
-            return int(f.read())
-    else:
-        return None
