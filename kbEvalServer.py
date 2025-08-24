@@ -61,19 +61,22 @@ def verify_token(authorization: str = Header(None)):
     return True
 
 wandb_loggers = {} # {prefix_tag: wandb.Run}
-def _setup_wandb_logging(prefix_tag: str="test", model_tag: str="local_qwen3-14b"):
+def _setup_wandb_logging(prefix_tag: str="auto", model_tag: str="local_qwen3-32b"):
     """Setup logging and tracking"""
-    key = f"{prefix_tag}"
+    if prefix_tag.startswith("auto"):
+        return None
+
+    key = f"{prefix_tag}_{model_tag}"
     if key in wandb_loggers:
         return wandb_loggers[key]
     
     wandb_run = wandb.init(
-        project=f"kb_eval_{prefix_tag}",
-        id=f"{prefix_tag}",
-        name=f"{model_tag}_{datetime.now().strftime('%m%d-%H%M')}",
+        project=f"kb_eval",
+        id=f"{prefix_tag}_{model_tag}",
+        name=f"{prefix_tag}_{model_tag}_{datetime.now().strftime('%m%d')}",
         resume="allow",
         reinit="create_new",
-        settings=wandb.Settings(init_timeout=10),
+        settings=wandb.Settings(init_timeout=15),
     )
     wandb_loggers[key] = wandb_run
     logger.info(f"📊 W&B logging enabled for [{key}]")
@@ -184,7 +187,7 @@ async def kb_eval_ref(
         start_time = time.time()
 
         # get prefix_tag from run_tag by removing regex pattern [_ddd_dd] (ddd is 3 digits, dd is 2 digits) at the end if exists
-        prefix_tag = re.sub(r"_\d{3}_\d{2}$", "", run_tag)
+        prefix_tag = re.sub(r"_\d*_\d*$", "", run_tag)
         wandb_run = _setup_wandb_logging(prefix_tag, model_tag)
 
         # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}/{eval_tag}/{time_tag}
@@ -257,7 +260,8 @@ async def kb_eval_ref(
             f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
             f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
         }
-        wandb_run.log(metrics)
+        if wandb_run:
+            wandb_run.log(metrics)
 
         return result
 
@@ -286,7 +290,8 @@ async def kb_eval_ref(
             f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
             f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
         }
-        wandb_run.log(metrics)
+        if wandb_run:
+            wandb_run.log(metrics)
         return result
 
     except Exception as e:
@@ -313,7 +318,8 @@ async def kb_eval_ref(
             f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
             f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
         }
-        wandb_run.log(metrics)
+        if wandb_run:
+            wandb_run.log(metrics)
         return result
 
     finally:
@@ -348,7 +354,7 @@ async def kb_eval(
         start_time = time.time()
 
         # get prefix_tag from run_tag by removing regex pattern [_ddd_dd] (ddd is 3 digits, dd is 2 digits) at the end if exists
-        prefix_tag = re.sub(r"_\d{3}_\d{2}$", "", run_tag)
+        prefix_tag = re.sub(r"_\d*_\d*$", "", run_tag)
         wandb_run = _setup_wandb_logging(prefix_tag, model_tag)
 
         # temp_dir is {HOME}/.kbeval/{run_tag}/{model_tag}/{task_tag}/{eval_tag}
@@ -426,7 +432,8 @@ async def kb_eval(
             f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
             f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
         }
-        wandb_run.log(metrics)
+        if wandb_run:
+            wandb_run.log(metrics)
 
         return result
 
@@ -459,7 +466,8 @@ async def kb_eval(
             f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
             f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
         }
-        wandb_run.log(metrics)
+        if wandb_run:
+            wandb_run.log(metrics)
 
         return result
 
@@ -492,7 +500,8 @@ async def kb_eval(
             f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
             f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
         }
-        wandb_run.log(metrics)
+        if wandb_run:
+            wandb_run.log(metrics)
 
         return result
 
