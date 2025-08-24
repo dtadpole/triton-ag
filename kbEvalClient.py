@@ -103,25 +103,27 @@ class KbEvalClient:
                     keepalive_expiry=0,
                 )
                 timeout = httpx.Timeout(connect=5.0, write=30.0, read=timeout, pool=5.0) # 5s connect, 30s write, 300s read, 5s pool
+                json_body = {
+                    "run_tag": run_tag,
+                    "model_tag": model_tag,
+                    "task_tag": task_tag,
+                    "reference_code": reference_code,
+                }
+                body = gzip.compress(json.dumps(json_body).encode("utf-8"))
                 async with httpx.AsyncClient(
                     limits=limits,
-                    headers={"Connection": "close", "Accept-Encoding": "identity"}, # disable gzip
+                    headers={
+                        "Connection": "close",
+                        "Content-Encoding": "gzip",
+                        "Authorization": f"Bearer {api_key}",
+                    },
                     http2=False, # disable http2
                     trust_env=False, # disable trust env
                     timeout=timeout,
                 ) as client:
                     response = await client.post(
                         url=f"{base_url}/kb_eval_ref",
-                        json={
-                            "run_tag": run_tag,
-                            "model_tag": model_tag,
-                            "task_tag": task_tag,
-                            "reference_code": reference_code,
-                        },
-                        headers={
-                            "Content-Type": "application/json",
-                            "Authorization": f"Bearer {api_key}",
-                        },
+                        content=body,
                     )
 
                     response.raise_for_status()
@@ -136,7 +138,7 @@ class KbEvalClient:
                             await asyncio.sleep(sleep_seconds)
                             continue
                         else:
-                            logger.warning(f"⚠️ [kbEvalClient] [{provider_name}] [{run_tag}] [{model_tag}] [{task_tag}] Return the last result from retriable error... [{retry_count}/{self.num_retries}] [elapsed_time: {elapsed_time:.2f}s]")
+                            logger.warning(f"⚠️ [kbEvalClient] [{provider_name}] [{run_tag}] [{model_tag}] [{task_tag}] Return the last result from retriable error... [{retry_count}/{num_retries}] [elapsed_time: {elapsed_time:.2f}s]")
                             return result.model_dump()
 
                     return result.model_dump()
@@ -221,13 +223,13 @@ class KbEvalClient:
                     result = KernelExecResult(**response.json())
                     if (not result.compiled or not result.correctness) and "retriable" in result.metadata and result.metadata["retriable"]:
                         elapsed_time = time.time() - start_time
-                        sleep_seconds = self.initial_retry_interval ** retry_count
-                        if retry_count < self.num_retries:
-                            logger.warning(f"⚠️ [kbEvalClient] [{provider_name}] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Retriable error, retrying... [{retry_count}/{self.num_retries}] in [{sleep_seconds}s] [elapsed_time: {elapsed_time:.2f}s]")
+                        sleep_seconds = initial_retry_interval ** retry_count
+                        if retry_count < num_retries:
+                            logger.warning(f"⚠️ [kbEvalClient] [{provider_name}] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Retriable error, retrying... [{retry_count}/{num_retries}] in [{sleep_seconds}s] [elapsed_time: {elapsed_time:.2f}s]")
                             await asyncio.sleep(sleep_seconds)
                             continue
                         else:
-                            logger.warning(f"⚠️ [kbEvalClient] [{provider_name}] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Return the last result from retriable error... [{retry_count}/{self.num_retries}] [elapsed_time: {elapsed_time:.2f}s]")
+                            logger.warning(f"⚠️ [kbEvalClient] [{provider_name}] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Return the last result from retriable error... [{retry_count}/{num_retries}] [elapsed_time: {elapsed_time:.2f}s]")
                             return result.model_dump()
 
                     return result.model_dump()
