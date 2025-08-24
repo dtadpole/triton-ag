@@ -552,7 +552,7 @@ async def main(args):
 
     hostname = socket.gethostname()
     # if hostname is not in kbEval_config["kbEvalRemoteServer"], use "one"
-    if hostname not in kbEval_config["kbEvalRemoteServer"]:
+    if hostname not in kbEval_config["servers"]:
         logger.warning(
             f"Hostname {hostname} not found in kbEval.yaml, using 'one' as default"
         )
@@ -561,25 +561,25 @@ async def main(args):
     global DEVICES
 
     if args.local_host:
-        host = "0.0.0.0"
+        host = "localhost"
         port = args.port
         DEVICES = [args.device]
     else:
-        host = kbEval_config["kbEvalRemoteServer"][hostname]["host"]
-        port = kbEval_config["kbEvalRemoteServer"][hostname]["port"]
-        DEVICES = [int(d) for d in kbEval_config["kbEvalRemoteServer"][hostname]["devices"]]
+        host = kbEval_config["servers"][hostname]["host"]
+        port = kbEval_config["servers"][hostname]["port"]
+        DEVICES = [int(d) for d in kbEval_config["servers"][hostname]["devices"]]
 
     logger.info(f"Running on [{hostname}:{port}] with devices: {DEVICES}")
 
     #########################################################
     # get api_key from kbEval_config["kbEvalRemoteServer"]["common"]["api_key"]
-    if "common" not in kbEval_config["kbEvalRemoteServer"]:
-        logger.error("[kbEvalRemoteServer] [common] not found in kbEval.yaml")
+    if "common" not in kbEval_config["servers"]:
+        logger.error("[kbEvalServer] [common] not found in kbEval.yaml")
         exit(1)
-    if "api_key" not in kbEval_config["kbEvalRemoteServer"]["common"]:
-        logger.error(f"[kbEvalRemoteServer] [api_key] not found in kbEval.yaml [{kbEval_config['kbEvalRemoteServer']['common']}]")
+    if "api_key" not in kbEval_config["servers"]["common"]:
+        logger.error(f"[kbEvalServer] [api_key] not found in kbEval.yaml [{kbEval_config['servers']['common']}]")
         exit(1)
-    api_key_filepath = kbEval_config["kbEvalRemoteServer"]["common"]["api_key"]
+    api_key_filepath = kbEval_config["servers"]["common"]["api_key"]
     # read file from api_key, replace ${HOME} with os.path.expanduser("~") in api_key_filepath
     api_key_filepath = api_key_filepath.replace("${HOME}", os.path.expanduser("~"))
     if not os.path.exists(api_key_filepath):
@@ -588,12 +588,12 @@ async def main(args):
             api_key = str(uuid.uuid4())
             f.write(api_key)
             # add emoji to beginning and end of the string
-            logger.info(f"🔑 [kbEvalRemoteServer] API key [{api_key}] created and saved to [{api_key_filepath}]")
+            logger.info(f"🔑 [kbEvalServer] API key [{api_key}] created and saved to [{api_key_filepath}]")
     # now read in the api_key
     with open(api_key_filepath, "r") as f:
         global KB_EVAL_TOKEN
         KB_EVAL_TOKEN = f.read().strip()
-        logger.info(f"[kbEvalRemoteServer] KB_EVAL_TOKEN loaded from [{api_key_filepath}]")
+        logger.info(f"[kbEvalServer] KB_EVAL_TOKEN loaded from [{api_key_filepath}]")
     #########################################################
 
     import uvicorn

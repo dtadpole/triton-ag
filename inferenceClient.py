@@ -125,6 +125,7 @@ class InferenceClient:
             logger.info(f"🔍 [InferenceClient] Using NON-STREAMING mode with OpenAI client [{provider_name}]")
 
         result = {
+            "provider_name": provider_name,
             "openai_client": openai_client,
             "base_url": base_url,
             "api_key": api_key,
@@ -136,7 +137,7 @@ class InferenceClient:
         }
 
         self.openai_client_cache[provider_name] = result
-        logger.info(f"🔍 [InferenceClient] OpenAI client created with base_url [{base_url}] and api_key [{api_key_path}]")
+        logger.info(f"🔍 [InferenceClient] OpenAI client [{provider_name}] created with base_url [{base_url}] and api_key [{api_key_path}]")
 
         return result
 

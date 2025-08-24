@@ -31,16 +31,14 @@ VALID_INPUT_PROCESSORS = [
 
 class ComposerClient:
     def __init__(
-            self,
-            input_tag: str,
-            inference_client_config: InferenceClientConfig,
-            custom_provider: str,
-            model_override: str = None,
-            module_file: str = "inference/codeGenEval.module.yaml",
-            prompt_file: str = "inference/triton.prompt.yaml",
-            example_file: str = "inference/triton.example.yaml",
-            output_dir: str = "~/.inference/output",
-            stats_dir: str = "~/.trainer/stats",
+        self,
+        input_tag: str,
+        inference_client_config: InferenceClientConfig,
+        module_file: str = "inference/codeGenEval.module.yaml",
+        prompt_file: str = "inference/triton.prompt.yaml",
+        example_file: str = "inference/triton.example.yaml",
+        output_dir: str = "~/.inference/output",
+        stats_dir: str = "~/.trainer/stats",
     ):
         with open(prompt_file, 'r') as f:
             self.prompt_config = yaml.safe_load(f)
@@ -57,10 +55,8 @@ class ComposerClient:
         self.inferenceClient = InferenceClient(config=self.inference_client_config)
         self.provider_name = self.inference_client_config.provider.provider_name
         self.model_name = self.inference_client_config.model.model_name
-        self.model_override = model_override
         self.tokenizer = self.inferenceClient.tokenizer
         self.model_tag = self.inferenceClient.model_tag
-        self.custom_provider = custom_provider
         self.inferenceCustomClient = InferenceCustomClient(provider_name=self.custom_provider)
         self.output_dir = self._get_output_dir(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -305,7 +301,7 @@ async def run_inference_block(block: InferenceBlock, use_global_registry: bool =
     """
     try:
         config = load_inference_client_config(
-            provider_name=block.provider_name,
+            provider_name=block.vllm_providers[0],
             model_short_name=block.model_name,
         )
 

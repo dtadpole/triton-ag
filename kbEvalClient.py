@@ -3,8 +3,6 @@ import asyncio
 import requests
 import sys
 import traceback
-from fastapi import FastAPI
-from kbEvalTest.kbeval import eval_kernel_against_ref
 import os
 import json
 from pathlib import Path
@@ -12,9 +10,9 @@ import time
 from datetime import datetime
 import yaml
 import httpx
-from kbEvalTest.kbeval import KernelExecResult
+from typing import Dict, Any
 from logger import logger
-from typing import Dict
+from kbEvalUtil import KernelExecResult
 
 # reusable client for calling kbEvalRemoteServer
 class KbEvalClient:
@@ -22,59 +20,81 @@ class KbEvalClient:
 
     def __init__(self, config_file: str = "kbEval.yaml"):
         """Initialize the client with configuration"""
-        self.config = self._load_config(config_file)
+        self.provider_config_cache = {}
+
         # Get kbEval config from kbEval.yaml
-        kb_eval_config = self.config.get('kbEvalClient', {})
-        self.base_url = kb_eval_config.get('servers', [])[0].get('url', 'http://localhost:44456')
-        self.timeout = kb_eval_config.get('servers', [])[0].get('timeout', 450)
-        self.num_retries = kb_eval_config.get('servers', [])[0].get('num_retries', 7)
-        self.initial_retry_interval = kb_eval_config.get('servers', [])[0].get('initial_retry_interval', 3)
         self.server_last_refresh_time = time.time()
         self.server_stats = {}
-        self.kb_eval_config = kb_eval_config
-        # expand the api_key_file
-        api_key_file = kb_eval_config.get('servers', [])[0].get('api_key', '~/.keys/kbeval.api.key').replace("${HOME}", os.path.expanduser("~")).replace("~", os.path.expanduser("~"))
-        # read the api_key from the file
-        with open(api_key_file, 'r') as f:
-            self.api_key = f.read().strip()
-            logger.info(f"🔑 [kbEvalRemoteCli] API key loaded from [{api_key_file}]")
 
-    def _load_config(self, config_file: str) -> Dict:
-        """Load configuration from YAML file."""
-        config_path = Path(config_file)
-        if not config_path.exists():
-            # Try relative to script directory
-            config_path = Path(__file__).parent / config_file
+    def _provider_config_from_yaml(
+        self,
+        provider_name: str,
+        yaml_file: str="kbEval.yaml",
+    ) -> Dict[str, Any]:
+        """Load provider config from YAML file."""
+        if provider_name in self.provider_config_cache:
+            return self.provider_config_cache[provider_name]
 
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                config = yaml.safe_load(f)
-                # use file emoji
-                logger.info(f"📁 [kbEvalClient] Config file [{config_file}] loaded")
-                return config or {}
-        else:
-            logger.warning(f"⚠️ [kbEvalClient] Warning: Config file [{config_file}] not found")
-            return {}
+        # if not found, load from yaml file
+        with open(yaml_file, "r") as f:
+            config = yaml.safe_load(f)
+
+        if provider_name not in config.get("providers", {}):
+            raise ValueError(f"Provider [{provider_name}] not found in config file [{yaml_file}]")
+
+        provider_config = config.get("providers", {}).get(provider_name, {})
+
+        base_url = provider_config.get('base_url', 'http://localhost:8091')
+        api_key_path = os.path.expanduser(provider_config.get('api_key_path', '~/.keys/local.api.key'))
+        try:
+            with open(api_key_path, 'r') as f:
+                api_key = f.read().strip() # read the api key from the file
+                logger.info(f"🔑 [KbEvalClient] API key loaded from [{api_key_path}]")
+        except FileNotFoundError:
+            logger.info(f"🔑 [KbEvalClient] API key not found at [{api_key_path}], using [dummy] key")
+            api_key = "dummy"  # vLLM often doesn't require real auth
+
+        result = {
+            "provider_name": provider_name,
+            "base_url": base_url,
+            "hostname": base_url.split("://")[1].split(":")[0],
+            "port": base_url.split(":")[2].split("/")[0],
+            "api_key": api_key,
+            "retry_count": provider_config.get('retry_count', 3),
+            "initial_retry_interval": provider_config.get('initial_retry_interval', 3),
+            "timeout": provider_config.get('timeout', 300),
+        }
+
+        self.provider_config_cache[provider_name] = result
+        logger.info(f"🔍 [kbEvalClient] Provider config [{provider_name}] created with base_url [{base_url}] and api_key_path [{api_key_path}]")
+
+        return result
 
     async def kb_eval_ref(
         self,
+        provider_name: str,
+        reference_code: str,
         run_tag: str="auto",
         model_tag: str="model_tag",
         task_tag: str="task_tag",
-        reference_code: str="reference_code",
-    ) -> KernelExecResult:
-        """Call the kbEvalRemoteServer with evaluation parameters"""
-        if len(self.kb_eval_config) > 0 and len(self.kb_eval_config["servers"]) > 1:
-            self.pick_server()
+    ) -> dict[str, Any]:
+        """Call the kbEvalServer with evaluation parameters"""
+        provider_config = self._provider_config_from_yaml(provider_name)
+        base_url = provider_config["base_url"]
+        api_key = provider_config["api_key"]
+        num_retries = provider_config["retry_count"]
+        initial_retry_interval = provider_config["initial_retry_interval"]
+        timeout = provider_config["timeout"]
+
         run_tag = run_tag if run_tag != "auto" else f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         retry_count = 0
-        while retry_count < self.num_retries:
+        while retry_count < num_retries:
             try:
                 retry_count += 1
                 limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
                 async with httpx.AsyncClient(limits=limits, headers={"Connection": "close"}, http2=False) as client:
                     response = await client.post(
-                        f"{self.base_url}/kb_eval_ref",
+                        f"{base_url}/kb_eval_ref",
                         json={
                             "run_tag": run_tag,
                             "model_tag": model_tag,
@@ -83,19 +103,19 @@ class KbEvalClient:
                         },
                         headers={
                             "Content-Type": "application/json",
-                            "Authorization": f"Bearer {self.api_key}",
+                            "Authorization": f"Bearer {api_key}",
                         },
-                        timeout=self.timeout  # 5 minute timeout
+                        timeout=timeout  # 5 minute timeout
                     )
 
                     response.raise_for_status()
 
                     result = KernelExecResult(**response.json())
                     if (not result.compiled or not result.correctness) and "retriable" in result.metadata and result.metadata["retriable"]:
-                        sleep_seconds = self.initial_retry_interval ** retry_count
-                        if retry_count < self.num_retries:
+                        sleep_seconds = initial_retry_interval ** retry_count
+                        if retry_count < num_retries:
                             # retry_count -= 0.5 # reduce retry count by 0.5 to avoid infinite loop
-                            logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Retriable error, retrying... [{retry_count}/{self.num_retries}] in [{sleep_seconds}s]")
+                            logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Retriable error, retrying... [{retry_count}/{num_retries}] in [{sleep_seconds}s]")
                             await asyncio.sleep(sleep_seconds)
                             continue
                         else:
@@ -105,10 +125,10 @@ class KbEvalClient:
                     return result.model_dump()
 
             except Exception as e:
-                logger.warning(f"🔍 [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Error calling server: [{e}] [{retry_count}/{self.num_retries}]")
-                if retry_count < self.num_retries:
-                    sleep_seconds = 2 ** retry_count
-                    logger.info(f"🔄 [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Retrying in {sleep_seconds} seconds... ({retry_count}/{self.num_retries})")
+                logger.warning(f"🔍 [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Error calling server: [{e}] [{retry_count}/{num_retries}]")
+                if retry_count < num_retries:
+                    sleep_seconds = initial_retry_interval ** retry_count
+                    logger.info(f"🔄 [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Retrying in {sleep_seconds} seconds... ({retry_count}/{num_retries})")
                     # exponential backoff
                     await asyncio.sleep(sleep_seconds)
                     continue
@@ -119,26 +139,32 @@ class KbEvalClient:
 
     async def kb_eval(
         self,
+        provider_name: str,
+        reference_code: str,
+        generated_code: str,
         run_tag: str="auto",
         model_tag: str="model_tag",
         task_tag: str="task_tag",
         eval_tag: str="eval_tag",
-        reference_code: str="reference_code",
-        generated_code: str="generated_code",
         code_type: str="cuda",
-    ) -> KernelExecResult:
-        """Call the kbEvalRemoteServer with evaluation parameters"""
-        if len(self.kb_eval_config) > 0 and len(self.kb_eval_config["servers"]) > 1:
-            self.pick_server()
+    ) -> dict[str, Any]:
+        """Call the kbEvalServer with evaluation parameters"""
+        provider_config = self._provider_config_from_yaml(provider_name)
+        base_url = provider_config["base_url"]
+        api_key = provider_config["api_key"]
+        num_retries = provider_config["retry_count"]
+        initial_retry_interval = provider_config["initial_retry_interval"]
+        timeout = provider_config["timeout"]
+
         run_tag = run_tag if run_tag != "auto" else f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         retry_count = 0
-        while retry_count < self.num_retries:
+        while retry_count < num_retries:
             try:
                 retry_count += 1
                 limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
                 async with httpx.AsyncClient(limits=limits, headers={"Connection": "close"}, http2=False) as client:
                     response = await client.post(
-                        f"{self.base_url}/kb_eval",
+                        f"{base_url}/kb_eval",
                         json={
                             "run_tag": run_tag,
                             "model_tag": model_tag,
@@ -150,9 +176,9 @@ class KbEvalClient:
                         },
                         headers={
                             "Content-Type": "application/json",
-                            "Authorization": f"Bearer {self.api_key}",
+                            "Authorization": f"Bearer {api_key}",
                         },
-                        timeout=self.timeout  # 5 minute timeout
+                        timeout=timeout  # 5 minute timeout
                     )
 
                     response.raise_for_status()
@@ -173,10 +199,10 @@ class KbEvalClient:
 
             except Exception as e:
                 # add retry emoji to beginning and end of the string
-                logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Error calling server: [{type(e).__name__}: {str(e)}] [{retry_count}/{self.num_retries}]")
-                if retry_count < self.num_retries:
-                    sleep_seconds = 2 ** retry_count
-                    logger.info(f"🔄 [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Retrying in {sleep_seconds} seconds... ({retry_count}/{self.num_retries})") # no emoji
+                logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Error calling server: [{type(e).__name__}: {str(e)}] [{retry_count}/{num_retries}]")
+                if retry_count < num_retries:
+                    sleep_seconds = initial_retry_interval ** retry_count
+                    logger.info(f"🔄 [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Retrying in {sleep_seconds} seconds... ({retry_count}/{num_retries})") # no emoji
                     # exponential backoff
                     await asyncio.sleep(sleep_seconds)
                     continue
@@ -185,56 +211,46 @@ class KbEvalClient:
                     logger.error(f"❌ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Failed after {retry_count} retries")
                     return None
 
-    def get_server_stats(self):
-        time_now = time.time()
-        kb_eval_config = self.config.get("kbEvalClient", {})
-        if "servers" not in kb_eval_config:
-            return {}
-        self.server_stats = {}
-        if len(self.server_stats) == 0 or time_now - self.server_last_refresh_time > 10:
-            for server in kb_eval_config["servers"]:
-                try:
-                    response = requests.get(f"{server['url']}/stats")
-                    self.server_stats[server["url"]] = response.json()
-                except:
-                    pass
-
-    def pick_server(self):
-        self.get_server_stats()
-        min_avg_load = float("inf")
-        min_avg_load_server = None
-        for server in self.server_stats:
-            if self.server_stats[server]["pending_requests"] / self.server_stats[server]["num_devices"] < min_avg_load:
-                min_avg_load = self.server_stats[server]["pending_requests"] / self.server_stats[server]["num_devices"]
-                min_avg_load_server = server
-        logger.info(f"[kbEvalClient] choose {min_avg_load_server}")
-        self.base_url = min_avg_load_server
-
-
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--wd", type=str, default="./kbEvalTest")
+    parser.add_argument("--provider_name", type=str, default="local")
+    parser.add_argument("--wd", type=str, default=".")
     parser.add_argument("--run_tag", type=str, default="auto")
     parser.add_argument("--model_tag", type=str, default="model_tag")
     parser.add_argument("--task_tag", type=str, default="task_tag")
     parser.add_argument("--eval_tag", type=str, default="eval_tag")
-    parser.add_argument("--reference_code", type=str, default="elemAddRef.py")
-    parser.add_argument("--generated_code", type=str, default="elemAddTriton.py")
+    parser.add_argument("--reference_code_path", type=str, default="kbEvalTest/elemAddRef.py")
+    parser.add_argument("--generated_code_path", type=str, default="kbEvalTest/elemAddTriton.py")
     parser.add_argument("--code_type", type=str, default="triton")
     parser.add_argument("--measure_reference", action="store_true")
     args = parser.parse_args()
 
     # read from file
-    reference_model_src = open(os.path.join(args.wd, args.reference_code), "r").read()
-    generated_model_src = open(os.path.join(args.wd, args.generated_code), "r").read()
+    reference_model_src = open(os.path.join(args.wd, args.reference_code_path), "r").read()
+    generated_model_src = open(os.path.join(args.wd, args.generated_code_path), "r").read()
 
     client = KbEvalClient()
 
     if args.measure_reference:
-        result = await client.kb_eval_ref(run_tag=args.run_tag, model_tag=args.model_tag, task_tag=args.task_tag, reference_code=reference_model_src)
-        logger.info(f"🔍 [kbEvalClient] [{args.run_tag}] [{args.model_tag}] [{args.task_tag}] Reference code evaluation result: {json.dumps(result if result else None, indent=4)}")
+        result = await client.kb_eval_ref(
+            provider_name=args.provider_name,
+            reference_code=reference_model_src,
+            run_tag=args.run_tag,
+            model_tag=args.model_tag,
+            task_tag=args.task_tag,
+        )
+        logger.info(f"🔍 [kbEvalClient] [{args.provider_name}] [{args.run_tag}] [{args.model_tag}] [{args.task_tag}] Reference code evaluation result: {json.dumps(result if result else None, indent=4)}")
     else:
-        result = await client.kb_eval(run_tag=args.run_tag, model_tag=args.model_tag, task_tag=args.task_tag, eval_tag=args.eval_tag, reference_code=reference_model_src, generated_code=generated_model_src, code_type=args.code_type)
+        result = await client.kb_eval(
+            provider_name=args.provider_name,
+            reference_code=reference_model_src,
+            generated_code=generated_model_src,
+            run_tag=args.run_tag,
+            model_tag=args.model_tag,
+            task_tag=args.task_tag,
+            eval_tag=args.eval_tag,
+            code_type=args.code_type,
+        )
         logger.info(f"🔍 [kbEvalClient] [{args.run_tag}] [{args.model_tag}] [{args.task_tag}] [{args.eval_tag}] Generated code evaluation result: {json.dumps(result if result else None, indent=4)}")
 
 if __name__ == "__main__":

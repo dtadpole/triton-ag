@@ -71,6 +71,9 @@ module:
                       output_dir: "`os.path.expanduser(block.output_dir)`" # output_dir is the output directory 
                       num_turns_per_generation: "`block.num_turns_per_generation`" # number of turns per generation
                       model_override: "`block.model_override`" # model override
+                      vllm_providers: "`block.vllm_providers`" # vllm providers
+                      logp_providers: "`block.logp_providers`" # logp providers
+                      kbeval_providers: "`block.kbeval_providers`" # kb eval providers
                   returns:
                     logging:
                       method: "log_enqueue"
@@ -143,8 +146,8 @@ module:
           steps:
             - type: endpoint
               endpoint: inferenceClient.completion
-              # endpoint: inferenceClient.chat_completion
               context_vars:
+                provider_override: "`random.choice(vllm_providers)`"
                 metadata:
                   "run_tag": "`run_tag`"
                   "model_tag": "`model_tag`"
@@ -153,6 +156,7 @@ module:
                   "turn_tag": "`turn_tag`"
                   "code_type": "`code_type`"
                   "model_override": "`model_override`"
+                  "provider_override": "`provider_override`"
                 messages: |
                   `[
                     {"role": "system", "content": __runtime__.get_system_prompt(__context__)}, 
@@ -172,10 +176,10 @@ module:
                   )`
               args:
                 prompt: "`prompt`"
-                # messages: "`messages`"
                 max_tokens: "`max_tokens`"
                 logprobs: true
                 model_override: "`model_override`"
+                provider_override: "`provider_override`"
               returns:
                 error_if: "`__result__ is None`"
                 context_vars:
