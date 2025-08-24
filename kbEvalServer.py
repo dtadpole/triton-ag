@@ -20,6 +20,9 @@ from kbEvalUtil import KernelExecResult
 from logger import logger
 from pydantic import BaseModel, Field
 from kbEvalUtil import on_process_timeout
+import uvicorn
+from fastapi.middleware.gzip import GZipMiddleware
+
 
 KB_EVAL_TOKEN = None
 
@@ -33,6 +36,7 @@ KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
 
 # Create app
 app = FastAPI()
+app.add_middleware(GZipMiddleware, minimum_size=512, compresslevel=5)
 
 parallel_request_counter = 0
 parallel_request_counter_lock = asyncio.Lock()
@@ -616,8 +620,6 @@ async def main(args):
         KB_EVAL_TOKEN = f.read().strip()
         logger.info(f"[kbEvalServer] KB_EVAL_TOKEN loaded from [{api_key_filepath}]")
     #########################################################
-
-    import uvicorn
 
     server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, workers=args.workers))
 

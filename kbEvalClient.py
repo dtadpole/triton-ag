@@ -10,6 +10,7 @@ import time
 from datetime import datetime
 import yaml
 import httpx
+import gzip
 from typing import Dict, Any, List
 from logger import logger
 from kbEvalUtil import KernelExecResult
@@ -101,14 +102,16 @@ class KbEvalClient:
                     max_connections=100,
                     keepalive_expiry=0,
                 )
+                timeout = httpx.Timeout(connect=5.0, write=30.0, read=timeout, pool=5.0) # 5s connect, 30s write, 300s read, 5s pool
                 async with httpx.AsyncClient(
                     limits=limits,
                     headers={"Connection": "close", "Accept-Encoding": "identity"}, # disable gzip
                     http2=False, # disable http2
                     trust_env=False, # disable trust env
+                    timeout=timeout,
                 ) as client:
                     response = await client.post(
-                        f"{base_url}/kb_eval_ref",
+                        url=f"{base_url}/kb_eval_ref",
                         json={
                             "run_tag": run_tag,
                             "model_tag": model_tag,
@@ -119,7 +122,6 @@ class KbEvalClient:
                             "Content-Type": "application/json",
                             "Authorization": f"Bearer {api_key}",
                         },
-                        timeout=timeout  # 5 minute timeout
                     )
 
                     response.raise_for_status()
@@ -187,28 +189,32 @@ class KbEvalClient:
                     max_connections=100,
                     keepalive_expiry=0,
                 )
+                timeout = httpx.Timeout(connect=5.0, write=30.0, read=timeout, pool=5.0) # 5s connect, 30s write, 300s read, 5s pool
+                json_body = {
+                    "run_tag": run_tag,
+                    "model_tag": model_tag,
+                    "task_tag": task_tag,
+                    "eval_tag": eval_tag,
+                    "reference_code": reference_code,
+                    "generated_code": generated_code,
+                    "code_type": code_type,
+                }
+                logger.info(f"🔍 [kbEvalClient] [{provider_name}] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Sending request to server [{base_url}] with json body: {json.dumps(json_body, indent=4)}")
+                body = gzip.compress(json.dumps(json_body).encode("utf-8"))
                 async with httpx.AsyncClient(
                     limits=limits,
-                    headers={"Connection": "close", "Accept-Encoding": "identity"}, # disable gzip
+                    headers={
+                        "Connection": "close",
+                        "Accept-Encoding": "gzip",
+                        "Authorization": f"Bearer {api_key}",
+                    }, # disable gzip
                     http2=False, # disable http2
                     trust_env=False, # disable trust env
+                    timeout=timeout,
                 ) as client:
                     response = await client.post(
-                        f"{base_url}/kb_eval",
-                        json={
-                            "run_tag": run_tag,
-                            "model_tag": model_tag,
-                            "task_tag": task_tag,
-                            "eval_tag": eval_tag,
-                            "reference_code": reference_code,
-                            "generated_code": generated_code,
-                            "code_type": code_type,
-                        },
-                        headers={
-                            "Content-Type": "application/json",
-                            "Authorization": f"Bearer {api_key}",
-                        },
-                        timeout=timeout  # 5 minute timeout
+                        url=f"{base_url}/kb_eval",
+                        content=body,
                     )
 
                     response.raise_for_status()
@@ -245,7 +251,7 @@ class KbEvalClient:
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--provider_name", type=str, default="local")
+    parser.add_argument("--provider", type=str, default="local")
     parser.add_argument("--wd", type=str, default=".")
     parser.add_argument("--run_tag", type=str, default="auto")
     parser.add_argument("--model_tag", type=str, default="model_tag")
@@ -265,7 +271,7 @@ async def main():
 
     if args.measure_reference:
         result = await client.kb_eval_ref(
-            provider_name=args.provider_name,
+            provider=args.provider.split(","),
             reference_code=reference_model_src,
             run_tag=args.run_tag,
             model_tag=args.model_tag,
@@ -274,7 +280,7 @@ async def main():
         logger.info(f"🔍 [kbEvalClient] [{args.provider_name}] [{args.run_tag}] [{args.model_tag}] [{args.task_tag}] Reference code evaluation result: {json.dumps(result if result else None, indent=4)}")
     else:
         result = await client.kb_eval(
-            provider_name=args.provider_name,
+            provider=args.provider.split(","),
             reference_code=reference_model_src,
             generated_code=generated_model_src,
             run_tag=args.run_tag,
