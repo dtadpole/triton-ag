@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from configEndpoints import DuckDBClient
 from configInterpreter import ConfigInterpreter
-from workflowUtil import TrainerGRPOBlock
+from workflowUtil import TrainerBlock
 from workflowSync import WorkflowSync
 
 LATEST_REFERENCE_NAME = "reference_state_latest.pt"
@@ -28,7 +28,7 @@ BOUND_ADVANTAGE_LOWER_PERCENTAGE = "bound_adv_lower_pct"
 BOUND_ADVANTAGE_UPPER_PERCENTAGE = "bound_adv_upper_pct"
 LOG_PROB_AVERAGE_VALUE = "log_prob_avg_value"
 LOG_PROB_AVERAGE_RATIO = "log_prob_avg_ratio"
-LOG_PROB_CUSTOM_DIFF = "log_prob_custom_diff"
+LOG_PROB_VLLM_GEN_DIFF = "log_prob_vllm_gen_diff"
 
 class GRPOConfig(BaseModel):
     """GRPO configuration"""
@@ -47,6 +47,7 @@ class GRPOConfig(BaseModel):
     # loss_type: str = "token" # "episode" or "token" or "seq_max" or "gspo"
     loss_type: str = "gspo" # "episode" or "token" or "seq_max" or "gspo"
     gamma: float = 0.5
+    tis_ratio: float = 2.0
 
     @classmethod
     def from_yaml(cls, file_path: str) -> "GRPOConfig":
@@ -110,11 +111,12 @@ class GRPOTrainer():
         """Log raw data"""
         logger.info(f"🔍 [GRPOTrainer] DuckDB search has found [{len(data)}] rows.\n{data}")
 
-    def _calculate_log_probs(self,
-                       logits: torch.Tensor,
-                       prompt_token_len: int,
-                       completion_token_ids: torch.Tensor,
-                    ):
+    def _calculate_log_probs(
+        self,
+        logits: torch.Tensor,
+        prompt_token_len: int,
+        completion_token_ids: torch.Tensor,
+    ):
         """Get log probabilities for the completion tokens"""
         output_completion_logits = logits[prompt_token_len-1:-1, :]
         log_probs = F.log_softmax(output_completion_logits, dim=-1) # dim: (completion_len, vocab_size)
@@ -172,7 +174,11 @@ class GRPOTrainer():
         for i in range(len(advantages)): # for each generation result in the batch
             # get the logits for the completion tokens only, remove the prompt tokens
             prompt_token_len = len(prompt_token_ids[i])
-            new_action_log_probs = self._calculate_log_probs(model_outputs.logits[i], prompt_token_len, completion_token_ids[i])
+            new_action_log_probs = self._calculate_log_probs(
+                model_outputs.logits[i],
+                prompt_token_len,
+                completion_token_ids[i],
+            )
 
             # if 'checkpoint_name' in batch:
             #     completion_log_probs_override = self._calculate_override_log_probs(
@@ -187,7 +193,7 @@ class GRPOTrainer():
             # else:
             completion_log_probs_tensor = torch.tensor(log_probs[i][len(prompt_token_ids[i])-1:len(prompt_token_ids[i])-1+len(completion_token_ids[i])], device=self.engine.device)
             # log_prob_override_mse is always zero here
-            log_prob_custom_diff = torch.mean(torch.abs(new_action_log_probs - completion_log_probs_tensor))
+            log_prob_vllm_gen_diff = torch.mean(torch.abs(new_action_log_probs - completion_log_probs_tensor))
 
             # calculate log ratio (in log space is subtraction)
             if completion_log_probs_tensor.shape != new_action_log_probs.shape:
@@ -196,7 +202,7 @@ class GRPOTrainer():
             log_ratio = new_action_log_probs - completion_log_probs_tensor
 
             clip_metrics[LOG_PROB_AVERAGE_VALUE].append(torch.mean(new_action_log_probs).item())
-            clip_metrics[LOG_PROB_CUSTOM_DIFF].append(log_prob_custom_diff.item())
+            clip_metrics[LOG_PROB_VLLM_GEN_DIFF].append(log_prob_vllm_gen_diff.item())
 
             if self.grpo_config.loss_type == "gspo":
 
@@ -289,7 +295,7 @@ class GRPOTrainer():
             BOUND_ADVANTAGE_LOWER_PERCENTAGE: [],
             LOG_PROB_AVERAGE_VALUE: [],
             LOG_PROB_AVERAGE_RATIO: [],
-            LOG_PROB_CUSTOM_DIFF: [],
+            LOG_PROB_VLLM_GEN_DIFF: [],
         }
         for batch_idx, batch in enumerate(dataloader):
             # Training step
@@ -340,7 +346,7 @@ class GRPOTrainer():
             self.engine._save_checkpoint(self.engine.status.global_step, callback=callback)
 
 
-    async def train_grpo_block(self, block: TrainerGRPOBlock, callback: Optional[Callable] = None):
+    async def train_grpo_block(self, block: TrainerBlock, callback: Optional[Callable] = None):
         """Train the model for one block"""
         # Create data loader
         context_vars = self.configInterpreter.prepare_context_vars(
@@ -427,6 +433,7 @@ def grpo_get_trainer(
 async def main():
     """Main function for GRPO training"""
     parser = argparse.ArgumentParser(description="Train a model using GRPOTrainer")
+    parser.add_argument("--name", type=str, default="grpo.1")
     parser.add_argument("--engine", type=str, default="unsloth")
     parser.add_argument("--engine_config", type=str, default="engineBase.yaml")
     parser.add_argument("--prefix_tag", type=str, default="auto.trainer.grpo")
@@ -446,7 +453,8 @@ async def main():
     engine_config.model.engine = args.engine
     engine = EngineBase.create_engine(args.prefix_tag, engine_config) # no status for testing
     trainer = grpo_get_trainer(engine, args.prefix_tag, args.engine_config, args.grpo_config)
-    grpo_block = TrainerGRPOBlock(
+    grpo_block = TrainerBlock(
+        name=args.name,
         prefix_tag=args.prefix_tag,
         epoch_id=args.epoch_id,
         block_id=args.block_id,

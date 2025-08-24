@@ -27,19 +27,6 @@ async def read_stream(stream, prefix: str, is_error: bool = False):
         else:
             logger.info(f"[{prefix}] {output}")
 
-def merge_dicts(a: dict, b: dict) -> dict:
-    """
-    Return a new dict that is a recursive merge of a and b.
-    Keys in b override keys in a. If both values are dicts, merge them recursively.
-    """
-    result = a.copy()
-    for key, b_val in b.items():
-        if key in result and isinstance(result[key], dict) and isinstance(b_val, dict):
-            result[key] = merge_dicts(result[key], b_val)
-        else:
-            result[key] = b_val
-    return result
-
 def format_conversation(messages: List[Dict[str, Any]],
                         tokenizer: AutoTokenizer,
                         mask_non_assistant_tokens: bool = True, # mask all token except assistant tokens

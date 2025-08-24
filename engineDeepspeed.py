@@ -40,7 +40,8 @@ import wandb
 import yaml
 import argparse
 from logger import logger
-from trainerUtil import SimpleCollator, merge_dicts
+from trainerUtil import SimpleCollator
+from workflowUtil import merge_dicts
 from engineBase import EngineBase, EngineConfig, TrainerStatus, create_sample_training_dataset
 
 TRAINING_STATUS_FILE = "training_status.json"

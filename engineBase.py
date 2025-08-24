@@ -11,7 +11,8 @@ from typing import Optional, List, Callable, Dict
 import yaml
 from logger import logger
 from torch.utils.data import Dataset
-from trainerUtil import SimpleCollator, merge_dicts
+from trainerUtil import SimpleCollator
+from workflowUtil import merge_dicts
 
 class TrainerStatus(BaseModel):
     """Running status of the trainer"""

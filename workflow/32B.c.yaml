@@ -56,20 +56,21 @@ inference:
       model_override: null
 
     callbacks:
-      - type: trainer
-        name: grpo.1
-        prefix_tag: "{prefix_tag}"
-        epoch_id: "{epoch_id}"
-        block_id: "{block_id}"
-        input_tag: "{run_tag}"
-        input_dir: ~/.inference/codeGenEval
-      # - type: trainer
-      #   name: rft.1
-      #   prefix_tag: "{prefix_tag}"
-      #   epoch_id: "{epoch_id}"
-      #   block_id: "{block_id}"
-      #   input_tag: "{run_tag}"
-      #   input_dir: ~/.inference/codeGenEval
+      completion:
+        - queue_type: trainer
+          queue_name: grpo.1
+          prefix_tag: "{prefix_tag}"
+          epoch_id: "{epoch_id}"
+          block_id: "{block_id}"
+          input_tag: "{run_tag}"
+          input_dir: ~/.inference/codeGenEval
+        # - queue_type: trainer
+        #   queue_name: rft.1
+        #   prefix_tag: "{prefix_tag}"
+        #   epoch_id: "{epoch_id}"
+        #   block_id: "{block_id}"
+        #   input_tag: "{run_tag}"
+        #   input_dir: ~/.inference/codeGenEval
 
   exemplar.deepseek-v3:
     default:
@@ -87,13 +88,14 @@ inference:
       model_override: null
 
     callbacks:
-      - type: trainer
-        name: sft.1
-        prefix_tag: "{prefix_tag}"
-        epoch_id: "{epoch_id}"
-        block_id: "{block_id}"
-        input_tag: "{run_tag}"
-        input_dir: ~/.inference/exemplar.deepseek-v3
+      completion:
+        - queue_type: trainer
+          queue_name: sft.1
+          prefix_tag: "{prefix_tag}"
+          epoch_id: "{epoch_id}"
+          block_id: "{block_id}"
+          input_tag: "{run_tag}"
+          input_dir: ~/.inference/exemplar.deepseek-v3
 
   exemplar.kimi-k2:
     default:
@@ -111,13 +113,14 @@ inference:
       model_override: null
 
     callbacks:
-      - type: trainer
-        name: sft.1
-        prefix_tag: "{prefix_tag}"
-        epoch_id: "{epoch_id}"
-        block_id: "{block_id}"
-        input_tag: "{run_tag}"
-        input_dir: ~/.inference/exemplar.kimi-k2
+      completion:
+        - queue_type: trainer
+          queue_name: sft.1
+          prefix_tag: "{prefix_tag}"
+          epoch_id: "{epoch_id}"
+          block_id: "{block_id}"
+          input_tag: "{run_tag}"
+          input_dir: ~/.inference/exemplar.kimi-k2
 
 trainer:
   grpo.1:
@@ -125,13 +128,17 @@ trainer:
       output_dir: ~/.trainer
 
     callbacks:
-      - type: sync
-        name: sync.1
-
-        context:
-          vllm_providers: ["h8_1"]
-          logp_providers: ["h8_1_6, h8_1_7"]
-          kbeval_providers: ["a8_1"]
+      checkpoint:
+        - queue_type: sync
+          queue_name: sync.1
+          prefix_tag: "{prefix_tag}"
+          epoch_id: "{epoch_id}"
+          block_id: "{block_id}"
+          input_tag: "{run_tag}"
+          context:
+            vllm_providers: ["h8_3"]
+            logp_providers: ["h8_3_2, h8_3_3"]
+            kbeval_providers: ["a4_2, a4_3"]
 
   sft.1:
     default:

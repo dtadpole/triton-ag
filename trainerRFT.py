@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from engineBase import EngineBase, EngineConfig, TrainerStatus
 from trainerUtil import format_conversation
 from logger import logger
-from workflowUtil import TrainerRFTBlock
+from workflowUtil import TrainerBlock
 from configInterpreter import ConfigInterpreter
 from configEndpoints import DuckDBClient
 from workflowSync import WorkflowSync
@@ -73,7 +73,7 @@ class RFTTrainer():
         """Log raw data"""
         logger.info(f"🔍 [RFTTrainer] DuckDB search has found [{len(data)}] rows.\n{data}")
 
-    async def train_rft_block(self, block: TrainerRFTBlock, callback: Optional[Callable] = None):
+    async def train_rft_block(self, block: TrainerBlock, callback: Optional[Callable] = None):
         """Train the model for one block"""
         logger.info(f"👉 [RFTTrainer] [{block.input_tag}] RFT Training started for block...")
 
@@ -137,6 +137,7 @@ def rft_get_trainer(
 async def main():
     """Main function for RFT training"""
     parser = argparse.ArgumentParser(description="Train a model using RFTTrainer")
+    parser.add_argument("--name", type=str, default="rft.1")
     parser.add_argument("--engine", type=str, default="unsloth")
     parser.add_argument("--engine_config", type=str, default="engineBase.yaml")
     parser.add_argument("--prefix_tag", type=str, default="auto.trainer.rft")
@@ -157,7 +158,8 @@ async def main():
     engine_config.model.engine = args.engine
     engine = EngineBase.create_engine(args.prefix_tag, engine_config) # no status for testing
     trainer = rft_get_trainer(engine, args.prefix_tag, args.engine_config, args.rft_config, args.module_file)
-    rft_block = TrainerRFTBlock(
+    rft_block = TrainerBlock(
+        name=args.name,
         prefix_tag=args.prefix_tag,
         epoch_id=args.epoch_id,
         block_id=args.block_id,

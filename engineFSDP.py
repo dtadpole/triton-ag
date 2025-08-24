@@ -39,21 +39,23 @@ import wandb
 import yaml
 import argparse
 from logger import logger
-from trainerUtil import SimpleCollator, merge_dicts
-from trainerBase import BaseTrainer, TrainerConfig, TrainerStatus, TextDataset
+from trainerUtil import SimpleCollator
+from workflowUtil import merge_dicts
+from engineBase import EngineBase, EngineConfig, TrainerStatus, create_sample_training_dataset
 
-TRAINING_STATUS_FILE = "training_status.json"
-ADAPTER_MODEL_FILE = "adapter_model.safetensors"
-CHECKPOINT_READY_FILE = "checkpoint.ready"
-TRAINING_STATE_FILE = "training_state.pt"
-DEEPSPEED_TAG = "ds"
 
-class FSDPTrainer(BaseTrainer):
+class EngineFSDP(EngineBase):
     """Base trainer for Hugging Face models with step-by-step training implementation"""
 
-    def __init__(self, prefix_tag: str, config: TrainerConfig, status: Optional[TrainerStatus] = None):
-        # TODO
+    def __init__(self, prefix_tag: str, config: EngineConfig, status: Optional[TrainerStatus] = None):
+        super().__init__(prefix_tag, config, status)
+
+    def short_name(self):
+        return "fsdp"
+
+    def _set_seed(self):
         pass
+
 
 async def main():
     pass
