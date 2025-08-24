@@ -116,7 +116,7 @@ async def check_return_code(process: asyncio.subprocess.Process):
             return_code = await process.wait()
             if return_code is not None:
                 elapsed_time = time.time() - start_time
-                logger.info(f"Child process [{process.pid}] completed with return code: {return_code} in {elapsed_time:.2f}s")
+                logger.info(f"Child process [{process.pid}] completed with return code: {return_code} in [{elapsed_time:.2f}s]")
                 return
         except asyncio.TimeoutError:
             continue
@@ -131,7 +131,7 @@ async def check_disconnect_and_kill_child_process(request: Request, process: asy
         try:
             if process.returncode is not None:
                 elapsed_time = time.time() - start_time
-                logger.info(f"Child process [{process.pid}] completed with return code: {process.returncode} in {elapsed_time:.2f}s")
+                logger.info(f"Child process [{process.pid}] completed with return code: {process.returncode} in [{elapsed_time:.2f}s]")
                 return
             elif request._is_disconnected or await request.is_disconnected():
                 logger.error(f"Client disconnected, terminating child process [{process.pid}]")
