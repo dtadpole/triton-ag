@@ -91,6 +91,8 @@ mlflow:
 	# mlflow server --host localhost --port 5051
 	mlflow server --host localhost --port 5051 --backend-store-uri sqlite:///mlflow.sqlite
 
+workflow_server:
+	while true; do python ./workflowServer.py --host :: --port 8488; sleep 5; done
 
 lora_merge_compress_autoawq:
 	CUDA_VISIBLE_DEVICES=4 python lora_merge_awq.py
