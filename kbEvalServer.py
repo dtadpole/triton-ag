@@ -576,12 +576,12 @@ async def main(args):
     if "common" not in kbEval_config["servers"]:
         logger.error("[kbEvalServer] [common] not found in kbEval.yaml")
         exit(1)
-    if "api_key" not in kbEval_config["servers"]["common"]:
-        logger.error(f"[kbEvalServer] [api_key] not found in kbEval.yaml [{kbEval_config['servers']['common']}]")
+    if "api_key_path" not in kbEval_config["servers"]["common"]:
+        logger.error(f"[kbEvalServer] [api_key_path] not found in kbEval.yaml [{kbEval_config['servers']['common']}]")
         exit(1)
-    api_key_filepath = kbEval_config["servers"]["common"]["api_key"]
+    api_key_filepath = kbEval_config["servers"]["common"]["api_key_path"]
     # read file from api_key, replace ${HOME} with os.path.expanduser("~") in api_key_filepath
-    api_key_filepath = api_key_filepath.replace("${HOME}", os.path.expanduser("~"))
+    api_key_filepath = os.path.expanduser(api_key_filepath)
     if not os.path.exists(api_key_filepath):
         # create the file, and write a random string to it
         with open(api_key_filepath, "w") as f:
