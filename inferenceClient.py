@@ -24,7 +24,7 @@ class InferenceClient:
 
     def __init__(
         self,
-        model_short_name: str,
+        model_name: str,
         config_file: str = "inferenceClient.yaml",
     ):
         """
@@ -39,39 +39,39 @@ class InferenceClient:
         self.provider_config_cache = {}
         self.model_config_cache = {}
         # model tag
-        self.model_short_name = model_short_name
-        self.model_tag = f"{self.model_short_name}"
+        self.model_name = model_name
+        self.model_tag = f"{self.model_name}"
         # model config
-        self.model_config = self._model_config_from_yaml(self.model_short_name, config_file=config_file)
+        self.model_config = self._model_config_from_yaml(self.model_name, config_file=config_file)
         # tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_config['tokenizer_name'], trust_remote_code=True)
 
 
     def _model_config_from_yaml(
         self,
-        model_short_name: str,
+        model_name: str,
         provider_name: Optional[str] = None,
         config_file: str="inferenceClient.yaml",
     ) -> Dict[str, Any]:
         """Load model config from YAML file."""
         # check cache
-        if model_short_name in self.model_config_cache:
-            return self.model_config_cache[model_short_name]
+        if model_name in self.model_config_cache:
+            return self.model_config_cache[model_name]
         # if not found, load from yaml file
         with open(config_file, "r") as f:
             config = yaml.safe_load(f)
-        if model_short_name not in config.get('models', {}):
-            raise ValueError(f"Model [{model_short_name}] not found in config file [{config_file}]")
-        model_config = config.get('models', {}).get(model_short_name, {})
+        if model_name not in config.get('models', {}):
+            raise ValueError(f"Model [{model_name}] not found in config file [{config_file}]")
+        model_config = config.get('models', {}).get(model_name, {})
         if provider_name:
             if provider_name not in config.get('providers', {}):
                 raise ValueError(f"Provider [{provider_name}] not found in config file [{config_file}]")
             provider_config = config.get('providers', {}).get(provider_name, {})
-            provider_specific_model_config = provider_config.get('models', {}).get(model_short_name, {})
+            provider_specific_model_config = provider_config.get('models', {}).get(model_name, {})
             model_config = {**model_config, **provider_specific_model_config}
         
-        model_name = model_config.get('model_name', model_short_name)
-        tokenizer_name = model_config.get('tokenizer_name', model_name)
+        model_full_name = model_config.get('model_full_name', model_name)
+        tokenizer_name = model_config.get('tokenizer_name', model_full_name)
         temperature = model_config.get('temperature', 0.6)
         max_tokens = model_config.get('max_tokens', 16384)
         truncate_prompt_tokens = model_config.get('truncate_prompt_tokens', 8192)
@@ -79,6 +79,7 @@ class InferenceClient:
         top_k = model_config.get('top_k', 40)
         result = {
             "model_name": model_name,
+            "model_full_name": model_full_name,
             "tokenizer_name": tokenizer_name,
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -87,7 +88,7 @@ class InferenceClient:
             "top_k": top_k,
         }
 
-        logger.info(f"🔍 [InferenceClient] Model config [{provider_name}] [{model_short_name}]: {json.dumps(result, indent=4)}")
+        logger.info(f"🔍 [InferenceClient] Model config [{provider_name}] [{model_name}]: {json.dumps(result, indent=4)}")
 
         return result
 
@@ -172,12 +173,12 @@ class InferenceClient:
         Returns:
             Dict with 'text' and 'tokens' data
         """
-        model_config = self._model_config_from_yaml(self.model_short_name, provider_name=provider_name)
+        model_config = self._model_config_from_yaml(self.model_name, provider_name=provider_name)
 
         if streaming:
             # STREAMING MODE: Real-time token streaming using OpenAI client
             stream = await openai_client.chat.completions.create(
-                model=model_override or model_config['model_name'],
+                model=model_override or model_config['model_full_name'],
                 messages=messages,
                 temperature=model_config['temperature'],
                 max_tokens=max_tokens or model_config['max_tokens'],
@@ -234,7 +235,7 @@ class InferenceClient:
         else:
             # NON-STREAMING MODE: Single response using OpenAI client
             response = await openai_client.chat.completions.create(
-                model=model_override or model_config['model_name'],
+                model=model_override or model_config['model_full_name'],
                 messages=messages,
                 temperature=model_config['temperature'],
                 max_tokens=max_tokens or model_config['max_tokens'],
@@ -325,7 +326,7 @@ class InferenceClient:
         Returns:
             Dict with 'text' data
         """
-        model_config = self._model_config_from_yaml(self.model_short_name, provider_name=provider_name)
+        model_config = self._model_config_from_yaml(self.model_name, provider_name=provider_name)
 
         generated_content = ""
         logprobs_content = []
@@ -333,7 +334,7 @@ class InferenceClient:
         if streaming:
             # STREAMING MODE: Real-time token streaming using OpenAI client
             stream = await openai_client.completions.create(
-                model=model_override or model_config['model_name'],
+                model=model_override or model_config['model_full_name'],
                 prompt=prompt,
                 temperature=model_config['temperature'],
                 max_tokens=max_tokens or model_config['max_tokens'],
@@ -362,7 +363,7 @@ class InferenceClient:
         else:
             # NON-STREAMING MODE: Single response using OpenAI client
             response = await openai_client.completions.create(
-                model=model_override or model_config['model_name'],
+                model=model_override or model_config['model_full_name'],
                 prompt=prompt,
                 temperature=model_config['temperature'],
                 max_tokens=max_tokens or model_config['max_tokens'],
@@ -495,11 +496,11 @@ async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_file", type=str, default="inferenceClient.yaml", help="Config file to use")
     parser.add_argument("--provider_name", type=str, default="fireworks", help="Provider to use (fireworks, sglang, deepseek, fireworks, together)")
-    parser.add_argument("--model_short_name", type=str, default="deepseek-v3", help="Model to use (deepseek-v3, deepseek-r1, kimi-k2, qwen3-14b, qwen3-32b, qwen3-235b, qwen3-coder-480b, gpt-oss-20b, gpt-oss-120b)")
+    parser.add_argument("--model_name", type=str, default="deepseek-v3", help="Model to use (deepseek-v3, deepseek-r1, kimi-k2, qwen3-14b, qwen3-32b, qwen3-235b, qwen3-coder-480b, gpt-oss-20b, gpt-oss-120b)")
     parser.add_argument("--api_type", type=str, default="completion", choices=["chat", "completion"], help="API type to use (chat or completion)")
     args = parser.parse_args()
 
-    client = InferenceClient(model_short_name=args.model_short_name, config_file=args.config_file)
+    client = InferenceClient(model_name=args.model_name, config_file=args.config_file)
     logger.info(f"[InferenceClient] Models: {json.dumps(await client.get_models(args.provider_name), indent=4)}")
     logger.info(f"[InferenceClient] Health check: {await client.health_check(args.provider_name)}")
 
