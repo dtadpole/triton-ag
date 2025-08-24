@@ -2,7 +2,7 @@ import argparse
 import asyncio
 import os
 import random
-from typing import Dict, Any
+from typing import Dict, Any, List
 import httpx
 import yaml
 from logger import logger
@@ -61,18 +61,22 @@ class InferenceCustomClient:
 
         return result
 
-    async def get_models(self, provider_name: str):
-        provider_config = self._provider_config_from_yaml(provider_name)
-        base_url = provider_config.get('base_url')
-        api_key = provider_config.get('api_key')
+    async def get_models(self, provider: str|List[str]):
+        default_provider_name = provider[0] if isinstance(provider, list) else provider
+        provider_config = self._provider_config_from_yaml(default_provider_name)
         num_retries = provider_config.get('retry_count', 3)
-        initial_retry_interval = provider_config.get('initial_retry_interval', 3)
-        timeout = provider_config.get('timeout', 300)
 
         retry_count = 0
         while retry_count < num_retries:
             try:
                 retry_count += 1
+                provider_name = random.choice(provider) if isinstance(provider, list) else provider
+                provider_config = self._provider_config_from_yaml(provider_name)
+                base_url = provider_config.get('base_url')
+                api_key = provider_config.get('api_key')
+                initial_retry_interval = provider_config.get('initial_retry_interval', 3)
+                timeout = provider_config.get('timeout', 300)
+
                 limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
                 async with httpx.AsyncClient(
                     limits=limits, headers={"Connection": "close"}, http2=False
@@ -109,18 +113,22 @@ class InferenceCustomClient:
                     )
                     return None
 
-    async def load_lora_adapter(self, provider_name: str, lora_name: str, lora_path: str = None):
-        provider_config = self._provider_config_from_yaml(provider_name)
-        base_url = provider_config.get('base_url')
-        api_key = provider_config.get('api_key')
+    async def load_lora_adapter(self, provider: str|List[str], lora_name: str, lora_path: str = None):
+        default_provider_name = provider[0] if isinstance(provider, list) else provider
+        provider_config = self._provider_config_from_yaml(default_provider_name)
         num_retries = provider_config.get('retry_count', 3)
-        initial_retry_interval = provider_config.get('initial_retry_interval', 3)
-        timeout = provider_config.get('timeout', 300)
 
         retry_count = 0
         while retry_count < num_retries:
             try:
                 retry_count += 1
+                provider_name = random.choice(provider) if isinstance(provider, list) else provider
+                provider_config = self._provider_config_from_yaml(provider_name)
+                base_url = provider_config.get('base_url')
+                api_key = provider_config.get('api_key')
+                initial_retry_interval = provider_config.get('initial_retry_interval', 3)
+                timeout = provider_config.get('timeout', 300)
+
                 limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
                 async with httpx.AsyncClient(
                     limits=limits, headers={"Connection": "close"}, http2=False
@@ -161,18 +169,22 @@ class InferenceCustomClient:
                     )
                     return None
 
-    async def unload_lora_adapter(self, provider_name: str, lora_name: str):
-        provider_config = self._provider_config_from_yaml(provider_name)
-        base_url = provider_config.get('base_url')
-        api_key = provider_config.get('api_key')
+    async def unload_lora_adapter(self, provider: str|List[str], lora_name: str):
+        default_provider_name = provider[0] if isinstance(provider, list) else provider
+        provider_config = self._provider_config_from_yaml(default_provider_name)
         num_retries = provider_config.get('retry_count', 3)
-        initial_retry_interval = provider_config.get('initial_retry_interval', 3)
-        timeout = provider_config.get('timeout', 300)
 
         retry_count = 0
         while retry_count < num_retries:
             try:
                 retry_count += 1
+                provider_name = random.choice(provider) if isinstance(provider, list) else provider
+                provider_config = self._provider_config_from_yaml(provider_name)
+                base_url = provider_config.get('base_url')
+                api_key = provider_config.get('api_key')
+                initial_retry_interval = provider_config.get('initial_retry_interval', 3)
+                timeout = provider_config.get('timeout', 300)
+
                 limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
                 async with httpx.AsyncClient(
                     limits=limits, headers={"Connection": "close"}, http2=False
@@ -212,18 +224,22 @@ class InferenceCustomClient:
                     )
                     return None
 
-    async def logps(self, provider_name: str, model_name: str, input_ids: list[int]):
-        provider_config = self._provider_config_from_yaml(provider_name)
-        base_url = provider_config.get('base_url')
-        api_key = provider_config.get('api_key')
+    async def logps(self, provider: str|List[str], model_name: str, input_ids: list[int]):
+        default_provider_name = provider[0] if isinstance(provider, list) else provider
+        provider_config = self._provider_config_from_yaml(default_provider_name)
         num_retries = provider_config.get('retry_count', 3)
-        initial_retry_interval = provider_config.get('initial_retry_interval', 3)
-        timeout = provider_config.get('timeout', 300)
 
         retry_count = 0
         while retry_count < num_retries:
             try:
                 retry_count += 1
+                provider_name = random.choice(provider) if isinstance(provider, list) else provider
+                provider_config = self._provider_config_from_yaml(provider_name)
+                base_url = provider_config.get('base_url')
+                api_key = provider_config.get('api_key')
+                initial_retry_interval = provider_config.get('initial_retry_interval', 3)
+                timeout = provider_config.get('timeout', 300)
+
                 limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
                 async with httpx.AsyncClient(
                     limits=limits, headers={"Connection": "close"}, http2=False

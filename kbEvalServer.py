@@ -625,14 +625,10 @@ async def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_host", action="store_true")
-    parser.add_argument("--port",  type=int, default=8088)
-    parser.add_argument("--workers",  type=int, default=32)
+    parser.add_argument("--port",  type=int, default=8456)
+    parser.add_argument("--workers",  type=int, default=64)
     parser.add_argument("--device",  type=str, default='4')
     parser.add_argument("--max_timeout_seconds", type=int, default=240)
-    parser.add_argument("--max_process_time", type=int, default=7200)
     args = parser.parse_args()
-
-    # signal.signal(signal.SIGALRM, on_process_timeout)
-    # signal.alarm(args.max_process_time)  # exit after max_process_time seconds
 
     asyncio.run(main(args))

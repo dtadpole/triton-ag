@@ -2,6 +2,7 @@ import os
 import re
 import json
 import httpx
+import random
 import argparse
 import asyncio
 from typing import Dict, List, Optional, Any
@@ -40,9 +41,9 @@ class InferenceClient:
         self.model_config_cache = {}
         # model tag
         self.model_name = model_name
-        self.model_tag = f"{self.model_name}"
         # model config
         self.model_config = self._model_config_from_yaml(self.model_name, config_file=config_file)
+        self.model_full_name = self.model_config['model_full_name']
         # tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_config['tokenizer_name'], trust_remote_code=True)
 
@@ -55,8 +56,9 @@ class InferenceClient:
     ) -> Dict[str, Any]:
         """Load model config from YAML file."""
         # check cache
-        if model_name in self.model_config_cache:
-            return self.model_config_cache[model_name]
+        model_key = f"{model_name}_{provider_name}"
+        if model_key in self.model_config_cache:
+            return self.model_config_cache[model_key]
         # if not found, load from yaml file
         with open(config_file, "r") as f:
             config = yaml.safe_load(f)
@@ -87,7 +89,7 @@ class InferenceClient:
             "top_p": top_p,
             "top_k": top_k,
         }
-
+        self.model_config_cache[model_key] = result
         logger.info(f"🔍 [InferenceClient] Model config [{provider_name}] [{model_name}]: {json.dumps(result, indent=4)}")
 
         return result
@@ -266,7 +268,7 @@ class InferenceClient:
 
     async def chat_completion(
         self,
-        provider_name: str,
+        provider: str|List[str],
         messages: List[Dict],
         max_tokens: int = None,
         logprobs: bool = False,
@@ -275,16 +277,20 @@ class InferenceClient:
         """
         Generate text using OpenAI-compatible API with streaming or non-streaming mode.
         """
-        openai_client_dict = self._provider_config_from_yaml(provider_name)
-        openai_client = openai_client_dict['openai_client']
-        streaming = openai_client_dict['streaming']
+        default_provider_name = provider[0] if isinstance(provider, list) else provider
+        openai_client_dict = self._provider_config_from_yaml(default_provider_name)
         num_retries = openai_client_dict['retry_count']
-        initial_retry_interval = openai_client_dict['initial_retry_interval']
-        timeout = openai_client_dict['timeout']
 
         retry_count = 0
         while retry_count < num_retries:
             retry_count += 1
+            provider_name = random.choice(provider) if isinstance(provider, list) else provider
+            openai_client_dict = self._provider_config_from_yaml(provider_name)
+            openai_client = openai_client_dict['openai_client']
+            base_url = openai_client_dict['base_url']
+            streaming = openai_client_dict['streaming']
+            initial_retry_interval = openai_client_dict['initial_retry_interval']
+            timeout = openai_client_dict['timeout']
             try:
                 return await self._chat_completion(
                     provider_name=provider_name,
@@ -300,10 +306,10 @@ class InferenceClient:
                 traceback.print_exc()
                 if retry_count < num_retries:
                     sleep_time = initial_retry_interval ** retry_count
-                    logger.warning(f"⚠️ [InferenceClient] [Chat completion] Failed: {e} [{retry_count}/{num_retries}], retrying in {sleep_time} seconds...")
+                    logger.warning(f"⚠️ [InferenceClient] [Chat completion] Failed [{provider_name}] [{base_url}]: {e} [{retry_count}/{num_retries}], retrying in {sleep_time} seconds...")
                     await asyncio.sleep(sleep_time) # exponential backoff
                 else:
-                    logger.error(f"❌ [InferenceClient] [Chat completion] Failed: {e}, giving up...") # give up after max retries
+                    logger.error(f"❌ [InferenceClient] [Chat completion] Failed [{provider_name}] [{base_url}]: {e}, giving up...") # give up after max retries
         return None
 
     async def _completion(
@@ -405,7 +411,7 @@ class InferenceClient:
 
     async def completion(
         self,
-        provider_name: str,
+        provider: str|List[str],
         prompt: str,
         max_tokens: int = None,
         logprobs: bool = False,
@@ -414,16 +420,20 @@ class InferenceClient:
         """
         Generate text completion using OpenAI-compatible API with streaming or non-streaming mode.
         """
-        openai_client_dict = self._provider_config_from_yaml(provider_name)
-        openai_client = openai_client_dict['openai_client']
-        streaming = openai_client_dict['streaming']
+        default_provider_name = provider[0] if isinstance(provider, list) else provider
+        openai_client_dict = self._provider_config_from_yaml(default_provider_name)
         num_retries = openai_client_dict['retry_count']
-        initial_retry_interval = openai_client_dict['initial_retry_interval']
-        timeout = openai_client_dict['timeout']
 
         retry_count = 0
         while retry_count < num_retries:
             retry_count += 1
+            provider_name = random.choice(provider) if isinstance(provider, list) else provider
+            openai_client_dict = self._provider_config_from_yaml(provider_name)
+            openai_client = openai_client_dict['openai_client']
+            base_url = openai_client_dict['base_url']
+            streaming = openai_client_dict['streaming']
+            initial_retry_interval = openai_client_dict['initial_retry_interval']
+            timeout = openai_client_dict['timeout']
             try:
                 return await self._completion(
                     provider_name=provider_name,
@@ -438,11 +448,11 @@ class InferenceClient:
             except Exception as e:
                 if retry_count < num_retries:
                     sleep_time = initial_retry_interval ** retry_count
-                    logger.warning(f"⚠️ [InferenceClient] [Completion] Failed: [{type(e).__name__}] {e} [{retry_count}/{num_retries}], retrying in {sleep_time} seconds...")
+                    logger.warning(f"⚠️ [InferenceClient] [Completion] Failed [{provider_name}] [{base_url}]: [{type(e).__name__}] {e} [{retry_count}/{num_retries}], retrying in {sleep_time} seconds...")
                     await asyncio.sleep(sleep_time) # exponential backoff
                 else:
                     traceback.print_exc()
-                    logger.error(f"❌ [InferenceClient] [Completion] Failed: {e}, giving up...") # give up after max retries
+                    logger.error(f"❌ [InferenceClient] [Completion] Failed [{provider_name}] [{base_url}]: {e}, giving up...") # give up after max retries
         return None
 
     async def health_check(self, provider_name: str) -> bool:

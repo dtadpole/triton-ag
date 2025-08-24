@@ -1,6 +1,6 @@
 import argparse
 import asyncio
-import requests
+import random
 import sys
 import traceback
 import os
@@ -10,7 +10,7 @@ import time
 from datetime import datetime
 import yaml
 import httpx
-from typing import Dict, Any
+from typing import Dict, Any, List
 from logger import logger
 from kbEvalUtil import KernelExecResult
 
@@ -72,25 +72,30 @@ class KbEvalClient:
 
     async def kb_eval_ref(
         self,
-        provider_name: str,
+        provider: str|List[str],
         reference_code: str,
         run_tag: str="auto",
         model_tag: str="model_tag",
         task_tag: str="task_tag",
     ) -> dict[str, Any]:
         """Call the kbEvalServer with evaluation parameters"""
-        provider_config = self._provider_config_from_yaml(provider_name)
-        base_url = provider_config["base_url"]
-        api_key = provider_config["api_key"]
-        num_retries = provider_config["retry_count"]
-        initial_retry_interval = provider_config["initial_retry_interval"]
-        timeout = provider_config["timeout"]
+        default_provider_name = provider[0] if isinstance(provider, list) else provider
+        provider_config = self._provider_config_from_yaml(default_provider_name)
+        num_retries = provider_config.get('retry_count', 3)
 
         run_tag = run_tag if run_tag != "auto" else f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         retry_count = 0
         while retry_count < num_retries:
             try:
                 retry_count += 1
+                start_time = time.time()
+                provider_name = random.choice(provider) if isinstance(provider, list) else provider
+                provider_config = self._provider_config_from_yaml(provider_name)
+                base_url = provider_config.get('base_url')
+                api_key = provider_config.get('api_key')
+                initial_retry_interval = provider_config.get('initial_retry_interval', 3)
+                timeout = provider_config.get('timeout', 300)
+
                 limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
                 async with httpx.AsyncClient(limits=limits, headers={"Connection": "close"}, http2=False) as client:
                     response = await client.post(
@@ -112,34 +117,36 @@ class KbEvalClient:
 
                     result = KernelExecResult(**response.json())
                     if (not result.compiled or not result.correctness) and "retriable" in result.metadata and result.metadata["retriable"]:
+                        elapsed_time = time.time() - start_time
                         sleep_seconds = initial_retry_interval ** retry_count
                         if retry_count < num_retries:
                             # retry_count -= 0.5 # reduce retry count by 0.5 to avoid infinite loop
-                            logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Retriable error, retrying... [{retry_count}/{num_retries}] in [{sleep_seconds}s]")
+                            logger.warning(f"⚠️ [kbEvalClient] [{provider_name}] [{run_tag}] [{model_tag}] [{task_tag}] Retriable error, retrying... [{retry_count}/{num_retries}] in [{sleep_seconds}s] [elapsed_time: {elapsed_time:.2f}s]")
                             await asyncio.sleep(sleep_seconds)
                             continue
                         else:
-                            logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Return the last result from retriable error... [{retry_count}/{self.num_retries}]")
+                            logger.warning(f"⚠️ [kbEvalClient] [{provider_name}] [{run_tag}] [{model_tag}] [{task_tag}] Return the last result from retriable error... [{retry_count}/{self.num_retries}] [elapsed_time: {elapsed_time:.2f}s]")
                             return result.model_dump()
 
                     return result.model_dump()
 
             except Exception as e:
-                logger.warning(f"🔍 [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Error calling server: [{e}] [{retry_count}/{num_retries}]")
+                elapsed_time = time.time() - start_time
+                logger.warning(f"🔍 [kbEvalClient] [{provider_name}] [{run_tag}] [{model_tag}] [{task_tag}] Error calling server [{base_url}]: [{type(e).__name__}: {str(e)}] [{retry_count}/{num_retries}] [elapsed_time: {elapsed_time:.2f}s]")
                 if retry_count < num_retries:
                     sleep_seconds = initial_retry_interval ** retry_count
-                    logger.info(f"🔄 [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Retrying in {sleep_seconds} seconds... ({retry_count}/{num_retries})")
+                    logger.info(f"🔄 [kbEvalClient] [{provider_name}] [{run_tag}] [{model_tag}] [{task_tag}] Retrying in {sleep_seconds} seconds... ({retry_count}/{num_retries}) [elapsed_time: {elapsed_time:.2f}s]")
                     # exponential backoff
                     await asyncio.sleep(sleep_seconds)
                     continue
                 else:
                     # add error emoji to beginning and end of the string
-                    logger.error(f"❌ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] Failed after {retry_count} retries")
+                    logger.error(f"❌ [kbEvalClient] [{provider_name}] [{run_tag}] [{model_tag}] [{task_tag}] Failed after {retry_count} retries [elapsed_time: {elapsed_time:.2f}s]")
                     return None
 
     async def kb_eval(
         self,
-        provider_name: str,
+        provider: str|List[str],
         reference_code: str,
         generated_code: str,
         run_tag: str="auto",
@@ -149,18 +156,23 @@ class KbEvalClient:
         code_type: str="cuda",
     ) -> dict[str, Any]:
         """Call the kbEvalServer with evaluation parameters"""
-        provider_config = self._provider_config_from_yaml(provider_name)
-        base_url = provider_config["base_url"]
-        api_key = provider_config["api_key"]
-        num_retries = provider_config["retry_count"]
-        initial_retry_interval = provider_config["initial_retry_interval"]
-        timeout = provider_config["timeout"]
+        default_provider_name = provider[0] if isinstance(provider, list) else provider
+        provider_config = self._provider_config_from_yaml(default_provider_name)
+        num_retries = provider_config.get('retry_count', 3)
 
         run_tag = run_tag if run_tag != "auto" else f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         retry_count = 0
         while retry_count < num_retries:
             try:
                 retry_count += 1
+                start_time = time.time()
+                provider_name = random.choice(provider) if isinstance(provider, list) else provider
+                provider_config = self._provider_config_from_yaml(provider_name)
+                base_url = provider_config.get('base_url')
+                api_key = provider_config.get('api_key')
+                initial_retry_interval = provider_config.get('initial_retry_interval', 3)
+                timeout = provider_config.get('timeout', 300)
+
                 limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
                 async with httpx.AsyncClient(limits=limits, headers={"Connection": "close"}, http2=False) as client:
                     response = await client.post(
@@ -185,30 +197,32 @@ class KbEvalClient:
 
                     result = KernelExecResult(**response.json())
                     if (not result.compiled or not result.correctness) and "retriable" in result.metadata and result.metadata["retriable"]:
+                        elapsed_time = time.time() - start_time
                         sleep_seconds = self.initial_retry_interval ** retry_count
                         if retry_count < self.num_retries:
                             # retry_count -= 0.5 # reduce retry count by 0.5 to avoid infinite loop
-                            logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Retriable error, retrying... [{retry_count}/{self.num_retries}] in [{sleep_seconds}s]")
+                            logger.warning(f"⚠️ [kbEvalClient] [{provider_name}] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Retriable error, retrying... [{retry_count}/{self.num_retries}] in [{sleep_seconds}s] [elapsed_time: {elapsed_time:.2f}s]")
                             await asyncio.sleep(sleep_seconds)
                             continue
                         else:
-                            logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Return the last result from retriable error... [{retry_count}/{self.num_retries}]")
+                            logger.warning(f"⚠️ [kbEvalClient] [{provider_name}] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Return the last result from retriable error... [{retry_count}/{self.num_retries}] [elapsed_time: {elapsed_time:.2f}s]")
                             return result.model_dump()
 
                     return result.model_dump()
 
             except Exception as e:
+                elapsed_time = time.time() - start_time
                 # add retry emoji to beginning and end of the string
-                logger.warning(f"⚠️ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Error calling server: [{type(e).__name__}: {str(e)}] [{retry_count}/{num_retries}]")
+                logger.warning(f"⚠️ [kbEvalClient] [{provider_name}] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Error calling server [{base_url}]: [{type(e).__name__}: {str(e)}] [{retry_count}/{num_retries}] [elapsed_time: {elapsed_time:.2f}s]")
                 if retry_count < num_retries:
                     sleep_seconds = initial_retry_interval ** retry_count
-                    logger.info(f"🔄 [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Retrying in {sleep_seconds} seconds... ({retry_count}/{num_retries})") # no emoji
+                    logger.info(f"🔄 [kbEvalClient] [{provider_name}] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Retrying in {sleep_seconds} seconds... ({retry_count}/{num_retries}) [elapsed_time: {elapsed_time:.2f}s]") # no emoji
                     # exponential backoff
                     await asyncio.sleep(sleep_seconds)
                     continue
                 else:
                     # add error emoji to beginning and end of the string
-                    logger.error(f"❌ [kbEvalClient] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Failed after {retry_count} retries")
+                    logger.error(f"❌ [kbEvalClient] [{provider_name}] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Failed after {retry_count} retries")
                     return None
 
 async def main():

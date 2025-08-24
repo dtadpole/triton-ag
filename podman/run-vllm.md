@@ -7,6 +7,7 @@ cd ~/.trainer
     --data-parallel-size 4 \
     --port 8091 --host 0.0.0.0 
     --quantization fp8 \
+    --enforce-eager \
 
 H100_96G (4 GPUs)
 
@@ -30,8 +31,8 @@ export CUDA_VISIBLE_DEVICES=4,5,6,7
     --max_log_len 0 --max_num_seqs 128 \
     --enable_prefix_caching \
     --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
-    --return-tokens-as-token-ids \
-    --enforce-eager 
+    --return-tokens-as-token-ids
+
 
 A100_40G:
 

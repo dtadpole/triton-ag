@@ -15,7 +15,7 @@ import requests
 import duckdb
 from pathlib import Path
 from transformers import AutoTokenizer
-from inferenceClient import InferenceClient, InferenceClientConfig, load_inference_client_config
+from inferenceClient import InferenceClient
 from inferenceCustomClient import InferenceCustomClient
 from logger import logger
 from kbEvalClient import KbEvalClient
@@ -33,7 +33,7 @@ class ComposerClient:
     def __init__(
         self,
         input_tag: str,
-        inference_client_config: InferenceClientConfig,
+        model_name: str,
         module_file: str = "inference/codeGenEval.module.yaml",
         prompt_file: str = "inference/triton.prompt.yaml",
         example_file: str = "inference/triton.example.yaml",
@@ -47,24 +47,22 @@ class ComposerClient:
         self.queue = asyncio.Queue()
         self.duckdbClient = DuckDBClient()
         self.recorder = Recorder()
-        self.kbEvalClient = KbEvalClient()
         self.statsClient = StatsClient()
         self.codeExtractor = CodeExtractor()
         self.configInterpreter = ConfigInterpreter()
-        self.inference_client_config = inference_client_config
-        self.inferenceClient = InferenceClient(config=self.inference_client_config)
-        self.provider_name = self.inference_client_config.provider.provider_name
-        self.model_name = self.inference_client_config.model.model_name
+        self.inferenceClient = InferenceClient(model_name=model_name)
+        self.logpClient = InferenceCustomClient()
+        self.kbEvalClient = KbEvalClient()
+        self.model_name = self.inferenceClient.model_name
+        self.model_tag = self.model_name
         self.tokenizer = self.inferenceClient.tokenizer
-        self.model_tag = self.inferenceClient.model_tag
-        self.inferenceCustomClient = InferenceCustomClient(provider_name=self.custom_provider)
         self.output_dir = self._get_output_dir(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.module_file = module_file
         self.prompt_file = prompt_file
+        self.example_file = example_file
         self.module_config = yaml.safe_load(open(module_file, 'r')).get('module', {})
         self.prompt_config = yaml.safe_load(open(prompt_file, 'r')).get('prompts', {})
-        self.example_file = example_file
         self.example_config = yaml.safe_load(open(example_file, 'r')).get('examples', {})
         self.context_vars = {
             # built-in context vars
@@ -72,6 +70,7 @@ class ComposerClient:
             "os": os,
             "json": json,
             "yaml": yaml,
+            "random": random,
             "stats_dir": os.path.expanduser(stats_dir),
             "__runtime_start_time__": datetime.now().strftime("%Y%m%d_%H%M%S"),
         }
@@ -265,8 +264,13 @@ class ComposerClient:
                     continue
 
                 # start processing the worker config, create a new context_vars dictionary
+                # print("json.dumps(item):", json.dumps(item, indent=4))
+                proc_id = item['context'].get('proc_id')
                 context_vars = self.context_vars | {
                     "__input__": item,
+                    "worker_name": worker_name,
+                    "worker_id": f"{worker_id:02d}",
+                    "proc_id": f"{proc_id if proc_id is not None else -random.randint(1, 99):02d}",
                 } | item # add the input variables to the context variables
 
                 success = await self.configInterpreter.execute(
@@ -300,23 +304,16 @@ async def run_inference_block(block: InferenceBlock, use_global_registry: bool =
     Run one batch of code generation and evaluation.
     """
     try:
-        config = load_inference_client_config(
-            provider_name=block.vllm_providers[0],
-            model_short_name=block.model_name,
-        )
-
         # override the model name
         # if block.model_override:
         #     config.model.model_name = block.model_override
 
         # start running the block
-        logger.info(f"🔍 [Composer] [{block.input_tag}] Starting block...")
+        logger.info(f"🔍 [Inference Composer] [{block.prefix_tag}] [{block.input_tag}] Starting block...")
 
         composerClient = ComposerClient(
             input_tag=block.input_tag,
-            inference_client_config=config,
-            custom_provider=block.custom_provider,
-            model_override=block.model_override,
+            model_name=block.model_name,
             module_file=block.module_file,
             prompt_file=block.prompt_file,
             example_file=block.example_file,
@@ -393,18 +390,7 @@ async def main():
             block_json = await global_reg_client.dequeue(queue_name)
             # convert the block_json to a ComposerBlock object
             block = InferenceBlock(**block_json)
-            # process the model override
-            if "codeGen" in QUEUE_NAME: # a hack for now. TODO: fix this
-                if PROC_ID is None:
-                    error_msg = f"❌ [Composer] [{block.prefix_tag}] Unable to get PROC_ID to update model_override"
-                    logger.error(error_msg)
-                    raise Exception(error_msg)
-                model_override = await global_reg_client.get(f"{MODEL_OVERRIDE_KEY}")
-                if model_override:
-                    logger.info(f"🔍 [Composer] [{block.prefix_tag}] Using model override: [{model_override}]")
-                    block.model_override = model_override
-                    # update model_override in the global registry
-                    await global_reg_client.put(f"adapter.{queue_name}.model_override.{PROC_ID}", model_override)
+            block.context["proc_id"] = PROC_ID
         else:
             block = InferenceBlock(
                 name=args.name,
@@ -425,7 +411,7 @@ async def main():
                 example_file=args.example_file,
                 input_dir=args.input_dir,
                 output_dir=args.output_dir,
-                context=json.loads(args.context),
+                context=json.loads(args.context) if PROC_ID is None else json.loads(args.context) | {"proc_id": PROC_ID},
             )
         # run the block
         await run_inference_block(block)

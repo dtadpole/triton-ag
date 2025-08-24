@@ -17,8 +17,9 @@ VALID_TASK_TYPES = [
 ]
 
 class WorkflowClient:
-    def __init__(self, prefix_tag: str, config_path: str = "workflow.yaml"):
+    def __init__(self, prefix_tag: str, provider_name: str = "default", config_path: str = "workflow.yaml"):
         self.prefix_tag = prefix_tag
+        self.provider_name = provider_name
         self.config_path = config_path
         self.config = self._load_config(self.config_path)
         self.registry_config = self.config.get("registry", {})
@@ -29,7 +30,7 @@ class WorkflowClient:
                 error_msg = f"❌ [WorkflowClient] [{self.prefix_tag}] Prefix tag [{self.prefix_tag}] not found in workflow registry! Please check your [{config_path}] file."
                 logger.error(error_msg)
                 raise ValueError(error_msg)
-        self.client_config = self.config.get("client", {})
+        self.client_config = self.config.get("providers", {}).get(self.provider_name, {})
         self.host = self.client_config.get("host", "localhost")
         self.port = self.client_config.get("port", 8488)
         self.base_url = f"http://{self.host}:{self.port}"
@@ -296,12 +297,19 @@ class WorkflowClient:
             await self._enqueue_post_task(task_type, task_name, post_workitem, env_vars)
 
 if __name__ == "__main__":
-    client = WorkflowClient(prefix_tag="test")
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--prefix_tag", type=str, default="test")
+    parser.add_argument("--provider_name", type=str, default="default")
+    parser.add_argument("--queue_name", type=str, default="test.test.1")
+    args = parser.parse_args()
+
+    client = WorkflowClient(prefix_tag=args.prefix_tag, provider_name=args.provider_name)
     print(asyncio.run(client.get_queues()))
-    print(asyncio.run(client.enqueue("test", {"testKey1": "testValue1"})))
-    print(asyncio.run(client.enqueue("test", {"testKey2": "testValue2"})))
-    print(asyncio.run(client.qsize("test")))
-    print(asyncio.run(client.dequeue("test")))
-    print(asyncio.run(client.qsize("test")))
-    print(asyncio.run(client.dequeue("test")))
-    print(asyncio.run(client.qsize("test")))
+    print(asyncio.run(client.enqueue(args.queue_name, {"testKey1": "testValue1"})))
+    print(asyncio.run(client.enqueue(args.queue_name, {"testKey2": "testValue2"})))
+    print(asyncio.run(client.qsize(args.queue_name)))
+    print(asyncio.run(client.dequeue(args.queue_name)))
+    print(asyncio.run(client.qsize(args.queue_name)))
+    print(asyncio.run(client.dequeue(args.queue_name)))
+    print(asyncio.run(client.qsize(args.queue_name)))

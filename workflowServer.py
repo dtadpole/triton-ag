@@ -144,7 +144,7 @@ class WorkflowServer:
             if queue is None:
                 raise HTTPException(status_code=404, detail=f"Queue [{queue_name}] not found")
             # get timeout from config
-            timeout = self.config.get("fastapi", {}).get("dequeue_timeout", 5)
+            timeout = self.config.get("servers", {}).get("dequeue_timeout", 5)
             try:
                 item = await asyncio.wait_for(queue.get(), timeout=timeout)
                 logger.info(f"🎢 Dequeued item [{item}] from queue [{queue_name}]")
@@ -257,8 +257,9 @@ class WorkflowServer:
             # with open(port_file, "w") as f:
             #     f.write(str(listen_port))
 
+            default_config = self.config.get("servers", {}).get("default", {})
             hostname = socket.gethostname()
-            hostname_config = self.config.get("fastapi", {}).get(hostname, {})
+            hostname_config = self.config.get("servers", {}).get(hostname, default_config)
             host = hostname_config.get("host", "0.0.0.0")
             port = hostname_config.get("port", port)
             server = uvicorn.Server(uvicorn.Config(fastapi, host=host, port=port))
