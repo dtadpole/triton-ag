@@ -1,5 +1,5 @@
-from sync_lora_vllm import vllm_load_lora_adapters, vllm_unload_lora_adapters, vllm_get_unused_lora_adapters
-from sync_lora_logp import logp_load_lora_adapters, logp_unload_lora_adapters, logp_get_unused_lora_adapters
+from workflow.sync_lora_vllm import vllm_load_lora_adapters, vllm_unload_lora_adapters, vllm_get_unused_lora_adapters
+from workflow.sync_lora_logp import logp_load_lora_adapters, logp_unload_lora_adapters, logp_get_unused_lora_adapters
 
 MODEL_OVERRIDE_KEY = "adapter.model_override"
 
@@ -12,6 +12,7 @@ async def sync_lora_all(
     from logger import logger
     # sync vllm servers
     for vllm_provider in vllm_providers:
+        logger.info(f"🔍 Loading LoRA adapter: [{checkpoint_name}] to VLLM server [{vllm_provider}]")
         await vllm_load_lora_adapters(vllm_provider, checkpoint_name)
         logger.info(f"✅ Loaded LoRA adapter: [{checkpoint_name}] to VLLM server [{vllm_provider}]")
         # check unused vllm adapters
@@ -47,6 +48,7 @@ async def sync_lora_all(
         value=checkpoint_name,
     )
     logger.info(f"✅ Updated [{MODEL_OVERRIDE_KEY}] to [{checkpoint_name}]")
+    return True
 
 async def main():
     import argparse

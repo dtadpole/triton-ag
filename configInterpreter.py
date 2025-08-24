@@ -227,7 +227,7 @@ class ConfigInterpreter:
                 else:
                     log_method(result, context_vars)
         except Exception as e:
-            logger.warning(f"🔴 [_process_endpoint] Error processing logging: {log_config} [{type(e)}: {e}]")
+            logger.warning(f"🔴 [_process_endpoint] Error processing logging: {logging_config} [{type(e)}: {e}]")
 
 
     async def _process_returns(self, runtime: Any, result: Any, returns_config: dict, context_vars: dict) -> tuple[bool, Any]:
@@ -436,6 +436,7 @@ class ConfigInterpreter:
             except Exception as e:
                 # assume each step depend on each other, always break the steps if current step fails
                 logger.error(f"🔴 [_process_code] Error processing returns: [code_config={code_config}] [{type(e)}: {e}]")
+                logger.error(traceback.format_exc())
                 return False
 
         except Exception as e:
