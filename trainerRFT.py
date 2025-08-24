@@ -6,7 +6,7 @@ import asyncio
 import argparse
 from pydantic import BaseModel
 from engineBase import EngineBase, EngineConfig, TrainerStatus
-from trainerUtil import format_conversation
+from trainerUtil import format_conversation, make_checkpoint_callback
 from logger import logger
 from workflowUtil import TrainerBlock
 from configInterpreter import ConfigInterpreter
@@ -137,7 +137,7 @@ def rft_get_trainer(
 async def main():
     """Main function for RFT training"""
     parser = argparse.ArgumentParser(description="Train a model using RFTTrainer")
-    parser.add_argument("--name", type=str, default="rft.1")
+    parser.add_argument("--queue_name", type=str, default="rft.1")
     parser.add_argument("--engine", type=str, default="unsloth")
     parser.add_argument("--engine_config", type=str, default="engineBase.yaml")
     parser.add_argument("--prefix_tag", type=str, default="auto.trainer.rft")
@@ -159,7 +159,7 @@ async def main():
     engine = EngineBase.create_engine(args.prefix_tag, engine_config) # no status for testing
     trainer = rft_get_trainer(engine, args.prefix_tag, args.engine_config, args.rft_config, args.module_file)
     rft_block = TrainerBlock(
-        name=args.name,
+        queue_name=args.queue_name,
         prefix_tag=args.prefix_tag,
         epoch_id=args.epoch_id,
         block_id=args.block_id,
@@ -170,12 +170,13 @@ async def main():
     rft_block.input_dir = os.path.expanduser(rft_block.input_dir)
     rft_block.output_dir = os.path.expanduser(rft_block.output_dir)
 
-    sync_client = WorkflowSync(prefix_tag=args.prefix_tag, queue_name='sync.sync.1')
+    callback_func = make_checkpoint_callback(
+        prefix_tag=args.prefix_tag,
+        trainer_block=rft_block,
+        workflow_provider="default",
+    )
 
-    loop = asyncio.get_event_loop()
-    # await loop.run_in_executor(None, trainer.train_rft_block, rft_block, rsync_client.enqueue)
-    # asyncio.run_coroutine_threadsafe(trainer.train_rft_block(rft_block, rsync_client.enqueue), loop)
-    await trainer.train_rft_block(rft_block, sync_client.enqueue)
+    await trainer.train_rft_block(rft_block, callback_func)
     await asyncio.sleep(1)
 
 if __name__ == "__main__":

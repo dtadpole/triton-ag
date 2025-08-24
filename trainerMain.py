@@ -7,14 +7,14 @@ import httpx
 import yaml
 import traceback
 import os
-from workflowUtil import MODEL_OVERRIDE_KEY, TrainerGRPOBlock, TrainerRFTBlock, get_prefix_tag
+from workflowUtil import MODEL_OVERRIDE_KEY, TrainerBlock, get_prefix_tag
 from logger import logger
 from workflowServer import WorkflowServer
 from workflowClient import WorkflowClient
+from trainerUtil import make_checkpoint_callback
 from engineBase import EngineConfig, EngineBase, TrainerStatus
 from trainerRFT import RFTConfig, rft_get_trainer
 from trainerGRPO import GRPOConfig, grpo_get_trainer
-from workflowRsync import RsyncClient
 
 
 ALPHA = 1.1
@@ -23,7 +23,6 @@ class TrainerMain:
     def __init__(self, engine: EngineBase, prefix_tag: str):
         self.engine = engine
         self.prefix_tag = prefix_tag
-        self.rsync_client = RsyncClient(prefix_tag)
         self.trainer_prefix_tag = get_prefix_tag(prefix_tag)
         self.reg_client = WorkflowClient(prefix_tag=self.trainer_prefix_tag)
 
@@ -70,7 +69,7 @@ class TrainerMain:
                     if rft_item['prefix_tag'] != self.trainer_prefix_tag:
                         logger.error(f"❌ [trainerMain] Skipping item with prefix: {rft_item['prefix_tag']}")
                         continue
-                    rft_block = TrainerRFTBlock(**rft_item)
+                    rft_block = TrainerBlock(**rft_item)
                     logger.info(f"🧊 [trainerMain] Training RFT block: {rft_block.input_tag}")
                     # update config before running
                     engine_config = EngineConfig.from_yaml(engine_config_file, override_yaml_path=rft_config_file)
@@ -80,14 +79,19 @@ class TrainerMain:
                     logger.info(f"🔍 [trainerMain] Base config: {rft_trainer.engine.config.model_dump_json()}")
                     logger.info(f"🔍 [trainerMain] RFT config: {rft_trainer.rft_config.model_dump_json()}")
                     # run in executor to avoid blocking the event loop
-                    await rft_trainer.train_rft_block(rft_block, self.rsync_client.enqueue)
+                    callback_func = make_checkpoint_callback(
+                        prefix_tag=self.trainer_prefix_tag,
+                        trainer_block=rft_block,
+                        workflow_provider="default",
+                    )
+                    await rft_trainer.train_rft_block(rft_block, callback_func)
 
                 if random.random() < grpo_prob:
                     grpo_item = await self.reg_client.dequeue(queue_name=GRPO_QUEUE_NAME)
                     if grpo_item['prefix_tag'] != self.trainer_prefix_tag:
                         logger.error(f"❌ [trainerMain] Skipping item with prefix: {grpo_item['prefix_tag']}")
                         continue
-                    grpo_block = TrainerGRPOBlock(**grpo_item)
+                    grpo_block = TrainerBlock(**grpo_item)
                     logger.info(f"🧊 [trainerMain] Training GRPO block: {grpo_block.input_tag}")
                     # update config before running
                     engine_config = EngineConfig.from_yaml(engine_config_file, override_yaml_path=grpo_config_file)
@@ -97,7 +101,12 @@ class TrainerMain:
                     logger.info(f"🔍 [trainerMain] Base config: {grpo_trainer.engine.config.model_dump_json()}")
                     logger.info(f"🔍 [trainerMain] GRPO config: {grpo_trainer.grpo_config.model_dump_json()}")
                     # run in executor to avoid blocking the event loop
-                    await grpo_trainer.train_grpo_block(grpo_block, self.rsync_client.enqueue)
+                    callback_func = make_checkpoint_callback(
+                        prefix_tag=self.trainer_prefix_tag,
+                        trainer_block=grpo_block,
+                        workflow_provider="default",
+                    )
+                    await grpo_trainer.train_grpo_block(grpo_block, callback_func)
 
             except Exception as e:
                 logger.error(f"❌ [trainerMain] Error: [{type(e)}: {e}]")

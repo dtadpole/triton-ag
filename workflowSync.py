@@ -7,10 +7,10 @@ import yaml
 from logger import logger
 from workflowClient import WorkflowClient
 from configEndpoints import VLLMClient
-from workflowUtil import MODEL_OVERRIDE_KEY
+from workflowUtil import MODEL_OVERRIDE_KEY, TrainerBlock
 from workflowClient import WorkflowClient
 from configInterpreter import ConfigInterpreter
-from trainerUtil import read_stream
+from trainerUtil import make_checkpoint_callback
 
 LAST_MODIFIED_WITHIN = 7200
 
@@ -49,19 +49,6 @@ class WorkflowSync:
             config = yaml.safe_load(f)
         return config
 
-    def enqueue(self, checkpoint_path: str):
-        """Enqueue checkpoint path to the rsync_queue"""
-        logger.info(f"📞 [RsyncClient] Enqueue path: [{checkpoint_path}] ...")
-        checkpoint_name = '/'.join(str(os.path.expanduser(checkpoint_path)).split('/')[-2:])
-        logger.info(f"📞 [RsyncClient] Enqueue name: [{checkpoint_name}]")
-        loop = asyncio.get_event_loop()
-        # create task to enqueue
-        task = asyncio.create_task(
-            self.workflowClient.enqueue(self.queue_name, {"checkpoint_name": checkpoint_name})
-        )
-        # run task in background
-        logger.info(f"📞 [RsyncClient] Enqueue name: [{checkpoint_name}] done.")
-
     async def handle_sync_task(self, checkpoint_name: str, context_vars: dict = {}):
         sync_context_vars = self.context_vars | context_vars | {
             "checkpoint_name": checkpoint_name,
@@ -97,8 +84,9 @@ class WorkflowSync:
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prefix_tag", type=str, default='TC_0.1.0_32B.b') # "auto.workflow.sync")
-    parser.add_argument("--module_file", type=str, default="workflow/sync.module.vllm+logps.yaml")
+    parser.add_argument("--workflow_provider", type=str, default="default")
+    parser.add_argument("--prefix_tag", type=str, default='TC_0.1.0_32B.c') # "auto.workflow.sync")
+    parser.add_argument("--module_file", type=str, default="workflow/sync.module.vllm+logp.yaml")
     parser.add_argument("--queue_name", type=str, default="sync.sync.1")
     parser.add_argument("--manual_sync_checkpoint", type=str, default='TC_0.1.0_32B.b/checkpoint-1500')
     parser.add_argument("--manual_sync_context", type=str, default="""{
@@ -106,21 +94,41 @@ async def main():
         "custom_provider": "h8_1",
         "vllm_host": "devvm3317.eag0.facebook.com"
     }""")
+    parser.add_argument("--test_callback", action="store_true")
+    parser.add_argument("--checkpoint_path", type=str, default="~/.trainer/TC_0.1.0_32B.c/checkpoint-66")
     args = parser.parse_args()
 
     if args.prefix_tag == 'auto':
         logger.error(f"❌ [RsyncClient] --prefix_tag is required!")
         return
 
-    sync_client = WorkflowSync(args.prefix_tag, args.queue_name, module_file=args.module_file)
-    if args.manual_sync_checkpoint:
-        manual_sync_context = json.loads(args.manual_sync_context) | {
-            "prefix_tag": args.prefix_tag,
-            "checkpoint_name": args.manual_sync_checkpoint,
-        }
-        await sync_client.handle_sync_task(args.manual_sync_checkpoint, manual_sync_context)
+    if args.test_callback:
+        callback_func = make_checkpoint_callback(
+            prefix_tag=args.prefix_tag,
+            trainer_block=TrainerBlock(
+                queue_name="grpo.1",
+                prefix_tag=args.prefix_tag,
+                epoch_id=0,
+                block_id=0,
+                input_tag=f"{args.prefix_tag}_000_00",
+            ),
+            workflow_provider=args.workflow_provider,
+            env_vars=json.loads(args.manual_sync_context),
+        )
+        checkpoint_path = os.path.expanduser(args.checkpoint_path)
+        # callback_func is a sync function
+        task = callback_func(checkpoint_path)
+        await task
     else:
-        await sync_client.run()
+        sync_client = WorkflowSync(args.prefix_tag, args.queue_name, module_file=args.module_file)
+        if args.manual_sync_checkpoint:
+            manual_sync_context = json.loads(args.manual_sync_context) | {
+                "prefix_tag": args.prefix_tag,
+                "checkpoint_name": args.manual_sync_checkpoint,
+            }
+            await sync_client.handle_sync_task(args.manual_sync_checkpoint, manual_sync_context)
+        else:
+            await sync_client.run()
 
 if __name__ == "__main__":
     asyncio.run(main())

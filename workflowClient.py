@@ -334,6 +334,7 @@ class WorkflowClient:
         if queue_type is None or queue_type not in VALID_TASK_TYPES:
             raise ValueError(f"Task [{queue_name}] has invalid queue type: [{queue_type}] in [{task_config}]")
         # evaluate everything in the task_config
+        # logger.info(f"🔍 [WorkflowClient] [{self.prefix_tag}] [{queue_type}.{queue_name}] Task config: [{task_config}] Env vars: [{env_vars}]")
         task_data = deep_format(task_config, env_vars)
         # enqueue the task
         full_queue_name = f"{queue_type}.{queue_name}"
@@ -361,9 +362,9 @@ class WorkflowClient:
         queue_type: str,
         queue_name: str,
         block: BaseModel,
-        context: dict = {},
+        env_vars: dict = {},
     ):
-        logger.info(f"⏳ [WorkflowClient] [{self.prefix_tag}] [{queue_type}.{queue_name}] {callback_kind}. Block: [{block.model_dump()}] Context: [{context}]")
+        logger.info(f"⏳ [WorkflowClient] [{self.prefix_tag}] [{queue_type}.{queue_name}] {callback_kind}. Block: [{block.model_dump()}] Env vars: [{env_vars}]")
         env_vars = {
             "queue_type": queue_type,
             "queue_name": queue_name,
@@ -372,7 +373,7 @@ class WorkflowClient:
             "block_id": block.block_id,
             "run_tag": self._get_run_tag(block.epoch_id, block.block_id),
             "block": block.model_dump(),
-            "context": context,
+            "env_vars": env_vars,
         }
         workflow_config = await self.get_workflow_config(self.prefix_tag)
         if workflow_config is None:
@@ -402,12 +403,6 @@ async def main():
     args = parser.parse_args()
 
     client = WorkflowClient(prefix_tag=args.prefix_tag, provider_name=args.provider_name)
-    print(await client.get_queues())
-    print(await client.enqueue(args.queue_name, {"testKey1": "testValue1"}))
-    print(await client.enqueue(args.queue_name, {"testKey2": "testValue2"}))
-    print(await client.qsize(args.queue_name))
-    print(await client.dequeue(args.queue_name))
-    print(await client.qsize(args.queue_name))
 
     if args.test_callback:
         block = InferenceBlock(
@@ -429,6 +424,13 @@ async def main():
             block=block,
             context={},
         )
+    else:
+        print(await client.get_queues())
+        print(await client.enqueue(args.queue_name, {"testKey1": "testValue1"}))
+        print(await client.enqueue(args.queue_name, {"testKey2": "testValue2"}))
+        print(await client.qsize(args.queue_name))
+        print(await client.dequeue(args.queue_name))
+        print(await client.qsize(args.queue_name))
 
 if __name__ == "__main__":
     asyncio.run(main())

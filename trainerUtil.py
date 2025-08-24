@@ -2,8 +2,10 @@ import json
 import yaml
 import argparse
 import torch
+from pydantic import BaseModel
 from transformers import AutoTokenizer
 from logger import logger
+from workflowUtil import TrainerBlock
 from typing import List, Dict, Any, Union, Callable
 import warnings
 import asyncio
@@ -26,6 +28,37 @@ async def read_stream(stream, prefix: str, is_error: bool = False):
             logger.error(f"[{prefix}] {output}")
         else:
             logger.info(f"[{prefix}] {output}")
+
+def make_checkpoint_callback(
+    prefix_tag: str,
+    trainer_block: TrainerBlock,
+    workflow_provider: str = "default",
+    env_vars: dict = {},
+):
+    """Make a callback function for the trainer"""
+    def callback_func(checkpoint_path: str):
+        """Callback function for the trainer"""
+        from workflowClient import WorkflowClient
+        workflow_client = WorkflowClient(prefix_tag=prefix_tag, provider_name=workflow_provider)
+        logger.info(f"📞 [SyncClient] Enqueue path: [{checkpoint_path}] ...")
+        checkpoint_name = '/'.join(str(os.path.expanduser(checkpoint_path)).split('/')[-2:])
+        logger.info(f"📞 [SyncClient] Enqueue name: [{checkpoint_name}] ...")
+        # create task to enqueue
+        loop = asyncio.get_event_loop()
+        task = loop.create_task(
+            workflow_client.callback(
+                callback_kind="checkpoint",
+                queue_type=trainer_block.queue_type,
+                queue_name=trainer_block.queue_name,
+                block=trainer_block,
+                env_vars=env_vars | {"checkpoint_name": checkpoint_name },
+            )
+        )
+        # run task in background
+        logger.info(f"📞 [SyncClient] Enqueue name: [{checkpoint_name}] done.")
+        return task
+    # return the callback function
+    return callback_func
 
 def format_conversation(messages: List[Dict[str, Any]],
                         tokenizer: AutoTokenizer,
