@@ -38,7 +38,7 @@ KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
 
 # Create app
 app = FastAPI()
-app.add_middleware(GZipMiddleware, minimum_size=512, compresslevel=5)
+# app.add_middleware(GZipMiddleware, minimum_size=512, compresslevel=5)
 app.add_middleware(GunzipRequestMiddleware)  # now all routes accept gzip bodies
 
 parallel_request_counter = 0
