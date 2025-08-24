@@ -199,15 +199,14 @@ class KbEvalClient:
                     "generated_code": generated_code,
                     "code_type": code_type,
                 }
-                logger.info(f"🔍 [kbEvalClient] [{provider_name}] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Sending request to server [{base_url}] with json body: {json.dumps(json_body, indent=4)}")
                 body = gzip.compress(json.dumps(json_body).encode("utf-8"))
                 async with httpx.AsyncClient(
                     limits=limits,
                     headers={
                         "Connection": "close",
-                        "Accept-Encoding": "gzip",
+                        "Content-Encoding": "gzip",
                         "Authorization": f"Bearer {api_key}",
-                    }, # disable gzip
+                    },
                     http2=False, # disable http2
                     trust_env=False, # disable trust env
                     timeout=timeout,
@@ -224,7 +223,6 @@ class KbEvalClient:
                         elapsed_time = time.time() - start_time
                         sleep_seconds = self.initial_retry_interval ** retry_count
                         if retry_count < self.num_retries:
-                            # retry_count -= 0.5 # reduce retry count by 0.5 to avoid infinite loop
                             logger.warning(f"⚠️ [kbEvalClient] [{provider_name}] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Retriable error, retrying... [{retry_count}/{self.num_retries}] in [{sleep_seconds}s] [elapsed_time: {elapsed_time:.2f}s]")
                             await asyncio.sleep(sleep_seconds)
                             continue
