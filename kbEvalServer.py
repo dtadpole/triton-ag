@@ -161,6 +161,14 @@ async def get_pending_task_count():
     return len(set(all_tasks))
 
 
+@app.middleware("http")
+async def log_preheader_crashes(request, call_next):
+    try:
+        return await call_next(request)
+    except Exception:
+        logger.error("❌ Crashed before sending headers")
+        raise
+
 @app.get("/stats")
 async def stats():
     global parallel_request_counter

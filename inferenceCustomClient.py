@@ -77,9 +77,16 @@ class InferenceCustomClient:
                 initial_retry_interval = provider_config.get('initial_retry_interval', 3)
                 timeout = provider_config.get('timeout', 300)
 
-                limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
+                limits = httpx.Limits(
+                    max_keepalive_connections=0,
+                    max_connections=100,
+                    keepalive_expiry=0,
+                )
                 async with httpx.AsyncClient(
-                    limits=limits, headers={"Connection": "close"}, http2=False
+                    limits=limits,
+                    headers={"Connection": "close"},
+                    http2=False,
+                    trust_env=False,
                 ) as client:
                     response = await client.get(
                         f"{base_url}/models",
@@ -129,9 +136,16 @@ class InferenceCustomClient:
                 initial_retry_interval = provider_config.get('initial_retry_interval', 3)
                 timeout = provider_config.get('timeout', 300)
 
-                limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
+                limits = httpx.Limits(
+                    max_keepalive_connections=0,
+                    max_connections=100,
+                    keepalive_expiry=0,
+                )
                 async with httpx.AsyncClient(
-                    limits=limits, headers={"Connection": "close"}, http2=False
+                    limits=limits,
+                    headers={"Connection": "close"},
+                    http2=False,
+                    trust_env=False,
                 ) as client:
                     response = await client.post(
                         f"{base_url}/load_lora_adapter",
@@ -185,9 +199,16 @@ class InferenceCustomClient:
                 initial_retry_interval = provider_config.get('initial_retry_interval', 3)
                 timeout = provider_config.get('timeout', 300)
 
-                limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
+                limits = httpx.Limits(
+                    max_keepalive_connections=0,
+                    max_connections=100,
+                    keepalive_expiry=0,
+                )
                 async with httpx.AsyncClient(
-                    limits=limits, headers={"Connection": "close"}, http2=False
+                    limits=limits,
+                    headers={"Connection": "close"},
+                    http2=False,
+                    trust_env=False,
                 ) as client:
                     response = await client.post(
                         f"{base_url}/unload_lora_adapter",
@@ -240,9 +261,16 @@ class InferenceCustomClient:
                 initial_retry_interval = provider_config.get('initial_retry_interval', 3)
                 timeout = provider_config.get('timeout', 300)
 
-                limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
+                limits = httpx.Limits(
+                    max_keepalive_connections=0,
+                    max_connections=100,
+                    keepalive_expiry=0,
+                )
                 async with httpx.AsyncClient(
-                    limits=limits, headers={"Connection": "close"}, http2=False
+                    limits=limits,
+                    headers={"Connection": "close"},
+                    http2=False,
+                    trust_env=False,
                 ) as client:
                     response = await client.post(
                         f"{base_url}/logps",

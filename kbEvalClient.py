@@ -96,8 +96,17 @@ class KbEvalClient:
                 initial_retry_interval = provider_config.get('initial_retry_interval', 3)
                 timeout = provider_config.get('timeout', 300)
 
-                limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
-                async with httpx.AsyncClient(limits=limits, headers={"Connection": "close"}, http2=False) as client:
+                limits = httpx.Limits(
+                    max_keepalive_connections=0,
+                    max_connections=100,
+                    keepalive_expiry=0,
+                )
+                async with httpx.AsyncClient(
+                    limits=limits,
+                    headers={"Connection": "close", "Accept-Encoding": "identity"}, # disable gzip
+                    http2=False, # disable http2
+                    trust_env=False, # disable trust env
+                ) as client:
                     response = await client.post(
                         f"{base_url}/kb_eval_ref",
                         json={
@@ -173,8 +182,17 @@ class KbEvalClient:
                 initial_retry_interval = provider_config.get('initial_retry_interval', 3)
                 timeout = provider_config.get('timeout', 300)
 
-                limits = httpx.Limits(max_keepalive_connections=0, keepalive_expiry=0)
-                async with httpx.AsyncClient(limits=limits, headers={"Connection": "close"}, http2=False) as client:
+                limits = httpx.Limits(
+                    max_keepalive_connections=0,
+                    max_connections=100,
+                    keepalive_expiry=0,
+                )
+                async with httpx.AsyncClient(
+                    limits=limits,
+                    headers={"Connection": "close", "Accept-Encoding": "identity"}, # disable gzip
+                    http2=False, # disable http2
+                    trust_env=False, # disable trust env
+                ) as client:
                     response = await client.post(
                         f"{base_url}/kb_eval",
                         json={

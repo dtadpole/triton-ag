@@ -3,7 +3,7 @@ import asyncio
 import httpx
 from typing import Any, Dict, Optional
 from logger import logger
-from workflowUtil import InferenceBlock, WorkflowSyncBlock
+from workflowUtil import InferenceBlock, TrainerBlock, WorkflowSyncBlock
 from pydantic import BaseModel
 
 TASK_TYPE_INFERENCE = "inference"
@@ -66,7 +66,17 @@ class WorkflowClient:
         retry_count = 0
         while retry_count < self.retries:
             try:
-                async with httpx.AsyncClient() as client:
+                limits = httpx.Limits(
+                    max_keepalive_connections=0,
+                    max_connections=100,
+                    keepalive_expiry=0,
+                )
+                async with httpx.AsyncClient(
+                    limits=limits,
+                    headers={"Connection": "close"},
+                    http2=False,
+                    trust_env=False,
+                ) as client:
                     response = await client.get(url, timeout=self.timeout)
                     response.raise_for_status()
                     return response.json()
@@ -85,7 +95,17 @@ class WorkflowClient:
         retry_count = 0
         while retry_count < self.retries:
             try:
-                async with httpx.AsyncClient() as client:
+                limits = httpx.Limits(
+                    max_keepalive_connections=0,
+                    max_connections=100,
+                    keepalive_expiry=0,
+                )
+                async with httpx.AsyncClient(
+                    limits=limits,
+                    headers={"Connection": "close"},
+                    http2=False,
+                    trust_env=False,
+                ) as client:
                     response = await client.get(url, timeout=self.timeout)
                     response.raise_for_status()
                     return response.json()
@@ -106,7 +126,17 @@ class WorkflowClient:
         retry_count = 0
         while retry_count < self.retries:
             try:
-                async with httpx.AsyncClient() as client:
+                limits = httpx.Limits(
+                    max_keepalive_connections=0,
+                    max_connections=100,
+                    keepalive_expiry=0,
+                )
+                async with httpx.AsyncClient(
+                    limits=limits,
+                    headers={"Connection": "close"},
+                    http2=False,
+                    trust_env=False,
+                ) as client:
                     response = await client.get(url, timeout=self.timeout)  
                     response.raise_for_status()
                     return response.json()
@@ -125,7 +155,17 @@ class WorkflowClient:
         retry_count = 0
         while retry_count < self.retries:
             try:
-                async with httpx.AsyncClient() as client:
+                limits = httpx.Limits(
+                    max_keepalive_connections=0,
+                    max_connections=100,
+                    keepalive_expiry=0,
+                )
+                async with httpx.AsyncClient(
+                    limits=limits,
+                    headers={"Connection": "close"},
+                    http2=False,
+                    trust_env=False,
+                ) as client:
                     response = await client.post(url, json={"value": value}, timeout=self.timeout)
                     response.raise_for_status()
                     return response.json()
@@ -144,7 +184,17 @@ class WorkflowClient:
         retry_count = 0
         while retry_count < self.retries:
             try:
-                async with httpx.AsyncClient() as client:
+                limits = httpx.Limits(
+                    max_keepalive_connections=0,
+                    max_connections=100,
+                    keepalive_expiry=0,
+                )
+                async with httpx.AsyncClient(
+                    limits=limits,
+                    headers={"Connection": "close"},
+                    http2=False,
+                    trust_env=False,
+                ) as client:
                     response = await client.get(url, timeout=self.timeout)
                     response.raise_for_status()
                     return response.json()
@@ -163,7 +213,17 @@ class WorkflowClient:
         while retry_count < self.retries:
             try:
                 url = f"{self.base_url}/queue/enqueue/{self.prefix_tag}/{queue_name}"
-                async with httpx.AsyncClient() as client:
+                limits = httpx.Limits(
+                    max_keepalive_connections=0,
+                    max_connections=100,
+                    keepalive_expiry=0,
+                )
+                async with httpx.AsyncClient(
+                    limits=limits,
+                    headers={"Connection": "close"},
+                    http2=False,
+                    trust_env=False,
+                ) as client:
                     response = await client.post(url, json={
                         "item": item,
                         "create_queue": create_queue
@@ -184,7 +244,17 @@ class WorkflowClient:
         while retry_count < self.retries:
             try:
                 url = f"{self.base_url}/queue/dequeue/{self.prefix_tag}/{queue_name}"
-                async with httpx.AsyncClient() as client:
+                limits = httpx.Limits(
+                    max_keepalive_connections=0,
+                    max_connections=100,
+                    keepalive_expiry=0,
+                )
+                async with httpx.AsyncClient(
+                    limits=limits,
+                    headers={"Connection": "close"},
+                    http2=False,
+                    trust_env=False,
+                ) as client:
                     response = await client.get(url, timeout=self.timeout)
                     response.raise_for_status()
                     return response.json()
@@ -202,7 +272,17 @@ class WorkflowClient:
         while retry_count < self.retries:
             try:
                 url = f"{self.base_url}/queue/qsize/{self.prefix_tag}/{queue_name}"
-                async with httpx.AsyncClient() as client:
+                limits = httpx.Limits(
+                    max_keepalive_connections=0,
+                    max_connections=100,
+                    keepalive_expiry=0,
+                )
+                async with httpx.AsyncClient(
+                    limits=limits,
+                    headers={"Connection": "close"},
+                    http2=False,
+                    trust_env=False,
+                ) as client:
                     response = await client.get(url, timeout=self.timeout)
                     response.raise_for_status()
                     return response.json()
@@ -220,7 +300,17 @@ class WorkflowClient:
         while retry_count < self.retries:
             try:
                 url = f"{self.base_url}/queue/peek/{self.prefix_tag}/{queue_name}"
-                async with httpx.AsyncClient() as client:
+                limits = httpx.Limits(
+                    max_keepalive_connections=0,
+                    max_connections=100,
+                    keepalive_expiry=0,
+                )
+                async with httpx.AsyncClient(
+                    limits=limits,
+                    headers={"Connection": "close"},
+                    http2=False,
+                    trust_env=False,
+                ) as client:
                     response = await client.get(url, timeout=self.timeout)
                     response.raise_for_status()
                     return response.json()
@@ -250,18 +340,11 @@ class WorkflowClient:
         # enqueue the task
         queue_name = f"{task_type}.{task_name}"
         if task_type == TASK_TYPE_INFERENCE:
-            inferenceBlock = ComposerBlock(**(self._get_task_default(task_type, task_name) | task_config))
+            inferenceBlock = InferenceBlock(**(self._get_task_default(task_type, task_name) | task_config))
             await self.enqueue(queue_name, inferenceBlock.model_dump(), create_queue=True)
             logger.info(f"🎢 [GlobalWorkflow] [{self.prefix_tag}] Enqueued to [{task_type}:{task_name}], content: [{inferenceBlock.model_dump()}]")
         elif task_type == TASK_TYPE_TRAINER:
-            if task_name.startswith("grpo"):
-                trainerBlock = TrainerGRPOBlock(**(self._get_task_default(task_type, task_name) | task_config))
-            elif task_name.startswith("sft"):
-                trainerBlock = TrainerSFTBlock(**(self._get_task_default(task_type, task_name) | task_config))
-            elif task_name.startswith("rft"):
-                trainerBlock = TrainerRFTBlock(**(self._get_task_default(task_type, task_name) | task_config))
-            else:
-                raise ValueError(f"Task [{task_name}] has unknown task type: [{task_type}]")
+            trainerBlock = TrainerBlock(**(self._get_task_default(task_type, task_name) | task_config))
             await self.enqueue(queue_name, trainerBlock.model_dump(), create_queue=True)
             logger.info(f"🎢 [GlobalWorkflow] [{self.prefix_tag}] Enqueued to [{task_type}:{task_name}], content: [{trainerBlock.model_dump()}]")
         elif task_type == TASK_TYPE_SYNC:
