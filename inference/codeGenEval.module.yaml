@@ -51,7 +51,7 @@ module:
               returns:
                 logging:
                   method: "log_enqueue"
-            - type: iterator
+            - type: iterator  ## Potential efficiency improvement, add the num_generations to the openai interface and do batch generation
               collection: "`range(block.num_generations)`"
               context_vars:
                 gen_tag: "`f'gen_{__item__:02d}'`" # gen_tag is the generation tag
@@ -68,13 +68,13 @@ module:
                       gen_tag: "`gen_tag`" # gen_tag is the generation tag
                       reference_code: "`row.reference_code`" # reference code
                       code_type: "`__runtime__.get_prompt_code_type(__context__)`"
-                      output_dir: "`os.path.expanduser(block.output_dir)`" # output_dir is the output directory 
+                      output_dir: "`os.path.expanduser(block.output_dir)`" # output_dir is the output directory
                       num_turns_per_generation: "`block.num_turns_per_generation`" # number of turns per generation
                       model_override: "`block.model_override`" # model override
                   returns:
                     logging:
                       method: "log_enqueue"
-  
+
   # queue worker reads from the queue and executes the worker
   queue_worker:
     # reference worker
@@ -155,7 +155,7 @@ module:
                   "model_override": "`model_override`"
                 messages: |
                   `[
-                    {"role": "system", "content": __runtime__.get_system_prompt(__context__)}, 
+                    {"role": "system", "content": __runtime__.get_system_prompt(__context__)},
                     {"role": "user", "content": __runtime__.get_user_prompt(__context__)}
                   ] if conversation is None else conversation['messages'][:-1] + [
                     {"role": "assistant", "content": f"```python\n{generated_code}\n```"}
