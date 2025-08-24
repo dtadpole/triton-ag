@@ -130,22 +130,35 @@ def grpo_group_to_dataset(
         logp_server_input_ids = torch.tensor(result["logp_server_input_ids"])
         logp_server_attention_mask = torch.ones_like(logp_server_input_ids)
         logp_server_logps = result["logp_server_logps"]
-        # check if vllm and logp server are aligned
-        min_prompt_ids_len = min(len(vllm_prompt_ids), len(logp_server_prompt_ids))
-        # calculate the number of tokens that are different
-        diff_count_prompt_ids = sum(1 for i, j in zip(vllm_prompt_ids[:min_prompt_ids_len], logp_server_prompt_ids[:min_prompt_ids_len]) if i != j)
+        # check if the prompt ids length are different
+        if len(vllm_prompt_ids) != len(logp_server_prompt_ids):
+            logger.error(f"len(vllm_prompt_ids) [{len(vllm_prompt_ids)}] != len(logp_server_prompt_ids): [{len(logp_server_prompt_ids)}]")
+            continue # skip the group if the prompt ids length are different
+        # calculate the number of prompt ids that are different
+        diff_count_prompt_ids = sum(1 for i, j in zip(vllm_prompt_ids, logp_server_prompt_ids) if i != j)
         if diff_count_prompt_ids > 0:
-            logger.error(f"vllm_prompt_ids != logp_server_prompt_ids: [{diff_count_prompt_ids}/{min_prompt_ids_len} tokens different]")
-        min_completion_ids_len = min(len(vllm_completion_ids), len(logp_server_completion_ids))
-        # calculate the number of tokens that are different
-        diff_count_completion_ids = sum(1 for i, j in zip(vllm_completion_ids[:min_completion_ids_len], logp_server_completion_ids[:min_completion_ids_len]) if i != j)
+            logger.error(f"vllm_prompt_ids != logp_server_prompt_ids: [{diff_count_prompt_ids}/{len(vllm_prompt_ids)} tokens different]")
+            continue # skip the group if the prompt ids are different
+        # check if the completion ids length are different
+        if len(vllm_completion_ids) != len(logp_server_completion_ids):
+            logger.error(f"len(vllm_completion_ids) [{len(vllm_completion_ids)}] != len(logp_server_completion_ids): [{len(logp_server_completion_ids)}]")
+            continue # skip the group if the completion ids length are different
+        # calculate the number of completion ids that are different
+        diff_count_completion_ids = sum(1 for i, j in zip(vllm_completion_ids, logp_server_completion_ids) if i != j)
         if diff_count_completion_ids > 0:
-            logger.error(f"vllm_completion_ids != logp_server_completion_ids: [{diff_count_completion_ids}/{min_completion_ids_len} tokens different]")
-        min_logps_len = min(len(vllm_completion_log_probs), len(logp_server_logps) - len(logp_server_prompt_ids))
-        # calculate the number of tokens that are different (within a relative tolerance of 1e-2)
-        diff_count_logps = sum(1 for i, j in zip(vllm_completion_log_probs[:min_logps_len], logp_server_logps[len(logp_server_prompt_ids)-1:len(logp_server_prompt_ids)-1+min_logps_len]) if abs(i-j) / abs(i+j) > 1e-2 and abs(i-j) > 1e-2)
-        if diff_count_logps > 0:
-            logger.warning(f"vllm_completion_log_probs != logp_server_logps: [{diff_count_logps}/{min_logps_len} tokens different]")
+            logger.error(f"vllm_completion_ids != logp_server_completion_ids: [{diff_count_completion_ids}/{len(vllm_completion_ids)} tokens different]")
+            continue # skip the group if the prompt ids are different
+        # check if logps length are different
+        if len(vllm_completion_log_probs) != len(logp_server_logps) - len(logp_server_prompt_ids) + 1:
+            logger.error(f"len(vllm_completion_log_probs) [{len(vllm_completion_log_probs)}] != len(logp_server_logps) - len(logp_server_prompt_ids) + 1: [{len(logp_server_logps) - len(logp_server_prompt_ids) + 1}]")
+            # logger.error(f"len(vllm_input_ids): [{len(vllm_input_ids)}], len(logp_server_input_ids): [{len(logp_server_input_ids)}]")
+            # logger.error(f"len(vllm_completion_ids): [{len(vllm_completion_ids)}], len(logp_server_completion_ids): [{len(logp_server_completion_ids)}]")
+            # logger.error(f"len(vllm_prompt_ids): [{len(vllm_prompt_ids)}], len(logp_server_prompt_ids): [{len(logp_server_prompt_ids)}]")
+            continue # skip the group if the logps length are different
+        # calculate the number of logps that are different
+        # diff_count_logps = sum(1 for i, j in zip(vllm_completion_log_probs, logp_server_logps) if abs(i-j) / abs(i+j) > 1e-2 and abs(i-j) > 1e-2)
+        # if diff_count_logps > 0:
+        #     logger.warning(f"vllm_completion_log_probs != logp_server_logps: [{diff_count_logps}/{min_logps_len} tokens different]")
         group_dataset.append({
             'task_tag': result["task_tag"],
             'turn_tag': result["turn_tag"],

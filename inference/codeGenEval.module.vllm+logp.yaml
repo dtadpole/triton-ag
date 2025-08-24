@@ -230,7 +230,7 @@ module:
             - type: endpoint
               endpoint: codeExtractor.extract_code
               args:
-                completion: "`completion['completion']`"
+                completion: "`__runtime__.tokenizer.decode([logprob['token_id'] for logprob in completion['logprobs']], skip_special_tokens=True)`"
               returns:
                 error_if: "`__result__ is None or __result__['code'] is None`"
                 context_vars:
@@ -283,7 +283,7 @@ module:
               endpoint: logpClient.logps
               context_vars:
                 prompt_ids: "`__runtime__.tokenizer.encode(prompt)`"
-                completion_ids: "`__runtime__.tokenizer.encode(completion['completion'])`"
+                completion_ids: "`[logprob['token_id'] for logprob in completion['logprobs']]`"
                 input_ids: "`prompt_ids + completion_ids`"
               args:
                 provider: "`logp_providers`"

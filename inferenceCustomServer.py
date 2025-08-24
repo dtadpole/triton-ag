@@ -250,7 +250,7 @@ class InferenceCustomServer:
                         for i, item in enumerate(work_items):
                             result = {
                                 "input_ids": item['input_ids'],
-                                "logps": per_token_logps[i, :len(item['input_ids'])].tolist(),
+                                "logps": per_token_logps[i, :len(item['input_ids'])-1].tolist(),
                                 "status": "success",
                             }
                             item['result_queue'].put_nowait(result)
