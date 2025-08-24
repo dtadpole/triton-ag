@@ -22,6 +22,8 @@ from pydantic import BaseModel, Field
 from kbEvalUtil import on_process_timeout
 import uvicorn
 from fastapi.middleware.gzip import GZipMiddleware
+from gzipMiddleware import GunzipRequestMiddleware
+
 
 
 KB_EVAL_TOKEN = None
@@ -37,6 +39,7 @@ KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
 # Create app
 app = FastAPI()
 app.add_middleware(GZipMiddleware, minimum_size=512, compresslevel=5)
+app.add_middleware(GunzipRequestMiddleware)  # now all routes accept gzip bodies
 
 parallel_request_counter = 0
 parallel_request_counter_lock = asyncio.Lock()
