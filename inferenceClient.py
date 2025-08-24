@@ -19,39 +19,13 @@ EOS_TOKENS = ["<|endoftext|>", "<|end▁of▁sentence|>", "<｜end▁of▁senten
 
 REQUIRED_MATCHED_RATIO = 99.75
 
-class ProviderConfig(BaseModel):
-    provider_name: str = Field()
-    base_url: str = Field()
-    api_key_path: str = Field()
-    streaming: bool = Field(default=True)
-    num_retries: int = Field(default=3)
-    initial_retry_interval: int = Field(default=3)
-    timeout: int = Field(default=300)
-    trust_remote_code: bool = Field(default=False)
-
-class ModelConfig(BaseModel):
-    model_short_name: str = Field()
-    model_name: str = Field()
-    tokenizer_name: str = Field(default=None)
-    temperature: float = Field(default=0.6)
-    max_tokens: int = Field(default=16384)
-    truncate_prompt_tokens: int = Field(default=8192)
-    top_p: float = Field(default=1.0)
-    top_k: int = Field(default=40)
-    logprobs: bool = Field(default=False)
-    enable_thinking: bool = Field(default=False)
-
-class InferenceClientConfig(BaseModel):
-    provider: ProviderConfig = Field()
-    model: ModelConfig = Field()
-
-
 class InferenceClient:
     """Client for OpenAI API using OpenAI client for streaming or non-streaming generation."""
 
     def __init__(
         self,
-        config: InferenceClientConfig,
+        model_short_name: str,
+        config_file: str = "inferenceClient.yaml",
     ):
         """
         Initialize vLLM client.
@@ -60,47 +34,84 @@ class InferenceClient:
             config: InferenceClientConfig
         """
         # Load configuration from file
-        self.config = config
-        # model config
-        self.model_short_name = config.model.model_short_name
-        self.model_name = config.model.model_name
-        self.tokenizer_name = config.model.tokenizer_name if config.model.tokenizer_name else self.model_name # use model_name as tokenizer_name if not provided
-        self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name, trust_remote_code=True)
-        self.temperature = config.model.temperature
-        self.max_tokens = config.model.max_tokens
-        self.truncate_prompt_tokens = config.model.truncate_prompt_tokens
-        self.top_p = config.model.top_p
-        self.top_k = config.model.top_k
+        self.config_file = config_file
+        # cache for provider and model configs
+        self.provider_config_cache = {}
+        self.model_config_cache = {}
         # model tag
-        self.model_tag = f"{self.config.provider.provider_name}_{self.model_short_name}"
+        self.model_short_name = model_short_name
+        self.model_tag = f"{self.model_short_name}"
+        # model config
+        self.model_config = self._model_config_from_yaml(self.model_short_name, config_file=config_file)
+        # tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_config['tokenizer_name'], trust_remote_code=True)
 
-        # cache for openai clients
-        self.openai_client_cache = {}
+
+    def _model_config_from_yaml(
+        self,
+        model_short_name: str,
+        provider_name: Optional[str] = None,
+        config_file: str="inferenceClient.yaml",
+    ) -> Dict[str, Any]:
+        """Load model config from YAML file."""
+        # check cache
+        if model_short_name in self.model_config_cache:
+            return self.model_config_cache[model_short_name]
+        # if not found, load from yaml file
+        with open(config_file, "r") as f:
+            config = yaml.safe_load(f)
+        if model_short_name not in config.get('models', {}):
+            raise ValueError(f"Model [{model_short_name}] not found in config file [{config_file}]")
+        model_config = config.get('models', {}).get(model_short_name, {})
+        if provider_name:
+            if provider_name not in config.get('providers', {}):
+                raise ValueError(f"Provider [{provider_name}] not found in config file [{config_file}]")
+            provider_config = config.get('providers', {}).get(provider_name, {})
+            provider_specific_model_config = provider_config.get('models', {}).get(model_short_name, {})
+            model_config = {**model_config, **provider_specific_model_config}
         
-        # Create OpenAI client for vLLM
-        self.openai_client_dict_default = self._openai_client_from_yaml(self.config.provider.provider_name)
+        model_name = model_config.get('model_name', model_short_name)
+        tokenizer_name = model_config.get('tokenizer_name', model_name)
+        temperature = model_config.get('temperature', 0.6)
+        max_tokens = model_config.get('max_tokens', 16384)
+        truncate_prompt_tokens = model_config.get('truncate_prompt_tokens', 8192)
+        top_p = model_config.get('top_p', 1.0)
+        top_k = model_config.get('top_k', 40)
+        result = {
+            "model_name": model_name,
+            "tokenizer_name": tokenizer_name,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "truncate_prompt_tokens": truncate_prompt_tokens,
+            "top_p": top_p,
+            "top_k": top_k,
+        }
 
-    def _openai_client_from_yaml(
+        logger.info(f"🔍 [InferenceClient] Model config [{provider_name}] [{model_short_name}]: {json.dumps(result, indent=4)}")
+
+        return result
+
+    def _provider_config_from_yaml(
         self,
         provider_name: str,
-        yaml_file: str="inferenceClient.yaml",
-        streaming: Optional[bool] = None,
+        config_file: str="inferenceClient.yaml",
     ) -> Dict[str, Any]:
         """Load OpenAI client from YAML file."""
-        if provider_name in self.openai_client_cache:
-            return self.openai_client_cache[provider_name]
+        if provider_name in self.provider_config_cache:
+            return self.provider_config_cache[provider_name]
 
         # if not found, load from yaml file
-        with open(yaml_file, "r") as f:
+        with open(config_file, "r") as f:
             config = yaml.safe_load(f)
+        providers_config = config.get('providers', {})
+        if provider_name not in providers_config:
+            raise ValueError(f"Provider [{provider_name}] not found in config file [{config_file}]")
+        provider_config = providers_config[provider_name]
 
-        if provider_name not in config:
-            raise ValueError(f"Provider [{provider_name}] not found in config file [{yaml_file}]")
+        if 'common' not in provider_config:
+            raise ValueError(f"Common config not found for provider [{provider_name}] in config file [{config_file}]")
 
-        if 'common' not in config[provider_name]:
-            raise ValueError(f"Common config not found for provider [{provider_name}] in config file [{yaml_file}]")
-
-        common_config = config[provider_name]['common']
+        common_config = provider_config['common']
 
         base_url = common_config.get('base_url', 'http://localhost:8091')
         api_key_path = os.path.expanduser(common_config.get('api_key_path', '~/.keys/local.api.key'))
@@ -136,13 +147,14 @@ class InferenceClient:
             "trust_remote_code": common_config.get('trust_remote_code', False),
         }
 
-        self.openai_client_cache[provider_name] = result
+        self.provider_config_cache[provider_name] = result
         logger.info(f"🔍 [InferenceClient] OpenAI client [{provider_name}] created with base_url [{base_url}] and api_key [{api_key_path}]")
 
         return result
 
     async def _chat_completion(
         self,
+        provider_name: str,
         messages: List[Dict],
         max_tokens: int = None,
         logprobs: bool = False,
@@ -160,25 +172,21 @@ class InferenceClient:
         Returns:
             Dict with 'text' and 'tokens' data
         """
-        max_tokens = max_tokens or self.max_tokens
-
-        target_openai_client = openai_client if openai_client is not None else self.openai_client_dict_default['openai_client']
-        streaming = streaming if streaming is not None else self.openai_client_dict_default['streaming']
-        timeout = timeout if timeout is not None else self.openai_client_dict_default['timeout']
+        model_config = self._model_config_from_yaml(self.model_short_name, provider_name=provider_name)
 
         if streaming:
             # STREAMING MODE: Real-time token streaming using OpenAI client
-            stream = await target_openai_client.chat.completions.create(
-                model=model_override or self.model_name,
+            stream = await openai_client.chat.completions.create(
+                model=model_override or model_config['model_name'],
                 messages=messages,
-                temperature=self.temperature,
-                max_tokens=max_tokens,
+                temperature=model_config['temperature'],
+                max_tokens=max_tokens or model_config['max_tokens'],
                 stream=True,
                 timeout=timeout,
                 logprobs=1 if logprobs else NOT_GIVEN,
-                # top_p=self.top_p,
-                # extra_body={"top_k": self.top_k}
-                # extra_body={"truncate_prompt_tokens": self.truncate_prompt_tokens}
+                # top_p=model_config['top_p'],
+                # extra_body={"top_k": model_config['top_k']}
+                # extra_body={"truncate_prompt_tokens": model_config['truncate_prompt_tokens']}
             )
 
             # Initialize variables to accumulate streaming response
@@ -225,17 +233,17 @@ class InferenceClient:
             }
         else:
             # NON-STREAMING MODE: Single response using OpenAI client
-            response = await target_openai_client.chat.completions.create(
-                model=model_override or self.model_name,
+            response = await openai_client.chat.completions.create(
+                model=model_override or model_config['model_name'],
                 messages=messages,
-                temperature=self.temperature,
-                max_tokens=max_tokens,
+                temperature=model_config['temperature'],
+                max_tokens=max_tokens or model_config['max_tokens'],
                 stream=False,
                 timeout=timeout,
                 logprobs=1 if logprobs else NOT_GIVEN,
-                # top_p=self.top_p,
-                # extra_body={"top_k": self.top_k}
-                # extra_body={"truncate_prompt_tokens": self.truncate_prompt_tokens}
+                # top_p=model_config['top_p'],
+                # extra_body={"top_k": model_config['top_k']}
+                # extra_body={"truncate_prompt_tokens": model_config['truncate_prompt_tokens']}
             )
 
             # Extract text from response
@@ -257,35 +265,29 @@ class InferenceClient:
 
     async def chat_completion(
         self,
+        provider_name: str,
         messages: List[Dict],
         max_tokens: int = None,
         logprobs: bool = False,
         model_override: Optional[str] = None,
-        provider_override: Optional[str] = None,
     ) -> Dict:
         """
         Generate text using OpenAI-compatible API with streaming or non-streaming mode.
         """
-        if provider_override:
-            openai_client_dict = self._openai_client_from_yaml(provider_override)
-            openai_client = openai_client_dict['openai_client']
-            streaming = openai_client_dict['streaming']
-            num_retries = openai_client_dict['retry_count']
-            initial_retry_interval = openai_client_dict['initial_retry_interval']
-            timeout = openai_client_dict['timeout']
-        else:
-            openai_client = self.openai_client_dict_default['openai_client']
-            streaming = self.openai_client_dict_default['streaming']
-            num_retries = self.openai_client_dict_default['retry_count']
-            initial_retry_interval = self.openai_client_dict_default['initial_retry_interval']
-            timeout = self.openai_client_dict_default['timeout']
+        openai_client_dict = self._provider_config_from_yaml(provider_name)
+        openai_client = openai_client_dict['openai_client']
+        streaming = openai_client_dict['streaming']
+        num_retries = openai_client_dict['retry_count']
+        initial_retry_interval = openai_client_dict['initial_retry_interval']
+        timeout = openai_client_dict['timeout']
 
         retry_count = 0
         while retry_count < num_retries:
             retry_count += 1
             try:
                 return await self._chat_completion(
-                    messages,
+                    provider_name=provider_name,
+                    messages=messages,
                     max_tokens=max_tokens,
                     logprobs=logprobs,
                     model_override=model_override,
@@ -305,6 +307,7 @@ class InferenceClient:
 
     async def _completion(
         self,
+        provider_name: str,
         prompt: str,
         max_tokens: int = None,
         logprobs: bool = False,
@@ -322,30 +325,25 @@ class InferenceClient:
         Returns:
             Dict with 'text' data
         """
-
-        target_openai_client = openai_client if openai_client is not None else self.openai_client_dict_default['openai_client']
-        streaming = streaming if streaming is not None else self.openai_client_dict_default['streaming']
-        timeout = timeout if timeout is not None else self.openai_client_dict_default['timeout']
-
-        max_tokens = max_tokens or self.max_tokens
+        model_config = self._model_config_from_yaml(self.model_short_name, provider_name=provider_name)
 
         generated_content = ""
         logprobs_content = []
 
         if streaming:
             # STREAMING MODE: Real-time token streaming using OpenAI client
-            stream = await target_openai_client.completions.create(
-                model=model_override or self.model_name,
+            stream = await openai_client.completions.create(
+                model=model_override or model_config['model_name'],
                 prompt=prompt,
-                temperature=self.temperature,
-                max_tokens=max_tokens,
+                temperature=model_config['temperature'],
+                max_tokens=max_tokens or model_config['max_tokens'],
                 stop=[self.tokenizer.eos_token] + EOS_TOKENS,
                 stream=True,
                 timeout=timeout,
                 logprobs=1 if logprobs else NOT_GIVEN,
-                # top_p=self.top_p,
-                # extra_body={"top_k": self.top_k}
-                # extra_body={"truncate_prompt_tokens": self.truncate_prompt_tokens}
+                # top_p=model_config['top_p'],
+                # extra_body={"top_k": model_config['top_k']}
+                # extra_body={"truncate_prompt_tokens": model_config['truncate_prompt_tokens']}
             )
 
             # Process streaming response
@@ -363,18 +361,18 @@ class InferenceClient:
                             logprobs_content.append(choice.logprobs.model_dump())
         else:
             # NON-STREAMING MODE: Single response using OpenAI client
-            response = await target_openai_client.completions.create(
-                model=model_override or self.model_name,
+            response = await openai_client.completions.create(
+                model=model_override or model_config['model_name'],
                 prompt=prompt,
-                temperature=self.temperature,
-                max_tokens=max_tokens,
+                temperature=model_config['temperature'],
+                max_tokens=max_tokens or model_config['max_tokens'],
                 stop=[self.tokenizer.eos_token] + EOS_TOKENS,
                 stream=False,
                 timeout=timeout,
                 logprobs=1 if logprobs else NOT_GIVEN,
-                # top_p=self.top_p,
-                # extra_body={"top_k": self.top_k}
-                # extra_body={"truncate_prompt_tokens": self.truncate_prompt_tokens}
+                # top_p=model_config['top_p'],
+                # extra_body={"top_k": model_config['top_k']}
+                # extra_body={"truncate_prompt_tokens": model_config['truncate_prompt_tokens']}
             )
 
             # Extract text from response
@@ -406,35 +404,29 @@ class InferenceClient:
 
     async def completion(
         self,
+        provider_name: str,
         prompt: str,
         max_tokens: int = None,
         logprobs: bool = False,
         model_override: Optional[str] = None,
-        provider_override: Optional[str] = None,
     ) -> Dict:
         """
         Generate text completion using OpenAI-compatible API with streaming or non-streaming mode.
         """
-        if provider_override:
-            openai_client_dict = self._openai_client_from_yaml(provider_override)
-            openai_client = openai_client_dict['openai_client']
-            streaming = openai_client_dict['streaming']
-            num_retries = openai_client_dict['retry_count']
-            initial_retry_interval = openai_client_dict['initial_retry_interval']
-            timeout = openai_client_dict['timeout']
-        else:
-            openai_client = self.openai_client_dict_default['openai_client']
-            streaming = self.openai_client_dict_default['streaming']
-            num_retries = self.openai_client_dict_default['retry_count']
-            initial_retry_interval = self.openai_client_dict_default['initial_retry_interval']
-            timeout = self.openai_client_dict_default['timeout']
+        openai_client_dict = self._provider_config_from_yaml(provider_name)
+        openai_client = openai_client_dict['openai_client']
+        streaming = openai_client_dict['streaming']
+        num_retries = openai_client_dict['retry_count']
+        initial_retry_interval = openai_client_dict['initial_retry_interval']
+        timeout = openai_client_dict['timeout']
 
         retry_count = 0
         while retry_count < num_retries:
             retry_count += 1
             try:
                 return await self._completion(
-                    prompt,
+                    provider_name=provider_name,
+                    prompt=prompt,
                     max_tokens=max_tokens,
                     logprobs=logprobs,
                     model_override=model_override,
@@ -452,11 +444,11 @@ class InferenceClient:
                     logger.error(f"❌ [InferenceClient] [Completion] Failed: {e}, giving up...") # give up after max retries
         return None
 
-    async def health_check(self) -> bool:
+    async def health_check(self, provider_name: str) -> bool:
         """Check if OpenAI server is healthy."""
         try:
             # Try a simple generation request
-            result = await self.chat_completion([{"role": "user", "content": "Hello"}], max_tokens=5)
+            result = await self.chat_completion(provider_name, [{"role": "user", "content": "Hello"}], max_tokens=5)
             success = bool(('content' in result and result['content']) or ('reasoning_content' in result and result['reasoning_content']))  # If we get any text or reasoning content response, server is healthy
             if success:
                 logger.info(f"✅ [InferenceClient] [Health check] Success!")
@@ -469,18 +461,13 @@ class InferenceClient:
 
     async def get_models(
         self,
-        provider_override: Optional[str] = None,
+        provider_name: str,
     ) -> List[str]:
         """Get available models from the server."""
-        if provider_override:
-            openai_client_dict = self._openai_client_from_yaml(provider_override)
-            base_url = openai_client_dict['base_url']
-            api_key = openai_client_dict['api_key']
-            timeout = openai_client_dict['timeout']
-        else:
-            base_url = self.openai_client_dict_default['base_url']
-            api_key = self.openai_client_dict_default['api_key']
-            timeout = self.openai_client_dict_default['timeout']
+        openai_client_dict = self._provider_config_from_yaml(provider_name)
+        base_url = openai_client_dict['base_url']
+        api_key = openai_client_dict['api_key']
+        timeout = openai_client_dict['timeout']
 
         try:
             # Use vLLM's OpenAI-compatible models endpoint
@@ -504,78 +491,17 @@ class InferenceClient:
             return ['default']
 
 
-def load_inference_client_config(
-        provider_name: str,
-        model_short_name: str,
-        logprobs: bool = False,
-        streaming: bool = True,
-        config_file: str = "inferenceClient.yaml"
-    ) -> InferenceClientConfig:
-    """Load configuration from YAML file."""
-    config_path = Path(config_file)
-    if not config_path.exists():
-        # Try relative to script directory
-        config_path = Path(__file__).parent / config_file
-
-    config_yaml = {}
-    if config_path.exists():
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
-            config_yaml = config or {}
-    else:
-        logger.warning(f"⚠️ [InferenceClient] Warning: Config file [{config_file}] not found")
-        config_yaml = {}
-
-    if provider_name not in config_yaml or 'common' not in config_yaml[provider_name]:
-        logger.error(f"❌ [InferenceClient] Error: Provider [{provider_name}] not found in config file [{config_file}]")
-        raise ValueError(f"Provider [{provider_name}] not found in config file [{config_file}]")
-    else:
-        provider_json = config_yaml[provider_name]['common'] | {"provider_name": provider_name}
-        provider_config = ProviderConfig(**provider_json)
-
-    if model_short_name not in config_yaml[provider_name]['models']:
-        logger.error(f"❌ [InferenceClient] Error: Model [{model_short_name}] not found in config file [{config_file}]")
-        raise ValueError(f"Model [{model_short_name}] not found in config file [{config_file}]")
-    else:
-        model_json = config_yaml[provider_name]['models'][model_short_name] | {"model_short_name": model_short_name}
-        model_config = ModelConfig(**model_json)
-
-    # override logprobs
-    model_config.logprobs = logprobs
-
-    # override streaming mode
-    provider_config.streaming = streaming
-
-    # use file emoji
-    logger.info(f"📁 [InferenceClient] Config file [{config_file}] loaded with Provider [{provider_config.provider_name}] and Model [{model_config.model_short_name}]")
-
-    return InferenceClientConfig(
-        provider=provider_config,
-        model=model_config
-    )
-
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--provider", type=str, default="fireworks", help="Provider to use (vllm, sglang, deepseek, fireworks, together)")
-    parser.add_argument("--model", type=str, default="deepseek-v3", help="Model to use (deepseek-v3, deepseek-r1, kimi-k2)")
+    parser.add_argument("--config_file", type=str, default="inferenceClient.yaml", help="Config file to use")
+    parser.add_argument("--provider_name", type=str, default="fireworks", help="Provider to use (fireworks, sglang, deepseek, fireworks, together)")
+    parser.add_argument("--model_short_name", type=str, default="deepseek-v3", help="Model to use (deepseek-v3, deepseek-r1, kimi-k2, qwen3-14b, qwen3-32b, qwen3-235b, qwen3-coder-480b, gpt-oss-20b, gpt-oss-120b)")
     parser.add_argument("--api_type", type=str, default="completion", choices=["chat", "completion"], help="API type to use (chat or completion)")
-    parser.add_argument("--streaming", type=bool, default=True, help="Whether to use streaming mode")
-    parser.add_argument("--logprobs", type=bool, default=True, help="Whether to use logprobs")
     args = parser.parse_args()
 
-    config = load_inference_client_config(
-        provider_name=args.provider,
-        model_short_name=args.model,
-        logprobs=args.logprobs,
-        streaming=args.streaming,
-        config_file="inferenceClient.yaml"
-    )
-
-    logger.info(f"[InferenceClient] Config: {json.dumps(config.model_dump(), indent=4)}")
-
-    client = InferenceClient(config=config)
-    logger.info(f"[InferenceClient] Models: {json.dumps(await client.get_models(), indent=4)}")
-    logger.info(f"[InferenceClient] Health check: {await client.health_check()}")
+    client = InferenceClient(model_short_name=args.model_short_name, config_file=args.config_file)
+    logger.info(f"[InferenceClient] Models: {json.dumps(await client.get_models(args.provider_name), indent=4)}")
+    logger.info(f"[InferenceClient] Health check: {await client.health_check(args.provider_name)}")
 
     system_prompt = "You are a helpful assistant."
     user_prompt = "Tell me what is Machine Learning?"
@@ -588,7 +514,7 @@ async def main():
 
     if args.api_type == "chat":
         # Use chat completion API
-        result = await client.chat_completion(messages)
+        result = await client.chat_completion(args.provider_name, messages)
         if 'reasoning_content' in result:
             logger.info(f"[InferenceClient] Chat completion [reasoning_content]: {result['reasoning_content']}")
         if 'content' in result:
@@ -599,7 +525,7 @@ async def main():
         # Use completion API
         prompt = client.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=True)
         logger.info(f"[InferenceClient] Completion [prompt]: {prompt}")
-        result = await client.completion(prompt)
+        result = await client.completion(args.provider_name, prompt)
         if 'content' in result:
             logger.info(f"[InferenceClient] Completion [content]: {result['content']}")
         if 'logprobs' in result:
