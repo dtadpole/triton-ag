@@ -362,7 +362,7 @@ class WorkflowClient:
         queue_type: str,
         queue_name: str,
         block: BaseModel,
-        env_vars: dict = {},
+        env: dict = {},
     ):
         logger.info(f"⏳ [WorkflowClient] [{self.prefix_tag}] [{queue_type}.{queue_name}] {callback_kind}. Block: [{block.model_dump()}] Env vars: [{env_vars}]")
         env = {
@@ -373,7 +373,7 @@ class WorkflowClient:
             "block_id": block.block_id,
             "run_tag": self._get_run_tag(block.epoch_id, block.block_id),
             "block": block.model_dump(),
-            "env": env_vars,
+            "env": env,
         }
         workflow_config = await self.get_workflow_config(self.prefix_tag)
         if workflow_config is None:

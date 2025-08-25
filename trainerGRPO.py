@@ -121,7 +121,9 @@ class GRPOTrainer():
         output_completion_logits = logits[prompt_token_len-1:-1, :]
         log_probs = F.log_softmax(output_completion_logits, dim=-1) # dim: (completion_len, vocab_size)
         # get log probabilities for the completion tokens
-        labels = torch.tensor(completion_token_ids, device=self.engine.device)
+        labels = torch.tensor(completion_token_ids, device=self.engine.device) \
+            if isinstance(completion_token_ids, list) \
+            else completion_token_ids.to(self.engine.device)
         action_log_probs = log_probs[:len(completion_token_ids), :].gather(
             dim=-1,
             index=labels.unsqueeze(-1)
