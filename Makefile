@@ -41,14 +41,6 @@ else
 endif
 
 
-build_docker_nas: Dockerfile_nas
-ifeq (${IS_DEVSERVER}, 1)
-	$(META_PROXY) docker build -f Dockerfile_nas --network=host --progress=plain  -t nas .
-else
-	docker build -f Dockerfile_nas --network=host --progress=plain  -t nas .
-endif
-
-
 env_autoawq:
 	docker run -it  --gpus all --net=host -p 8081:8081 -p 8082:8082 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.inference/:/root/.inference/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/autoawq /bin/bash
 
@@ -70,17 +62,13 @@ env_start:
 		-v ~/.gitconfig:/root/.gitconfig \
 		-v ~/.keys/:/root/.keys/ \
 		-v /data/users/${USER}/:/root/.cache/ \
+		-v ${PWD}:/workspace/ \
 		--cap-add SYS_ADMIN \
 		--device /dev/fuse \
 		--security-opt apparmor:unconfined \
 		--privileged \
 		localhost/triton_ag \
-		/bin/bash -c "\
-		sshfs -o IdentityFile=/root/.ssh/id_rsa_shared -p 8082 codegen@devvm8492.cco0.facebook.com:/shared/ /workspace && \
-		cd /workspace/ && \
-		make mount_shared_drive && \
-		make wandb_login && \
-		tail -f /dev/null"
+		/bin/bash -c "make mount_shared_drive && make wandb_login && tail -f /dev/null"
 
 env:
 	docker exec -it codegen /bin/bash
