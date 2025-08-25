@@ -26,9 +26,12 @@ CLIP_RATIO_LOWER_PERCENTAGE = "clip_ratio_lower_pct"
 CLIP_RATIO_UPPER_PERCENTAGE = "clip_ratio_upper_pct"
 BOUND_ADVANTAGE_LOWER_PERCENTAGE = "bound_adv_lower_pct"
 BOUND_ADVANTAGE_UPPER_PERCENTAGE = "bound_adv_upper_pct"
+IS_RATIO_TRUNCATED_PERCENTAGE = "is_ratio_truncated_pct"
 LOG_PROB_AVERAGE_VALUE = "log_prob_avg_value"
 LOG_PROB_AVERAGE_RATIO = "log_prob_avg_ratio"
-LOG_PROB_VLLM_GEN_DIFF = "log_prob_vllm_gen_diff"
+LOG_PROB_FORWARD_GENERATION_DIFF = "log_prob_forward_generation_diff"
+LOG_PROB_GENERATION_VLLM_DIFF = "log_prob_generation_vllm_diff"
+LOG_PROB_FORWARD_VLLM_DIFF = "log_prob_forward_vllm_diff"
 
 class GRPOConfig(BaseModel):
     """GRPO configuration"""
@@ -47,7 +50,8 @@ class GRPOConfig(BaseModel):
     # loss_type: str = "token" # "episode" or "token" or "seq_max" or "gspo"
     loss_type: str = "gspo" # "episode" or "token" or "seq_max" or "gspo"
     gamma: float = 0.5
-    tis_ratio: float = 2.0
+    use_tis: bool = False
+    tis_clamp_ratio: float = 2.0
 
     @classmethod
     def from_yaml(cls, file_path: str) -> "GRPOConfig":
@@ -158,7 +162,13 @@ class GRPOTrainer():
         return action_log_probs
     '''
 
-    def _compute_mini_batch_loss(self, batch: Dict[str, Any], clip_metrics: Dict[str, List[float]]):
+    def _compute_mini_batch_loss(
+        self,
+        batch: Dict[str, Any],
+        clip_metrics: Dict[str, List[float]],
+        max_tokens_in_group: int = 0,
+        total_tokens_in_group: int = 0,
+    ):
         """Compute loss for the generated tokens"""
         # turn_tags = batch['turn_tag']
         # rewards = batch['reward']
@@ -166,7 +176,8 @@ class GRPOTrainer():
         prompt_token_ids = batch['logp_server_prompt_ids']
         completion_token_ids = batch['logp_server_completion_ids']
         # vllm_completion_log_probs = batch['vllm_completion_log_probs']
-        log_probs = batch['logp_server_logps']
+        generation_log_probs = batch['logp_server_logps']
+        vllm_completion_log_probs = batch['vllm_completion_log_probs']
         input_ids = batch['input_ids'].to(self.engine.device)
         attention_mask = batch['attention_mask'].to(self.engine.device)
 
@@ -176,7 +187,7 @@ class GRPOTrainer():
         for i in range(len(advantages)): # for each generation result in the batch
             # get the logits for the completion tokens only, remove the prompt tokens
             prompt_token_len = len(prompt_token_ids[i])
-            new_action_log_probs = self._calculate_log_probs(
+            forward_completion_log_probs = self._calculate_log_probs(
                 model_outputs.logits[i],
                 prompt_token_len,
                 completion_token_ids[i],
@@ -193,22 +204,29 @@ class GRPOTrainer():
             #     completion_log_probs_tensor = completion_log_probs_override
             #     log_prob_override_mse = torch.mean(torch.abs(torch.tensor(completion_log_probs[i], device=self.device) - completion_log_probs_tensor))
             # else:
-            completion_log_probs_tensor = torch.tensor(log_probs[i][len(prompt_token_ids[i])-1:len(prompt_token_ids[i])-1+len(completion_token_ids[i])], device=self.engine.device)
-            # log_prob_override_mse is always zero here
-            log_prob_vllm_gen_diff = torch.mean(torch.abs(new_action_log_probs - completion_log_probs_tensor))
-
+            generation_completion_log_probs = torch.tensor(generation_log_probs[i][len(prompt_token_ids[i])-1:len(prompt_token_ids[i])-1+len(completion_token_ids[i])], device=self.engine.device)
             # calculate log ratio (in log space is subtraction)
-            if completion_log_probs_tensor.shape != new_action_log_probs.shape:
-                raise ValueError(f"❌ [GRPOTrainer] Completion log probabilities and new action log probabilities have different shapes: {completion_log_probs_tensor.shape} != {new_action_log_probs.shape}")
-            # log probs is calculated in log space, so we need to subtract the log probabilities
-            log_ratio = new_action_log_probs - completion_log_probs_tensor
+            if generation_completion_log_probs.shape != forward_completion_log_probs.shape:
+                raise ValueError(f"❌ [GRPOTrainer] Generation completion log probabilities and forward completion log probabilities have different shapes: {generation_completion_log_probs.shape} != {forward_completion_log_probs.shape}")
+            if vllm_completion_log_probs.shape != generation_completion_log_probs.shape:
+                raise ValueError(f"❌ [GRPOTrainer] VLLM completion log probabilities and generation completion log probabilities have different shapes: {vllm_completion_log_probs.shape} != {generation_completion_log_probs.shape}")
 
-            clip_metrics[LOG_PROB_AVERAGE_VALUE].append(torch.mean(new_action_log_probs).item())
-            clip_metrics[LOG_PROB_VLLM_GEN_DIFF].append(log_prob_vllm_gen_diff.item())
+            # log_prob_override_mse is always zero here
+            log_prob_forward_generation_diff = torch.mean(torch.abs(forward_completion_log_probs - generation_completion_log_probs))
+            log_prob_generation_vllm_diff = torch.mean(torch.abs(generation_completion_log_probs - vllm_completion_log_probs))
+            log_prob_forward_vllm_diff = torch.mean(torch.abs(forward_completion_log_probs - vllm_completion_log_probs))
+
+            # log probs is calculated in log space, so we need to subtract the log probabilities
+            log_ratio = forward_completion_log_probs - generation_completion_log_probs
+
+            clip_metrics[LOG_PROB_AVERAGE_VALUE].append(torch.mean(forward_completion_log_probs).item())
+            clip_metrics[LOG_PROB_FORWARD_GENERATION_DIFF].append(log_prob_forward_generation_diff.item())
+            clip_metrics[LOG_PROB_GENERATION_VLLM_DIFF].append(log_prob_generation_vllm_diff.item())
+            clip_metrics[LOG_PROB_FORWARD_VLLM_DIFF].append(log_prob_forward_vllm_diff.item())
 
             if self.grpo_config.loss_type == "gspo":
 
-                sequence_log_ratio = torch.sum(log_ratio) / len(new_action_log_probs)
+                sequence_log_ratio = torch.sum(log_ratio) / len(forward_completion_log_probs)
                 sequence_ratio = torch.exp(sequence_log_ratio)
 
                 clip_metrics[LOG_PROB_AVERAGE_RATIO].append(sequence_ratio.item())
@@ -235,8 +253,8 @@ class GRPOTrainer():
                 clip_metrics[LOG_PROB_AVERAGE_RATIO].append(ratio.mean().item())
 
                 # calculate clipped upper and lower percentage
-                clip_metrics[CLIP_RATIO_UPPER_PERCENTAGE].append(torch.sum(ratio > 1+self.grpo_config.clip_ratio_epsilon_upper).item() * 100.0 / len(new_action_log_probs))
-                clip_metrics[CLIP_RATIO_LOWER_PERCENTAGE].append(torch.sum(ratio < 1-self.grpo_config.clip_ratio_epsilon_lower).item() * 100.0 / len(new_action_log_probs))
+                clip_metrics[CLIP_RATIO_UPPER_PERCENTAGE].append(torch.sum(ratio > 1+self.grpo_config.clip_ratio_epsilon_upper).item() * 100.0 / len(forward_completion_log_probs))
+                clip_metrics[CLIP_RATIO_LOWER_PERCENTAGE].append(torch.sum(ratio < 1-self.grpo_config.clip_ratio_epsilon_lower).item() * 100.0 / len(forward_completion_log_probs))
 
                 clamped_ratio = torch.clamp(ratio, 1-self.grpo_config.clip_ratio_epsilon_lower, 1+self.grpo_config.clip_ratio_epsilon_upper)
 
@@ -244,17 +262,27 @@ class GRPOTrainer():
                 ratio_advantage = torch.min(ratio * advantages[i], clamped_ratio * advantages[i]) # dim: (completion_len)
 
                 # calculate clipped upper and lower percentage
-                clip_metrics[BOUND_ADVANTAGE_UPPER_PERCENTAGE].append(torch.sum(ratio_advantage > self.grpo_config.bound_advantage_range).item() * 100.0 / len(new_action_log_probs))
-                clip_metrics[BOUND_ADVANTAGE_LOWER_PERCENTAGE].append(torch.sum(ratio_advantage < -self.grpo_config.bound_advantage_range).item() * 100.0 / len(new_action_log_probs))
+                clip_metrics[BOUND_ADVANTAGE_UPPER_PERCENTAGE].append(torch.sum(ratio_advantage > self.grpo_config.bound_advantage_range).item() * 100.0 / len(forward_completion_log_probs))
+                clip_metrics[BOUND_ADVANTAGE_LOWER_PERCENTAGE].append(torch.sum(ratio_advantage < -self.grpo_config.bound_advantage_range).item() * 100.0 / len(forward_completion_log_probs))
 
                 # calculate clipped upper and lower percentage
-                final_ratio_advantage = torch.clamp(ratio_advantage, -self.grpo_config.bound_advantage_range, self.grpo_config.bound_advantage_range)
+                bounded_ratio_advantage = torch.clamp(ratio_advantage, -self.grpo_config.bound_advantage_range, self.grpo_config.bound_advantage_range)
+
+                if self.grpo_config.use_tis:
+                    is_ratio = torch.exp(generation_completion_log_probs - vllm_completion_log_probs).detach()
+                    clip_metrics[IS_RATIO_TRUNCATED_PERCENTAGE].append(torch.sum(is_ratio > self.grpo_config.tis_clamp_ratio).item() * 100.0 / len(forward_completion_log_probs))
+                    truncated_is_ratio = torch.min(is_ratio, self.grpo_config.tis_clamp_ratio)
+                    final_ratio_advantage = truncated_is_ratio * bounded_ratio_advantage
+                else:
+                    final_ratio_advantage = bounded_ratio_advantage
 
                 # compute loss
                 if self.grpo_config.loss_type == "episode":
                     loss = -final_ratio_advantage.mean()
                 elif self.grpo_config.loss_type == "token":
-                    loss = -torch.sum(final_ratio_advantage) / len(new_action_log_probs)
+                    loss = -torch.sum(final_ratio_advantage) / total_tokens_in_group
+                elif self.grpo_config.loss_type == "group_max":
+                    loss = -torch.sum(final_ratio_advantage) / max_tokens_in_group
                 elif self.grpo_config.loss_type == "seq_max":
                     loss = -torch.sum(final_ratio_advantage) / self.grpo_config.max_seq_length
                 else:
@@ -289,19 +317,30 @@ class GRPOTrainer():
         group_reward_items_mean = {k: np.mean(v) for k, v in group_reward_items.items()}
         group_reward_items_std = {k: np.std(v) for k, v in group_reward_items.items()}
 
+        max_tokens_in_group = max([len(result["vllm_completion_ids"]) for result in group_dataset])
+        total_tokens_in_group = sum([len(result["vllm_completion_ids"]) for result in group_dataset])
+
         self.engine.model.train()
         clip_metrics = {
             CLIP_RATIO_UPPER_PERCENTAGE: [],
             CLIP_RATIO_LOWER_PERCENTAGE: [],
             BOUND_ADVANTAGE_UPPER_PERCENTAGE: [],
             BOUND_ADVANTAGE_LOWER_PERCENTAGE: [],
+            IS_RATIO_TRUNCATED_PERCENTAGE: [],
             LOG_PROB_AVERAGE_VALUE: [],
             LOG_PROB_AVERAGE_RATIO: [],
-            LOG_PROB_VLLM_GEN_DIFF: [],
+            LOG_PROB_FORWARD_GENERATION_DIFF: [],
+            LOG_PROB_GENERATION_VLLM_DIFF: [],
+            LOG_PROB_FORWARD_VLLM_DIFF: [],
         }
         for batch_idx, batch in enumerate(dataloader):
             # Training step
-            mini_batch_loss = self._compute_mini_batch_loss(batch, clip_metrics)
+            mini_batch_loss = self._compute_mini_batch_loss(
+                batch,
+                clip_metrics,
+                max_tokens_in_group=max_tokens_in_group,
+                total_tokens_in_group=total_tokens_in_group,
+            )
 
             # Scale loss for gradient accumulation
             mini_batch_loss = mini_batch_loss * self.engine.config.training.loss_multiplier / len(dataloader) # divide by the group size
