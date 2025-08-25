@@ -16,10 +16,15 @@ import asyncio
 import yaml
 import uuid
 from fastapi import FastAPI, Body, HTTPException, Header, Depends, Request
-from kbEvalTest.kbeval import KernelExecResult
+from kbEvalUtil import KernelExecResult
 from logger import logger
 from pydantic import BaseModel, Field
 from kbEvalUtil import on_process_timeout
+import uvicorn
+from fastapi.middleware.gzip import GZipMiddleware
+from gzipMiddleware import GunzipRequestMiddleware
+
+
 
 KB_EVAL_TOKEN = None
 
@@ -33,6 +38,8 @@ KB_EVAL_DIR = os.path.join(os.path.expanduser("~"), ".kbeval")
 
 # Create app
 app = FastAPI()
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
+app.add_middleware(GunzipRequestMiddleware)  # now all routes accept gzip bodies
 
 parallel_request_counter = 0
 parallel_request_counter_lock = asyncio.Lock()
@@ -61,19 +68,22 @@ def verify_token(authorization: str = Header(None)):
     return True
 
 wandb_loggers = {} # {prefix_tag: wandb.Run}
-def _setup_wandb_logging(prefix_tag: str="test", model_tag: str="local_qwen3-14b"):
+def _setup_wandb_logging(prefix_tag: str="auto", model_tag: str="local_qwen3-32b"):
     """Setup logging and tracking"""
-    key = f"{prefix_tag}"
+    if prefix_tag.startswith("auto"):
+        return None
+
+    key = f"{prefix_tag}_{model_tag}"
     if key in wandb_loggers:
         return wandb_loggers[key]
     
     wandb_run = wandb.init(
-        project=f"kb_eval_{prefix_tag}",
-        id=f"{prefix_tag}",
-        name=f"{model_tag}_{datetime.now().strftime('%m%d-%H%M')}",
+        project=f"kb_eval",
+        id=f"{prefix_tag}_{model_tag}",
+        name=f"{prefix_tag}_{model_tag}_{datetime.now().strftime('%m%d')}",
         resume="allow",
         reinit="create_new",
-        settings=wandb.Settings(init_timeout=10),
+        settings=wandb.Settings(init_timeout=15),
     )
     wandb_loggers[key] = wandb_run
     logger.info(f"📊 W&B logging enabled for [{key}]")
@@ -107,11 +117,13 @@ async def read_stream(stream, work_dir: str, eval_tag: str, is_error: bool = Fal
                 f.write(output + "\n")
 
 async def check_return_code(process: asyncio.subprocess.Process):
+    start_time = time.time()
     while True:
         try:
             return_code = await process.wait()
             if return_code is not None:
-                logger.info(f"Child process [{process.pid}] completed with return code: {return_code}")
+                elapsed_time = time.time() - start_time
+                logger.info(f"Child process [{process.pid}] completed with return code: {return_code} in [{elapsed_time:.2f}s]")
                 return
         except asyncio.TimeoutError:
             continue
@@ -121,10 +133,12 @@ async def check_return_code(process: asyncio.subprocess.Process):
             await asyncio.sleep(1)
 
 async def check_disconnect_and_kill_child_process(request: Request, process: asyncio.subprocess.Process):
+    start_time = time.time()
     while True:
         try:
             if process.returncode is not None:
-                logger.info(f"Child process [{process.pid}] completed with return code: {process.returncode}")
+                elapsed_time = time.time() - start_time
+                logger.info(f"Child process [{process.pid}] completed with return code: {process.returncode} in [{elapsed_time:.2f}s]")
                 return
             elif request._is_disconnected or await request.is_disconnected():
                 logger.error(f"Client disconnected, terminating child process [{process.pid}]")
@@ -153,6 +167,14 @@ async def get_pending_task_count():
     all_tasks = asyncio.all_tasks()
     return len(set(all_tasks))
 
+
+@app.middleware("http")
+async def log_preheader_crashes(request, call_next):
+    try:
+        return await call_next(request)
+    except Exception:
+        logger.error("❌ Crashed before sending headers")
+        raise
 
 @app.get("/stats")
 async def stats():
@@ -184,7 +206,7 @@ async def kb_eval_ref(
         start_time = time.time()
 
         # get prefix_tag from run_tag by removing regex pattern [_ddd_dd] (ddd is 3 digits, dd is 2 digits) at the end if exists
-        prefix_tag = re.sub(r"_\d{3}_\d{2}$", "", run_tag)
+        prefix_tag = re.sub(r"_\d*_\d*$", "", run_tag)
         wandb_run = _setup_wandb_logging(prefix_tag, model_tag)
 
         # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}/{eval_tag}/{time_tag}
@@ -257,7 +279,8 @@ async def kb_eval_ref(
             f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
             f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
         }
-        wandb_run.log(metrics)
+        if wandb_run:
+            wandb_run.log(metrics)
 
         return result
 
@@ -286,7 +309,8 @@ async def kb_eval_ref(
             f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
             f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
         }
-        wandb_run.log(metrics)
+        if wandb_run:
+            wandb_run.log(metrics)
         return result
 
     except Exception as e:
@@ -313,7 +337,8 @@ async def kb_eval_ref(
             f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
             f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
         }
-        wandb_run.log(metrics)
+        if wandb_run:
+            wandb_run.log(metrics)
         return result
 
     finally:
@@ -348,7 +373,7 @@ async def kb_eval(
         start_time = time.time()
 
         # get prefix_tag from run_tag by removing regex pattern [_ddd_dd] (ddd is 3 digits, dd is 2 digits) at the end if exists
-        prefix_tag = re.sub(r"_\d{3}_\d{2}$", "", run_tag)
+        prefix_tag = re.sub(r"_\d*_\d*$", "", run_tag)
         wandb_run = _setup_wandb_logging(prefix_tag, model_tag)
 
         # temp_dir is {HOME}/.kbeval/{run_tag}/{model_tag}/{task_tag}/{eval_tag}
@@ -426,7 +451,8 @@ async def kb_eval(
             f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
             f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
         }
-        wandb_run.log(metrics)
+        if wandb_run:
+            wandb_run.log(metrics)
 
         return result
 
@@ -459,7 +485,8 @@ async def kb_eval(
             f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
             f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
         }
-        wandb_run.log(metrics)
+        if wandb_run:
+            wandb_run.log(metrics)
 
         return result
 
@@ -492,7 +519,8 @@ async def kb_eval(
             f"{task_tag}/runtime": result.runtime if result.runtime > 0 else 0, # milliseconds
             f"{task_tag}/elapsed_time": time.time() - start_time, # seconds
         }
-        wandb_run.log(metrics)
+        if wandb_run:
+            wandb_run.log(metrics)
 
         return result
 
@@ -552,7 +580,7 @@ async def main(args):
 
     hostname = socket.gethostname()
     # if hostname is not in kbEval_config["kbEvalRemoteServer"], use "one"
-    if hostname not in kbEval_config["kbEvalRemoteServer"]:
+    if hostname not in kbEval_config["servers"]:
         logger.warning(
             f"Hostname {hostname} not found in kbEval.yaml, using 'one' as default"
         )
@@ -561,42 +589,40 @@ async def main(args):
     global DEVICES
 
     if args.local_host:
-        host = "0.0.0.0"
+        host = "localhost"
         port = args.port
         DEVICES = [args.device]
     else:
-        host = kbEval_config["kbEvalRemoteServer"][hostname]["host"]
-        port = kbEval_config["kbEvalRemoteServer"][hostname]["port"]
-        DEVICES = [int(d) for d in kbEval_config["kbEvalRemoteServer"][hostname]["devices"]]
+        host = kbEval_config["servers"][hostname]["host"]
+        port = kbEval_config["servers"][hostname]["port"]
+        DEVICES = [int(d) for d in kbEval_config["servers"][hostname]["devices"]]
 
     logger.info(f"Running on [{hostname}:{port}] with devices: {DEVICES}")
 
     #########################################################
     # get api_key from kbEval_config["kbEvalRemoteServer"]["common"]["api_key"]
-    if "common" not in kbEval_config["kbEvalRemoteServer"]:
-        logger.error("[kbEvalRemoteServer] [common] not found in kbEval.yaml")
+    if "common" not in kbEval_config["servers"]:
+        logger.error("[kbEvalServer] [common] not found in kbEval.yaml")
         exit(1)
-    if "api_key" not in kbEval_config["kbEvalRemoteServer"]["common"]:
-        logger.error(f"[kbEvalRemoteServer] [api_key] not found in kbEval.yaml [{kbEval_config['kbEvalRemoteServer']['common']}]")
+    if "api_key_path" not in kbEval_config["servers"]["common"]:
+        logger.error(f"[kbEvalServer] [api_key_path] not found in kbEval.yaml [{kbEval_config['servers']['common']}]")
         exit(1)
-    api_key_filepath = kbEval_config["kbEvalRemoteServer"]["common"]["api_key"]
+    api_key_filepath = kbEval_config["servers"]["common"]["api_key_path"]
     # read file from api_key, replace ${HOME} with os.path.expanduser("~") in api_key_filepath
-    api_key_filepath = api_key_filepath.replace("${HOME}", os.path.expanduser("~"))
+    api_key_filepath = os.path.expanduser(api_key_filepath)
     if not os.path.exists(api_key_filepath):
         # create the file, and write a random string to it
         with open(api_key_filepath, "w") as f:
             api_key = str(uuid.uuid4())
             f.write(api_key)
             # add emoji to beginning and end of the string
-            logger.info(f"🔑 [kbEvalRemoteServer] API key [{api_key}] created and saved to [{api_key_filepath}]")
+            logger.info(f"🔑 [kbEvalServer] API key [{api_key}] created and saved to [{api_key_filepath}]")
     # now read in the api_key
     with open(api_key_filepath, "r") as f:
         global KB_EVAL_TOKEN
         KB_EVAL_TOKEN = f.read().strip()
-        logger.info(f"[kbEvalRemoteServer] KB_EVAL_TOKEN loaded from [{api_key_filepath}]")
+        logger.info(f"[kbEvalServer] KB_EVAL_TOKEN loaded from [{api_key_filepath}]")
     #########################################################
-
-    import uvicorn
 
     server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, workers=args.workers))
 
@@ -612,14 +638,10 @@ async def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_host", action="store_true")
-    parser.add_argument("--port",  type=int, default=8088)
-    parser.add_argument("--workers",  type=int, default=32)
+    parser.add_argument("--port",  type=int, default=8456)
+    parser.add_argument("--workers",  type=int, default=64)
     parser.add_argument("--device",  type=str, default='4')
     parser.add_argument("--max_timeout_seconds", type=int, default=240)
-    parser.add_argument("--max_process_time", type=int, default=7200)
     args = parser.parse_args()
-
-    # signal.signal(signal.SIGALRM, on_process_timeout)
-    # signal.alarm(args.max_process_time)  # exit after max_process_time seconds
 
     asyncio.run(main(args))

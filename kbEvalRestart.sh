@@ -1,6 +1,6 @@
 #!/bin/bash
 
-SECONDS_THRESHOLD=3600
+SECONDS_THRESHOLD=7200
 
 TARGET_PIDS=$(ps -eo pid,etimes,cmd   | awk -v T="$SECONDS_THRESHOLD" '/[p]ython.*kbEvalServer.py/ && $2 > T' | grep -v while | awk '{print $1}')
 

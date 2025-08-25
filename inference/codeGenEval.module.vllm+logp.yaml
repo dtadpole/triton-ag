@@ -4,10 +4,8 @@ module:
   # here we add addotional context variables for easier access by the program
   # variables will be evaluated sequentially, so that later variables can use earlier variables
   context_vars:
-    provider_name: "`__runtime__.inference_client_config.provider.provider_name`"
-    model_short_name: "`__runtime__.inference_client_config.model.model_short_name`"
-    model_tag: "{provider_name}_{model_short_name}"
-    max_tokens: "`__runtime__.inference_client_config.model.max_tokens`"
+    model_tag: "`__runtime__.model_tag`"
+    tokenizer: "`__runtime__.tokenizer`"
 
   # input processor adds jobs to the queue
   input_processor:
@@ -47,6 +45,8 @@ module:
                   kb_filename: "`row.kb_filename`" # kb_filename is the filename
                   reference_code: "`row.reference_code`" # reference code
                   output_dir: "`os.path.expanduser(block.output_dir)`" # output_dir is the output directory
+                  kbeval_providers: "`block.kbeval_providers`" # kb eval providers
+                  context: "`block.context`"
                   # generate code and evaluate
               returns:
                 logging:
@@ -70,7 +70,10 @@ module:
                       code_type: "`__runtime__.get_prompt_code_type(__context__)`"
                       output_dir: "`os.path.expanduser(block.output_dir)`" # output_dir is the output directory 
                       num_turns_per_generation: "`block.num_turns_per_generation`" # number of turns per generation
-                      model_override: "`block.model_override`" # model override
+                      vllm_providers: "`block.vllm_providers`" # vllm providers
+                      logp_providers: "`block.logp_providers`" # logp providers
+                      kbeval_providers: "`block.kbeval_providers`" # kb eval providers
+                      context: "`block.context`"
                   returns:
                     logging:
                       method: "log_enqueue"
@@ -85,10 +88,11 @@ module:
         - type: endpoint
           endpoint: kbEvalClient.kb_eval_ref
           args:
+            provider: "`kbeval_providers`"
+            reference_code: "`reference_code`"
             run_tag: "`run_tag`"
             model_tag: "`model_tag`"
             task_tag: "`task_tag`"
-            reference_code: "`reference_code`"
           # returned variables will be added to the context
           returns:
             error_if: "`__result__ is None or __result__['runtime'] <= 0`"
@@ -141,9 +145,24 @@ module:
           context_vars:
             turn_tag: "`f'{gen_tag}_t{__item__:02d}'`" # turn_tag is gen_01_t03
           steps:
+            - type: code
+              code_snippet_path: 'inference/model_override.py'
+              code_snippet_block: |
+                # get model override
+                __async__ = update_model_override(
+                    prefix_tag=prefix_tag,
+                    worker_name=worker_name,
+                    proc_id=proc_id,
+                    worker_id=worker_id,
+                )
+              async: true
+              returns:
+                context_vars:
+                  model_override: "`__result__`"
+                logging:
+                  info: "🔍 [{worker_name}.p{proc_id}.w{worker_id}] Model override: [{model_override}]"
             - type: endpoint
               endpoint: inferenceClient.completion
-              # endpoint: inferenceClient.chat_completion
               context_vars:
                 metadata:
                   "run_tag": "`run_tag`"
@@ -171,9 +190,8 @@ module:
                     enable_thinking=True,
                   )`
               args:
+                provider: "`vllm_providers`"
                 prompt: "`prompt`"
-                # messages: "`messages`"
-                max_tokens: "`max_tokens`"
                 logprobs: true
                 model_override: "`model_override`"
               returns:
@@ -212,7 +230,7 @@ module:
             - type: endpoint
               endpoint: codeExtractor.extract_code
               args:
-                completion: "`completion['completion']`"
+                completion: "`__runtime__.tokenizer.decode([logprob['token_id'] for logprob in completion['logprobs']], skip_special_tokens=True)`"
               returns:
                 error_if: "`__result__ is None or __result__['code'] is None`"
                 context_vars:
@@ -232,12 +250,13 @@ module:
             - type: endpoint
               endpoint: kbEvalClient.kb_eval
               args:
+                provider: "`kbeval_providers`"
+                reference_code: "`reference_code`"
+                generated_code: "`generated_code`"
                 run_tag: "`run_tag`"
                 model_tag: "`model_tag`"
                 task_tag: "`task_tag`"
                 eval_tag: "`turn_tag`" # eval_tag is the turn tag
-                reference_code: "`reference_code`"
-                generated_code: "`generated_code`"
                 code_type: "`code_type`" # code_type is the code type
               returns:
                 error_if: "`__result__ is None`"
@@ -261,13 +280,14 @@ module:
                 category: "generated"
                 data: "`generated_eval`"
             - type: endpoint
-              endpoint: inferenceCustomClient.logps
+              endpoint: logpClient.logps
               context_vars:
                 prompt_ids: "`__runtime__.tokenizer.encode(prompt)`"
-                completion_ids: "`__runtime__.tokenizer.encode(completion['completion'])`"
+                completion_ids: "`[logprob['token_id'] for logprob in completion['logprobs']]`"
                 input_ids: "`prompt_ids + completion_ids`"
               args:
-                model_name: "`model_override or __runtime__.inferenceClient.model_name`"
+                provider: "`logp_providers`"
+                model_name: "`model_override or __runtime__.inferenceClient.model_full_name`"
                 input_ids: "`input_ids`"
               returns:
                 error_if: "`__result__ is None`"

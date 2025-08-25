@@ -84,9 +84,9 @@ class VLLMClient:
     def from_yaml(self, provider_name: str, config_file: str = "inferenceClient.yaml"):
         with open(config_file, "r") as f:
             config = yaml.safe_load(f)
-        if provider_name not in config:
-            raise ValueError(f"Provider [{provider_name}] not found in [{config_file}], available providers: {config.keys()}")
-        provider_common_config = config.get(provider_name, {}).get('common', {})
+        if provider_name not in config.get('providers', {}):
+            raise ValueError(f"Provider [{provider_name}] not found in [{config_file}], available providers: {config.get('providers', {}).keys()}")
+        provider_common_config = config.get('providers', {}).get(provider_name, {}).get('common', {})
         return provider_common_config        
 
     def load_config(self, config_path: str = "configEndpoints.yaml"):
