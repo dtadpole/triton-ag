@@ -108,19 +108,19 @@ This will create a new working directory under `_run_{ddd}` and generate kernel 
 We use sshfs to mount a shared drive on devserver. We use the devserver devgpu139.cco2.facebook.com to host the shared drive, and other devservers can mount the shared drive to read and write model artifacts.
 
 ```
-ssh host: devgpu139.cco2.facebook.com
+ssh host: devvm8492.cco0.facebook.com
 ssh port: 8081
 ```
 To mount the shared drive on your devserver, run the following command on your devserver:
 ```
 cd ~/.ssh
 ssh-keygen -t rsa -b 4096 -f id_rsa_{mykey_name}
-scp -P 8081 id_rsa_{mykey_name}.pub devgpu139.cco2.facebook.com:/tmp/
+scp -P 8081 id_rsa_{mykey_name}.pub codegen@devvm8492.cco0.facebook.com:/tmp/
 
-# log on the host devserver devgpu139.cco2.facebook.com
-ssh devgpu139.cco2.facebook.com
-docker exec -it ssh-server /bin/bash
-cat /tmp/id_rsa_{mykey_name}.pub >> /home/testuser/.ssh/authorized_keys
+# log on the host devserver devvm8492.cco0.facebook.com
+ssh ddevvm8492.cco0.facebook.com
+docker exec -it ssh-data-server /bin/bash
+cat /tmp/id_rsa_{mykey_name}.pub >> /home/codegen/.ssh/authorized_keys
 chown codegen:codegen /home/codegen/.ssh/authorized_keys
 chmod 600 /home/codegen/.ssh/authorized_keys
 
