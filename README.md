@@ -114,13 +114,13 @@ ssh port: 8081
 To mount the shared drive on your devserver, run the following command on your devserver:
 ```
 cd ~/.ssh
-ssh-keygen -t rsa -b 4096 -f id_rsa_{mykey_name}
-scp -P 8081 id_rsa_{mykey_name}.pub codegen@devvm8492.cco0.facebook.com:/tmp/
+ssh-keygen -t rsa -b 4096 -f id_rsa_shared
+scp -P 8081 ~/.ssh/id_rsa_shared.pub codegen@devvm8492.cco0.facebook.com:/tmp/
 
 # log on the host devserver devvm8492.cco0.facebook.com
 ssh ddevvm8492.cco0.facebook.com
 docker exec -it ssh-data-server /bin/bash
-cat /tmp/id_rsa_{mykey_name}.pub >> /home/codegen/.ssh/authorized_keys
+cat /tmp/id_rsa_shared.pub >> /home/codegen/.ssh/authorized_keys
 chown codegen:codegen /home/codegen/.ssh/authorized_keys
 chmod 600 /home/codegen/.ssh/authorized_keys
 

@@ -45,7 +45,7 @@ env_autoawq:
 	docker run -it  --gpus all --net=host -p 8081:8081 -p 8082:8082 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.inference/:/root/.inference/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/autoawq /bin/bash
 
 env_start:
-	docker run -d \
+	docker run -it \
 		--name codegen \
 		--replace \
 		--gpus all \
