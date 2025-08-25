@@ -505,6 +505,17 @@ async def kb_eval(
                 )
                 parallel_request_counter = 0
 
+async def graceful_exit():
+    # Cancel all running tasks
+    tasks = [task for task in asyncio.all_tasks() if not task.done()]
+    for task in tasks:
+        task.cancel()
+
+    # Wait for cancellation to complete
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    sys.exit(1)
 
 async def _check_total_error_count():
     global TOTAL_ERROR_COUNTER, MAX_ERROR_COUNT, START_TIME
@@ -525,14 +536,14 @@ async def _check_total_error_count():
                 # loop.stop()
                 for key, wandb_run in wandb_loggers.items():
                     wandb_run.finish()
-                exit(1)
+                await graceful_exit()
             if TOTAL_ERROR_COUNTER > MAX_ERROR_COUNT:
                 logger.error(f"❌ Total error count [{TOTAL_ERROR_COUNTER}] is greater than {MAX_ERROR_COUNT}!")
                 # loop = asyncio.get_event_loop()
                 # loop.stop()
                 for key, wandb_run in wandb_loggers.items():
                     wandb_run.finish()
-                exit(1)
+                await graceful_exit()
             elif TOTAL_ERROR_COUNTER > 0 and counter % print_interval == 0:
                 logger.warning(f"⚠️ Total error count is {TOTAL_ERROR_COUNTER}, continuing...")
         finally:
