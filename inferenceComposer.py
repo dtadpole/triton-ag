@@ -269,7 +269,7 @@ class ComposerClient:
                     "__input__": item,
                     "worker_name": worker_name,
                     "worker_id": f"{worker_id:02d}",
-                    "proc_id": f"{proc_id if proc_id is not None else -random.randint(1, 99):02d}",
+                    "proc_id": f"{proc_id if proc_id is not None else str(-random.randint(1, 99))}",
                 } | item # add the input variables to the context variables
 
                 success = await self.configInterpreter.execute(
@@ -414,7 +414,7 @@ async def main():
                 queue_type=queue_type,
                 queue_name=queue_name,
                 block=block,
-                context={},
+                env={},
             )
 
     except Exception as e:

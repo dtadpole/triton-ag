@@ -7,7 +7,7 @@ import httpx
 import yaml
 import traceback
 import os
-from workflowUtil import MODEL_OVERRIDE_KEY, TrainerBlock, get_prefix_tag
+from workflowUtil import MODEL_OVERRIDE_KEY, TrainerBlock
 from logger import logger
 from workflowServer import WorkflowServer
 from workflowClient import WorkflowClient
@@ -23,23 +23,22 @@ class TrainerMain:
     def __init__(self, engine: EngineBase, prefix_tag: str):
         self.engine = engine
         self.prefix_tag = prefix_tag
-        self.trainer_prefix_tag = get_prefix_tag(prefix_tag)
-        self.reg_client = WorkflowClient(prefix_tag=self.trainer_prefix_tag)
+        self.reg_client = WorkflowClient(prefix_tag=prefix_tag)
 
     async def main_loop_task(self):
-        logger.info(f"🌀 [trainerMain] Main loop started for prefix: {self.trainer_prefix_tag}")
+        logger.info(f"🌀 [trainerMain] Main loop started for prefix: {self.prefix_tag}")
 
         engine_config_file = "engineBase.yaml"
         rft_config_file = "trainerRFT.yaml"
         grpo_config_file = "trainerGRPO.yaml"
         # initialize trainers (for now, we only have grpo)
-        rft_trainer = rft_get_trainer(self.engine, self.trainer_prefix_tag, engine_config_file, rft_config_file)
-        grpo_trainer = grpo_get_trainer(self.engine, self.trainer_prefix_tag, engine_config_file, grpo_config_file)
+        rft_trainer = rft_get_trainer(self.engine, self.prefix_tag, engine_config_file, rft_config_file)
+        grpo_trainer = grpo_get_trainer(self.engine, self.prefix_tag, engine_config_file, grpo_config_file)
 
         while True:
             try:
                 # reinitialize the reg_client to avoid stale connection
-                self.reg_client = WorkflowClient(prefix_tag=self.trainer_prefix_tag)
+                self.reg_client = WorkflowClient(prefix_tag=self.prefix_tag)
                 # queue name is {task_type}:{task_name}
                 RFT_QUEUE_NAME = 'trainer.rft.1'
                 GRPO_QUEUE_NAME = 'trainer.grpo.1'
@@ -66,7 +65,7 @@ class TrainerMain:
 
                 if random.random() < rft_prob:
                     rft_item = await self.reg_client.dequeue(queue_name=RFT_QUEUE_NAME)
-                    if rft_item['prefix_tag'] != self.trainer_prefix_tag:
+                    if rft_item['prefix_tag'] != self.prefix_tag:
                         logger.error(f"❌ [trainerMain] Skipping item with prefix: {rft_item['prefix_tag']}")
                         continue
                     rft_block = TrainerBlock(**rft_item)
@@ -80,7 +79,7 @@ class TrainerMain:
                     logger.info(f"🔍 [trainerMain] RFT config: {rft_trainer.rft_config.model_dump_json()}")
                     # run in executor to avoid blocking the event loop
                     callback_func = make_checkpoint_callback(
-                        prefix_tag=self.trainer_prefix_tag,
+                        prefix_tag=self.prefix_tag,
                         trainer_block=rft_block,
                         workflow_provider="default",
                     )
@@ -88,7 +87,7 @@ class TrainerMain:
 
                 if random.random() < grpo_prob:
                     grpo_item = await self.reg_client.dequeue(queue_name=GRPO_QUEUE_NAME)
-                    if grpo_item['prefix_tag'] != self.trainer_prefix_tag:
+                    if grpo_item['prefix_tag'] != self.prefix_tag:
                         logger.error(f"❌ [trainerMain] Skipping item with prefix: {grpo_item['prefix_tag']}")
                         continue
                     grpo_block = TrainerBlock(**grpo_item)
@@ -102,7 +101,7 @@ class TrainerMain:
                     logger.info(f"🔍 [trainerMain] GRPO config: {grpo_trainer.grpo_config.model_dump_json()}")
                     # run in executor to avoid blocking the event loop
                     callback_func = make_checkpoint_callback(
-                        prefix_tag=self.trainer_prefix_tag,
+                        prefix_tag=self.prefix_tag,
                         trainer_block=grpo_block,
                         workflow_provider="default",
                     )
@@ -120,16 +119,16 @@ async def main():
     parser.add_argument("--prefix_tag", type=str, default="auto.trainer.main")
     args = parser.parse_args()
 
+    if args.prefix_tag.startswith('auto'):
+        logger.error(f"❌ [trainerMain] --prefix_tag is required")
+        return
+
     if args.engine == "unsloth":
         import unsloth
 
     engine_config = EngineConfig.from_yaml(args.engine_config)
     engine_config.model.engine = args.engine
     engine = EngineBase.create_engine(args.prefix_tag, engine_config) # no status for testing
-
-    if args.prefix_tag == 'auto':
-        logger.error(f"❌ [trainerMain] --prefix_tag is required")
-        return
 
     logger.info(f"🌀 [trainerMain] Starting with prefix: {args.prefix_tag}")
     main_trainer = TrainerMain(engine, args.prefix_tag)

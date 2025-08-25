@@ -8,28 +8,29 @@ queues:
 
 # global variables
 global:
-  prefix_tag: "TC_0.1.0_32B.b"
+  prefix_tag: "TC_0.1.0_32B.c"
   start_epoch: 0
   start_block: 0
-  end_epoch: 80
-  end_block: 10
+  end_epoch: 20
+  end_block: 8
 
 init:
-  inference:
-    codeGenEval.base:
-      prefix_tag: "`prefix_tag`"
-      epoch_id: "`epoch_id`"
-      block_id: "`block_id`"
-      input_tag: "`input_tag`"
-      num_samples: 20
+  codeGenEval.base:
+    - queue_type: inference
+      queue_name: codeGenEval.base
+      prefix_tag: "{prefix_tag}"
+      epoch_id: "{epoch_id}"
+      block_id: "{block_id}"
+      input_tag: "{input_tag}"
+      num_samples: 16
       num_generations: 8
       num_turns_per_generation: 4
       parallel_workers: 48
       model_name: qwen3-32b
-      vllm_providers: ["h8_1"]
-      logp_providers: ["h8_1_6, h8_1_7"]
-      kbeval_providers: ["a8_1"]
-      module_file: inference/codeGenEval.module.yaml
+      vllm_providers: ["h8_3"]
+      logp_providers: ["h8_3_2", "h8_3_3"]
+      kbeval_providers: ["a4_2", "a4_3"]
+      module_file: inference/codeGenEval.module.vllm+logp.yaml
       prompt_file: inference/triton.prompt.yaml
       example_file: inference/triton.example.yaml
       input_dir: ~/triton-ag/kernel_bench/level1
@@ -136,10 +137,10 @@ trainer:
           block_id: "{block_id}"
           input_tag: "{run_tag}"
           context:
-            checkpoint_name: "{env_vars[checkpoint_name]}"
+            checkpoint_name: "{env[checkpoint_name]}"
             vllm_providers: ["h8_3"]
-            logp_providers: ["h8_3_2, h8_3_3"]
-            kbeval_providers: ["a4_2, a4_3"]
+            logp_providers: ["h8_3_2", "h8_3_3"]
+            kbeval_providers: ["a4_2", "a4_3"]
 
   sft.1:
     default:

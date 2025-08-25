@@ -324,10 +324,10 @@ class WorkflowClient:
                     raise e
         return None
 
-    def _get_task_default(self, queue_type: str, queue_name: str):
+    def _get_queue_default(self, queue_type: str, queue_name: str):
         return self.config.get(queue_type, {}).get(queue_name, {}).get("default", {})
 
-    async def _enqueue_callback_task(self, queue_type: str, queue_name: str, task_config: dict, env_vars: dict):
+    async def _enqueue_callback_task(self, queue_type: str, queue_name: str, task_config: dict, env: dict):
         # clone task_config
         task_config = task_config.copy()
         queue_type = task_config.get("queue_type", None)
@@ -335,15 +335,15 @@ class WorkflowClient:
             raise ValueError(f"Task [{queue_name}] has invalid queue type: [{queue_type}] in [{task_config}]")
         # evaluate everything in the task_config
         # logger.info(f"🔍 [WorkflowClient] [{self.prefix_tag}] [{queue_type}.{queue_name}] Task config: [{task_config}] Env vars: [{env_vars}]")
-        task_data = deep_format(task_config, env_vars)
+        task_data = deep_format(task_config, env)
         # enqueue the task
         full_queue_name = f"{queue_type}.{queue_name}"
         if queue_type == TASK_TYPE_INFERENCE:
-            inferenceBlock = InferenceBlock(**merge_dicts(self._get_task_default(queue_type, queue_name), task_data))
+            inferenceBlock = InferenceBlock(**merge_dicts(self._get_queue_default(queue_type, queue_name), task_data))
             await self.enqueue(full_queue_name, inferenceBlock.model_dump(), create_queue=True)
             logger.info(f"🎢 [WorkflowClient] [{self.prefix_tag}] Enqueued to [{full_queue_name}], content: [{inferenceBlock.model_dump()}]")
         elif queue_type == TASK_TYPE_TRAINER:
-            trainerBlock = TrainerBlock(**merge_dicts(self._get_task_default(queue_type, queue_name), task_data))
+            trainerBlock = TrainerBlock(**merge_dicts(self._get_queue_default(queue_type, queue_name), task_data))
             await self.enqueue(full_queue_name, trainerBlock.model_dump(), create_queue=True)
             logger.info(f"🎢 [WorkflowClient] [{self.prefix_tag}] Enqueued to [{full_queue_name}], content: [{trainerBlock.model_dump()}]")
         elif queue_type == TASK_TYPE_SYNC:
@@ -365,7 +365,7 @@ class WorkflowClient:
         env_vars: dict = {},
     ):
         logger.info(f"⏳ [WorkflowClient] [{self.prefix_tag}] [{queue_type}.{queue_name}] {callback_kind}. Block: [{block.model_dump()}] Env vars: [{env_vars}]")
-        env_vars = {
+        env = {
             "queue_type": queue_type,
             "queue_name": queue_name,
             "prefix_tag": self.prefix_tag,
@@ -373,7 +373,7 @@ class WorkflowClient:
             "block_id": block.block_id,
             "run_tag": self._get_run_tag(block.epoch_id, block.block_id),
             "block": block.model_dump(),
-            "env_vars": env_vars,
+            "env": env_vars,
         }
         workflow_config = await self.get_workflow_config(self.prefix_tag)
         if workflow_config is None:
@@ -391,7 +391,7 @@ class WorkflowClient:
                 raise ValueError(f"Callback task [{callback_task}] has no queue_type or queue_name")
             if queue_type not in VALID_TASK_TYPES:
                 raise ValueError(f"Callback task [{queue_name}] has invalid queue type: [{queue_type}] in [{callback_task}]")
-            await self._enqueue_callback_task(queue_type, queue_name, callback_task, env_vars)
+            await self._enqueue_callback_task(queue_type, queue_name, callback_task, env)
 
 async def main():
     import argparse

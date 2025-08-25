@@ -33,7 +33,7 @@ def make_checkpoint_callback(
     prefix_tag: str,
     trainer_block: TrainerBlock,
     workflow_provider: str = "default",
-    env_vars: dict = {},
+    env: dict = {},
 ):
     """Make a callback function for the trainer"""
     def callback_func(checkpoint_path: str):
@@ -51,7 +51,7 @@ def make_checkpoint_callback(
                 queue_type=trainer_block.queue_type,
                 queue_name=trainer_block.queue_name,
                 block=trainer_block,
-                env_vars=env_vars | {"checkpoint_name": checkpoint_name },
+                env=env | {"checkpoint_name": checkpoint_name },
             )
         )
         # run task in background
