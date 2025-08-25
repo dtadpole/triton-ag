@@ -105,7 +105,7 @@ This will create a new working directory under `_run_{ddd}` and generate kernel 
 
 ## Setup shared drive on meta's devserver
 
-We use sshfs to mount a shared drive on devserver. We use the devserver devgpu139.cco2.facebook.com to host the shared drive, and other devservers can mount the shared drive to read and write model artifacts.
+We use sshfs to mount a shared drive on devserver. We use the devserver devgpu139.cco2.facebook.com to host the shared drive, and other devservers can mount the shared drive to read and write model artifacts. The shared drive should have permission for everyone in the team to read and write.
 
 ```
 ssh host: devvm8492.cco0.facebook.com
