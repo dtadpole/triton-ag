@@ -253,6 +253,8 @@ class EngineUnsloth(EngineBase):
 
         # Update latest checkpoint link
         self._update_latest_checkpoint_link(checkpoint_path)
+        # clean up old checkpoints
+        self._cleanup_checkpoint(self.checkpoint_path)
 
         # Callback
         if callback:
