@@ -41,8 +41,13 @@ from pydantic import BaseModel
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader, Dataset, DistributedSampler, Subset
 from tqdm import tqdm
-from trainerUtil import merge_dicts, SimpleCollator
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+import wandb
+import yaml
+import argparse
+from logger import logger
+from trainerUtil import SimpleCollator
+from workflowUtil import merge_dicts
+from engineBase import EngineBase, EngineConfig, TrainerStatus, create_sample_training_dataset
 
 TRAINING_STATUS_FILE = "training_status.json"
 ADAPTER_MODEL_FILE = "adapter_model.safetensors"
@@ -398,21 +403,6 @@ class EngineDeepspeed(EngineBase):
         logger.info(
             f"💾 [{self.__class__.__name__}-{self.rank}] Checkpoint saved: {checkpoint_path} in [{time.time() - start_time:.1f}s]"
         )
-
-    def _setup_logging(self):
-        """Setup logging and tracking"""
-        if self.engine.global_rank == 0:
-            if self.config.logging.use_wandb:
-                wandb.init(
-                    project=self.config.logging.wandb_project,
-                    id=self.config.logging.wandb_run_id,
-                    name=self.config.logging.wandb_run_name,
-                    config=self.config.model_dump(),
-                    resume="allow",
-                )
-                logger.info(
-                    f"📊 [{self.__class__.__name__}-{self.rank}] W&B logging enabled"
-                )
 
     def _compute_loss(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Compute loss for a batch"""
@@ -794,19 +784,13 @@ async def main():
         sys.exit(1)
 
     # Create datasets
-    train_dataset = create_sample_training_dataset(
-        trainer.tokenizer, size=40, max_length=trainer.config.model.max_seq_length
-    )
-    eval_dataset = create_sample_training_dataset(
-        trainer.tokenizer, size=2, max_length=trainer.config.model.max_seq_length
-    )
+    train_dataset = create_sample_training_dataset(trainer.tokenizer, size=100, max_length=trainer.config.model.max_seq_length)
+    # eval_dataset = create_sample_training_dataset(trainer.tokenizer, size=2, max_length=trainer.config.model.max_seq_length)
 
-    logger.info(
-        f"📊 [{trainer.__class__.__name__}-{trainer.rank}] Dataset created - Train: {len(train_dataset)}, Eval: {len(eval_dataset)}"
-    )
+    logger.info(f"📊 [{trainer.__class__.__name__}-{trainer.rank}] Dataset created - Train: {len(train_dataset)}")
 
     # Start training
-    success = await train_async(args.prefix_tag, trainer, train_dataset, eval_dataset)
+    success = await train_async(args.prefix_tag, trainer, train_dataset, None)
     if not success:
         logger.error("❌ Training failed")
         sys.exit(1)

@@ -6,12 +6,12 @@ import asyncio
 import argparse
 from pydantic import BaseModel
 from engineBase import EngineBase, EngineConfig, TrainerStatus
-from trainerUtil import format_conversation
+from trainerUtil import format_conversation, make_checkpoint_callback
 from logger import logger
-from workflowUtil import TrainerRFTBlock
+from workflowUtil import TrainerBlock
 from configInterpreter import ConfigInterpreter
 from configEndpoints import DuckDBClient
-from workflowRsync import RsyncClient
+from workflowSync import WorkflowSync
 
 
 class RFTConfig(BaseModel):
@@ -73,7 +73,7 @@ class RFTTrainer():
         """Log raw data"""
         logger.info(f"🔍 [RFTTrainer] DuckDB search has found [{len(data)}] rows.\n{data}")
 
-    async def train_rft_block(self, block: TrainerRFTBlock, callback: Optional[Callable] = None):
+    async def train_rft_block(self, block: TrainerBlock, callback: Optional[Callable] = None):
         """Train the model for one block"""
         logger.info(f"👉 [RFTTrainer] [{block.input_tag}] RFT Training started for block...")
 
@@ -137,6 +137,7 @@ def rft_get_trainer(
 async def main():
     """Main function for RFT training"""
     parser = argparse.ArgumentParser(description="Train a model using RFTTrainer")
+    parser.add_argument("--queue_name", type=str, default="rft.1")
     parser.add_argument("--engine", type=str, default="unsloth")
     parser.add_argument("--engine_config", type=str, default="engineBase.yaml")
     parser.add_argument("--prefix_tag", type=str, default="auto.trainer.rft")
@@ -145,7 +146,6 @@ async def main():
     parser.add_argument("--input_dir", type=str, default="~/.inference/codeGenEval")
     parser.add_argument("--output_dir", type=str, default="~/.trainer/rft")
     parser.add_argument("--input_tag", type=str, default="TC_0.1.0_32B.b_006_05") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
-    parser.add_argument("--engine_config", type=str, default="engineBase.yaml")
     parser.add_argument("--rft_config", type=str, default="trainerRFT.yaml")
     parser.add_argument("--module_file", type=str, default="trainer/rft.module.yaml")
     parser.add_argument("--target_short_hostname", type=str, default="two")
@@ -158,7 +158,8 @@ async def main():
     engine_config.model.engine = args.engine
     engine = EngineBase.create_engine(args.prefix_tag, engine_config) # no status for testing
     trainer = rft_get_trainer(engine, args.prefix_tag, args.engine_config, args.rft_config, args.module_file)
-    rft_block = TrainerRFTBlock(
+    rft_block = TrainerBlock(
+        queue_name=args.queue_name,
         prefix_tag=args.prefix_tag,
         epoch_id=args.epoch_id,
         block_id=args.block_id,
@@ -169,12 +170,13 @@ async def main():
     rft_block.input_dir = os.path.expanduser(rft_block.input_dir)
     rft_block.output_dir = os.path.expanduser(rft_block.output_dir)
 
-    rsync_client = RsyncClient(prefix_tag=args.prefix_tag)
+    callback_func = make_checkpoint_callback(
+        prefix_tag=args.prefix_tag,
+        trainer_block=rft_block,
+        workflow_provider="default",
+    )
 
-    loop = asyncio.get_event_loop()
-    # await loop.run_in_executor(None, trainer.train_rft_block, rft_block, rsync_client.enqueue)
-    # asyncio.run_coroutine_threadsafe(trainer.train_rft_block(rft_block, rsync_client.enqueue), loop)
-    await trainer.train_rft_block(rft_block, rsync_client.enqueue)
+    await trainer.train_rft_block(rft_block, callback_func)
     await asyncio.sleep(1)
 
 if __name__ == "__main__":

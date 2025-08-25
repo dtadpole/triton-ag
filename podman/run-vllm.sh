@@ -13,4 +13,4 @@ podman run -it \
     --env "HF_TOKEN=`cat ~/.keys/huggingface.api.key`" \
     -e HTTP_PROXY -e HTTPS_PROXY -e NO_PROXY \
     -e http_proxy -e https_proxy -e no_proxy \
-    docker://dtadpole/vllm:v0.7
+    docker://dtadpole/vllm:v0.8

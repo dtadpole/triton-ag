@@ -12,8 +12,8 @@ import yaml
 from logger import logger
 from pydantic import BaseModel
 from torch.utils.data import Dataset
-from trainerUtil import merge_dicts, SimpleCollator
-
+from trainerUtil import SimpleCollator
+from workflowUtil import merge_dicts
 
 class TrainerStatus(BaseModel):
     """Running status of the trainer"""
@@ -66,7 +66,7 @@ class EngineTrainingConfig(BaseModel):
     num_warmup_steps: int = 50
     dataloader_num_workers: int = 1
     loss_multiplier: float = 1.0
-    keep_checkpoint_num: int = 3
+    keep_checkpoint_num: int = 5
     seed: int = -1
 
 
