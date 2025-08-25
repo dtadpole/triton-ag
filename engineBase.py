@@ -1,25 +1,30 @@
 import os
 import shutil
-import wandb
-import torch
-import torch.distributed as dist
+from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
-from pydantic import BaseModel
-from abc import ABC, abstractmethod
-from typing import Optional, List, Callable, Dict
+from typing import Callable, Dict, List, Optional
+
+import torch
+import torch.distributed as dist
+import wandb
 import yaml
 from logger import logger
+from pydantic import BaseModel
 from torch.utils.data import Dataset
-from trainerUtil import SimpleCollator, merge_dicts
+from trainerUtil import merge_dicts, SimpleCollator
+
 
 class TrainerStatus(BaseModel):
     """Running status of the trainer"""
+
     global_step: int = 0
+
 
 class EngineModelConfig(BaseModel):
     """Configuration for model parameters"""
-    name: str = 'gpt2'
+
+    name: str = "gpt2"
     tokenizer_name: Optional[str] = None
     max_seq_length: int = 16384
     engine: str = "deepspeed"  # deepspeed, unsloth, fsdp, etc
@@ -31,8 +36,10 @@ class EngineModelConfig(BaseModel):
     compute_dtype: str = "bfloat16"
     trust_remote_code: bool = True
 
+
 class EngineOptimizerConfig(BaseModel):
     """Configuration for optimizer parameters"""
+
     optimizer_type: str = "AdamW"  # AdamW, Adam, SGD
     betas: tuple = (0.9, 0.99)
     eps: float = 1e-8
@@ -40,8 +47,10 @@ class EngineOptimizerConfig(BaseModel):
     momentum: float = 0.9  # For SGD
     nesterov: bool = False  # For SGD
 
+
 class EngineTrainingConfig(BaseModel):
     """Configuration for training parameters"""
+
     micro_batch_size: int = 2
     gradient_accumulation_steps: int = 1
     learning_rate: float = 0.000005
@@ -60,8 +69,10 @@ class EngineTrainingConfig(BaseModel):
     keep_checkpoint_num: int = 3
     seed: int = -1
 
+
 class EngineLoraConfig(BaseModel):
     """Configuration for LoRA parameters"""
+
     use_lora: bool = True
     rank: int = 64
     alpha: int = 32
@@ -71,15 +82,19 @@ class EngineLoraConfig(BaseModel):
     modules_to_save: Optional[List[str] | str] = None
     bias: str = "none"
 
+
 class LoggingConfig(BaseModel):
     """Configuration for logging parameters"""
+
     use_wandb: bool = True
     wandb_project: str = "kb_trainer"
     wandb_run_name: Optional[str] = None
     wandb_run_id: Optional[str] = None
 
+
 class EngineConfig(BaseModel):
     """Main configuration class containing all training parameters"""
+
     model: EngineModelConfig = EngineModelConfig()
     training: EngineTrainingConfig = EngineTrainingConfig()
     optimizer: EngineOptimizerConfig = EngineOptimizerConfig()
@@ -87,13 +102,15 @@ class EngineConfig(BaseModel):
     logging: LoggingConfig = LoggingConfig()
 
     @classmethod
-    def from_yaml(cls, yaml_path: str, override_yaml_path: Optional[str] = None) -> 'EngineConfig':
+    def from_yaml(
+        cls, yaml_path: str, override_yaml_path: Optional[str] = None
+    ) -> "EngineConfig":
         """Load configuration from YAML file"""
-        with open(yaml_path, 'r') as f:
+        with open(yaml_path, "r") as f:
             config_dict = yaml.safe_load(f)
 
         if override_yaml_path is not None:
-            with open(override_yaml_path, 'r') as f:
+            with open(override_yaml_path, "r") as f:
                 override_config_dict = yaml.safe_load(f)
             # do a recursive merge of the two dictionaries
             config_dict = merge_dicts(config_dict, override_config_dict)
@@ -106,43 +123,45 @@ class EngineConfig(BaseModel):
         logging_config = LoggingConfig()
 
         # Update from YAML sections
-        if 'model' in config_dict:
-            model_data = config_dict['model']
+        if "model" in config_dict:
+            model_data = config_dict["model"]
             model_config = EngineModelConfig(
-                name=model_data.get('name', 'gpt2'),
-                tokenizer_name=model_data.get('tokenizer_name'),
-                max_seq_length=model_data.get('max_seq_length', 1024),
-                use_gradient_checkpointing=model_data.get('use_gradient_checkpointing', "unsloth"),
-                load_in_4bit=model_data.get('load_in_4bit', False),
-                load_in_8bit=model_data.get('load_in_8bit', False),
-                compute_dtype=model_data.get('compute_dtype', 'bfloat16')
+                name=model_data.get("name", "gpt2"),
+                tokenizer_name=model_data.get("tokenizer_name"),
+                max_seq_length=model_data.get("max_seq_length", 1024),
+                use_gradient_checkpointing=model_data.get(
+                    "use_gradient_checkpointing", "unsloth"
+                ),
+                load_in_4bit=model_data.get("load_in_4bit", False),
+                load_in_8bit=model_data.get("load_in_8bit", False),
+                compute_dtype=model_data.get("compute_dtype", "bfloat16"),
             )
 
-        if 'training' in config_dict:
-            training_data = config_dict['training']
+        if "training" in config_dict:
+            training_data = config_dict["training"]
             training_config = EngineTrainingConfig(**training_data)
 
-        if 'optimizer' in config_dict:
-            optimizer_data = config_dict['optimizer']
+        if "optimizer" in config_dict:
+            optimizer_data = config_dict["optimizer"]
             # Convert betas list to tuple if present
-            if 'betas' in optimizer_data and isinstance(optimizer_data['betas'], list):
-                optimizer_data['betas'] = tuple(optimizer_data['betas'])
+            if "betas" in optimizer_data and isinstance(optimizer_data["betas"], list):
+                optimizer_data["betas"] = tuple(optimizer_data["betas"])
             optimizer_config = EngineOptimizerConfig(**optimizer_data)
 
-        if 'lora' in config_dict:
-            lora_data = config_dict['lora']
+        if "lora" in config_dict:
+            lora_data = config_dict["lora"]
             lora_config = EngineLoraConfig(
-                use_lora=lora_data.get('use_lora', True),
-                rank=lora_data.get('rank', 64),
-                alpha=lora_data.get('alpha', 16),
-                dropout=lora_data.get('dropout', 0.0),
-                target_modules=lora_data.get('target_modules', []),
-                modules_to_save=lora_data.get('modules_to_save', []),
-                bias=lora_data.get('bias', 'none')
+                use_lora=lora_data.get("use_lora", True),
+                rank=lora_data.get("rank", 64),
+                alpha=lora_data.get("alpha", 16),
+                dropout=lora_data.get("dropout", 0.0),
+                target_modules=lora_data.get("target_modules", []),
+                modules_to_save=lora_data.get("modules_to_save", []),
+                bias=lora_data.get("bias", "none"),
             )
 
-        if 'logging' in config_dict:
-            logging_data = config_dict['logging']
+        if "logging" in config_dict:
+            logging_data = config_dict["logging"]
             logging_config = LoggingConfig(**logging_data)
 
         return cls(
@@ -150,8 +169,9 @@ class EngineConfig(BaseModel):
             training=training_config,
             optimizer=optimizer_config,
             lora=lora_config,
-            logging=logging_config
+            logging=logging_config,
         )
+
 
 class TextDataset(Dataset):
     """Simple text dataset for language modeling"""
@@ -173,55 +193,80 @@ class TextDataset(Dataset):
             truncation=True,
             max_length=self.max_length,
             # padding='max_length',
-            return_tensors='pt'
+            return_tensors="pt",
         )
 
         return {
-            'input_ids': encoded['input_ids'].squeeze(),
-            'attention_mask': encoded['attention_mask'].squeeze(),
-            'labels': encoded['input_ids'].squeeze()
+            "input_ids": encoded["input_ids"].squeeze(),
+            "attention_mask": encoded["attention_mask"].squeeze(),
+            "labels": encoded["input_ids"].squeeze(),
         }
 
 
 class EngineBase(ABC):
 
     @classmethod
-    def create_engine(cls, prefix_tag: str, config: EngineConfig, status: Optional[TrainerStatus] = None):
+    def create_engine(
+        cls,
+        prefix_tag: str,
+        config: EngineConfig,
+        status: Optional[TrainerStatus] = None,
+        inference_mode=False,
+    ):
         if config.model.engine == "deepspeed":
             from engineDeepspeed import EngineDeepspeed
-            return EngineDeepspeed(prefix_tag, config, status)
+
+            return EngineDeepspeed(
+                prefix_tag, config, status=status, inference_mode=inference_mode
+            )
         elif config.model.engine == "unsloth":
             from engineUnsloth import EngineUnsloth
-            return EngineUnsloth(prefix_tag, config, status)
+
+            return EngineUnsloth(
+                prefix_tag, config, status=status, inference_mode=inference_mode
+            )
 
     """Base training engine for Hugging Face models with step-by-step training implementation"""
-    def __init__(self, prefix_tag: str, config: EngineConfig, status: Optional[TrainerStatus] = None):
+
+    def __init__(
+        self,
+        prefix_tag: str,
+        config: EngineConfig,
+        status: Optional[TrainerStatus] = None,
+        inference_mode=False,
+    ):
+        self.inference_mode = inference_mode
         self.prefix_tag = prefix_tag
         self.config = config
         self.status = status if status is not None else TrainerStatus()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # Setup output directory
-        self.checkpoint_path = Path(os.path.expanduser(self.config.training.checkpoint_path)) / self.prefix_tag
+        self.checkpoint_path = (
+            Path(os.path.expanduser(self.config.training.checkpoint_path))
+            / self.prefix_tag
+        )
         self.checkpoint_path.mkdir(parents=True, exist_ok=True)
-        # Initialize logging
-        self.config.logging.wandb_run_id = self.prefix_tag
-        self.config.logging.wandb_run_name = self.prefix_tag + "_" + datetime.now().strftime("%m%d")
-        # setup logging
-        self._setup_logging()
+        if not self.inference_mode:
+            # setup logging
+            self._setup_logging()
 
     def short_name(self):
-        return 'base'
+        return "base"
 
     def _update_config(self, config: EngineConfig):
         """Update config"""
         if type(config) != EngineConfig:
-            raise ValueError(f"❌ [{self.__class__.__name__}] Invalid config type: [{type(config)}]")
+            raise ValueError(
+                f"❌ [{self.__class__.__name__}] Invalid config type: [{type(config)}]"
+            )
         self.config = config
 
     def _print_model_info(self, model):
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        logger.info(f"🛳️ [{self.__class__.__name__}] loaded - Trainable: [{trainable_params:,}/{total_params:,}] ({100 * trainable_params / total_params:.1f}%)")
+        logger.info(
+            f"🛳️ [{self.__class__.__name__}] loaded - Trainable: [{trainable_params:,}/{total_params:,}] ({100 * trainable_params / total_params:.1f}%)"
+        )
 
     @abstractmethod
     def _backward_step(self, loss: torch.Tensor):
@@ -236,6 +281,16 @@ class EngineBase(ABC):
     @abstractmethod
     def _get_current_lr(self):
         """Get current learning rate"""
+        pass
+
+    @abstractmethod
+    def _base_model(self):
+        """Get base model"""
+        pass
+
+    @abstractmethod
+    def _lora_model(self):
+        """Get LoRA model"""
         pass
 
     @abstractmethod
@@ -257,7 +312,9 @@ class EngineBase(ABC):
         """Update latest checkpoint link"""
         latest_path = self.checkpoint_path / self.config.training.latest_checkpoint_name
 
-        if (dist.is_initialized() and dist.get_rank() == 0) or not dist.is_initialized():
+        if (
+            dist.is_initialized() and dist.get_rank() == 0
+        ) or not dist.is_initialized():
             # Remove existing link/directory
             if latest_path.exists():
                 if latest_path.is_symlink():
@@ -273,20 +330,33 @@ class EngineBase(ABC):
 
     def _cleanup_checkpoint(self, checkpoint_path: Path):
         """Cleanup checkpoint"""
-        if (dist.is_initialized() and dist.get_rank() == 0) or not dist.is_initialized():
+        if (
+            dist.is_initialized() and dist.get_rank() == 0
+        ) or not dist.is_initialized():
             # check all the folders under checkpoint_path
             # retain only the latest {self.config.training.keep_checkpoint_num} checkpoints
             checkpoints = list(checkpoint_path.glob("checkpoint-*"))
             # remove checkpoint-latest
-            checkpoints.remove(checkpoint_path / self.config.training.latest_checkpoint_name)
+            checkpoints.remove(
+                checkpoint_path / self.config.training.latest_checkpoint_name
+            )
             checkpoints.sort(key=lambda x: int(x.name.split("-")[1]))
-            for checkpoint in checkpoints[:-self.config.training.keep_checkpoint_num]:
-                logger.info(f"🔍 [{self.__class__.__name__}] Removing checkpoint: {checkpoint}")
+            for checkpoint in checkpoints[: -self.config.training.keep_checkpoint_num]:
+                logger.info(
+                    f"🔍 [{self.__class__.__name__}] Removing checkpoint: {checkpoint}"
+                )
                 shutil.rmtree(checkpoint)
 
     def _setup_logging(self):
         """Setup logging and tracking"""
-        if (dist.is_initialized() and dist.get_rank() == 0) or not dist.is_initialized():
+        if (
+            dist.is_initialized() and dist.get_rank() == 0
+        ) or not dist.is_initialized():
+            # Initialize logging
+            self.config.logging.wandb_run_id = self.prefix_tag
+            self.config.logging.wandb_run_name = (
+                self.prefix_tag + "_" + datetime.now().strftime("%m%d")
+            )
             if self.config.logging.use_wandb:
                 wandb.init(
                     project=self.config.logging.wandb_project,
@@ -299,18 +369,24 @@ class EngineBase(ABC):
 
     def _log_metrics(self, metrics: Dict[str, float], step: int):
         """Log training metrics"""
-        if (dist.is_initialized() and dist.get_rank() == 0) or not dist.is_initialized():
+        if (
+            dist.is_initialized() and dist.get_rank() == 0
+        ) or not dist.is_initialized():
             step = self.status.global_step
             if step % self.config.training.logging_steps == 0:
                 # format metrics into a string with .4f format
                 formatted_metrics = {k: f"{v:.4f}" for k, v in metrics.items()}
-                logger.info(f"🔍 [{self.__class__.__name__}] [G-Step={step}] {formatted_metrics}")
+                logger.info(
+                    f"🔍 [{self.__class__.__name__}] [G-Step={step}] {formatted_metrics}"
+                )
 
                 if self.config.logging.use_wandb:
                     wandb.log(metrics, step=step)
 
 
-def create_sample_training_dataset(tokenizer, size: int = 100, max_length: int = 512) -> TextDataset:
+def create_sample_training_dataset(
+    tokenizer, size: int = 100, max_length: int = 512
+) -> TextDataset:
     """Create a sample dataset for CLI training"""
     # Sample conversations for training
     conversations = [
@@ -327,4 +403,3 @@ def create_sample_training_dataset(tokenizer, size: int = 100, max_length: int =
     # Repeat to reach desired size
     repeated_conversations = (conversations * (size // len(conversations) + 1))[:size]
     return TextDataset(repeated_conversations, tokenizer, max_length)
-
