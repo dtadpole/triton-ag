@@ -334,7 +334,6 @@ class WorkflowClient:
         if queue_type is None or queue_type not in VALID_TASK_TYPES:
             raise ValueError(f"Task [{queue_name}] has invalid queue type: [{queue_type}] in [{task_config}]")
         # evaluate everything in the task_config
-        # logger.info(f"🔍 [WorkflowClient] [{self.prefix_tag}] [{queue_type}.{queue_name}] Task config: [{task_config}] Env vars: [{env_vars}]")
         task_data = deep_format(task_config, env)
         # enqueue the task
         full_queue_name = f"{queue_type}.{queue_name}"
@@ -347,7 +346,7 @@ class WorkflowClient:
             await self.enqueue(full_queue_name, trainerBlock.model_dump(), create_queue=True)
             logger.info(f"🎢 [WorkflowClient] [{self.prefix_tag}] Enqueued to [{full_queue_name}], content: [{trainerBlock.model_dump()}]")
         elif queue_type == TASK_TYPE_SYNC:
-            syncBlock = WorkflowSyncBlock(**merge_dicts(self._get_task_default(queue_type, queue_name), task_data))
+            syncBlock = WorkflowSyncBlock(**merge_dicts(self._get_queue_default(queue_type, queue_name), task_data))
             await self.enqueue(full_queue_name, syncBlock.model_dump(), create_queue=True)
             logger.info(f"🎢 [WorkflowClient] [{self.prefix_tag}] Enqueued to [{full_queue_name}], content: [{syncBlock.model_dump()}]")
         else:
@@ -364,7 +363,7 @@ class WorkflowClient:
         block: BaseModel,
         env: dict = {},
     ):
-        logger.info(f"⏳ [WorkflowClient] [{self.prefix_tag}] [{queue_type}.{queue_name}] {callback_kind}. Block: [{block.model_dump()}] Env vars: [{env_vars}]")
+        logger.info(f"⏳ [WorkflowClient] [{self.prefix_tag}] [{queue_type}.{queue_name}] {callback_kind}. Block: [{block.model_dump()}] Env vars: [{env}]")
         env = {
             "queue_type": queue_type,
             "queue_name": queue_name,
