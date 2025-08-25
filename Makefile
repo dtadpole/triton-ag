@@ -45,7 +45,7 @@ env_autoawq:
 	docker run -it  --gpus all --net=host -p 8081:8081 -p 8082:8082 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.inference/:/root/.inference/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/autoawq /bin/bash
 
 env_start:
-	docker run -it \
+	docker run -d \
 		--name codegen \
 		--replace \
 		--gpus all \
@@ -182,12 +182,12 @@ vllm-qwen3-14b-devserver:
 
 
 vllm-qwen3-32b-devserver:
-	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python -m vllm.entrypoints.openai.api_server \
+	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=0,1,2,3 python -m vllm.entrypoints.openai.api_server \
     --model Qwen/Qwen3-32B \
     --port 8091 --host :: \
     --api-key dummy \
     --data-parallel-size 1 \
-    --tensor-parallel-size 8 \
+    --tensor-parallel-size 4 \
     --pipeline-parallel-size 1 \
     --enable-lora --max-lora-rank 128 --max-loras 6 \
     --gpu-memory-utilization 0.95 --max_model_len 24576 \
