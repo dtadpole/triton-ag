@@ -609,13 +609,13 @@ async def main():
         sys.exit(1)
 
     # Create datasets
-    train_dataset = create_sample_training_dataset(trainer.tokenizer, size=40, max_length=trainer.config.model.max_seq_length)
-    eval_dataset = create_sample_training_dataset(trainer.tokenizer, size=2, max_length=trainer.config.model.max_seq_length)
+    train_dataset = create_sample_training_dataset(trainer.tokenizer, size=100, max_length=trainer.config.model.max_seq_length)
+    # eval_dataset = create_sample_training_dataset(trainer.tokenizer, size=2, max_length=trainer.config.model.max_seq_length)
 
-    logger.info(f"📊 [{trainer.__class__.__name__}-{trainer.rank}] Dataset created - Train: {len(train_dataset)}, Eval: {len(eval_dataset)}")
+    logger.info(f"📊 [{trainer.__class__.__name__}-{trainer.rank}] Dataset created - Train: {len(train_dataset)}")
 
     # Start training
-    success = await train_async(args.prefix_tag, trainer, train_dataset, eval_dataset)
+    success = await train_async(args.prefix_tag, trainer, train_dataset, None)
     if not success:
         logger.error("❌ Training failed")
         sys.exit(1)
