@@ -70,13 +70,17 @@ env_start:
 		-v ~/.gitconfig:/root/.gitconfig \
 		-v ~/.keys/:/root/.keys/ \
 		-v /data/users/${USER}/:/root/.cache/ \
-		-v ${PWD}:/workspace/ \
 		--cap-add SYS_ADMIN \
 		--device /dev/fuse \
 		--security-opt apparmor:unconfined \
 		--privileged \
 		localhost/triton_ag \
-		/bin/bash -c "make wandb_login && make mount_shared_drive && tail -f /dev/null"
+		/bin/bash -c "\
+		sshfs -o IdentityFile=/root/.ssh/id_rsa_shared -p 8082 codegen@devvm8492.cco0.facebook.com:/shared/ /workspace && \
+		cd /workspace/ && \
+		make mount_shared_drive && \
+		make wandb_login && \
+		tail -f /dev/null"
 
 env:
 	docker exec -it codegen /bin/bash
@@ -85,12 +89,14 @@ wandb_login:
 	wandb login --host=https://fairwandb.org
 
 mount_shared_drive:
-	sshfs -o IdentityFile=/root/.ssh/id_rsa_shared -p 8081 codegen@devgpu139.cco2.facebook.com:/shared/ shared/
+	sshfs -o IdentityFile=/root/.ssh/id_rsa_shared -p 8081 codegen@devvm8492.cco0.facebook.com:/shared/ shared/
+
+mount_shared_code:
+	sshfs -o IdentityFile=/root/.ssh/id_rsa_shared -p 8082 codegen@devvm8492.cco0.facebook.com:/shared/ /workspace/
 
 mlflow:
 	# mlflow server --host localhost --port 5051
 	mlflow server --host localhost --port 5051 --backend-store-uri sqlite:///mlflow.sqlite
-
 
 lora_merge_compress_autoawq:
 	CUDA_VISIBLE_DEVICES=4 python lora_merge_awq.py
@@ -185,12 +191,12 @@ vllm-qwen3-14b-devserver:
 
 
 vllm-qwen3-32b-devserver:
-	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=4,5,6,7 python -m vllm.entrypoints.openai.api_server \
+	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python -m vllm.entrypoints.openai.api_server \
     --model Qwen/Qwen3-32B \
     --port 8091 --host :: \
     --api-key dummy \
     --data-parallel-size 1 \
-    --tensor-parallel-size 4 \
+    --tensor-parallel-size 8 \
     --pipeline-parallel-size 1 \
     --enable-lora --max-lora-rank 128 --max-loras 6 \
     --gpu-memory-utilization 0.95 --max_model_len 24576 \
