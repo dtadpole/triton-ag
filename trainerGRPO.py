@@ -50,8 +50,8 @@ class GRPOConfig(BaseModel):
     # loss_type: str = "token" # "episode" or "token" or "seq_max" or "gspo"
     loss_type: str = "gspo" # "episode" or "token" or "seq_max" or "gspo"
     gamma: float = 0.5
-    use_tis: bool = False
-    tis_clamp_ratio: float = 2.0
+    use_truncated_is: bool = False
+    truncated_is_ratio: float = 2.0
 
     @classmethod
     def from_yaml(cls, file_path: str) -> "GRPOConfig":
@@ -268,10 +268,10 @@ class GRPOTrainer():
                 # calculate clipped upper and lower percentage
                 bounded_ratio_advantage = torch.clamp(ratio_advantage, -self.grpo_config.bound_advantage_range, self.grpo_config.bound_advantage_range)
 
-                if self.grpo_config.use_tis:
+                if self.grpo_config.use_truncated_is:
                     is_ratio = torch.exp(generation_completion_log_probs - vllm_completion_log_probs).detach()
-                    clip_metrics[IS_RATIO_TRUNCATED_PERCENTAGE].append(torch.sum(is_ratio > self.grpo_config.tis_clamp_ratio).item() * 100.0 / len(forward_completion_log_probs))
-                    truncated_is_ratio = torch.min(is_ratio, self.grpo_config.tis_clamp_ratio)
+                    clip_metrics[IS_RATIO_TRUNCATED_PERCENTAGE].append(torch.sum(is_ratio > self.grpo_config.truncated_is_ratio).item() * 100.0 / len(forward_completion_log_probs))
+                    truncated_is_ratio = torch.min(is_ratio, self.grpo_config.truncated_is_ratio)
                     final_ratio_advantage = truncated_is_ratio * bounded_ratio_advantage
                 else:
                     final_ratio_advantage = bounded_ratio_advantage
