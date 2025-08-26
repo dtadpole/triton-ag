@@ -1,6 +1,5 @@
 # CUDA_VISIBLE_DEVICES = ${GPU}
-ENV_VARS ?= PYTHONNOUSERSITE=1 \
-        PYTHONPATH=${PYTHONPATH}:${PWD}
+ENV_VARS ?= PYTHONNOUSERSITE=1 PYTHONPATH=${PYTHONPATH}:${PWD}
 HOST=$(shell hostname)
 IS_DEVSERVER=$(shell hostname | grep -E -c "dev.*\.facebook\.com")
 META_PROXY := https_proxy=http://fwdproxy:8080 http_proxy=http://fwdproxy:8080 ftp_proxy=http://fwdproxy:8080 no_proxy='\''\'\'''\''.facebook.com|.tfbnw.net|*.fb.com'\''\'\'
@@ -88,6 +87,7 @@ mlflow:
 
 workflow_server:
 	while true; do python ./workflowServer.py --host :: --port 8488; sleep 5; done
+
 
 lora_merge_compress_autoawq:
 	CUDA_VISIBLE_DEVICES=4 python lora_merge_awq.py
@@ -258,8 +258,7 @@ llama.cpp-server-qwen3-32b:
 	--host 0.0.0.0
 
 jupyter:
-	echo ${ENV_VARS}
-	env ${ENV_VARS} jupyter notebook --allow-root --port 8082 --ip 0.0.0.0 --NotebookApp.token='' --NotebookApp.password=''
+	${ENV_VARS} jupyter notebook --allow-root --port 8085 --ip 0.0.0.0 --NotebookApp.token='' --NotebookApp.password=''
 
 
 # MODEL_TO_SERVE ?= Qwen/Qwen3-32B-AWQ
