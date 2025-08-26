@@ -120,7 +120,7 @@ finetune-single:
 
 finetune-2gpu:
 	@echo "Starting data parallel fine-tuning on 2 GPUs..."
-	bash -c "CUDA_VISIBLE_DEVICES=4,5 torchrun --nproc_per_node=2 --master_port=29500 finetune_unsloth.py"
+	bash -c "CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 --master_port=29500 finetune_unsloth.py"
 
 vllm-qwen3-8b:
 	vllm serve unsloth/DeepSeek-R1-0528-Qwen3-8B-bnb-4bit \
@@ -226,7 +226,6 @@ vllm-qwen3-32b-sft4-devserver:
     --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
     --return-tokens-as-token-ids \
     --enforce-eager
-
 
 sglang-qwen3-8b:
 	sglang serve qwen/qwen3-8b-instruct \
