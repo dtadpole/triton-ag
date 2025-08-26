@@ -120,7 +120,7 @@ finetune-single:
 
 finetune-2gpu:
 	@echo "Starting data parallel fine-tuning on 2 GPUs..."
-	bash -c "CUDA_VISIBLE_DEVICES=4,5 torchrun --nproc_per_node=2 --master_port=29500 finetune_unsloth.py"
+	bash -c "CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 --master_port=29500 finetune_unsloth.py"
 
 vllm-qwen3-8b:
 	vllm serve unsloth/DeepSeek-R1-0528-Qwen3-8B-bnb-4bit \
@@ -203,6 +203,9 @@ vllm-qwen3-32b-devserver:
     --return-tokens-as-token-ids \
     --enforce-eager
 
+MODEL_TO_SERVE ?= finetune_model_output/sft_t2/qwen3_32b_awq
+
+
 
 vllm-qwen25-7b-devserver:
 	CUDA_VISIBLE_DEVICES=2,5 vllm serve unsloth/Qwen2.5-7B \
@@ -258,8 +261,6 @@ jupyter:
 	echo ${ENV_VARS}
 	env ${ENV_VARS} jupyter notebook --allow-root --port 8082 --ip 0.0.0.0 --NotebookApp.token='' --NotebookApp.password=''
 
-
-MODEL_TO_SERVE ?= finetune_model_output/sft_t2/qwen3_32b_awq
 
 # MODEL_TO_SERVE ?= Qwen/Qwen3-32B-AWQ
 
