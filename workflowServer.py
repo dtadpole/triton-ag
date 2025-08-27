@@ -67,6 +67,17 @@ class WorkflowServer:
                 raise HTTPException(status_code=404, detail=f"Prefix tag [{prefix_tag}] not found")
             return self.registries[prefix_tag].get_workflow_config()
 
+        @self.router.delete("/workflow/delete/{prefix_tag}")
+        async def workflow_delete(prefix_tag: str):
+            if prefix_tag not in self.registries:
+                raise HTTPException(status_code=404, detail=f"Prefix tag [{prefix_tag}] not found")
+            # Also remove from short_vars if present
+            short_names_to_remove = [k for k, v in self.short_vars.items() if v is None or v == self.registries.get(prefix_tag)]
+            for short_name in short_names_to_remove:
+                self.short_vars.pop(short_name, None)
+            del self.registries[prefix_tag]
+            return {"message": f"Registry with prefix tag [{prefix_tag}] deleted"}
+
         @self.router.get("/keys/{prefix_tag}")
         async def keys(prefix_tag: str):
             if prefix_tag not in self.registries:
