@@ -80,7 +80,6 @@ class InferenceClient:
         # self.logprobs = config.model.logprobs
         # model tag
         self.model_tag = f"{self.provider_name}_{self.model_short_name}"
-        self.model_tag = self.model_tag.replace(' ', '_').replace('/', '_') # replace spaces and slashes with underscores
 
         # Set up API key
         # Try to load from config or default location
