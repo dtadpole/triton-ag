@@ -292,6 +292,7 @@ async def kb_eval_ref(
 
     except Exception as e:
         # global TOTAL_ERROR_COUNTER
+        elapsed_time = time.time() - start_time
         TOTAL_ERROR_COUNTER += 1
         logger.error(f"❌ [KB Eval] [reference] error: {type(e).__name__}: {str(e)}")
         result = KernelExecResult(

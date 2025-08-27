@@ -212,11 +212,11 @@ vllm-qwen3-32b-devserver:
     --return-tokens-as-token-ids \
     --enforce-eager
 
-MODEL_TO_SERVE ?= shared/finetune_model_output/sft_t4/qwen3_32b
+MODEL_TO_SERVE ?= shared/finetune_model_output/sft_t5/qwen3_32b
 
-vllm-qwen3-32b-sft4-devserver:
+vllm-qwen3-32b-sft-devserver:
 	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=0,1,2,3 python -m vllm.entrypoints.openai.api_server \
-    --model shared/finetune_model_output/sft_t4/qwen3_32b \
+    --model ${MODEL_TO_SERVE} \
     --port 8091 --host :: \
     --api-key dummy \
     --data-parallel-size 1 \
