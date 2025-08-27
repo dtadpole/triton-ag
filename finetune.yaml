@@ -16,16 +16,16 @@ gpu:
 training:
   # Core training parameters
   num_train_epochs: 1
-  learning_rate: 0.0001 # 3e-5
+  learning_rate: 0.00003 # 3e-5
   max_steps: -1  # Set to -1 for full epochs
   warmup_steps: 10
 
   # Batch settings
   per_device_batch_size: 1
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
 
   # Optimization
-  optim: "adamw_torch"
+  optim: "paged_adamw_8bit"
   weight_decay: 0.05
   lr_scheduler_type: "cosine"
   max_grad_norm: 0.75  # Gradient clipping
@@ -34,7 +34,7 @@ training:
   logging_steps: 1
   save_steps: 200
   save_total_limit: 3
-  output_dir: "shared/finetune_model_output/sft_t4/"
+  output_dir: "shared/finetune_model_output/sft_t5/"
 
   # System settings
   seed: 3407
@@ -44,7 +44,7 @@ training:
 lora:
   r: 128
   alpha: 128
-  dropout: 0.00
+  dropout: 0.05
   target_modules:
     - "q_proj"
     - "k_proj"
