@@ -269,7 +269,7 @@ llama.cpp-server-qwen3-32b:
 	--host 0.0.0.0
 
 jupyter:
-	${ENV_VARS} jupyter notebook --allow-root --port 8085 --ip 0.0.0.0 --NotebookApp.token='' --NotebookApp.password=''
+	${ENV_VARS} jupyter notebook --allow-root --port 8086 --ip 0.0.0.0 --NotebookApp.token='' --NotebookApp.password=''
 
 
 # MODEL_TO_SERVE ?= Qwen/Qwen3-32B-AWQ
