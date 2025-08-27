@@ -90,7 +90,7 @@ workflow_server:
 
 
 lora_merge_compress_autoawq:
-	CUDA_VISIBLE_DEVICES=4 python lora_merge_awq.py
+	CUDA_VISIBLE_DEVICES=2 python lora_merge_awq.py
 
 lora_merge_compress:
 	CUDA_VISIBLE_DEVICES=4 python lora_merge_llmcomp_awq.py
