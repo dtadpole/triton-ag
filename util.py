@@ -22,7 +22,10 @@ from agents import (
 from agents.tool import Tool
 from logger import logger
 from pydantic.json_schema import to_jsonable_python
+import os
 
+# Set CONFIG_FOLDER from environment variable, defaulting to current directory ("./") if not set
+CONFIG_FOLDER = os.environ.get("TRITON_AG_CONFIG_FOLDER", "./")
 
 def is_devserver() -> bool:
     import socket

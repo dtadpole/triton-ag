@@ -12,11 +12,11 @@ from logger import logger
 from workflowRegistry import WorkflowRegistry, QUEUE_PREFIX, ADAPTER_PREFIX
 from workflowUtil import get_prefix_tag, CodeGenEvalBlock, CritiqueBlock, ExemplarBlock, ReflectionBlock, TrainerSFTBlock, TrainerRFTBlock, TrainerGRPOBlock, ComposerBlock
 from replServer import ReplServer
-from util import WORKFLOW_DIR
+from util import WORKFLOW_DIR, CONFIG_FOLDER
 
 
 class WorkflowServer:
-    def __init__(self, config_path: str = "workflow.yaml"):
+    def __init__(self, config_path: str = CONFIG_FOLDER + "workflow.yaml"):
         self.router = APIRouter()
         self.config_path = config_path
         self.registries = {}
@@ -29,7 +29,7 @@ class WorkflowServer:
         for prefix_tag, registry_item in self.config.get("registry", {}).items():
             if prefix_tag not in self.registries:
                 # we found a new prefix tag, so we need to create a new registry
-                workflow_config_path = registry_item.get("config_path", "workflow/example.yaml")
+                workflow_config_path = registry_item.get("config_path", CONFIG_FOLDER + "workflow/example.yaml")
                 workflow_data_dir = registry_item.get("data_dir", WORKFLOW_DIR)
                 workflow_registry = WorkflowRegistry(
                     workflow_config_path=workflow_config_path,
@@ -303,7 +303,7 @@ class WorkflowServer:
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config_path", type=str, default="workflow.yaml")
+    parser.add_argument("--config_path", type=str, default=CONFIG_FOLDER + "workflow.yaml")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8488)
     args = parser.parse_args()
