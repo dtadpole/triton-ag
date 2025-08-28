@@ -58,6 +58,7 @@ class EngineTrainingConfig(BaseModel):
     max_steps: int = 100000
     save_steps: int = 20
     eval_steps: int = 20
+    retain_steps: int = 1000
     logging_steps: int = 1
     checkpoint_path: str = "~/.trainer"
     latest_checkpoint_name: Optional[str] = "checkpoint-latest"
@@ -342,10 +343,17 @@ class EngineBase(ABC):
             )
             checkpoints.sort(key=lambda x: int(x.name.split("-")[1]))
             for checkpoint in checkpoints[: -self.config.training.keep_checkpoint_num]:
-                logger.info(
-                    f"🔍 [{self.__class__.__name__}] Removing checkpoint: {checkpoint}"
-                )
-                shutil.rmtree(checkpoint)
+                checkpoint_num = int(checkpoint.name.split("-")[1])
+                if checkpoint_num % self.config.training.retain_steps == 0:
+                    logger.info(
+                        f"🔍 [{self.__class__.__name__}] Retaining checkpoint: {checkpoint}"
+                    )
+                    continue
+                else:
+                    logger.info(
+                        f"🔍 [{self.__class__.__name__}] Removing checkpoint: {checkpoint}"
+                    )
+                    shutil.rmtree(checkpoint)
 
     def _setup_logging(self):
         """Setup logging and tracking"""
