@@ -175,7 +175,6 @@ class GRPOTrainer():
         advantages = batch['advantage']
         prompt_token_ids = batch['logp_server_prompt_ids']
         completion_token_ids = batch['logp_server_completion_ids']
-        # vllm_completion_log_probs = batch['vllm_completion_log_probs']
         generation_log_probs = batch['logp_server_logps']
         vllm_completion_log_probs = batch['vllm_completion_log_probs']
         input_ids = batch['input_ids'].to(self.engine.device)
@@ -205,19 +204,20 @@ class GRPOTrainer():
             #     log_prob_override_mse = torch.mean(torch.abs(torch.tensor(completion_log_probs[i], device=self.device) - completion_log_probs_tensor))
             # else:
             generation_completion_log_probs = torch.tensor(generation_log_probs[i][len(prompt_token_ids[i])-1:len(prompt_token_ids[i])-1+len(completion_token_ids[i])], device=self.engine.device)
+            vllm_completion_log_probs_i = torch.tensor(vllm_completion_log_probs[i], device=self.engine.device)
             # calculate log ratio (in log space is subtraction)
             if generation_completion_log_probs.shape != forward_completion_log_probs.shape:
                 raise ValueError(f"❌ [GRPOTrainer] Generation completion log probabilities and forward completion log probabilities have different shapes: {generation_completion_log_probs.shape} != {forward_completion_log_probs.shape}")
-            if vllm_completion_log_probs.shape != generation_completion_log_probs.shape:
-                raise ValueError(f"❌ [GRPOTrainer] VLLM completion log probabilities and generation completion log probabilities have different shapes: {vllm_completion_log_probs.shape} != {generation_completion_log_probs.shape}")
+            if vllm_completion_log_probs_i.shape != generation_completion_log_probs.shape:
+                raise ValueError(f"❌ [GRPOTrainer] VLLM completion log probabilities and generation completion log probabilities have different shapes: {vllm_completion_log_probs_i.shape} != {generation_completion_log_probs.shape}")
 
             # log_prob_override_mse is always zero here
             log_prob_forward_generation_diff = torch.mean(torch.abs(forward_completion_log_probs - generation_completion_log_probs))
-            log_prob_generation_vllm_diff = torch.mean(torch.abs(generation_completion_log_probs - vllm_completion_log_probs))
-            log_prob_forward_vllm_diff = torch.mean(torch.abs(forward_completion_log_probs - vllm_completion_log_probs))
+            log_prob_generation_vllm_diff = torch.mean(torch.abs(generation_completion_log_probs - vllm_completion_log_probs_i))
+            log_prob_forward_vllm_diff = torch.mean(torch.abs(forward_completion_log_probs - vllm_completion_log_probs_i))
 
             # log probs is calculated in log space, so we need to subtract the log probabilities
-            log_ratio = forward_completion_log_probs - generation_completion_log_probs
+            raw_log_ratio = forward_completion_log_probs - generation_completion_log_probs
 
             clip_metrics[LOG_PROB_AVERAGE_VALUE].append(torch.mean(forward_completion_log_probs).item())
             clip_metrics[LOG_PROB_FORWARD_GENERATION_DIFF].append(log_prob_forward_generation_diff.item())
@@ -225,6 +225,14 @@ class GRPOTrainer():
             clip_metrics[LOG_PROB_FORWARD_VLLM_DIFF].append(log_prob_forward_vllm_diff.item())
 
             if self.grpo_config.loss_type == "gspo":
+
+                if self.grpo_config.use_truncated_is:
+                    is_ratio = torch.exp(generation_completion_log_probs - vllm_completion_log_probs_i).detach()
+                    clip_metrics[IS_RATIO_TRUNCATED_PERCENTAGE].append(torch.sum(is_ratio > self.grpo_config.truncated_is_ratio).item() * 100.0 / len(forward_completion_log_probs))
+                    truncated_is_ratio = torch.clamp(is_ratio, max=self.grpo_config.truncated_is_ratio)
+                    log_ratio = truncated_is_ratio * raw_log_ratio
+                else:
+                    log_ratio = raw_log_ratio
 
                 sequence_log_ratio = torch.sum(log_ratio) / len(forward_completion_log_probs)
                 sequence_ratio = torch.exp(sequence_log_ratio)
@@ -248,7 +256,7 @@ class GRPOTrainer():
                 loss = -final_sequence_ratio_advantage.mean()
 
             else:
-                ratio = torch.exp(log_ratio)
+                ratio = torch.exp(raw_log_ratio)
 
                 clip_metrics[LOG_PROB_AVERAGE_RATIO].append(ratio.mean().item())
 
@@ -269,9 +277,9 @@ class GRPOTrainer():
                 bounded_ratio_advantage = torch.clamp(ratio_advantage, -self.grpo_config.bound_advantage_range, self.grpo_config.bound_advantage_range)
 
                 if self.grpo_config.use_truncated_is:
-                    is_ratio = torch.exp(generation_completion_log_probs - vllm_completion_log_probs).detach()
+                    is_ratio = torch.exp(generation_completion_log_probs - vllm_completion_log_probs_i).detach()
                     clip_metrics[IS_RATIO_TRUNCATED_PERCENTAGE].append(torch.sum(is_ratio > self.grpo_config.truncated_is_ratio).item() * 100.0 / len(forward_completion_log_probs))
-                    truncated_is_ratio = torch.min(is_ratio, self.grpo_config.truncated_is_ratio)
+                    truncated_is_ratio = torch.clamp(is_ratio, max=self.grpo_config.truncated_is_ratio)
                     final_ratio_advantage = truncated_is_ratio * bounded_ratio_advantage
                 else:
                     final_ratio_advantage = bounded_ratio_advantage
@@ -343,7 +351,9 @@ class GRPOTrainer():
             )
 
             # Scale loss for gradient accumulation
-            mini_batch_loss = mini_batch_loss * self.engine.config.training.loss_multiplier / len(dataloader) # divide by the group size
+            if self.grpo_config.loss_type != "token": # for token level loss, the loss has already been scaled by the group size
+                mini_batch_loss = mini_batch_loss * self.engine.config.training.loss_multiplier / len(dataloader) # divide by the group size
+            # run backward step
             self.engine._backward_step(mini_batch_loss)
 
             # del outputs
