@@ -8,19 +8,19 @@ sync_task:
   steps:
     - type: iterator
       collection: "`block.context['sync_hosts']`"
+      context_vars:
+        sync_host: "`__item__`"
       steps:
         - type: command
-          context_vars:
-            sync_host: "`__item__`"
           commands:
             - |
-              rsync -azP --rsync-path 'mkdir -p .trainer/{context[checkpoint_name]} && rsync' \
-                  ~/.trainer/{context[checkpoint_name]}/adapter_config.json \
-                  {sync_host}:.trainer/{checkpoint_name}/
+              rsync -azP --rsync-path 'mkdir -p .trainer/{block.context[checkpoint_name]} && rsync' \
+                  ~/.trainer/{block.context[checkpoint_name]}/adapter_config.json \
+                  {sync_host}:.trainer/{block.context[checkpoint_name]}/
             - |
-              rsync -azP --rsync-path 'mkdir -p .trainer/{context[checkpoint_name]} && rsync' \
-                  ~/.trainer/{context[checkpoint_name]}/adapter_model.safetensors \
-                  {sync_host}:.trainer/{context[checkpoint_name]}/
+              rsync -azP --rsync-path 'mkdir -p .trainer/{block.context[checkpoint_name]} && rsync' \
+                  ~/.trainer/{block.context[checkpoint_name]}/adapter_model.safetensors \
+                  {sync_host}:.trainer/{block.context[checkpoint_name]}/
     # sync the lora adapter with vllm and logp servers
     - type: code
       code_snippet_path: 'workflow/sync_lora_all.py'
