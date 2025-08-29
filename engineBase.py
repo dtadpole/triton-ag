@@ -341,9 +341,9 @@ class EngineBase(ABC):
             checkpoints.remove(
                 checkpoint_path / self.config.training.latest_checkpoint_name
             )
-            checkpoints.sort(key=lambda x: int(x.name.split("-")[1]))
+            checkpoints.sort(key=lambda x: int(x.name.split("-")[1].split(".")[0]))
             for checkpoint in checkpoints[: -self.config.training.keep_checkpoint_num]:
-                checkpoint_num = int(checkpoint.name.split("-")[1])
+                checkpoint_num = int(checkpoint.name.split("-")[1].split(".")[0])
                 if checkpoint_num % self.config.training.retain_steps == 0:
                     logger.info(
                         f"🔍 [{self.__class__.__name__}] Retaining checkpoint: {checkpoint}"
