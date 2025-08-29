@@ -90,7 +90,7 @@ workflow_server:
 
 sync_config:
 	cp workflow.yaml shared/config/workflow.yaml
-	cp -r workflow/* shared/config/workflow/*
+	cp workflow/* shared/config/workflow/
 
 lora_merge_compress_autoawq:
 	CUDA_VISIBLE_DEVICES=2 python lora_merge_awq.py
@@ -212,15 +212,41 @@ vllm-qwen3-32b-devserver:
     --return-tokens-as-token-ids \
     --enforce-eager
 
-MODEL_TO_SERVE ?= shared/finetune_model_output/sft_t5/qwen3_32b
-
 vllm-qwen3-32b-sft-devserver:
 	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=0,1,2,3 python -m vllm.entrypoints.openai.api_server \
-    --model ${MODEL_TO_SERVE} \
+    --model Qwen/Qwen3-32B \
     --port 8091 --host :: \
     --api-key dummy \
     --data-parallel-size 1 \
     --tensor-parallel-size 4 \
+    --pipeline-parallel-size 1 \
+    --enable-lora --max-lora-rank 128 --max-loras 6 \
+	--lora-modules  \
+		qwen3_32b_sft_t2=shared/finetune_model_output/sft_t2/checkpoint-289  \
+		qwen3_32b_sft_t5=shared/finetune_model_output/sft_t5/checkpoint-181  \
+		qwen3_32b_sft_t6=shared/finetune_model_output/sft_t6/checkpoint-362  \
+		qwen3_32b_sft_t7=shared/finetune_model_output/sft_t7/checkpoint-724  \
+    --gpu-memory-utilization 0.95 --max_model_len 24576 \
+    --load_format safetensors \
+    --trust_remote_code \
+    --guided_decoding_backend guidance --guided-decoding-disable-fallback \
+    --enable_auto_tool_choice --tool_call_parser hermes \
+    --scheduling_policy priority \
+    --enable_chunked_prefill --max_num_batched_tokens 2048 \
+    --max_log_len 0 --max_num_seqs 144 \
+    --enable_prefix_caching --prefix-caching-hash-algo builtin \
+    --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
+    --return-tokens-as-token-ids \
+    --enforce-eager
+
+
+vllm-qwen3-32b-awq-sft-devserver:
+	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=0,1 python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen3-32B-AWQ \
+    --port 8091 --host :: \
+    --api-key dummy \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 2 \
     --pipeline-parallel-size 1 \
     --enable-lora --max-lora-rank 128 --max-loras 6 \
     --gpu-memory-utilization 0.95 --max_model_len 24576 \
@@ -235,6 +261,7 @@ vllm-qwen3-32b-sft-devserver:
     --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
     --return-tokens-as-token-ids \
     --enforce-eager
+
 
 sglang-qwen3-8b:
 	sglang serve qwen/qwen3-8b-instruct \
