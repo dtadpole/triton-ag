@@ -66,6 +66,7 @@ def verify_token(authorization: str = Header(None)):
 wandb_loggers = {} # {prefix_tag: wandb.Run}
 def _setup_wandb_logging(prefix_tag: str="auto", model_tag: str="local_qwen3-32b"):
     """Setup logging and tracking"""
+    return None
     if prefix_tag.startswith("auto"):
         return None
 
