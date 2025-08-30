@@ -229,6 +229,7 @@ class WorkflowClient:
                         "create_queue": create_queue
                     }, timeout=self.timeout)
                     response.raise_for_status()
+                    logger.info(f"🔍 [WorkflowClient] [{self.prefix_tag}] Enqueued to [{queue_name}], content: [{item}]")
                     return response.json()
             except Exception as e:
                 retry_count += 1
@@ -257,6 +258,7 @@ class WorkflowClient:
                 ) as client:
                     response = await client.get(url, timeout=self.timeout)
                     response.raise_for_status()
+                    logger.info(f"🔍 [WorkflowClient] [{self.prefix_tag}] Dequeued from [{queue_name}], content: [{response.json()}]")
                     return response.json()
             except Exception as e:
                 retry_count += 1
