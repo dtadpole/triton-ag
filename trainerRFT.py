@@ -142,16 +142,9 @@ async def main():
     parser.add_argument("--prefix_tag", type=str, default="auto.trainer.rft")
     parser.add_argument("--epoch_id", type=int, default=0)
     parser.add_argument("--block_id", type=int, default=0)
-<<<<<<< HEAD
     parser.add_argument("--input_dir", type=str, default=INFERENCE_DIR + "/codeGenEval")
     parser.add_argument("--output_dir", type=str, default=TRAINER_DIR + "/rft")
     parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B.n_000_00") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
-    parser.add_argument("--base_config", type=str, default="trainerBase.yaml")
-=======
-    parser.add_argument("--input_dir", type=str, default="~/.inference/codeGenEval")
-    parser.add_argument("--output_dir", type=str, default="~/.trainer/rft")
-    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_32B.b_006_05") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
->>>>>>> deepspeed
     parser.add_argument("--rft_config", type=str, default="trainerRFT.yaml")
     parser.add_argument("--module_file", type=str, default="trainer/rft.module.yaml")
     parser.add_argument("--target_short_hostname", type=str, default="two")
