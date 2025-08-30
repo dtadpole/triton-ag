@@ -226,6 +226,12 @@ class EngineBase(ABC):
             return EngineUnsloth(
                 prefix_tag, config, status=status, inference_mode=inference_mode
             )
+        elif config.model.engine == "fsdp":
+            from engineFSDP import EngineFSDP
+
+            return EngineFSDP(
+                prefix_tag, config, status=status, inference_mode=inference_mode
+            )
 
     """Base training engine for Hugging Face models with step-by-step training implementation"""
 
