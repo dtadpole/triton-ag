@@ -19,6 +19,7 @@ from configEndpoints import DuckDBClient
 from configInterpreter import ConfigInterpreter
 from workflowUtil import TrainerBlock
 from workflowSync import WorkflowSync
+from util import INFERENCE_DIR, TRAINER_DIR
 
 LATEST_REFERENCE_NAME = "reference_state_latest.pt"
 

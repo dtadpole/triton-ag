@@ -12,6 +12,7 @@ from workflowUtil import TrainerBlock
 from configInterpreter import ConfigInterpreter
 from configEndpoints import DuckDBClient
 from workflowSync import WorkflowSync
+from util import INFERENCE_DIR, TRAINER_DIR
 
 class RFTConfig(BaseModel):
     """RFT configuration"""
