@@ -396,7 +396,7 @@ class EngineBase(ABC):
 
 
 def create_sample_training_dataset(
-    tokenizer, size: int = 100, max_length: int = 512
+    tokenizer, size: int = 128, max_length: int = 512
 ) -> TextDataset:
     """Create a sample dataset for CLI training"""
     # Sample conversations for training

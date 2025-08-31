@@ -857,6 +857,12 @@ async def main():
         help="Path to configuration YAML file",
     )
     parser.add_argument(
+        "--sample-size", type=int, default=128, help="Override sample size"
+    )
+    parser.add_argument(
+        "--sample-test-size", type=int, default=2, help="Override sample test size"
+    )
+    parser.add_argument(
         "--model-name", type=str, default=None, help="Override model name"
     )
     parser.add_argument(
@@ -898,10 +904,10 @@ async def main():
 
     # Create datasets
     train_dataset = create_sample_training_dataset(
-        trainer.tokenizer, size=100, max_length=trainer.config.model.max_seq_length
+        trainer.tokenizer, size=args.sample_size, max_length=trainer.config.model.max_seq_length
     )
     eval_dataset = create_sample_training_dataset(
-        trainer.tokenizer, size=2, max_length=trainer.config.model.max_seq_length
+        trainer.tokenizer, size=args.sample_test_size, max_length=trainer.config.model.max_seq_length
     )
 
     logger.info(
