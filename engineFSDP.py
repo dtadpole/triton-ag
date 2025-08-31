@@ -15,6 +15,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
+import torch.distributed.checkpoint as tdc
+from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_dict
 import torch.optim as optim
 import wandb
 import yaml
@@ -54,6 +56,24 @@ from torch.distributed.fsdp.wrap import (
     wrap,
 )
 from torch.distributed.fsdp.api import FullOptimStateDictConfig, OptimStateDictConfig
+from torch.distributed.checkpoint import save as tdc_save, load as tdc_load
+
+
+class MetadataWrapper:
+    """Wrapper class to make simple values compatible with TDC"""
+    def __init__(self, global_step: int, config: dict):
+        self.global_step = global_step
+        self.config = config
+    
+    def state_dict(self):
+        return {
+            "global_step": self.global_step,
+            "config": self.config,
+        }
+    
+    def load_state_dict(self, state_dict):
+        self.global_step = state_dict.get("global_step", 0)
+        self.config = state_dict.get("config", {})
 import functools
 
 FSDP_TRAINER_STATE_FILE = "training_state.pt"
@@ -63,19 +83,19 @@ FSDP_TAG = "fsdp"
 def get_transformer_layer_cls(model_name: str):
     """Get the transformer layer class for auto wrapping"""
     try:
-        from transformers import (
-            LlamaDecoderLayer,
-            MistralDecoderLayer,
-            Qwen2DecoderLayer,
-            GemmaDecoderLayer,
-            Phi3DecoderLayer,
-        )
+        from transformers.models.llama.modeling_llama import LlamaDecoderLayer
+        from transformers.models.mistral.modeling_mistral import MistralDecoderLayer
+        from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer
+        from transformers.models.gemma.modeling_gemma import GemmaDecoderLayer
+        from transformers.models.phi3.modeling_phi3 import Phi3DecoderLayer
+        from transformers.models.qwen3.modeling_qwen3 import Qwen3DecoderLayer
         
         # Map model names to their decoder layer classes
         layer_map = {
             "llama": LlamaDecoderLayer,
             "mistral": MistralDecoderLayer,
-            "qwen": Qwen2DecoderLayer,
+            "qwen3": Qwen3DecoderLayer,  # Qwen3 models
+            "qwen": Qwen2DecoderLayer,   # Qwen2/Qwen2.5 models
             "gemma": GemmaDecoderLayer,
             "phi": Phi3DecoderLayer,
         }
@@ -109,7 +129,8 @@ class EngineFSDP(EngineBase):
             os.environ.get("LOCAL_RANK") is not None
             and os.environ.get("WORLD_SIZE") is not None
         ):
-            dist.init_process_group("nccl")
+            if not dist.is_initialized():
+                dist.init_process_group("nccl")
             self.rank = dist.get_rank()
             self.world_size = dist.get_world_size()
             self.device = torch.device(
@@ -204,6 +225,12 @@ class EngineFSDP(EngineBase):
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
+        # Move model to the correct device
+        model = model.to(self.device)
+        logger.info(
+            f"🔄 [{self.__class__.__name__}-{self.rank}] Model moved to device: {self.device}"
+        )
+
         self._print_model_info(model)
 
         return model, tokenizer
@@ -239,6 +266,12 @@ class EngineFSDP(EngineBase):
                 f"⚠️ [{self.__class__.__name__}-{self.rank}] LoRA checkpoint not found: {checkpoint_location} - Starting fresh training..."
             )
             lora_model = get_peft_model(self.base_model, lora_cfg)
+
+        # Move LoRA model to the correct device
+        lora_model = lora_model.to(self.device)
+        logger.info(
+            f"🔄 [{self.__class__.__name__}-{self.rank}] LoRA model moved to device: {self.device}"
+        )
 
         self._print_model_info(lora_model)
         return lora_model, lora_cfg
@@ -282,6 +315,7 @@ class EngineFSDP(EngineBase):
             mixed_precision=mixed_precision,
             sharding_strategy=ShardingStrategy.FULL_SHARD,
             device_id=self.device,
+            use_orig_params=True,  # Enable for better optimizer state compatibility
         )
 
         logger.info(
@@ -356,18 +390,126 @@ class EngineFSDP(EngineBase):
 
         return optimizer, scheduler
 
+    def _save_config_and_tokenizer(self, checkpoint_path: Path):
+        """Save training config and tokenizer (rank 0 only)"""
+        if self.rank == 0:
+            # Save config
+            with open(checkpoint_path / "training_config.yaml", "w") as f:
+                yaml.dump(self.config.model_dump(), f, default_flow_style=False)
+            # Save tokenizer
+            self.tokenizer.save_pretrained(checkpoint_path)
+
+    def _handle_checkpoint_cleanup_and_callback(self, checkpoint_path: Path, callback: Optional[Callable] = None):
+        """Handle checkpoint cleanup, link updates, and callback execution (rank 0 only)"""
+        if self.rank == 0:
+            # Update latest checkpoint link
+            self._update_latest_checkpoint_link(checkpoint_path)
+            # Clean up old checkpoints
+            self._cleanup_checkpoint(self.checkpoint_path)
+
+            # Execute callback if provided
+            if callback:
+                try:
+                    logger.info(
+                        f"🔍 [{self.__class__.__name__}-{self.rank}] Running callback: {callback}"
+                    )
+                    callback(checkpoint_path)
+                    logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Callback completed")
+                except Exception as e:
+                    logger.error(f"❌ [{self.__class__.__name__}-{self.rank}] Error in callback: {e}")
+                    logger.error(traceback.format_exc())
+            else:
+                logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] No callback provided")
+
     def _checkpoint_exists(self, checkpoint_path: str) -> bool:
         """Check if checkpoint exists"""
         checkpoint_path_obj = Path(checkpoint_path)
-        return (checkpoint_path_obj / FSDP_TRAINER_STATE_FILE).exists()
+        
+        if self.use_distributed:
+            # For TDC checkpoints, check if the checkpoint directory exists
+            # TDC creates its own internal structure
+            return (
+                checkpoint_path_obj.exists() and
+                checkpoint_path_obj.is_dir()
+            )
+        else:
+            # For single GPU checkpoints, check for the training state file
+            return (checkpoint_path_obj / FSDP_TRAINER_STATE_FILE).exists()
 
     def _load_checkpoint(self, checkpoint_location: str):
-        """Load checkpoint for resuming training"""
+        """Load checkpoint for resuming training using TDC"""
         logger.info(
             f"🔄 [{self.__class__.__name__}-{self.rank}] Loading checkpoint from: {checkpoint_location}"
         )
 
         checkpoint_path_obj = Path(checkpoint_location)
+        
+        if self.use_distributed:
+            # Use TDC for distributed loading
+            self._load_checkpoint_tdc(checkpoint_path_obj)
+        else:
+            # Use regular loading for single GPU
+            self._load_checkpoint_single_gpu(checkpoint_path_obj)
+
+    def _load_checkpoint_tdc(self, checkpoint_path_obj: Path):
+        """Load checkpoint using TDC for distributed training"""
+        try:
+            # TDC automatically handles state dict type selection
+            # Include all training state in the distributed checkpoint
+            # Use MetadataWrapper to make simple values compatible with TDC
+            metadata_wrapper = MetadataWrapper(global_step=0, config={})
+            
+            # Get state dict using the correct API that handles FSDP properly
+            model_state_dict, optim_state_dict = get_state_dict(
+                model=self.model,
+                optimizers=self.optimizer,
+            )
+            
+            # Combine with other state
+            state_dict = {
+                "model": model_state_dict,
+                "optimizer": optim_state_dict,
+                "scheduler": self.scheduler.state_dict() if self.scheduler else None,
+                "metadata": metadata_wrapper,
+            }
+            
+            tdc.load(
+                state_dict=state_dict,
+                checkpoint_id=checkpoint_path_obj,
+            )
+            
+            # Set state dict for each individual object after loading
+            set_state_dict(
+                model=self.model,
+                optimizers=self.optimizer,
+                model_state_dict=state_dict["model"],
+                optim_state_dict=state_dict["optimizer"],
+            )
+            
+            # Load scheduler state if available
+            if self.scheduler and state_dict.get("scheduler") is not None:
+                self.scheduler.load_state_dict(state_dict["scheduler"])
+            
+            # Extract metadata from the wrapper
+            self.status.global_step = metadata_wrapper.global_step
+            logger.info(f"📊 Loaded global_step from TDC metadata: {self.status.global_step}")
+            logger.info("✅ TDC with FSDP: Optimizer state properly restored using TDC APIs")
+
+            # Synchronize all ranks after loading
+            if self.use_distributed:
+                dist.barrier()
+
+            logger.info(
+                f"📜 [{self.__class__.__name__}-{self.rank}] TDC Checkpoint loaded - Step: [{self.status.global_step}]"
+            )
+
+        except Exception as e:
+            logger.error(f"❌ [{self.__class__.__name__}-{self.rank}] Failed to load TDC checkpoint: {e}")
+            logger.error(traceback.format_exc())
+            raise
+
+    def _load_checkpoint_single_gpu(self, checkpoint_path_obj: Path):
+        """Load checkpoint for single GPU training"""
         training_state_path = (
             checkpoint_path_obj / FSDP_TRAINER_STATE_FILE
             if checkpoint_path_obj.is_dir()
@@ -379,29 +521,9 @@ class EngineFSDP(EngineBase):
 
         # Load model state
         if self.config.lora.use_lora and "lora_state_dict" in checkpoint:
-            # For LoRA, we need to gather the full state dict
-            if self.use_distributed:
-                with FSDP.state_dict_type(
-                    self.model,
-                    StateDictType.FULL_STATE_DICT,
-                    FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
-                ):
-                    if self.rank == 0:
-                        set_peft_model_state_dict(self.model, checkpoint["lora_state_dict"])
-            else:
-                set_peft_model_state_dict(self.model, checkpoint["lora_state_dict"])
+            set_peft_model_state_dict(self.model, checkpoint["lora_state_dict"])
         elif not self.config.lora.use_lora and "model_state_dict" in checkpoint:
-            # For full model, load state dict
-            if self.use_distributed:
-                with FSDP.state_dict_type(
-                    self.model,
-                    StateDictType.FULL_STATE_DICT,
-                    FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
-                ):
-                    if self.rank == 0:
-                        self.model.load_state_dict(checkpoint["model_state_dict"])
-            else:
-                self.model.load_state_dict(checkpoint["model_state_dict"])
+            self.model.load_state_dict(checkpoint["model_state_dict"])
         else:
             logger.warning(
                 f"⚠️ [{self.__class__.__name__}-{self.rank}] Model state not found or incompatible in checkpoint"
@@ -421,53 +543,84 @@ class EngineFSDP(EngineBase):
         )
 
     def _save_checkpoint(self, step: int, callback: Optional[Callable] = None):
-        """Save training checkpoint"""
+        """Save training checkpoint using TDC"""
         checkpoint_path = self.checkpoint_path / f"checkpoint-{step}"
         checkpoint_path.mkdir(parents=True, exist_ok=True)
 
-        # Save model and tokenizer (only on rank 0)
-        if self.rank == 0:
-            # Save config
-            with open(checkpoint_path / "training_config.yaml", "w") as f:
-                yaml.dump(self.config.model_dump(), f, default_flow_style=False)
-            # Save tokenizer
-            self.tokenizer.save_pretrained(checkpoint_path)
+        if self.use_distributed:
+            # Use TDC for distributed saving
+            self._save_checkpoint_tdc(checkpoint_path, step, callback)
+        else:
+            # Use regular saving for single GPU
+            self._save_checkpoint_single_gpu(checkpoint_path, step, callback)
+
+    def _save_checkpoint_tdc(self, checkpoint_path: Path, step: int, callback: Optional[Callable] = None):
+        """Save checkpoint using TDC for distributed training"""
+        try:
+            # Save config and tokenizer (only on rank 0)
+            self._save_config_and_tokenizer(checkpoint_path)
+
+            # TDC requires ALL ranks to participate in save operation
+            # Use MetadataWrapper to make simple values compatible with TDC
+            metadata_wrapper = MetadataWrapper(
+                global_step=self.status.global_step,
+                config=self.config.model_dump()
+            )
+            
+            # Get state dict using the correct API that handles FSDP properly
+            model_state_dict, optim_state_dict = get_state_dict(
+                model=self.model,
+                optimizers=self.optimizer,
+            )
+            
+            # Combine with other state
+            state_dict = {
+                "model": model_state_dict,
+                "optimizer": optim_state_dict,
+                "scheduler": self.scheduler.state_dict() if self.scheduler else None,
+                "metadata": metadata_wrapper,
+            }
+            
+            # All ranks participate in TDC save
+            tdc.save(
+                state_dict=state_dict,
+                checkpoint_id=checkpoint_path,
+            )
+
+            # Save LoRA model (only on rank 0) if using LoRA
+            if self.config.lora.use_lora and self.rank == 0:
+                self.model.save_pretrained(checkpoint_path)
+
+            # Handle checkpoint cleanup and callback
+            self._handle_checkpoint_cleanup_and_callback(checkpoint_path, callback)
+
+            # Synchronize all ranks after saving
+            if self.use_distributed:
+                dist.barrier()
+
+            logger.info(
+                f"💾 [{self.__class__.__name__}-{self.rank}] TDC Checkpoint saved: {checkpoint_path}"
+            )
+
+        except Exception as e:
+            logger.error(f"❌ [{self.__class__.__name__}-{self.rank}] Failed to save TDC checkpoint: {e}")
+            logger.error(traceback.format_exc())
+            raise
+
+    def _save_checkpoint_single_gpu(self, checkpoint_path: Path, step: int, callback: Optional[Callable] = None):
+        """Save checkpoint for single GPU training"""
+        # Save config and tokenizer
+        self._save_config_and_tokenizer(checkpoint_path)
 
         # Save model state
         if self.config.lora.use_lora:
-            # Save LoRA state dict
-            if self.use_distributed:
-                with FSDP.state_dict_type(
-                    self.model,
-                    StateDictType.FULL_STATE_DICT,
-                    FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
-                ):
-                    if self.rank == 0:
-                        lora_state_dict = get_peft_model_state_dict(self.model)
-                        # Save LoRA model
-                        self.model.save_pretrained(checkpoint_path)
-            else:
-                if self.rank == 0:
-                    lora_state_dict = get_peft_model_state_dict(self.model)
-                    # Save LoRA model
-                    self.model.save_pretrained(checkpoint_path)
+            lora_state_dict = get_peft_model_state_dict(self.model)
+            # Save LoRA model
+            self.model.save_pretrained(checkpoint_path)
         else:
-            # Save full model state dict
-            if self.use_distributed:
-                with FSDP.state_dict_type(
-                    self.model,
-                    StateDictType.FULL_STATE_DICT,
-                    FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
-                ):
-                    if self.rank == 0:
-                        model_state_dict = self.model.state_dict()
-                        # Save model
-                        torch.save(model_state_dict, checkpoint_path / "pytorch_model.bin")
-            else:
-                if self.rank == 0:
-                    model_state_dict = self.model.state_dict()
-                    # Save model
-                    torch.save(model_state_dict, checkpoint_path / "pytorch_model.bin")
+            model_state_dict = self.model.state_dict()
+            # Save model
+            torch.save(model_state_dict, checkpoint_path / "pytorch_model.bin")
 
         # Save training state
         checkpoint_state = {
@@ -482,29 +635,11 @@ class EngineFSDP(EngineBase):
         else:
             checkpoint_state["model_state_dict"] = self.model.state_dict()
 
-        # Save training state (only on rank 0)
-        if self.rank == 0:
-            torch.save(checkpoint_state, checkpoint_path / FSDP_TRAINER_STATE_FILE)
+        # Save training state
+        torch.save(checkpoint_state, checkpoint_path / FSDP_TRAINER_STATE_FILE)
 
-        # Update latest checkpoint link (only on rank 0)
-        if self.rank == 0:
-            self._update_latest_checkpoint_link(checkpoint_path)
-            # Clean up old checkpoints
-            self._cleanup_checkpoint(self.checkpoint_path)
-
-            # Callback
-            if callback:
-                try:
-                    logger.info(
-                        f"🔍 [{self.__class__.__name__}-{self.rank}] Running callback: {callback}"
-                    )
-                    callback(checkpoint_path)
-                    logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Callback completed")
-                except Exception as e:
-                    logger.error(f"❌ [{self.__class__.__name__}-{self.rank}] Error in callback: {e}")
-                    logger.error(traceback.format_exc())
-            else:
-                logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] No callback provided")
+        # Handle checkpoint cleanup and callback
+        self._handle_checkpoint_cleanup_and_callback(checkpoint_path, callback)
 
         logger.info(
             f"💾 [{self.__class__.__name__}-{self.rank}] Checkpoint saved: {checkpoint_path}"
