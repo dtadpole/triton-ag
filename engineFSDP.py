@@ -12,12 +12,13 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
-
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as tdc
 from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_dict
 import torch.optim as optim
+from torch.optim.lr_scheduler import LRScheduler
+from torch.distributed.checkpoint.stateful import Stateful
 import wandb
 import yaml
 from engineBase import (
@@ -49,6 +50,7 @@ from torch.distributed.fsdp import (
     FullStateDictConfig,
     LocalStateDictConfig,
     ShardedStateDictConfig,
+    fully_shard,
 )
 from torch.distributed.fsdp.wrap import (
     transformer_auto_wrap_policy,
@@ -57,27 +59,26 @@ from torch.distributed.fsdp.wrap import (
 )
 from torch.distributed.fsdp.api import FullOptimStateDictConfig, OptimStateDictConfig
 from torch.distributed.checkpoint import save as tdc_save, load as tdc_load
-
-
-class MetadataWrapper:
-    """Wrapper class to make simple values compatible with TDC"""
-    def __init__(self, global_step: int, config: dict):
-        self.global_step = global_step
-        self.config = config
-    
-    def state_dict(self):
-        return {
-            "global_step": self.global_step,
-            "config": self.config,
-        }
-    
-    def load_state_dict(self, state_dict):
-        self.global_step = state_dict.get("global_step", 0)
-        self.config = state_dict.get("config", {})
 import functools
 
 FSDP_TRAINER_STATE_FILE = "training_state.pt"
 FSDP_TAG = "fsdp"
+
+def setup_distributed():
+    """Initialize distributed process group"""
+    if not dist.is_initialized():
+        dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
+    
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    
+    if torch.cuda.is_available():
+        torch.cuda.set_device(rank)
+        device = torch.device(f"cuda:{rank}")
+    else:
+        device = torch.device("cpu")
+    
+    return rank, world_size, device
 
 
 def get_transformer_layer_cls(model_name: str):
@@ -112,6 +113,54 @@ def get_transformer_layer_cls(model_name: str):
         return None
 
 
+class AppState(Stateful):
+    """This is a useful wrapper for checkpointing the Application State. Since this object is compliant
+    with the Stateful protocol, DCP will automatically call state_dict/load_stat_dict as needed in the
+    dcp.save/load APIs.
+
+    Note: We take advantage of this wrapper to hande calling distributed state dict methods on the model
+    and optimizer.
+    """
+
+    def __init__(
+        self,
+        model: FSDP,
+        optimizer: optim.Optimizer,
+        scheduler: Optional[LRScheduler]=None,
+        global_step: Optional[int]=None,
+    ):
+        self.model = model
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+        self.global_step = global_step
+
+    def state_dict(self):
+        rank = dist.get_rank()
+        # this line automatically manages FSDP FQN's, as well as sets the default state dict type to FSDP.SHARDED_STATE_DICT
+        # logger.info(f"🔍 [{self.__class__.__name__}-{rank}] Getting state dict...")
+        model_state_dict, optimizer_state_dict = get_state_dict(self.model, self.optimizer)
+        # logger.info(f"🔍 [{self.__class__.__name__}-{rank}] Got model state dict.")
+        return {
+            "model": model_state_dict,
+            "optimizer": optimizer_state_dict,
+            "scheduler": self.scheduler.state_dict() if self.scheduler else None,
+            "global_step": self.global_step
+        }
+
+    def load_state_dict(self, state_dict):
+        # sets our state dicts on the model and optimizer, now that we've loaded
+        set_state_dict(
+            self.model,
+            self.optimizer,
+            model_state_dict=state_dict["model"],
+            optim_state_dict=state_dict["optimizer"]
+        )
+        if self.scheduler is not None:
+            self.scheduler.load_state_dict(state_dict["scheduler"])
+        if self.global_step is not None:
+            self.global_step = state_dict["global_step"]
+
+
 class EngineFSDP(EngineBase):
     """FSDP trainer for Hugging Face models with step-by-step training implementation"""
 
@@ -123,42 +172,20 @@ class EngineFSDP(EngineBase):
         inference_mode: bool = False,
     ):
         super().__init__(prefix_tag, config, status, inference_mode)
-        
-        # Initialize distributed training
-        if (
-            os.environ.get("LOCAL_RANK") is not None
-            and os.environ.get("WORLD_SIZE") is not None
-        ):
-            if not dist.is_initialized():
-                dist.init_process_group("nccl")
-            self.rank = dist.get_rank()
-            self.world_size = dist.get_world_size()
-            self.device = torch.device(
-                f"cuda:{self.rank}" if torch.cuda.is_available() else "cpu"
-            )
-            self.use_distributed = True
-        else:
-            self.rank = 0
-            self.world_size = 1
-            self.device = (
-                torch.device("cuda")
-                if torch.cuda.is_available()
-                else torch.device("cpu")
-            )
-            self.use_distributed = False
+
+        self.rank, self.world_size, self.device = setup_distributed()
+        logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Distributed training initialized [Rank: {self.rank}, World Size: {self.world_size}, Device: {self.device}]")
 
         # Initialize model and tokenizer
         self.base_model, self.tokenizer = self._setup_model_and_tokenizer()
 
-        # Setup LoRA if enabled
-        if self.config.lora.use_lora:
-            self.model, self.lora_cfg = self._setup_lora()
-        else:
-            self.model = self.base_model
-            self.lora_cfg = None
+        self.model = self.base_model
+        self.lora_cfg = None
 
         # Wrap model with FSDP
         self.model = self._setup_fsdp()
+        num_params = sum(p.numel() for p in self.model.parameters())
+        logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Model has [{num_params:,}] parameters")
 
         if not self.inference_mode:
             # setup logging
@@ -235,59 +262,11 @@ class EngineFSDP(EngineBase):
 
         return model, tokenizer
 
-    def _setup_lora(self):
-        """Setup LoRA configuration"""
-        logger.info(
-            f"🌸 [{self.__class__.__name__}-{self.rank}] Setting up LoRA (rank={self.config.lora.rank}, alpha={self.config.lora.alpha})"
-        )
-
-        lora_cfg = LoraConfig(
-            r=self.config.lora.rank,
-            lora_alpha=self.config.lora.alpha,
-            lora_dropout=self.config.lora.dropout,
-            bias=self.config.lora.bias,
-            task_type=TaskType.CAUSAL_LM,
-            target_modules=self.config.lora.target_modules,
-        )
-
-        # Load checkpoint if specified
-        checkpoint_location = (
-            self.checkpoint_path / self.config.training.latest_checkpoint_name
-        )
-        if self._checkpoint_exists(checkpoint_location):
-            lora_model = PeftModel.from_pretrained(
-                self.base_model, checkpoint_location, is_trainable=True
-            )
-            logger.info(
-                f"🌸 [{self.__class__.__name__}-{self.rank}] Loaded LoRA checkpoint: {checkpoint_location}"
-            )
-        else:
-            logger.warning(
-                f"⚠️ [{self.__class__.__name__}-{self.rank}] LoRA checkpoint not found: {checkpoint_location} - Starting fresh training..."
-            )
-            lora_model = get_peft_model(self.base_model, lora_cfg)
-
-        # Move LoRA model to the correct device
-        lora_model = lora_model.to(self.device)
-        logger.info(
-            f"🔄 [{self.__class__.__name__}-{self.rank}] LoRA model moved to device: {self.device}"
-        )
-
-        self._print_model_info(lora_model)
-        return lora_model, lora_cfg
-
     def _setup_fsdp(self):
         """Setup FSDP wrapping"""
         logger.info(
             f"🔄 [{self.__class__.__name__}-{self.rank}] Setting up FSDP..."
         )
-
-        # If not using distributed training, just return the model as-is
-        if not self.use_distributed:
-            logger.info(
-                f"🔄 [{self.__class__.__name__}-{self.rank}] Single GPU mode - skipping FSDP wrapping"
-            )
-            return self.model
 
         # Get transformer layer class for auto wrapping
         transformer_layer_cls = get_transformer_layer_cls(self.config.model.name)
@@ -298,8 +277,15 @@ class EngineFSDP(EngineBase):
                 transformer_auto_wrap_policy,
                 transformer_layer_cls={transformer_layer_cls},
             )
+            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Using transformer auto wrap policy with {transformer_layer_cls}")
         else:
-            auto_wrap_policy = None
+            # Fallback: use size-based wrapping
+            from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
+            auto_wrap_policy = functools.partial(
+                size_based_auto_wrap_policy,
+                min_num_params=100_000,  # Wrap modules with at least 100k parameters
+            )
+            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Using size-based auto wrap policy (min 100k params)")
 
         # Setup mixed precision
         mixed_precision = MixedPrecision(
@@ -308,6 +294,10 @@ class EngineFSDP(EngineBase):
             buffer_dtype=torch.bfloat16,
         )
 
+        # Debug: Check model structure before FSDP
+        total_params_before = sum(p.numel() for p in self.model.parameters())
+        logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Model parameters before FSDP: [{total_params_before:,}]")
+        
         # Wrap model with FSDP
         fsdp_model = FSDP(
             self.model,
@@ -317,6 +307,16 @@ class EngineFSDP(EngineBase):
             device_id=self.device,
             use_orig_params=True,  # Enable for better optimizer state compatibility
         )
+
+        # fsdp_model = fully_shard(self.model)
+
+        # Debug: Check model structure after FSDP
+        total_params_after = sum(p.numel() for p in fsdp_model.parameters())
+        logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Model parameters after FSDP: [{total_params_after:,}]")
+        
+        # Debug: Check if model is actually FSDP wrapped
+        is_fsdp_wrapped = hasattr(fsdp_model, '_fsdp_wrapped_module')
+        logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Model is FSDP wrapped: [{is_fsdp_wrapped}]")
 
         logger.info(
             f"🔄 [{self.__class__.__name__}-{self.rank}] FSDP setup completed"
@@ -425,16 +425,12 @@ class EngineFSDP(EngineBase):
         """Check if checkpoint exists"""
         checkpoint_path_obj = Path(checkpoint_path)
         
-        if self.use_distributed:
-            # For TDC checkpoints, check if the checkpoint directory exists
-            # TDC creates its own internal structure
-            return (
-                checkpoint_path_obj.exists() and
-                checkpoint_path_obj.is_dir()
-            )
-        else:
-            # For single GPU checkpoints, check for the training state file
-            return (checkpoint_path_obj / FSDP_TRAINER_STATE_FILE).exists()
+        # For TDC checkpoints, check if the checkpoint directory exists
+        # TDC creates its own internal structure
+        return (
+            checkpoint_path_obj.exists() and
+            checkpoint_path_obj.is_dir()
+        )
 
     def _load_checkpoint(self, checkpoint_location: str):
         """Load checkpoint for resuming training using TDC"""
@@ -444,60 +440,21 @@ class EngineFSDP(EngineBase):
 
         checkpoint_path_obj = Path(checkpoint_location)
         
-        if self.use_distributed:
-            # Use TDC for distributed loading
-            self._load_checkpoint_tdc(checkpoint_path_obj)
-        else:
-            # Use regular loading for single GPU
-            self._load_checkpoint_single_gpu(checkpoint_path_obj)
-
-    def _load_checkpoint_tdc(self, checkpoint_path_obj: Path):
         """Load checkpoint using TDC for distributed training"""
         try:
-            # TDC automatically handles state dict type selection
-            # Include all training state in the distributed checkpoint
-            # Use MetadataWrapper to make simple values compatible with TDC
-            metadata_wrapper = MetadataWrapper(global_step=0, config={})
-            
-            # Get state dict using the correct API that handles FSDP properly
-            model_state_dict, optim_state_dict = get_state_dict(
-                model=self.model,
-                optimizers=self.optimizer,
-            )
-            
-            # Combine with other state
-            state_dict = {
-                "model": model_state_dict,
-                "optimizer": optim_state_dict,
-                "scheduler": self.scheduler.state_dict() if self.scheduler else None,
-                "metadata": metadata_wrapper,
-            }
-            
+            app_state = AppState(self.model, self.optimizer, scheduler=self.scheduler, global_step=self.status.global_step)
+            state_dict = { "app": app_state }
             tdc.load(
                 state_dict=state_dict,
                 checkpoint_id=checkpoint_path_obj,
             )
-            
-            # Set state dict for each individual object after loading
-            set_state_dict(
-                model=self.model,
-                optimizers=self.optimizer,
-                model_state_dict=state_dict["model"],
-                optim_state_dict=state_dict["optimizer"],
-            )
-            
-            # Load scheduler state if available
-            if self.scheduler and state_dict.get("scheduler") is not None:
-                self.scheduler.load_state_dict(state_dict["scheduler"])
-            
-            # Extract metadata from the wrapper
-            self.status.global_step = metadata_wrapper.global_step
-            logger.info(f"📊 Loaded global_step from TDC metadata: {self.status.global_step}")
-            logger.info("✅ TDC with FSDP: Optimizer state properly restored using TDC APIs")
 
+            self.status.global_step = app_state.global_step
+            logger.info(f"📊 Loaded global_step from TDC metadata: [{self.status.global_step}]")
+            logger.info("✅ TDC with FSDP: Optimizer state properly restored using TDC APIs")
+            
             # Synchronize all ranks after loading
-            if self.use_distributed:
-                dist.barrier()
+            dist.barrier()
 
             logger.info(
                 f"📜 [{self.__class__.__name__}-{self.rank}] TDC Checkpoint loaded - Step: [{self.status.global_step}]"
@@ -508,55 +465,11 @@ class EngineFSDP(EngineBase):
             logger.error(traceback.format_exc())
             raise
 
-    def _load_checkpoint_single_gpu(self, checkpoint_path_obj: Path):
-        """Load checkpoint for single GPU training"""
-        training_state_path = (
-            checkpoint_path_obj / FSDP_TRAINER_STATE_FILE
-            if checkpoint_path_obj.is_dir()
-            else checkpoint_path_obj
-        )
-
-        # Load checkpoint
-        checkpoint = torch.load(training_state_path, map_location="cpu")
-
-        # Load model state
-        if self.config.lora.use_lora and "lora_state_dict" in checkpoint:
-            set_peft_model_state_dict(self.model, checkpoint["lora_state_dict"])
-        elif not self.config.lora.use_lora and "model_state_dict" in checkpoint:
-            self.model.load_state_dict(checkpoint["model_state_dict"])
-        else:
-            logger.warning(
-                f"⚠️ [{self.__class__.__name__}-{self.rank}] Model state not found or incompatible in checkpoint"
-            )
-
-        # Load optimizer and scheduler state
-        if "optimizer_state_dict" in checkpoint:
-            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        if "scheduler_state_dict" in checkpoint:
-            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-
-        # Load training state
-        self.status.global_step = checkpoint.get("global_step", 0)
-
-        logger.info(
-            f"📜 [{self.__class__.__name__}-{self.rank}] Checkpoint loaded - Step: [{self.status.global_step}]"
-        )
-
     def _save_checkpoint(self, step: int, callback: Optional[Callable] = None):
         """Save training checkpoint using TDC"""
         checkpoint_path = self.checkpoint_path / f"checkpoint-{step}"
         checkpoint_path.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] before save checkpoint to: {checkpoint_path}")
-
-        if self.use_distributed:
-            # Use TDC for distributed saving
-            self._save_checkpoint_tdc(checkpoint_path, step, callback)
-        else:
-            # Use regular saving for single GPU
-            self._save_checkpoint_single_gpu(checkpoint_path, step, callback)
-
-    def _save_checkpoint_tdc(self, checkpoint_path: Path, step: int, callback: Optional[Callable] = None):
         """Save checkpoint using TDC for distributed training"""
         try:
             # Save config and tokenizer (only on rank 0)
@@ -564,115 +477,45 @@ class EngineFSDP(EngineBase):
                 self._save_config_and_tokenizer(checkpoint_path)
 
             # TDC requires ALL ranks to participate in save operation
-            # Use MetadataWrapper to make simple values compatible with TDC
-            metadata_wrapper = MetadataWrapper(
-                global_step=self.status.global_step,
-                config=self.config.model_dump()
-            )
-            
-            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] before get state dict")
-            # Get state dict using the correct API that handles FSDP properly
-            try:
-                model_state_dict, optim_state_dict = get_state_dict(
-                    model=self.model,
-                    optimizers=self.optimizer,
-                )
-                logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] after get state dict")
-            except Exception as state_dict_error:
-                logger.error(f"❌ [{self.__class__.__name__}-{self.rank}] Failed to get state dict: {state_dict_error}")
-                raise state_dict_error
-            
-            # Synchronize all ranks after getting state dict
-            if self.use_distributed:
-                dist.barrier()
-            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] all ranks synchronized after get state dict")
-            
-            # Combine with other state
-            state_dict = {
-                "model": model_state_dict,
-                "optimizer": optim_state_dict,
-                "scheduler": self.scheduler.state_dict() if self.scheduler else None,
-                "metadata": metadata_wrapper,
-            }
-            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] combined state dict")
-            
-            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] before save checkpoint to: {checkpoint_path}")
+            # Use AppState to make simple values compatible with TDC
+            app_state = AppState(self.model, self.optimizer, scheduler=self.scheduler, global_step=self.status.global_step)
+            state_dict = { "app": app_state }
             
             # Ensure all ranks are synchronized before TDC save
-            if self.use_distributed:
-                dist.barrier()
-            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] all ranks synchronized before TDC save")
+            dist.barrier()
+            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] synchronized all ranks before TDC save")
             
             # All ranks participate in TDC save
             try:
+                start_time = time.time()
                 tdc.save(
                     state_dict=state_dict,
                     checkpoint_id=checkpoint_path,
                 )
-                logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] after save checkpoint to: {checkpoint_path}")
+                logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] saved checkpoint to: [{checkpoint_path}] in [{time.time() - start_time:.2f}s]")
             except Exception as tdc_error:
                 logger.error(f"❌ [{self.__class__.__name__}-{self.rank}] TDC save failed: {tdc_error}")
                 # Synchronize all ranks even if save failed
-                if self.use_distributed:
-                    dist.barrier()
+                dist.barrier()
                 raise tdc_error
 
             # Synchronize all ranks after saving
-            if self.use_distributed:
-                dist.barrier()
-            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] after synchronize all ranks after saving")
+            dist.barrier()
+            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] synchronized all ranks after saving")
             
             # Handle checkpoint cleanup and callback (only on rank 0)
             if self.rank == 0:
                 self._handle_checkpoint_cleanup_and_callback(checkpoint_path, callback)
-                logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] after handle checkpoint cleanup and callback")
+                logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] handled checkpoint cleanup and callback")
 
             logger.info(
-                f"💾 [{self.__class__.__name__}-{self.rank}] TDC Checkpoint saved: {checkpoint_path}"
+                f"💾 [{self.__class__.__name__}-{self.rank}] TDC Checkpoint saved: [{checkpoint_path}] in [{time.time() - start_time:.2f}s]"
             )
 
         except Exception as e:
             logger.error(f"❌ [{self.__class__.__name__}-{self.rank}] Failed to save TDC checkpoint: {e}")
             logger.error(traceback.format_exc())
             raise
-
-    def _save_checkpoint_single_gpu(self, checkpoint_path: Path, step: int, callback: Optional[Callable] = None):
-        """Save checkpoint for single GPU training"""
-        # Save config and tokenizer
-        self._save_config_and_tokenizer(checkpoint_path)
-
-        # Save model state
-        if self.config.lora.use_lora:
-            lora_state_dict = get_peft_model_state_dict(self.model)
-            # Save LoRA model
-            self.model.save_pretrained(checkpoint_path)
-        else:
-            model_state_dict = self.model.state_dict()
-            # Save model
-            torch.save(model_state_dict, checkpoint_path / "pytorch_model.bin")
-
-        # Save training state
-        checkpoint_state = {
-            "optimizer_state_dict": self.optimizer.state_dict(),
-            "scheduler_state_dict": self.scheduler.state_dict(),
-            "global_step": self.status.global_step,
-            "config": self.config.model_dump(),
-        }
-
-        if self.config.lora.use_lora:
-            checkpoint_state["lora_state_dict"] = get_peft_model_state_dict(self.model)
-        else:
-            checkpoint_state["model_state_dict"] = self.model.state_dict()
-
-        # Save training state
-        torch.save(checkpoint_state, checkpoint_path / FSDP_TRAINER_STATE_FILE)
-
-        # Handle checkpoint cleanup and callback
-        self._handle_checkpoint_cleanup_and_callback(checkpoint_path, callback)
-
-        logger.info(
-            f"💾 [{self.__class__.__name__}-{self.rank}] Checkpoint saved: {checkpoint_path}"
-        )
 
     def _compute_loss(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Compute loss for a batch"""
@@ -743,16 +586,13 @@ class EngineFSDP(EngineBase):
     ):
         """Train the model for one block"""
         # Create data loader
-        if self.use_distributed:
-            sampler = DistributedSampler(
-                dataset,
-                num_replicas=dist.get_world_size(),
-                rank=self.rank,
-                shuffle=True,
-                drop_last=True,
-            )
-        else:
-            sampler = None
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=dist.get_world_size(),
+            rank=self.rank,
+            shuffle=True,
+            drop_last=True,
+        )
 
         def worker_init_fn(worker_id):
             # Make dataloader workers deterministic but distinct per rank/worker
@@ -1046,10 +886,6 @@ async def main():
     logger.info(
         f"⚙️ Optimizer Config - Type: {config.optimizer.optimizer_type}, Weight Decay: {config.optimizer.weight_decay}"
     )
-    if config.lora.use_lora:
-        logger.info(
-            f"🎯 LoRA Config - Rank: {config.lora.rank}, Alpha: {config.lora.alpha}"
-        )
 
     # Initialize trainer
     try:
@@ -1108,5 +944,8 @@ async def main():
 
 
 if __name__ == "__main__":
+    # rank, world_size, device = setup_distributed()
+    # logger.info(f"🔍 [{__name__}-{rank}] Distributed training initialized")
+    # logger.info(f"🔍 [{__name__}-{rank}] World size: {world_size}, Rank: {rank}, Device: {device}")
     # Run main async
     asyncio.run(main())
