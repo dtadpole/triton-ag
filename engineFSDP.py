@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import hashlib
 import copy
 import gc
 import json
@@ -186,6 +187,8 @@ class EngineFSDP(EngineBase):
         self.model = self._setup_fsdp()
         num_params = sum(p.numel() for p in self.model.parameters())
         logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Model has [{num_params:,}] parameters")
+
+        self.fsdp_debug = os.getenv("FSDP_DEBUG", "false").lower() == "true"
 
         if not self.inference_mode:
             # setup logging
@@ -438,6 +441,16 @@ class EngineFSDP(EngineBase):
             f"🔄 [{self.__class__.__name__}-{self.rank}] Loading checkpoint from: {checkpoint_location}"
         )
 
+        if self.fsdp_debug:
+            self_model_state_hash = get_model_state_hash(self.model)
+            self_optimizer_state_hash = get_optimizer_state_hash(self.optimizer)
+            self_scheduler_state_hash = get_scheduler_state_hash(self.scheduler)
+
+            logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] Before load, self model state hash: [{self_model_state_hash}]")
+            logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] Before load, self optimizer state hash: [{self_optimizer_state_hash}]")
+            logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] Before load, self scheduler state hash: [{self_scheduler_state_hash}]")
+
+        start_time = time.time()
         checkpoint_path_obj = Path(checkpoint_location)
         
         """Load checkpoint using TDC for distributed training"""
@@ -451,13 +464,30 @@ class EngineFSDP(EngineBase):
 
             self.status.global_step = app_state.global_step
             logger.info(f"📊 Loaded global_step from TDC metadata: [{self.status.global_step}]")
-            logger.info("✅ TDC with FSDP: Optimizer state properly restored using TDC APIs")
+            logger.info(f"✅ TDC with FSDP: Optimizer state properly restored using TDC APIs in [{time.time() - start_time:.2f}s]")
+
+            if self.fsdp_debug:
+                app_model_state_hash = get_model_state_hash(app_state.model)
+                app_optimizer_state_hash = get_optimizer_state_hash(app_state.optimizer)
+                app_scheduler_state_hash = get_scheduler_state_hash(app_state.scheduler)
+
+                logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] Loaded app model state hash: [{app_model_state_hash}]")
+                logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] Loaded App optimizer state hash: [{app_optimizer_state_hash}]")
+                logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] Loaded App scheduler state hash: [{app_scheduler_state_hash}]")
+
+                self_model_state_hash = get_model_state_hash(self.model)
+                self_optimizer_state_hash = get_optimizer_state_hash(self.optimizer)
+                self_scheduler_state_hash = get_scheduler_state_hash(self.scheduler)
+
+                logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] After load, self model state hash: [{self_model_state_hash}]")
+                logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] After load, self optimizer state hash: [{self_optimizer_state_hash}]")
+                logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] After load, self scheduler state hash: [{self_scheduler_state_hash}]")
             
             # Synchronize all ranks after loading
             dist.barrier()
 
             logger.info(
-                f"📜 [{self.__class__.__name__}-{self.rank}] TDC Checkpoint loaded - Step: [{self.status.global_step}]"
+                f"📜 [{self.__class__.__name__}-{self.rank}] TDC Checkpoint loaded - Step: [{self.status.global_step}] in [{time.time() - start_time:.2f}s]"
             )
 
         except Exception as e:
@@ -480,7 +510,16 @@ class EngineFSDP(EngineBase):
             # Use AppState to make simple values compatible with TDC
             app_state = AppState(self.model, self.optimizer, scheduler=self.scheduler, global_step=self.status.global_step)
             state_dict = { "app": app_state }
-            
+
+            if self.fsdp_debug:
+                self_model_state_hash = get_model_state_hash(self.model)
+                self_optimizer_state_hash = get_optimizer_state_hash(self.optimizer)
+                self_scheduler_state_hash = get_scheduler_state_hash(self.scheduler)
+
+                logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] Before save, self model state hash: [{self_model_state_hash}]")
+                logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] Before save, self optimizer state hash: [{self_optimizer_state_hash}]")
+                logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] Before save, self scheduler state hash: [{self_scheduler_state_hash}]")
+
             # Ensure all ranks are synchronized before TDC save
             dist.barrier()
             logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] synchronized all ranks before TDC save")
@@ -502,6 +541,15 @@ class EngineFSDP(EngineBase):
             # Synchronize all ranks after saving
             dist.barrier()
             logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] synchronized all ranks after saving")
+
+            if self.fsdp_debug:
+                self_model_state_hash = get_model_state_hash(self.model)
+                self_optimizer_state_hash = get_optimizer_state_hash(self.optimizer)
+                self_scheduler_state_hash = get_scheduler_state_hash(self.scheduler)
+
+                logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] After save, self model state hash: [{self_model_state_hash}]")
+                logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] After save, self optimizer state hash: [{self_optimizer_state_hash}]")
+                logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] After save, self scheduler state hash: [{self_scheduler_state_hash}]")
             
             # Handle checkpoint cleanup and callback (only on rank 0)
             if self.rank == 0:
@@ -782,6 +830,91 @@ class EngineFSDP(EngineBase):
         )
 
         return generated_text.strip()
+
+def get_model_state_hash(model):
+    """Get hash of model parameters for consistency checking in FSDP"""
+    hasher = hashlib.md5()
+    rank = dist.get_rank()
+    
+    # For FSDP models, we need to use the state dict approach to get consistent hashing
+    # across all ranks. Each rank will hash its own sharded parameters, but we need
+    # to ensure consistent ordering and handling.
+    
+    # Get the model state dict - this gives us the sharded parameters for this rank
+    with FSDP.state_dict_type(model, StateDictType.SHARDED_STATE_DICT):
+        model_state_dict = model.state_dict()
+        
+        # Count parameters for logging - handle both regular tensors and ShardedTensors
+        num_params = 0
+        for p in model_state_dict.values():
+            # Check for ShardedTensor first (it's a subclass of torch.Tensor)
+            if hasattr(p, 'local_shards'):  # This is a ShardedTensor
+                num_params += p.local_shards()[0].tensor.numel()
+            elif isinstance(p, torch.Tensor):  # This is a regular tensor
+                num_params += p.numel()
+        logger.info(f"🔍 Rank {rank}: Model has [{num_params:,}] parameters in state dict")
+        
+        # Sort by parameter names for consistent ordering across ranks
+        # Each rank will hash its own sharded parameters
+        for param_name in sorted(model_state_dict.keys()):
+            param_tensor = model_state_dict[param_name]
+            
+            # Skip non-tensor entries (like metadata)
+            if not isinstance(param_tensor, torch.Tensor) and not hasattr(param_tensor, 'size'):
+                continue
+            
+            # For ShardedTensor, we need to get the local shard
+            if hasattr(param_tensor, 'local_shards') and param_tensor.local_shards():
+                # This is a ShardedTensor - get the local shard data
+                local_shard = param_tensor.local_shards()[0].tensor
+                tensor_to_hash = local_shard
+            elif isinstance(param_tensor, torch.Tensor):
+                # This is a regular tensor
+                tensor_to_hash = param_tensor
+            else:
+                continue
+                
+            # Convert to float32 if needed for consistent hashing
+            if tensor_to_hash.dtype == torch.bfloat16:
+                tensor_to_hash = tensor_to_hash.float()
+            elif tensor_to_hash.dtype == torch.float16:
+                tensor_to_hash = tensor_to_hash.float()
+                
+            # Move to CPU and hash the tensor data
+            hasher.update(tensor_to_hash.cpu().numpy().tobytes())
+    
+    return hasher.hexdigest()
+
+
+def get_optimizer_state_hash(optimizer):
+    """Get hash of optimizer state for consistency checking"""
+    hasher = hashlib.md5()
+    
+    # Get optimizer state dict
+    optim_state = optimizer.state_dict()
+    
+    # Convert to JSON string for hashing (handles nested structures)
+    state_str = json.dumps(optim_state, sort_keys=True, default=str)
+    hasher.update(state_str.encode())
+    
+    return hasher.hexdigest()
+
+
+def get_scheduler_state_hash(scheduler):
+    """Get hash of scheduler state for consistency checking"""
+    if scheduler is None:
+        return "no_scheduler"
+    
+    hasher = hashlib.md5()
+    
+    # Get scheduler state dict
+    scheduler_state = scheduler.state_dict()
+    
+    # Convert to JSON string for hashing
+    state_str = json.dumps(scheduler_state, sort_keys=True, default=str)
+    hasher.update(state_str.encode())
+    
+    return hasher.hexdigest()
 
 
 async def _train_loop(
