@@ -70,6 +70,8 @@ class EngineUnsloth(EngineBase):
             self.model = self.base_model
 
         if not self.inference_mode:
+            # setup logging
+            self._setup_logging()
             # Initialize optimizer and scheduler
             self.optimizer, self.scheduler = self._setup_optimizer_and_scheduler()
 

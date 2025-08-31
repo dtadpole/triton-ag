@@ -253,9 +253,6 @@ class EngineBase(ABC):
             / self.prefix_tag
         )
         self.checkpoint_path.mkdir(parents=True, exist_ok=True)
-        if not self.inference_mode:
-            # setup logging
-            self._setup_logging()
 
     def short_name(self):
         return "base"

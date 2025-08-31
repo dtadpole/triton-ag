@@ -147,8 +147,6 @@ class EngineFSDP(EngineBase):
             )
             self.use_distributed = False
 
-        self.status = status if status is not None else TrainerStatus()
-
         # Initialize model and tokenizer
         self.base_model, self.tokenizer = self._setup_model_and_tokenizer()
 
@@ -163,6 +161,8 @@ class EngineFSDP(EngineBase):
         self.model = self._setup_fsdp()
 
         if not self.inference_mode:
+            # setup logging
+            self._setup_logging()
             # Initialize optimizer and scheduler
             self.optimizer, self.scheduler = self._setup_optimizer_and_scheduler()
 
@@ -547,6 +547,8 @@ class EngineFSDP(EngineBase):
         checkpoint_path = self.checkpoint_path / f"checkpoint-{step}"
         checkpoint_path.mkdir(parents=True, exist_ok=True)
 
+        logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] before save checkpoint to: {checkpoint_path}")
+
         if self.use_distributed:
             # Use TDC for distributed saving
             self._save_checkpoint_tdc(checkpoint_path, step, callback)
@@ -558,7 +560,8 @@ class EngineFSDP(EngineBase):
         """Save checkpoint using TDC for distributed training"""
         try:
             # Save config and tokenizer (only on rank 0)
-            self._save_config_and_tokenizer(checkpoint_path)
+            if self.rank == 0:
+                self._save_config_and_tokenizer(checkpoint_path)
 
             # TDC requires ALL ranks to participate in save operation
             # Use MetadataWrapper to make simple values compatible with TDC
@@ -567,11 +570,22 @@ class EngineFSDP(EngineBase):
                 config=self.config.model_dump()
             )
             
+            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] before get state dict")
             # Get state dict using the correct API that handles FSDP properly
-            model_state_dict, optim_state_dict = get_state_dict(
-                model=self.model,
-                optimizers=self.optimizer,
-            )
+            try:
+                model_state_dict, optim_state_dict = get_state_dict(
+                    model=self.model,
+                    optimizers=self.optimizer,
+                )
+                logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] after get state dict")
+            except Exception as state_dict_error:
+                logger.error(f"❌ [{self.__class__.__name__}-{self.rank}] Failed to get state dict: {state_dict_error}")
+                raise state_dict_error
+            
+            # Synchronize all ranks after getting state dict
+            if self.use_distributed:
+                dist.barrier()
+            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] all ranks synchronized after get state dict")
             
             # Combine with other state
             state_dict = {
@@ -580,23 +594,38 @@ class EngineFSDP(EngineBase):
                 "scheduler": self.scheduler.state_dict() if self.scheduler else None,
                 "metadata": metadata_wrapper,
             }
+            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] combined state dict")
+            
+            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] before save checkpoint to: {checkpoint_path}")
+            
+            # Ensure all ranks are synchronized before TDC save
+            if self.use_distributed:
+                dist.barrier()
+            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] all ranks synchronized before TDC save")
             
             # All ranks participate in TDC save
-            tdc.save(
-                state_dict=state_dict,
-                checkpoint_id=checkpoint_path,
-            )
-
-            # Save LoRA model (only on rank 0) if using LoRA
-            if self.config.lora.use_lora and self.rank == 0:
-                self.model.save_pretrained(checkpoint_path)
-
-            # Handle checkpoint cleanup and callback
-            self._handle_checkpoint_cleanup_and_callback(checkpoint_path, callback)
+            try:
+                tdc.save(
+                    state_dict=state_dict,
+                    checkpoint_id=checkpoint_path,
+                )
+                logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] after save checkpoint to: {checkpoint_path}")
+            except Exception as tdc_error:
+                logger.error(f"❌ [{self.__class__.__name__}-{self.rank}] TDC save failed: {tdc_error}")
+                # Synchronize all ranks even if save failed
+                if self.use_distributed:
+                    dist.barrier()
+                raise tdc_error
 
             # Synchronize all ranks after saving
             if self.use_distributed:
                 dist.barrier()
+            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] after synchronize all ranks after saving")
+            
+            # Handle checkpoint cleanup and callback (only on rank 0)
+            if self.rank == 0:
+                self._handle_checkpoint_cleanup_and_callback(checkpoint_path, callback)
+                logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] after handle checkpoint cleanup and callback")
 
             logger.info(
                 f"💾 [{self.__class__.__name__}-{self.rank}] TDC Checkpoint saved: {checkpoint_path}"
@@ -794,10 +823,7 @@ class EngineFSDP(EngineBase):
                 )
 
                 # Save checkpoint
-                if (
-                    self.status.global_step % self.config.training.save_steps == 0
-                    and self.rank == 0
-                ):
+                if self.status.global_step % self.config.training.save_steps == 0:
                     self._save_checkpoint(self.status.global_step, callback=callback)
 
                 # Evaluation
@@ -813,8 +839,8 @@ class EngineFSDP(EngineBase):
                     break
 
         try:
-            # Always save checkpoint at the end of the block
-            if self.rank == 0:
+            # Always save checkpoint at the end of the block (only if save_steps is reached)
+            if self.status.global_step % self.config.training.save_steps == 0:
                 self._save_checkpoint(self.status.global_step)
         except Exception as e:
             logger.error(
@@ -950,8 +976,7 @@ async def _train_loop(
             break
 
     # Final checkpoint
-    if trainer.rank == 0:
-        trainer._save_checkpoint(trainer.status.global_step)
+    trainer._save_checkpoint(trainer.status.global_step)
 
     if trainer.config.logging.use_wandb:
         wandb.finish()
