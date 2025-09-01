@@ -68,7 +68,7 @@ FSDP_TAG = "fsdp"
 def setup_distributed():
     """Initialize distributed process group"""
     if not dist.is_initialized():
-        dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
+        dist.init_process_group(backend="cpu:gloo,cuda:nccl")
     
     rank = dist.get_rank()
     world_size = dist.get_world_size()
@@ -188,6 +188,9 @@ class EngineFSDP(EngineBase):
         num_params = sum(p.numel() for p in self.model.parameters())
         logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] Model has [{num_params:,}] parameters")
 
+        # future for async saving of checkpoint
+        self.save_checkpoint_future = None
+        # debug fsdp save and load
         self.fsdp_debug = os.getenv("FSDP_DEBUG", "false").lower() == "true"
 
         if not self.inference_mode:
@@ -500,8 +503,13 @@ class EngineFSDP(EngineBase):
         checkpoint_path = self.checkpoint_path / f"checkpoint-{step}"
         checkpoint_path.mkdir(parents=True, exist_ok=True)
 
+        # waits for checkpointing to finish if one exists, avoiding queuing more then one checkpoint request at a time
+        if self.save_checkpoint_future is not None:
+            self.save_checkpoint_future.result()
+
         """Save checkpoint using TDC for distributed training"""
         try:
+            start_time = time.time()
             # Save config and tokenizer (only on rank 0)
             if self.rank == 0:
                 self._save_config_and_tokenizer(checkpoint_path)
@@ -522,46 +530,47 @@ class EngineFSDP(EngineBase):
 
             # Ensure all ranks are synchronized before TDC save
             dist.barrier()
-            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] synchronized all ranks before TDC save")
-            
+            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] synchronized all ranks before TDC save.")
+
+            def checkpoint_cleanup_and_callback(*args, **kwargs):
+                logger.info(
+                    f"💾 [{self.__class__.__name__}-{self.rank}] TDC Checkpoint saved: [{checkpoint_path}] in [{time.time() - start_time:.2f}s]"
+                )
+                if self.rank == 0:
+                    callback_start_time = time.time()
+                    self._handle_checkpoint_cleanup_and_callback(checkpoint_path, callback)
+                    logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] handled checkpoint cleanup and callback in [{time.time() - callback_start_time:.2f}s]")
+
+            def prepend_callback_cf(fut, cb):
+                # Register normally first (so it’s wrapped as expected)
+                fut.add_done_callback(cb)
+                # Danger: private internals ahead
+                # _callbacks is a list of callables; _condition is a threading.Condition
+                with fut._condition:              # private API
+                    fut._done_callbacks.insert(0, fut._done_callbacks.pop())
+                    logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] prepended callback to future [{fut}] with [{len(fut._done_callbacks)}] callbacks")
+
             # All ranks participate in TDC save
             try:
-                start_time = time.time()
-                tdc.save(
+                async_save_start_time = time.time()
+                self.save_checkpoint_future = tdc.async_save(
                     state_dict=state_dict,
                     checkpoint_id=checkpoint_path,
                 )
-                logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] saved checkpoint to: [{checkpoint_path}] in [{time.time() - start_time:.2f}s]")
+                prepend_callback_cf(self.save_checkpoint_future, checkpoint_cleanup_and_callback)
+                logger.info(f"💾 [{self.__class__.__name__}-{self.rank}] async TDC will save checkpoint to: [{checkpoint_path}] in [{time.time() - async_save_start_time:.2f}s]")
             except Exception as tdc_error:
-                logger.error(f"❌ [{self.__class__.__name__}-{self.rank}] TDC save failed: {tdc_error}")
+                logger.error(f"❌ [{self.__class__.__name__}-{self.rank}] TDC save failed: {tdc_error} in [{time.time() - async_save_start_time:.2f}s]")
                 # Synchronize all ranks even if save failed
                 dist.barrier()
                 raise tdc_error
 
             # Synchronize all ranks after saving
-            dist.barrier()
-            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] synchronized all ranks after saving")
-
-            if self.fsdp_debug:
-                self_model_state_hash = get_model_state_hash(self.model)
-                self_optimizer_state_hash = get_optimizer_state_hash(self.optimizer)
-                self_scheduler_state_hash = get_scheduler_state_hash(self.scheduler)
-
-                logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] After save, self model state hash: [{self_model_state_hash}]")
-                logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] After save, self optimizer state hash: [{self_optimizer_state_hash}]")
-                logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] After save, self scheduler state hash: [{self_scheduler_state_hash}]")
-            
-            # Handle checkpoint cleanup and callback (only on rank 0)
-            if self.rank == 0:
-                self._handle_checkpoint_cleanup_and_callback(checkpoint_path, callback)
-                logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] handled checkpoint cleanup and callback")
-
-            logger.info(
-                f"💾 [{self.__class__.__name__}-{self.rank}] TDC Checkpoint saved: [{checkpoint_path}] in [{time.time() - start_time:.2f}s]"
-            )
+            # dist.barrier()
+            # logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] synchronized all ranks after async TDC saving.")
 
         except Exception as e:
-            logger.error(f"❌ [{self.__class__.__name__}-{self.rank}] Failed to save TDC checkpoint: {e}")
+            logger.error(f"❌ [{self.__class__.__name__}-{self.rank}] Failed to save TDC checkpoint: {e} in [{time.time() - async_save_start_time:.2f}s]")
             logger.error(traceback.format_exc())
             raise
 
