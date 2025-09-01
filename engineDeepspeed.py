@@ -465,6 +465,7 @@ class EngineDeepspeed(EngineBase):
         dataset: Dataset,
         eval_dataset: Optional[Dataset] = None,
         callback: Optional[Callable] = None,
+        save_at_end: bool = False,
     ):
         """Train the model for one block"""
         # Create data loader
@@ -564,7 +565,12 @@ class EngineDeepspeed(EngineBase):
 
         try:
             # always save checkpoint at the end of the block
-            self._save_checkpoint(self.status.global_step)
+            if save_at_end: 
+                if self.status.global_step % self.config.training.save_steps == 0:
+                    # if end of block happens to be the save step, we don't need to save, because we already saved at the save step
+                    pass
+                else:
+                    self._save_checkpoint(self.status.global_step)
         except Exception as e:
             logger.error(
                 f"❌ [{self.__class__.__name__}-{self.rank}] [{run_tag}] Failed to save checkpoint: [{type(e).__name__}: {e}]"

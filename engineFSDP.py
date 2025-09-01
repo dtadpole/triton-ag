@@ -531,13 +531,14 @@ class EngineFSDP(EngineBase):
             # dist.barrier()
             # logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] synchronized all ranks before TDC save.")
 
+            my_checkpoint_path = checkpoint_path
             def checkpoint_cleanup_and_callback(*args, **kwargs):
                 logger.info(
-                    f"💾 [{self.__class__.__name__}-{self.rank}] TDC Checkpoint saved: [{checkpoint_path}] in [{time.time() - start_time:.2f}s]"
+                    f"💾 [{self.__class__.__name__}-{self.rank}] TDC Checkpoint saved: [{my_checkpoint_path}] in [{time.time() - start_time:.2f}s]"
                 )
                 if self.rank == 0:
                     callback_start_time = time.time()
-                    self._handle_checkpoint_cleanup_and_callback(checkpoint_path, callback)
+                    self._handle_checkpoint_cleanup_and_callback(my_checkpoint_path, callback)
                     logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] handled checkpoint cleanup and callback in [{time.time() - callback_start_time:.2f}s]")
 
             def prepend_callback_cf(fut, cb):
@@ -639,6 +640,7 @@ class EngineFSDP(EngineBase):
         dataset: Dataset,
         eval_dataset: Optional[Dataset] = None,
         callback: Optional[Callable] = None,
+        save_at_end: bool = False,
     ):
         """Train the model for one block"""
         # Create data loader
@@ -738,8 +740,12 @@ class EngineFSDP(EngineBase):
 
         try:
             # Always save checkpoint at the end of the block (only if save_steps is reached)
-            if self.status.global_step % self.config.training.save_steps == 0:
-                self._save_checkpoint(self.status.global_step)
+            if save_at_end:
+                if self.status.global_step % self.config.training.save_steps == 0:
+                    # if end of block happens to be the save step, we don't need to save, because we already saved at the save step
+                    pass
+                else:
+                    self._save_checkpoint(self.status.global_step)
         except Exception as e:
             logger.error(
                 f"❌ [{self.__class__.__name__}-{self.rank}] [{run_tag}] Failed to save checkpoint: {e}"
