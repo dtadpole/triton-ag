@@ -403,7 +403,7 @@ class EngineFSDP(EngineBase):
             with open(checkpoint_path / "training_config.yaml", "w") as f:
                 yaml.dump(self.config.model_dump(), f, default_flow_style=False)
             # Save tokenizer
-            self.tokenizer.save_pretrained(checkpoint_path)
+            # self.tokenizer.save_pretrained(checkpoint_path)
 
     def _handle_checkpoint_cleanup_and_callback(self, checkpoint_path: Path, callback: Optional[Callable] = None):
         """Handle checkpoint cleanup, link updates, and callback execution (rank 0 only)"""
@@ -487,7 +487,7 @@ class EngineFSDP(EngineBase):
                 logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] After load, self scheduler state hash: [{self_scheduler_state_hash}]")
             
             # Synchronize all ranks after loading
-            dist.barrier()
+            # dist.barrier()
 
             logger.info(
                 f"📜 [{self.__class__.__name__}-{self.rank}] TDC Checkpoint loaded - Step: [{self.status.global_step}] in [{time.time() - start_time:.2f}s]"
@@ -511,8 +511,7 @@ class EngineFSDP(EngineBase):
         try:
             start_time = time.time()
             # Save config and tokenizer (only on rank 0)
-            if self.rank == 0:
-                self._save_config_and_tokenizer(checkpoint_path)
+            self._save_config_and_tokenizer(checkpoint_path)
 
             # TDC requires ALL ranks to participate in save operation
             # Use AppState to make simple values compatible with TDC
@@ -529,8 +528,8 @@ class EngineFSDP(EngineBase):
                 logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] Before save, self scheduler state hash: [{self_scheduler_state_hash}]")
 
             # Ensure all ranks are synchronized before TDC save
-            dist.barrier()
-            logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] synchronized all ranks before TDC save.")
+            # dist.barrier()
+            # logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] synchronized all ranks before TDC save.")
 
             def checkpoint_cleanup_and_callback(*args, **kwargs):
                 logger.info(
@@ -562,7 +561,7 @@ class EngineFSDP(EngineBase):
             except Exception as tdc_error:
                 logger.error(f"❌ [{self.__class__.__name__}-{self.rank}] TDC save failed: {tdc_error} in [{time.time() - async_save_start_time:.2f}s]")
                 # Synchronize all ranks even if save failed
-                dist.barrier()
+                # dist.barrier()
                 raise tdc_error
 
             # Synchronize all ranks after saving
@@ -570,7 +569,7 @@ class EngineFSDP(EngineBase):
             # logger.info(f"🔍 [{self.__class__.__name__}-{self.rank}] synchronized all ranks after async TDC saving.")
 
         except Exception as e:
-            logger.error(f"❌ [{self.__class__.__name__}-{self.rank}] Failed to save TDC checkpoint: {e} in [{time.time() - async_save_start_time:.2f}s]")
+            logger.error(f"❌ [{self.__class__.__name__}-{self.rank}] Failed to save TDC checkpoint: {e} in [{time.time() - start_time:.2f}s]")
             logger.error(traceback.format_exc())
             raise
 
