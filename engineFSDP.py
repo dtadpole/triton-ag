@@ -722,12 +722,14 @@ class EngineFSDP(EngineBase):
                 if self.status.global_step % self.config.training.save_steps == 0:
                     self._save_checkpoint(self.status.global_step, callback=callback)
 
-                # Evaluation
+                # Evaluation - only run if we're at a complete optimization step
                 if (
                     eval_dataset
+                    and self.config.training.eval_steps > 0
                     and self.status.global_step % self.config.training.eval_steps == 0
-                    and self.rank == 0
                 ):
+                    # Ensure we're at a clean state before evaluation
+                    # (i.e., we just completed an optimization step)
                     self._evaluate(eval_dataset)
 
                 # Check if training is complete
@@ -755,13 +757,30 @@ class EngineFSDP(EngineBase):
 
     def _evaluate(self, eval_dataset: Dataset):
         """Evaluate the model on evaluation dataset"""
+        # Ensure all ranks are synchronized before evaluation
+        dist.barrier()
+        
         logger.info(f"📊 [{self.__class__.__name__}-{self.rank}] Running evaluation...")
 
+        # Store original training state
+        was_training = self.model.training
+        
         self.model.eval()
+
+        sampler = DistributedSampler(
+            eval_dataset,
+            num_replicas=dist.get_world_size(),
+            rank=self.rank,
+            shuffle=False,
+            drop_last=True,
+        )
+        
+        # Only rank 0 does the actual evaluation computation
         eval_dataloader = DataLoader(
             eval_dataset,
             batch_size=self.config.training.micro_batch_size,
             shuffle=False,
+            # sampler=sampler,
             num_workers=self.config.training.dataloader_num_workers,
             pin_memory=True,
             collate_fn=self.data_collator,
@@ -770,20 +789,22 @@ class EngineFSDP(EngineBase):
         total_loss = 0.0
         num_batches = 0
 
-        with torch.no_grad():
-            for batch in eval_dataloader:
-                loss = self._compute_loss(batch)
-                total_loss += loss.item()
-                num_batches += 1
+        # with torch.no_grad():
+        if self.rank == 0:
+            with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+                for batch in eval_dataloader:
+                    loss = self._compute_loss(batch)
+                    total_loss += loss.item()
+                    num_batches += 1
 
-        avg_eval_loss = total_loss / num_batches
-        perplexity = math.exp(avg_eval_loss)
+            avg_eval_loss = total_loss / num_batches
+            perplexity = math.exp(avg_eval_loss)
 
-        logger.info(
-            f"📊 [{self.__class__.__name__}-{self.rank}] Eval Loss: {avg_eval_loss:.4f}, Perplexity: {perplexity:.2f}"
-        )
+            logger.info(
+                f"📊 [{self.__class__.__name__}-{self.rank}] Eval Loss: {avg_eval_loss:.4f}, Perplexity: {perplexity:.2f}"
+            )
 
-        if self.config.logging.use_wandb:
+        if self.rank == 0 and self.config.logging.use_wandb:
             wandb.log(
                 {
                     "eval/loss": avg_eval_loss,
@@ -792,7 +813,14 @@ class EngineFSDP(EngineBase):
                 }
             )
 
-        self.model.train()
+        # Restore original training state on all ranks
+        if was_training:
+            self.model.train()
+            # Ensure gradients are clean after evaluation
+            self.optimizer.zero_grad()
+        
+        # Ensure all ranks are synchronized after evaluation
+        dist.barrier()
 
     def generate_text(
         self, prompt: str, max_length: int = 100, temperature: float = 0.7
@@ -811,7 +839,8 @@ class EngineFSDP(EngineBase):
         input_length = inputs["input_ids"].shape[1]
 
         # Generate text
-        with torch.no_grad():
+        # with torch.no_grad():
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=max_length,
@@ -1050,9 +1079,10 @@ async def main():
     eval_dataset = create_sample_training_dataset(
         trainer.tokenizer, size=args.sample_test_size, max_length=trainer.config.model.max_seq_length
     )
+    # eval_dataset = None
 
     logger.info(
-        f"📊 [{trainer.__class__.__name__}-{trainer.rank}] Dataset created - Train: {len(train_dataset)}, Eval: {len(eval_dataset)}"
+        f"📊 [{trainer.__class__.__name__}-{trainer.rank}] Dataset created - Train: {len(train_dataset)}, Eval: {len(eval_dataset) if eval_dataset else 0}"
     )
 
     # Start training

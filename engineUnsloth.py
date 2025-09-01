@@ -460,6 +460,7 @@ class EngineUnsloth(EngineBase):
                 # Evaluation
                 if (
                     eval_dataset
+                    and self.config.training.eval_steps > 0
                     and self.status.global_step % self.config.training.eval_steps == 0
                 ):
                     self._evaluate(eval_dataset)
