@@ -10,6 +10,7 @@ podman run -it \
     --shm-size=32g \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -v ~/.trainer:/root/.trainer \
+    -v ~/triton-ag:/root/triton-ag \
     --env "HF_TOKEN=`cat ~/.keys/huggingface.api.key`" \
     -e HTTP_PROXY -e HTTPS_PROXY -e NO_PROXY \
     -e http_proxy -e https_proxy -e no_proxy \

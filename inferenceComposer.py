@@ -337,7 +337,7 @@ async def run_inference_block(block: InferenceBlock):
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--name", type=str, default="codeGenEval.base") # "TC_0.1.0_14B.m"
+    parser.add_argument("--queue_name", type=str, default="codeGenEval.base") # "TC_0.1.0_14B.m"
     parser.add_argument("--prefix_tag", type=str, default="auto.inference.composer") # "TC_0.1.0_14B.m"
     parser.add_argument("--epoch_id", type=int, default=-1)
     parser.add_argument("--block_id", type=int, default=-1)
@@ -385,7 +385,7 @@ async def main():
             block.context["proc_id"] = PROC_ID
         else:
             block = InferenceBlock(
-                name=args.name,
+                queue_name=args.queue_name,
                 prefix_tag=args.prefix_tag,
                 epoch_id=args.epoch_id,
                 block_id=args.block_id,
