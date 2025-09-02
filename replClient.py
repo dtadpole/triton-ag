@@ -26,12 +26,39 @@ class SimpleRepl:
         with open(api_key_file, 'r') as f:
             self.api_key = f.read().strip()
 
+        # Setup history file
+        self.history_file = os.path.expanduser('~/.repl_history')
+        self.load_history()
+
         # Setup readline for better input handling
         try:
             readline.parse_and_bind("tab: complete")
             readline.set_history_length(1000)
         except:
             pass  # readline might not be available on all systems
+
+    def load_history(self):
+        """Load command history from history file"""
+        try:
+            if os.path.exists(self.history_file):
+                with open(self.history_file, 'r', encoding='utf-8') as f:
+                    history_lines = f.readlines()
+                    # Add each line to readline history (excluding newlines)
+                    for line in history_lines:
+                        line = line.strip()
+                        if line:  # Only add non-empty lines
+                            readline.add_history(line)
+                logger.info(f"Loaded {len(history_lines)} history entries from {self.history_file}")
+        except Exception as e:
+            logger.error(f"Failed to load history: {e}")
+
+    def save_history(self, command):
+        """Append a command to the history file"""
+        try:
+            with open(self.history_file, 'a', encoding='utf-8') as f:
+                f.write(command + '\n')
+        except Exception as e:
+            logger.error(f"Failed to save history: {e}")
 
     def is_complete(self, code):
         """Check if code is complete or needs more input"""
@@ -96,6 +123,7 @@ class SimpleRepl:
                 if len(self.buffer) > 1 and not line.strip():
                     code_to_execute = '\n'.join(self.buffer)  # Exclude empty line
                     if code_to_execute.strip():
+                        self.save_history(code_to_execute)
                         self.execute(code_to_execute)
                     self.buffer = []
                 
@@ -104,6 +132,7 @@ class SimpleRepl:
                 
                 # If we have complete code (not waiting for more)
                 elif self.is_complete(code):
+                    self.save_history(code)
                     self.execute(code)
                     self.buffer = []
 

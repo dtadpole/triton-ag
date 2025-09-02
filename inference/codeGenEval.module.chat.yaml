@@ -4,10 +4,8 @@ module:
   # here we add addotional context variables for easier access by the program
   # variables will be evaluated sequentially, so that later variables can use earlier variables
   context_vars:
-    provider_name: "`__runtime__.inference_client_config.provider.provider_name`"
-    model_short_name: "`__runtime__.inference_client_config.model.model_short_name`"
-    model_tag: "{provider_name}_{model_short_name}"
-    max_tokens: "`__runtime__.inference_client_config.model.max_tokens`"
+    model_tag: "`__runtime__.model_tag`"
+    tokenizer: "`__runtime__.tokenizer`"
 
   # input processor adds jobs to the queue
   input_processor:
@@ -47,7 +45,8 @@ module:
                   kb_filename: "`row.kb_filename`" # kb_filename is the filename
                   reference_code: "`row.reference_code`" # reference code
                   output_dir: "`os.path.expanduser(block.output_dir)`" # output_dir is the output directory
-                  # generate code and evaluate
+                  kbeval_providers: "`block.kbeval_providers`" # kb eval providers
+                  context: "`block.context`"
               returns:
                 logging:
                   method: "log_enqueue"
@@ -70,6 +69,9 @@ module:
                       code_type: "`__runtime__.get_prompt_code_type(__context__)`"
                       output_dir: "`os.path.expanduser(block.output_dir)`" # output_dir is the output directory 
                       num_turns_per_generation: "`block.num_turns_per_generation`" # number of turns per generation
+                      vllm_providers: "`block.vllm_providers`" # vllm providers
+                      kbeval_providers: "`block.kbeval_providers`" # kb eval providers
+                      context: "`block.context`"
                   returns:
                     logging:
                       method: "log_enqueue"
@@ -84,10 +86,11 @@ module:
         - type: endpoint
           endpoint: kbEvalClient.kb_eval_ref
           args:
+            provider: "`kbeval_providers`"
+            reference_code: "`reference_code`"
             run_tag: "`run_tag`"
             model_tag: "`model_tag`"
             task_tag: "`task_tag`"
-            reference_code: "`reference_code`"
           # returned variables will be added to the context
           returns:
             error_if: "`__result__ is None or __result__['runtime'] <= 0`"
@@ -161,8 +164,8 @@ module:
                   ]
                   `
               args:
+                provider: "`vllm_providers`"
                 messages: "`messages`"
-                max_tokens: "`max_tokens`"
                 logprobs: false
               returns:
                 error_if: "`__result__ is None`"
@@ -213,12 +216,13 @@ module:
             - type: endpoint
               endpoint: kbEvalClient.kb_eval
               args:
+                provider: "`kbeval_providers`"
+                reference_code: "`reference_code`"
+                generated_code: "`generated_code`"
                 run_tag: "`run_tag`"
                 model_tag: "`model_tag`"
                 task_tag: "`task_tag`"
                 eval_tag: "`turn_tag`" # eval_tag is the turn tag
-                reference_code: "`reference_code`"
-                generated_code: "`generated_code`"
                 code_type: "`code_type`" # code_type is the code type
               returns:
                 error_if: "`__result__ is None`"
