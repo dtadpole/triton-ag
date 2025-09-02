@@ -15,12 +15,12 @@ import requests
 import duckdb
 from pathlib import Path
 from transformers import AutoTokenizer
-from inferenceClient import InferenceClient, InferenceClientConfig, load_inference_client_config
+from inferenceClient import InferenceClient
+from inferenceCustomClient import InferenceCustomClient
 from logger import logger
 from kbEvalClient import KbEvalClient
-from workflowUtil import ComposerBlock, MODEL_OVERRIDE_KEY
+from workflowUtil import InferenceBlock, MODEL_OVERRIDE_KEY
 from workflowClient import WorkflowClient
-from workflowServer import WorkflowServer
 from configEndpoints import DuckDBClient, Recorder, CodeExtractor, StatsClient
 from configInterpreter import ConfigInterpreter
 from util import INFERENCE_DIR, TRAINER_DIR
@@ -31,14 +31,14 @@ VALID_INPUT_PROCESSORS = [
 
 class ComposerClient:
     def __init__(
-            self,
-            input_tag: str,
-            inference_client_config: InferenceClientConfig,
-            module_file: str = "inference/codeGenEval.module.yaml",
-            prompt_file: str = "inference/triton.prompt.yaml",
-            example_file: str = "inference/triton.example.yaml",
-            output_dir: str = INFERENCE_DIR + "/output",
-            stats_dir: str = TRAINER_DIR + "/stats",
+        self,
+        input_tag: str,
+        model_name: str,
+        module_file: str = "inference/codeGenEval.module.yaml",
+        prompt_file: str = "inference/triton.prompt.yaml",
+        example_file: str = "inference/triton.example.yaml",
+        output_dir: str = "~/.inference/output",
+        stats_dir: str = "~/.trainer/stats",
     ):
         with open(prompt_file, 'r') as f:
             self.prompt_config = yaml.safe_load(f)
@@ -47,21 +47,22 @@ class ComposerClient:
         self.queue = asyncio.Queue()
         self.duckdbClient = DuckDBClient()
         self.recorder = Recorder()
-        self.kbEvalClient = KbEvalClient()
         self.statsClient = StatsClient()
         self.codeExtractor = CodeExtractor()
         self.configInterpreter = ConfigInterpreter()
-        self.inference_client_config = inference_client_config
-        self.inferenceClient = InferenceClient(config=self.inference_client_config)
+        self.inferenceClient = InferenceClient(model_name=model_name)
+        self.logpClient = InferenceCustomClient()
+        self.kbEvalClient = KbEvalClient()
+        self.model_name = self.inferenceClient.model_name
+        self.model_tag = self.model_name
         self.tokenizer = self.inferenceClient.tokenizer
-        self.model_tag = self.inferenceClient.model_tag
         self.output_dir = self._get_output_dir(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.module_file = module_file
         self.prompt_file = prompt_file
+        self.example_file = example_file
         self.module_config = yaml.safe_load(open(module_file, 'r')).get('module', {})
         self.prompt_config = yaml.safe_load(open(prompt_file, 'r')).get('prompts', {})
-        self.example_file = example_file
         self.example_config = yaml.safe_load(open(example_file, 'r')).get('examples', {})
         self.context_vars = {
             # built-in context vars
@@ -69,6 +70,7 @@ class ComposerClient:
             "os": os,
             "json": json,
             "yaml": yaml,
+            "random": random,
             "stats_dir": os.path.expanduser(stats_dir),
             "__runtime_start_time__": datetime.now().strftime("%Y%m%d_%H%M%S"),
         }
@@ -147,6 +149,18 @@ class ComposerClient:
         token_per_second = num_completion_tokens / completion_time_seconds if completion_time_seconds > 0 else 0.0
         logger.info(f"👏 [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{conversation_path}] [{f'{num_completion_tokens}'} tokens] in [{completion_time_seconds:.2f}s] [{token_per_second:.2f} tokens/s]")
 
+    def log_logps(self, result: dict, context_vars: dict) -> dict:
+        """Process log logps."""
+        run_tag = context_vars.get('run_tag', None)
+        model_tag = context_vars.get('model_tag', None)
+        task_tag = context_vars.get('task_tag', None)
+        turn_tag = context_vars.get('turn_tag', None)
+        completion_time_seconds = context_vars.get('__endpoint_time__', None)
+        len_input_ids = len(result['input_ids'])
+        len_logps = len(result['logps'])
+        token_per_second = len_logps / completion_time_seconds if completion_time_seconds > 0 else 0.0
+        logger.info(f"📈 [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{len_input_ids} input_ids] [{len_logps} logps] in [{completion_time_seconds:.2f}s] [{token_per_second:.2f} tokens/s]")
+
     def log_code_extraction(self, result: dict, context_vars: dict) -> dict:
         """Process log code extraction."""
         run_tag = context_vars.get('run_tag', None)
@@ -192,9 +206,9 @@ class ComposerClient:
         speedup_emoji = '🚀' if speedup > 1.0 else ('🦙' if speedup > 0.5 else '🐢')
         evaluation_time = context_vars.get('__endpoint_time__', None)
         if result['compiled'] and result['correctness']:
-            logger.info(f"✅ [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{generated_eval_path}] [{generated_eval_runtime:.3f}ms] [{speedup_emoji} {speedup:.2f}x] in [{evaluation_time:.1f}s]")
+            logger.info(f"✅ [InferenceComposer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{generated_eval_path}] [{generated_eval_runtime:.3f}ms] [{speedup_emoji} {speedup:.2f}x] in [{evaluation_time:.1f}s]")
         else:
-            logger.warning(f"⚠️ [Composer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{generated_eval_path}] [{'🟢' if result['compiled'] else '🔴'} compiled], [{'🟢' if result['correctness'] else '🔴'} correctness] in [{evaluation_time:.2f}s]")
+            logger.warning(f"⚠️ [InferenceComposer] [{run_tag}] [{model_tag}] [{task_tag}] [{turn_tag}] [{generated_eval_path}] [{'🟢' if result['compiled'] else '🔴'} compiled], [{'🟢' if result['correctness'] else '🔴'} correctness] in [{evaluation_time:.2f}s]")
 
     async def log_enqueue(self, result: dict, context_vars: dict) -> dict:
         """Process log enqueue."""
@@ -202,9 +216,9 @@ class ComposerClient:
         model_tag = context_vars.get('model_tag', None)
         task_tag = context_vars.get('task_tag', None)
         gen_tag = context_vars.get('gen_tag', None)
-        logger.info(f"🔍 [Composer] [{run_tag}] Enqueued [{model_tag}] [{task_tag}] [{gen_tag}]...")
+        logger.info(f"🔍 [InferenceComposer] [{run_tag}] Enqueued [{model_tag}] [{task_tag}] [{gen_tag}]...")
 
-    async def input_processor(self, block: ComposerBlock):
+    async def input_processor(self, block: InferenceBlock):
         """Process input variables."""
         for processor_name, processor_config in self.module_config.get('input_processor', {}).items():
             try:
@@ -219,13 +233,13 @@ class ComposerClient:
                     context_vars=context_vars,
                 )
                 if not success:
-                    logger.error(f"🔴 [Composer] [{self.input_tag}] Input processor [{processor_name}] failed.")
+                    logger.error(f"🔴 [InferenceComposer] [{self.input_tag}] Input processor [{processor_name}] failed.")
                     continue
 
-                logger.info(f"👌 [Composer] [{self.input_tag}] Input processor [{processor_name}] completed.")
+                logger.info(f"👌 [InferenceComposer] [{self.input_tag}] Input processor [{processor_name}] completed.")
 
             except Exception as e:
-                logger.error(f"🔴 [Composer] [{self.input_tag}] Input processor [{processor_name}] error: [{type(e)}: {e}]")
+                logger.error(f"🔴 [InferenceComposer] [{self.input_tag}] Input processor [{processor_name}] error: [{type(e)}: {e}]")
                 logger.error(traceback.format_exc())
                 continue
 
@@ -236,22 +250,27 @@ class ComposerClient:
                 # Get file path from queue (blocking with timeout)
                 item = await asyncio.wait_for(self.queue.get(), timeout=1.0)
                 if item is None:
-                    logger.info(f"🔍 [Composer] [{self.input_tag}] [Worker {worker_id:02d}] Received termination signal")
+                    logger.info(f"🔍 [InferenceComposer] [{self.input_tag}] [Worker {worker_id:02d}] Received termination signal")
                     break
 
                 if 'worker' not in item:
-                    logger.error(f"🔴 [Composer] [{self.input_tag}] Worker not configured in item: {item}")
+                    logger.error(f"🔴 [InferenceComposer] [{self.input_tag}] Worker not configured in item: {item}")
                     continue
 
                 worker_name = item['worker']
                 worker_config = self.module_config.get('queue_worker', {}).get(worker_name, {})
                 if not worker_config:
-                    logger.error(f"🔴 [Composer] [{self.input_tag}] Worker config not found in module [{self.module_file}] for worker [{worker_name}].")
+                    logger.error(f"🔴 [InferenceComposer] [{self.input_tag}] Worker config not found in module [{self.module_file}] for worker [{worker_name}].")
                     continue
 
                 # start processing the worker config, create a new context_vars dictionary
+                # print("json.dumps(item):", json.dumps(item, indent=4))
+                proc_id = item['context'].get('proc_id')
                 context_vars = self.context_vars | {
                     "__input__": item,
+                    "worker_name": worker_name,
+                    "worker_id": f"{worker_id:02d}",
+                    "proc_id": f"{proc_id if proc_id is not None else str(-random.randint(1, 99))}",
                 } | item # add the input variables to the context variables
 
                 success = await self.configInterpreter.execute(
@@ -260,16 +279,16 @@ class ComposerClient:
                     context_vars=context_vars,
                 )
                 if not success:
-                    logger.error(f"🔴 [Composer] [{self.input_tag}] Worker [{worker_name}] failed.")
+                    logger.error(f"🔴 [InferenceComposer] [{self.input_tag}] Worker [{worker_name}] failed.")
                     continue
 
-                logger.info(f"👌 [Composer] [{self.input_tag}] [worker {worker_id:02d}] [{worker_name}] completed.")
+                logger.info(f"👌 [InferenceComposer] [{self.input_tag}] [worker {worker_id:02d}] [{worker_name}] completed.")
 
             except asyncio.TimeoutError:
                 continue
 
             except Exception as e:
-                logger.error(f"🔴 [Composer] [{self.input_tag}] Worker [{worker_id:02d}] error: [{type(e)}: {e}]")
+                logger.error(f"🔴 [InferenceComposer] [{self.input_tag}] Worker [{worker_id:02d}] error: [{type(e)}: {e}]")
                 logger.error(traceback.format_exc())
                 break
 
@@ -277,29 +296,20 @@ class ComposerClient:
                 await asyncio.sleep(1)
 
         # circle emoji to beginning of the line
-        logger.info(f"🎯 [Composer] [{self.input_tag}] Worker [{worker_id:02d}] completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
+        logger.info(f"🎯 [InferenceComposer] [{self.input_tag}] Worker [{worker_id:02d}] completed. Remaining tasks: [{len(asyncio.all_tasks())}]")
 
 
-async def composer_block(block: ComposerBlock, use_global_registry: bool = False):
+async def run_inference_block(block: InferenceBlock):
     """
     Run one batch of code generation and evaluation.
     """
     try:
-        config = load_inference_client_config(
-            provider_name=block.provider_name,
-            model_short_name=block.model_name,
-        )
-
-        # override the model name
-        if block.model_override:
-            config.model.model_name = block.model_override
-
         # start running the block
-        logger.info(f"🔍 [Composer] [{block.input_tag}] Starting block...")
+        logger.info(f"🔍 [InferenceComposer] [{block.input_tag}] Starting block...")
 
         composerClient = ComposerClient(
             input_tag=block.input_tag,
-            inference_client_config=config,
+            model_name=block.model_name,
             module_file=block.module_file,
             prompt_file=block.prompt_file,
             example_file=block.example_file,
@@ -318,37 +328,36 @@ async def composer_block(block: ComposerBlock, use_global_registry: bool = False
         # wait for the queue workers to complete
         await asyncio.gather(*queue_workers)
 
-        # if use_global_registry:
-        #     globalWorkflow = WorkflowServer(prefix_tag=block.prefix_tag)
-        #     await globalWorkflow.post_composer(block)
-
-        logger.info(f"🎉 [Composer] [{block.input_tag}] Block completed")
+        logger.info(f"🎉 [InferenceComposer] [{block.input_tag}] Block completed")
 
     except Exception as e:
-        logger.error(f"❌ [Composer] [{block.input_tag}] Error running block: [{e}] in [{traceback.format_exc()}]")
+        logger.error(f"❌ [InferenceComposer] [{block.input_tag}] Error running block: [{e}] in [{traceback.format_exc()}]")
         logger.error(traceback.format_exc())
 
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prefix_tag", type=str, default="auto") # "TC_0.1.0_14B.m"
+    parser.add_argument("--name", type=str, default="codeGenEval.base") # "TC_0.1.0_14B.m"
+    parser.add_argument("--prefix_tag", type=str, default="auto.inference.composer") # "TC_0.1.0_14B.m"
     parser.add_argument("--epoch_id", type=int, default=-1)
     parser.add_argument("--block_id", type=int, default=-1)
-    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B.m_003_12")
-    parser.add_argument("--input_dir", type=str, default="kernel_bench/level1", help="Input directory containing Python files")
-    parser.add_argument("--output_dir", type=str, default=INFERENCE_DIR + "/output", help="Output directory for the composer results")
-    parser.add_argument("--provider", type=str, default="local")  # most cost effective models are deepinfra-r1 and fireworks-v3
-    parser.add_argument("--model", type=str, default="qwen3-14b")  # most cost effective models are deepinfra-r1 and fireworks-v3
-    parser.add_argument("--model_override", type=str, default=None)
+    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_32B.b_006_05")
+    parser.add_argument("--input_dir", type=str, default="~/KernelBench/KernelBench/level1", help="Input directory containing Python files")
+    parser.add_argument("--output_dir", type=str, default="~/.inference/output", help="Output directory for the composer results")
     parser.add_argument("--parallel_workers", type=int, default=1)
     parser.add_argument("--num_samples", type=int, default=2)
     parser.add_argument("--num_generations", type=int, default=2)
-    parser.add_argument("--num_turns_per_generation", type=int, default=4)
+    parser.add_argument("--num_turns_per_generation", type=int, default=2)
+    parser.add_argument("--model_name", type=str, default="qwen3-32b")  # most cost effective models are deepinfra-r1 and fireworks-v3
+    parser.add_argument("--vllm_providers", type=str, default="local")
+    parser.add_argument("--logp_providers", type=str, default="local")
+    parser.add_argument("--kbeval_providers", type=str, default="local")
     parser.add_argument("--use_global_queue", type=str, default=None) # this is the task_name of the global queue
     parser.add_argument("--proc_id", type=str, default=None)
-    parser.add_argument("--module_file", type=str, default="inference/codeGenEval.module.yaml")
+    parser.add_argument("--module_file", type=str, default="inference/codeGenEval.module.vllm+logp.yaml")
     parser.add_argument("--prompt_file", type=str, default="inference/triton.prompt.yaml")
     parser.add_argument("--example_file", type=str, default="inference/triton.example.yaml")
+    parser.add_argument("--context", type=str, default="{}")
     args = parser.parse_args()
 
     if args.proc_id is not None:
@@ -356,63 +365,61 @@ async def main():
     else:
         PROC_ID = os.environ.get("PROC_ID", None)
 
-    QUEUE_TYPE = "inference"
+    queue_type = "inference"
 
     try:
         if args.use_global_queue:
             if args.prefix_tag == 'auto':
-                logger.error(f"❌ [Composer] --prefix_tag is required")
+                logger.error(f"❌ [InferenceComposer] --prefix_tag is required")
                 return
 
             prefix_tag = args.prefix_tag
-            QUEUE_NAME = args.use_global_queue # user configurable name
-            queue_name = f"{QUEUE_TYPE}.{QUEUE_NAME}"
+            queue_name = args.use_global_queue # user configurable name
+            full_queue_name = f"{queue_type}.{queue_name}"
             # get the global registry
-            global_reg_client = WorkflowClient(prefix_tag=prefix_tag)
+            workflow_client = WorkflowClient(prefix_tag=prefix_tag)
             # get the critiqueBlock from the global registry
-            block_json = await global_reg_client.dequeue(queue_name)
+            block_json = await workflow_client.dequeue(full_queue_name)
             # convert the block_json to a ComposerBlock object
-            block = ComposerBlock(**block_json)
-            # process the model override
-            if "codeGen" in QUEUE_NAME: # a hack for now. TODO: fix this
-                if PROC_ID is None:
-                    error_msg = f"❌ [Composer] [{block.prefix_tag}] Unable to get PROC_ID to update model_override"
-                    logger.error(error_msg)
-                    raise Exception(error_msg)
-                model_override = await global_reg_client.get(f"{MODEL_OVERRIDE_KEY}")
-                if model_override:
-                    logger.info(f"🔍 [Composer] [{block.prefix_tag}] Using model override: [{model_override}]")
-                    block.model_override = model_override
-                    # update model_override in the global registry
-                    await global_reg_client.put(f"adapter.{queue_name}.model_override.{PROC_ID}", model_override)
+            block = InferenceBlock(**block_json)
+            block.context["proc_id"] = PROC_ID
         else:
-            block = ComposerBlock(
+            block = InferenceBlock(
+                name=args.name,
                 prefix_tag=args.prefix_tag,
                 epoch_id=args.epoch_id,
                 block_id=args.block_id,
                 input_tag=args.input_tag,
-                provider_name=args.provider,
-                model_name=args.model,
-                module_file=args.module_file,
-                prompt_file=args.prompt_file,
-                example_file=args.example_file,
                 num_samples=args.num_samples,
                 num_generations=args.num_generations,
                 num_turns_per_generation=args.num_turns_per_generation,
                 parallel_workers=args.parallel_workers,
-                model_override=args.model_override,
+                model_name=args.model_name,
+                vllm_providers=args.vllm_providers.split(","),
+                logp_providers=args.logp_providers.split(","),
+                kbeval_providers=args.kbeval_providers.split(","),
+                module_file=args.module_file,
+                prompt_file=args.prompt_file,
+                example_file=args.example_file,
                 input_dir=args.input_dir,
                 output_dir=args.output_dir,
+                context=json.loads(args.context) if PROC_ID is None else json.loads(args.context) | {"proc_id": PROC_ID},
             )
         # run the block
-        await composer_block(block)
+        await run_inference_block(block)
 
         if args.use_global_queue:
-            global_reg_client = WorkflowClient(prefix_tag=block.prefix_tag)
-            await global_reg_client.post_block(QUEUE_TYPE, QUEUE_NAME, block)
+            workflow_client = WorkflowClient(prefix_tag=block.prefix_tag)
+            await workflow_client.callback(
+                callback_kind="completion",
+                queue_type=queue_type,
+                queue_name=queue_name,
+                block=block,
+                env={},
+            )
 
     except Exception as e:
-        logger.error(f"❌ [Composer] Error running block: [{type(e).__name__}: {e}]")
+        logger.error(f"❌ [InferenceComposer] Error running block: [{type(e).__name__}: {e}]")
         logger.error(traceback.format_exc())
 
 if __name__ == "__main__":

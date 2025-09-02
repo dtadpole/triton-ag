@@ -65,6 +65,10 @@ def grpo_compute_rewards(
             "reward_items": item["reward_items"],
             "prompt": item["prompt"],
             "logprobs": item["logprobs"],
+            "logp_server_prompt_ids": item["prompt_ids"],
+            "logp_server_completion_ids": item["completion_ids"],
+            "logp_server_input_ids": item["input_ids"],
+            "logp_server_logps": item["logps"],
             "runtime": item["runtime"],
             "checkpoint_name": item["metadata"]["model_override"].split("/")[-1] if "model_override" in item["metadata"] and item["metadata"]["model_override"] else None,
         } for item in value]
@@ -112,13 +116,49 @@ def grpo_group_to_dataset(
     group: list[dict],
     tokenizer: AutoTokenizer,
 ):
+    from logger import logger
+
     group_dataset = []
     for result in group:
-        prompt_token_ids = tokenizer.encode(result["prompt"])
-        completion_token_ids = [logprob['token_id'] for logprob in result["logprobs"]]
-        completion_log_probs = [logprob['logprob'] for logprob in result["logprobs"]]
-        input_ids = torch.tensor(prompt_token_ids + completion_token_ids)
-        attention_mask = torch.ones_like(input_ids)
+        vllm_prompt_ids = tokenizer.encode(result["prompt"])
+        vllm_completion_ids = [logprob['token_id'] for logprob in result["logprobs"]]
+        vllm_completion_log_probs = [logprob['logprob'] for logprob in result["logprobs"]]
+        vllm_input_ids = torch.tensor(vllm_prompt_ids + vllm_completion_ids)
+        vllm_attention_mask = torch.ones_like(vllm_input_ids)
+        logp_server_prompt_ids = torch.tensor(result["logp_server_prompt_ids"])
+        logp_server_completion_ids = torch.tensor(result["logp_server_completion_ids"])
+        logp_server_input_ids = torch.tensor(result["logp_server_input_ids"])
+        logp_server_attention_mask = torch.ones_like(logp_server_input_ids)
+        logp_server_logps = result["logp_server_logps"]
+        # check if the prompt ids length are different
+        if len(vllm_prompt_ids) != len(logp_server_prompt_ids):
+            logger.error(f"len(vllm_prompt_ids) [{len(vllm_prompt_ids)}] != len(logp_server_prompt_ids): [{len(logp_server_prompt_ids)}]")
+            continue # skip the group if the prompt ids length are different
+        # calculate the number of prompt ids that are different
+        diff_count_prompt_ids = sum(1 for i, j in zip(vllm_prompt_ids, logp_server_prompt_ids) if i != j)
+        if diff_count_prompt_ids > 0:
+            logger.error(f"vllm_prompt_ids != logp_server_prompt_ids: [{diff_count_prompt_ids}/{len(vllm_prompt_ids)} tokens different]")
+            continue # skip the group if the prompt ids are different
+        # check if the completion ids length are different
+        if len(vllm_completion_ids) != len(logp_server_completion_ids):
+            logger.error(f"len(vllm_completion_ids) [{len(vllm_completion_ids)}] != len(logp_server_completion_ids): [{len(logp_server_completion_ids)}]")
+            continue # skip the group if the completion ids length are different
+        # calculate the number of completion ids that are different
+        diff_count_completion_ids = sum(1 for i, j in zip(vllm_completion_ids, logp_server_completion_ids) if i != j)
+        if diff_count_completion_ids > 0:
+            logger.error(f"vllm_completion_ids != logp_server_completion_ids: [{diff_count_completion_ids}/{len(vllm_completion_ids)} tokens different]")
+            continue # skip the group if the prompt ids are different
+        # check if logps length are different
+        if len(vllm_completion_log_probs) != len(logp_server_logps) - len(logp_server_prompt_ids) + 1:
+            logger.error(f"len(vllm_completion_log_probs) [{len(vllm_completion_log_probs)}] != len(logp_server_logps) - len(logp_server_prompt_ids) + 1: [{len(logp_server_logps) - len(logp_server_prompt_ids) + 1}]")
+            # logger.error(f"len(vllm_input_ids): [{len(vllm_input_ids)}], len(logp_server_input_ids): [{len(logp_server_input_ids)}]")
+            # logger.error(f"len(vllm_completion_ids): [{len(vllm_completion_ids)}], len(logp_server_completion_ids): [{len(logp_server_completion_ids)}]")
+            # logger.error(f"len(vllm_prompt_ids): [{len(vllm_prompt_ids)}], len(logp_server_prompt_ids): [{len(logp_server_prompt_ids)}]")
+            continue # skip the group if the logps length are different
+        # calculate the number of logps that are different
+        # diff_count_logps = sum(1 for i, j in zip(vllm_completion_log_probs, logp_server_logps) if abs(i-j) / abs(i+j) > 1e-2 and abs(i-j) > 1e-2)
+        # if diff_count_logps > 0:
+        #     logger.warning(f"vllm_completion_log_probs != logp_server_logps: [{diff_count_logps}/{min_logps_len} tokens different]")
         group_dataset.append({
             'task_tag': result["task_tag"],
             'turn_tag': result["turn_tag"],
@@ -127,11 +167,18 @@ def grpo_group_to_dataset(
             'checkpoint_name': result["checkpoint_name"],
             'reward_items': result["reward_items"],
             'advantage': result["advantage"],
-            'prompt_token_ids': prompt_token_ids,
-            'completion_token_ids': completion_token_ids,
-            'completion_log_probs': completion_log_probs,
-            'input_ids': input_ids,
-            'attention_mask': attention_mask,
+            'vllm_prompt_ids': vllm_prompt_ids,
+            'vllm_completion_ids': vllm_completion_ids,
+            'vllm_completion_log_probs': vllm_completion_log_probs,
+            'vllm_input_ids': vllm_input_ids,
+            'vllm_attention_mask': vllm_attention_mask,
+            'logp_server_prompt_ids': logp_server_prompt_ids,
+            'logp_server_completion_ids': logp_server_completion_ids,
+            'logp_server_input_ids': logp_server_input_ids,
+            'logp_server_logps': logp_server_logps,
+            'logp_server_attention_mask': logp_server_attention_mask,
+            'input_ids': logp_server_input_ids,
+            'attention_mask': logp_server_attention_mask,
         }) 
     return group_dataset
 
@@ -139,6 +186,10 @@ def grpo_group_to_dataset(
 if __name__ == "__main__":
     import duckdb
     import argparse
+    # add parent directory to path
+    import os
+    import sys
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--gamma", type=float, default=0.5)
@@ -146,6 +197,7 @@ if __name__ == "__main__":
     parser.add_argument("--tokenizer_name", type=str, default="Qwen/Qwen3-8B")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
+
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
 
@@ -164,14 +216,23 @@ if __name__ == "__main__":
             prompt, completion, logprobs, metadata,
             metadata->>'task_tag' AS task_tag, metadata->>'gen_tag' AS gen_tag, metadata->>'turn_tag' AS turn_tag
         FROM read_json_auto('{args.input_dir}/**/*_completion.json', filename = true)
+        ),
+        logps AS (
+            SELECT
+                filename AS logps_file,
+                regexp_replace(filename, '_logps\\.json$', '') AS stem,
+                prompt_ids, completion_ids, input_ids, logps
+            FROM read_json_auto('{args.input_dir}/**/*_logps.json', filename = true)
         )
         SELECT
             e.compiled, e.correctness, e.runtime, e.ref_runtime,
             c.prompt, c.completion, c.logprobs, c.metadata,
             e.eval_file, c.completion_file,
+            l.prompt_ids, l.completion_ids, l.input_ids, l.logps,
             c.task_tag, c.gen_tag, c.turn_tag
         FROM evals e
         JOIN comps c USING (stem)
+        JOIN logps l USING (stem)
         ORDER BY task_tag, gen_tag, turn_tag
     """
     result = duckdb.sql(sql)
@@ -194,8 +255,13 @@ if __name__ == "__main__":
         print('    => advantages: ', [f'{gen["advantage"]:.2f}' for gen in value])
         print('    => runtime: ', [f'{gen["runtime"]:.2f}' for gen in value])
         print('    => checkpoint_number: ', [f'{gen["checkpoint_name"].split("-")[-1] if gen["checkpoint_name"] else None}' for gen in value if "checkpoint_name" in gen])
-        print('    => len(prompt_token_ids): ', [f'{len(gen["prompt_token_ids"])}' for gen in value if gen["prompt_token_ids"]])
-        print('    => len(completion_token_ids): ', [f'{len(gen["completion_token_ids"])}' for gen in value if gen["completion_token_ids"]])
-        print('    => len(completion_log_probs): ', [f'{len(gen["completion_log_probs"])}' for gen in value if gen["completion_log_probs"]])
-        print('    => len(input_ids): ', [f'{len(gen["input_ids"])}' for gen in value if "input_ids" in gen])
-        print('    => len(attention_mask): ', [f'{len(gen["attention_mask"])}' for gen in value if "attention_mask" in gen])
+        print('    => len(vllm_prompt_ids): ', [f'{len(gen["vllm_prompt_ids"])}' for gen in value if gen["vllm_prompt_ids"]])
+        print('    => len(vllm_completion_ids): ', [f'{len(gen["vllm_completion_ids"])}' for gen in value if gen["vllm_completion_ids"]])
+        print('    => len(vllm_completion_log_probs): ', [f'{len(gen["vllm_completion_log_probs"])}' for gen in value if gen["vllm_completion_log_probs"]])
+        print('    => len(vllm_input_ids): ', [f'{len(gen["vllm_input_ids"])}' for gen in value if "vllm_input_ids" in gen])
+        print('    => len(vllm_attention_mask): ', [f'{len(gen["vllm_attention_mask"])}' for gen in value if "vllm_attention_mask" in gen])
+        print('    => len(logp_server_prompt_ids): ', [f'{len(gen["logp_server_prompt_ids"])}' for gen in value if "logp_server_prompt_ids" in gen])
+        print('    => len(logp_server_completion_ids): ', [f'{len(gen["logp_server_completion_ids"])}' for gen in value if "logp_server_completion_ids" in gen])
+        print('    => len(logp_server_input_ids): ', [f'{len(gen["logp_server_input_ids"])}' for gen in value if "logp_server_input_ids" in gen])
+        print('    => len(logp_server_logps): ', [f'{len(gen["logp_server_logps"])}' for gen in value if "logp_server_logps" in gen])
+        print('    => len(logp_server_attention_mask): ', [f'{len(gen["logp_server_attention_mask"])}' for gen in value if "logp_server_attention_mask" in gen])
