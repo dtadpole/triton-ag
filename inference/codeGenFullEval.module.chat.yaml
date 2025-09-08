@@ -4,10 +4,8 @@ module:
   # here we add addotional context variables for easier access by the program
   # variables will be evaluated sequentially, so that later variables can use earlier variables
   context_vars:
-    provider_name: "`__runtime__.inference_client_config.provider.provider_name`"
-    model_short_name: "`__runtime__.inference_client_config.model.model_short_name`"
-    model_tag: "{provider_name}_{model_short_name}"
-    max_tokens: "`__runtime__.inference_client_config.model.max_tokens`"
+    model_tag: "`__runtime__.model_tag`"
+    tokenizer: "`__runtime__.tokenizer`"
 
   # input processor adds jobs to the queue
   input_processor:
@@ -69,6 +67,10 @@ module:
                       code_type: "`__runtime__.get_prompt_code_type(__context__)`"
                       output_dir: "`os.path.expanduser(block.output_dir)`" # output_dir is the output directory
                       num_turns_per_generation: "`block.num_turns_per_generation`" # number of turns per generation
+                      vllm_providers: "`block.vllm_providers`" # vllm providers
+                      logp_providers: "`block.logp_providers`" # logp providers
+                      kbeval_providers: "`block.kbeval_providers`" # kb eval providers
+                      context: "`block.context`"
                   returns:
                     logging:
                       method: "log_enqueue"
