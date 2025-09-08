@@ -71,7 +71,7 @@ class InferenceClient:
             provider_config = config.get('providers', {}).get(provider_name, {})
             provider_specific_model_config = provider_config.get('models', {}).get(model_name, {})
             model_config = {**model_config, **provider_specific_model_config}
-        
+
         model_full_name = model_config.get('model_full_name', model_name)
         tokenizer_name = model_config.get('tokenizer_name', model_full_name)
         temperature = model_config.get('temperature', 0.6)
