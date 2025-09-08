@@ -28,6 +28,7 @@ CLIP_RATIO_UPPER_PERCENTAGE = "clip_ratio_upper_pct"
 BOUND_ADVANTAGE_LOWER_PERCENTAGE = "bound_adv_lower_pct"
 BOUND_ADVANTAGE_UPPER_PERCENTAGE = "bound_adv_upper_pct"
 IS_RATIO_TRUNCATED_PERCENTAGE = "is_ratio_truncated_pct"
+FORWARD_ENTROPY_VALUE = "forward_entropy_value"
 LOG_PROB_AVERAGE_VALUE = "log_prob_avg_value"
 LOG_PROB_AVERAGE_RATIO = "log_prob_avg_ratio"
 LOG_PROB_FORWARD_GENERATION_DIFF = "log_prob_forward_generation_diff"
@@ -51,8 +52,12 @@ class GRPOConfig(BaseModel):
     # loss_type: str = "token" # "episode" or "token" or "seq_max" or "gspo"
     loss_type: str = "gspo" # "episode" or "token" or "seq_max" or "gspo"
     gamma: float = 0.5
-    use_truncated_is: bool = False
+    use_truncated_is: bool = False # https://fengyao.notion.site/off-policy-rl
     truncated_is_ratio: float = 2.0
+    use_entropy_shaping: bool = False # https://arxiv.org/abs/2506.14758
+    entropy_shaping_alpha: float = 0.3
+    entropy_shaping_kappa: float = 2.0
+
 
     @classmethod
     def from_yaml(cls, file_path: str) -> "GRPOConfig":
@@ -219,13 +224,25 @@ class GRPOTrainer():
 
             # log probs is calculated in log space, so we need to subtract the log probabilities
             raw_log_ratio = forward_completion_log_probs - generation_completion_log_probs
+            entropy_value = (-torch.exp(forward_completion_log_probs) * forward_completion_log_probs).detach()
 
+            clip_metrics[FORWARD_ENTROPY_VALUE].append(entropy_value.mean().item())
             clip_metrics[LOG_PROB_AVERAGE_VALUE].append(torch.mean(forward_completion_log_probs).item())
             clip_metrics[LOG_PROB_FORWARD_GENERATION_DIFF].append(log_prob_forward_generation_diff.item())
             clip_metrics[LOG_PROB_GENERATION_VLLM_DIFF].append(log_prob_generation_vllm_diff.item())
             clip_metrics[LOG_PROB_FORWARD_VLLM_DIFF].append(log_prob_forward_vllm_diff.item())
 
             if self.grpo_config.loss_type == "gspo":
+
+                sequence_entropy_value = torch.mean(entropy_value).detach().item()
+                if self.grpo_config.use_entropy_shaping:
+                    exploration_advantage = min(
+                        self.grpo_config.entropy_shaping_alpha * sequence_entropy_value,
+                        abs(advantages[i]) / self.grpo_config.entropy_shaping_kappa
+                    )
+                    advantage_i = advantages[i] + exploration_advantage
+                else:
+                    advantage_i = advantages[i]
 
                 if self.grpo_config.use_truncated_is:
                     is_ratio = torch.exp(generation_completion_log_probs - vllm_completion_log_probs_i).detach()
@@ -246,7 +263,7 @@ class GRPOTrainer():
 
                 clamped_sequence_ratio = torch.clamp(sequence_ratio, 1-self.grpo_config.gspo_clip_ratio_epsilon_lower, 1+self.grpo_config.gspo_clip_ratio_epsilon_upper)
 
-                sequence_ratio_advantage = torch.min(sequence_ratio * advantages[i], clamped_sequence_ratio * advantages[i])
+                sequence_ratio_advantage = torch.min(sequence_ratio * advantage_i, clamped_sequence_ratio * advantage_i)
 
                 # calculate clipped upper and lower percentage
                 clip_metrics[BOUND_ADVANTAGE_UPPER_PERCENTAGE].append(torch.sum(sequence_ratio_advantage > self.grpo_config.bound_advantage_range).item() * 100.0)
@@ -261,6 +278,17 @@ class GRPOTrainer():
 
                 clip_metrics[LOG_PROB_AVERAGE_RATIO].append(ratio.mean().item())
 
+                if self.grpo_config.use_entropy_shaping:
+                    exploration_advantage = torch.clamp(
+                        entropy_value * self.grpo_config.entropy_shaping_alpha,
+                        max=abs(advantages[i]) / self.grpo_config.entropy_shaping_kappa,
+                    )
+                    advantage_i = advantages[i] + exploration_advantage
+                else:
+                    advantage_i = advantages[i]
+
+
+
                 # calculate clipped upper and lower percentage
                 clip_metrics[CLIP_RATIO_UPPER_PERCENTAGE].append(torch.sum(ratio > 1+self.grpo_config.clip_ratio_epsilon_upper).item() * 100.0 / len(forward_completion_log_probs))
                 clip_metrics[CLIP_RATIO_LOWER_PERCENTAGE].append(torch.sum(ratio < 1-self.grpo_config.clip_ratio_epsilon_lower).item() * 100.0 / len(forward_completion_log_probs))
@@ -268,7 +296,7 @@ class GRPOTrainer():
                 clamped_ratio = torch.clamp(ratio, 1-self.grpo_config.clip_ratio_epsilon_lower, 1+self.grpo_config.clip_ratio_epsilon_upper)
 
                 # min ratio advantage is min of ratio_advantage and clamped_ratio_advantage
-                ratio_advantage = torch.min(ratio * advantages[i], clamped_ratio * advantages[i]) # dim: (completion_len)
+                ratio_advantage = torch.min(ratio * advantage_i, clamped_ratio * advantage_i) # dim: (completion_len)
 
                 # calculate clipped upper and lower percentage
                 clip_metrics[BOUND_ADVANTAGE_UPPER_PERCENTAGE].append(torch.sum(ratio_advantage > self.grpo_config.bound_advantage_range).item() * 100.0 / len(forward_completion_log_probs))
@@ -336,6 +364,7 @@ class GRPOTrainer():
             BOUND_ADVANTAGE_UPPER_PERCENTAGE: [],
             BOUND_ADVANTAGE_LOWER_PERCENTAGE: [],
             IS_RATIO_TRUNCATED_PERCENTAGE: [],
+            FORWARD_ENTROPY_VALUE: [],
             LOG_PROB_AVERAGE_VALUE: [],
             LOG_PROB_AVERAGE_RATIO: [],
             LOG_PROB_FORWARD_GENERATION_DIFF: [],
