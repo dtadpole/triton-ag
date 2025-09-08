@@ -55,7 +55,7 @@ class GRPOConfig(BaseModel):
     use_truncated_is: bool = False # https://fengyao.notion.site/off-policy-rl
     truncated_is_ratio: float = 2.0
     use_entropy_shaping: bool = False # https://arxiv.org/abs/2506.14758
-    entropy_shaping_alpha: float = 0.3
+    entropy_shaping_alpha: float = 0.5
     entropy_shaping_kappa: float = 2.0
 
 
