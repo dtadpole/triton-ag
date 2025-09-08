@@ -39,6 +39,7 @@ class WorkflowInit:
 
         for e, b in pairs:
             try:
+                print(e, b)
                 workitems_config = init_config.get(args.queue_name, [])
                 for workitem_config in workitems_config:
                     logger.info(f"🔍 [WorkflowInit] [{self.prefix_tag}] [{e}] [{b}] [{workitem_config}]")
