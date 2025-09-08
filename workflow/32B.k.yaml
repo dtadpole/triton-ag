@@ -1,0 +1,157 @@
+# built in queues
+queues:
+  - name: trainer.sft.1
+  - name: trainer.rft.1
+  - name: trainer.grpo.1
+  - name: sync.sync.1
+  - name: test.test.1
+
+# global variables
+global:
+  prefix_tag: "TC_0.1.0_32B.k"
+  start_epoch: 0
+  start_block: 0
+  end_epoch: 100
+  end_block: 8
+
+init:
+  codeGenEval.base:
+    - queue_type: inference
+      queue_name: codeGenEval.base
+      prefix_tag: "{prefix_tag}"
+      epoch_id: "{epoch_id}"
+      block_id: "{block_id}"
+      input_tag: "{input_tag}"
+      num_samples: 16
+      num_generations: 10
+      num_turns_per_generation: 4
+      parallel_workers: 48
+      model_name: qwen3-32b
+      vllm_providers: ["h8_3"]
+      logp_providers: ["h8_3_2", "h8_3_3"]
+      kbeval_providers: ["a4_2", "a4_3"]
+      module_file: inference/codeGenEval.module.vllm+logp.yaml
+      prompt_file: inference/triton.prompt.yaml
+      example_file: inference/triton.example.yaml
+      input_dir: ~/triton-ag/kernel_bench/level1
+      output_dir: ~/.inference/codeGenEval
+
+inference:
+  codeGenEval.base:
+    default:
+      input_dir: ~/.inference/composer/input
+      output_dir: ~/.inference/composer/output
+      module_file: inference/codeGen.module.vllm+logp.yaml
+      prompt_file: inference/codeGen.prompt.triton.yaml
+      example_file: inference/triton.example.yaml
+      vllm_providers: ["local"]
+      logp_providers: ["local"]
+      kbeval_providers: ["local"]
+      model_name: qwen3-14b
+      num_generations: 8
+      num_turns_per_generation: 4
+      parallel_workers: 32
+      logprobs: true
+      input_tag: kernel_bench
+      custom_provider: local
+      model_override: null
+
+    callbacks:
+      completion:
+        - queue_type: trainer
+          queue_name: grpo.1
+          prefix_tag: "{prefix_tag}"
+          epoch_id: "{epoch_id}"
+          block_id: "{block_id}"
+          input_tag: "{run_tag}"
+          input_dir: ~/.inference/codeGenEval
+        # - queue_type: trainer
+        #   queue_name: rft.1
+        #   prefix_tag: "{prefix_tag}"
+        #   epoch_id: "{epoch_id}"
+        #   block_id: "{block_id}"
+        #   input_tag: "{run_tag}"
+        #   input_dir: ~/.inference/codeGenEval
+
+  exemplar.deepseek-v3:
+    default:
+      input_dir: ~/.inference/composer/input
+      output_dir: ~/.inference/composer/output
+      module_file: inference/exemplar.module.yaml
+      prompt_file: inference/codeGen.prompt.triton.yaml
+      example_file: inference/triton.example.yaml
+      provider_name: fireworks
+      model_name: deepseek-v3
+      num_samples: 8 # this is not used, but required by the module
+      num_generations: 4 # this is not used, but required by the module
+      parallel_workers: 8
+      logprobs: false
+      model_override: null
+
+    callbacks:
+      completion:
+        - queue_type: trainer
+          queue_name: sft.1
+          prefix_tag: "{prefix_tag}"
+          epoch_id: "{epoch_id}"
+          block_id: "{block_id}"
+          input_tag: "{run_tag}"
+          input_dir: ~/.inference/exemplar.deepseek-v3
+
+  exemplar.kimi-k2:
+    default:
+      input_dir: ~/.inference/composer/input
+      output_dir: ~/.inference/composer/output
+      module_file: inference/exemplar.module.yaml
+      prompt_file: inference/codeGen.prompt.triton.yaml
+      example_file: inference/triton.example.yaml
+      provider_name: fireworks
+      model_name: kimi-k2
+      num_samples: 8 # this is not used, but required by the module
+      num_generations: 4 # this is not used, but required by the module
+      parallel_workers: 8
+      logprobs: false
+      model_override: null
+
+    callbacks:
+      completion:
+        - queue_type: trainer
+          queue_name: sft.1
+          prefix_tag: "{prefix_tag}"
+          epoch_id: "{epoch_id}"
+          block_id: "{block_id}"
+          input_tag: "{run_tag}"
+          input_dir: ~/.inference/exemplar.kimi-k2
+
+trainer:
+  grpo.1:
+    default:
+      output_dir: ~/.trainer
+
+    callbacks:
+      checkpoint:
+        - queue_type: sync
+          queue_name: sync.1
+          prefix_tag: "{prefix_tag}"
+          epoch_id: "{epoch_id}"
+          block_id: "{block_id}"
+          input_tag: "{run_tag}"
+          context:
+            checkpoint_name: "{env[checkpoint_name]}"
+            vllm_providers: ["h8_3"]
+            logp_providers: ["h8_3_2", "h8_3_3"]
+            sync_hosts: []
+            # sync_hosts: ["devvm8490.cco0.facebook.com"]
+
+  sft.1:
+    default:
+      output_dir: ~/.trainer
+
+  rft.1:
+    default:
+      output_dir: ~/.trainer
+
+sync:
+  sync.1:
+    default:
+      module_file: workflow/sync.module.vllm+logp.yaml # this will require both vllm_provider and logp_provider
