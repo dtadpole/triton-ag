@@ -26,3 +26,8 @@ if is_devserver():
     WORKFLOW_DIR = "shared/.workflow"
 else:
     WORKFLOW_DIR = "~/.workflow"
+
+if is_devserver():
+    CONFIG_FOLDER = "shared/config/"
+else:
+    CONFIG_FOLDER = "./"
