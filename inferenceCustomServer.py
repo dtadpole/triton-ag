@@ -18,6 +18,8 @@ from logger import logger
 from peft import get_peft_model, LoraConfig, TaskType
 from pydantic import BaseModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from fastapi.middleware.gzip import GZipMiddleware
+from gzipMiddleware import GunzipRequestMiddleware
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
@@ -376,6 +378,9 @@ if __name__ == "__main__":
     port = server_config.get("port", 8092) if args.port is None else args.port
 
     fastapi = FastAPI()
+    fastapi.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
+    fastapi.add_middleware(GunzipRequestMiddleware)  # now all routes accept gzip bodies
+
     inference_server = InferenceCustomServer(engine, args.config)
     fastapi.include_router(inference_server.router, prefix="/v1")
 

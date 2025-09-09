@@ -4,7 +4,7 @@ MODEL_OVERRIDE_KEY = "model_override"
 async def update_model_override(prefix_tag: str, worker_name: str, proc_id: str, worker_id: str):
     from workflowClient import WorkflowClient
     workflow_client = WorkflowClient(prefix_tag=prefix_tag)
-    model_override = await workflow_client.get(key=f"{ADAPTER_PREFIX}.{MODEL_OVERRIDE_KEY}")
+    model_override = await workflow_client.get(key=f"{ADAPTER_PREFIX}.{MODEL_OVERRIDE_KEY}", return_none_if_not_found=True)
     if model_override is None:
         return None
 

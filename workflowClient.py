@@ -120,7 +120,7 @@ class WorkflowClient:
                     raise e
         return False
 
-    async def get(self, key: str, last_modified_within: Optional[int]=None):
+    async def get(self, key: str, last_modified_within: Optional[int]=None, return_none_if_not_found: bool=False):
         url = f"{self.base_url}/get/{self.prefix_tag}/{key}"
         if last_modified_within is not None:
             url += f"?last_modified_within={last_modified_within}"
@@ -139,6 +139,8 @@ class WorkflowClient:
                     trust_env=False,
                 ) as client:
                     response = await client.get(url, timeout=self.timeout)
+                    if response.status_code == 404 and return_none_if_not_found:
+                        return None
                     response.raise_for_status()
                     return response.json()
             except Exception as e:

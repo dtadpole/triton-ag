@@ -70,7 +70,6 @@ module:
                       output_dir: "`os.path.expanduser(block.output_dir)`" # output_dir is the output directory
                       num_turns_per_generation: "`block.num_turns_per_generation`" # number of turns per generation
                       vllm_providers: "`block.vllm_providers`" # vllm providers
-                      logp_providers: "`block.logp_providers`" # logp providers
                       kbeval_providers: "`block.kbeval_providers`" # kb eval providers
                       context: "`block.context`"
                   returns:
@@ -167,7 +166,6 @@ module:
               args:
                 provider: "`vllm_providers`"
                 messages: "`messages`"
-                max_tokens: "`max_tokens`"
                 logprobs: false
               returns:
                 error_if: "`__result__ is None`"
@@ -183,7 +181,7 @@ module:
                     `
                   messages: |
                     `messages + [
-                      {"role": "assistant", "content": "<think>\n" + __result__["reasoning_content"] + "\n</think>\n\n" + __result__["content"] if "reasoning_content" in __result__ else __result__["content"]}
+                      {"role": "assistant", "content": "<think>\n" + __result__["reasoning_content"] + "\n</think>\n\n" + __result__["content"] if "reasoning_content" in __result__ and __result__['reasoning_content'] is not None else __result__["content"]}
                     ]`
                   conversation:
                     messages: "`messages`"
@@ -218,6 +216,7 @@ module:
             - type: endpoint
               endpoint: kbEvalClient.kb_eval
               args:
+                provider: "`kbeval_providers`"
                 run_tag: "`run_tag`"
                 model_tag: "`model_tag`"
                 task_tag: "`task_tag`"

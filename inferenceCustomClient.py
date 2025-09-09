@@ -1,6 +1,8 @@
 import argparse
 import asyncio
 import os
+import gzip
+import json
 import random
 from typing import Dict, Any, List
 import httpx
@@ -266,23 +268,25 @@ class InferenceCustomClient:
                     max_connections=100,
                     keepalive_expiry=0,
                 )
+                json_body = {
+                    "model_name": model_name,
+                    "input_ids": input_ids,
+                }
+                body = gzip.compress(json.dumps(json_body).encode("utf-8"))
                 async with httpx.AsyncClient(
                     limits=limits,
-                    headers={"Connection": "close"},
-                    http2=False,
-                    trust_env=False,
+                    headers={
+                        "Connection": "close",
+                        "Content-Encoding": "gzip",
+                        "Authorization": f"Bearer {api_key}",
+                    },
+                    http2=False, # disable http2
+                    trust_env=False, # disable trust env
+                    timeout=timeout,
                 ) as client:
                     response = await client.post(
                         f"{base_url}/logps",
-                        json={
-                            "model_name": model_name,
-                            "input_ids": input_ids,
-                        },
-                        headers={
-                            "Content-Type": "application/json",
-                            "Authorization": f"Bearer {api_key}",
-                        },
-                        timeout=timeout,
+                        content=body,
                     )
 
                     response.raise_for_status()
