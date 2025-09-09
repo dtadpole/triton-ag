@@ -187,7 +187,7 @@ async def main():
     parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_0.6B.a")
     parser.add_argument("--epoch_id", type=int, default=0)
     parser.add_argument("--block_id", type=int, default=0)
-    parser.add_argument("--input_dir", type=str, default="~/.codeGenEval")
+    parser.add_argument("--input_dir", type=str, default=INFERENCE_DIR + "/.codeGenEval")
     parser.add_argument("--output_dir", type=str, default=TRAINER_DIR)
     parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B_20250801_211407") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
     parser.add_argument("--base_config", type=str, default="trainerBase.yaml")

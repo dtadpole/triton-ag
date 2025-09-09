@@ -1,0 +1,100 @@
+# built in queues
+queues:
+  - name: trainer.sft.1
+  - name: trainer.rft.1
+  - name: trainer.grpo.1
+  - name: rsync.rsync.1
+  - name: test.test.1
+
+global:
+  prefix_tag: "cudacoder_eval_one_turn.sft"
+  start_epoch: 0
+  start_block: 0
+  end_epoch: 0
+  end_block: 12
+
+workitems:
+  codeGenEval.init:
+    # below syntax works with ConfigInterpreter
+    steps:
+      - type: endpoint
+        endpoint: workflowClient.enqueue
+        context_vars:
+          input_tag: "`f'{prefix_tag}_{epoch_id:03d}_{block_id:02d}'`"
+          item:
+            type: inference
+            name: codeGenEval.base
+            prefix_tag: "`prefix_tag`"
+            epoch_id: "`epoch_id`"
+            block_id: "`block_id`"
+            input_tag: "`input_tag`"
+            provider_name: deepseek
+            model_name: deepseek-reasoner
+            num_samples: 8
+            num_generations: 4
+            num_turns_per_generation: 1
+            parallel_workers: 32
+            logprobs: false
+            model_override: null
+            module_file: inference/codeGenFullEval.module.chat.yaml
+            prompt_file: inference/cuda.prompt.yaml
+            example_file: inference/cuda.example.yaml
+            input_dir: /workspace/kernel_bench/level1
+            output_dir: shared/.inference/codeGenEval
+        args:
+          queue_name: "inference.codeGenEval.base"
+          item: "`item`"
+          create_queue: true
+      - type: endpoint
+        endpoint: workflowClient.enqueue
+        context_vars:
+          input_tag: "`f'{prefix_tag}_{epoch_id:03d}_{block_id:02d}'`"
+          item:
+            type: inference
+            name: codeGenEval.base
+            prefix_tag: "`prefix_tag`"
+            epoch_id: "`epoch_id`"
+            block_id: "`block_id`"
+            input_tag: "`input_tag`"
+            provider_name: deepseek
+            model_name: deepseek-reasoner
+            num_samples: 8
+            num_generations: 4
+            num_turns_per_generation: 1
+            parallel_workers: 32
+            logprobs: false
+            model_override: null
+            module_file: inference/codeGenFullEval.module.chat.yaml
+            prompt_file: inference/cuda.prompt.yaml
+            example_file: inference/cuda.example.yaml
+            input_dir: /workspace/kernel_bench/level2
+            output_dir: shared/.inference/codeGenEval
+        args:
+          queue_name: "inference.codeGenEval.base"
+          item: "`item`"
+          create_queue: true
+      - type: endpoint
+        endpoint: workflowClient.qsize
+        args:
+          queue_name: "inference.codeGenEval.base"
+        returns:
+          context_vars:
+            qsize: "`__result__`"
+          logging:
+            method: log_qsize
+inference:
+  codeGenEval.base:
+    default:
+      input_dir: shared/.inference/composer/input
+      output_dir: shared/.inference/composer/output
+      module_file: inference/codeGenFullEval.module.chat.yaml
+      prompt_file: inference/cuda.prompt.yaml
+      example_file: inference/cuda.example.yaml
+      provider_name: deepseek
+      model_name: deepseek-reasoner
+      num_generations: 4
+      num_turns_per_generation: 1
+      parallel_workers: 32
+      logprobs: true
+      input_tag: kernel_bench
+      model_override: null
