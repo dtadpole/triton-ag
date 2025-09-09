@@ -23,6 +23,7 @@ from kbEvalUtil import on_process_timeout
 import uvicorn
 from fastapi.middleware.gzip import GZipMiddleware
 from gzipMiddleware import GunzipRequestMiddleware
+from util import KB_EVAL_DIR
 
 KB_EVAL_TOKEN = None
 
