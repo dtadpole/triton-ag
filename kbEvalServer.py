@@ -77,6 +77,7 @@ def _setup_wandb_logging(prefix_tag: str="auto", model_tag: str="local_qwen3-32b
     # Group by wandb log in the same way as in the shared folder
     model_tag = model_tag.replace("/", "_")
     wandb_run = wandb.init(
+        entity="code-gen",
         project=f"kb_eval",
         id=f"{prefix_tag}_{model_tag}",
         name=f"{prefix_tag}_{model_tag}_{datetime.now().strftime('%m%d')}",
