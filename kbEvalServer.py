@@ -32,6 +32,7 @@ TOTAL_ERROR_COUNTER = 0
 MAX_ERROR_COUNT = 20
 START_TIME = time.time()
 MAX_RUN_TIME = 2 * 3600 # restart periods in seconds
+COMPILE_CACHE = False
 
 # Create app
 app = FastAPI()
@@ -392,8 +393,13 @@ async def kb_eval(
         # logger.info(f"[KB Eval] [{eval_tag}] reference_file_path: [{reference_file_path}]")
         # logger.info(f"[KB Eval] [{eval_tag}] generated_file_path: [{generated_file_path}]")
 
+        if COMPILE_CACHE is True:
+            cache_tag = "--use_cuda_cache"
+        else:
+            cache_tag = ""
+
         # pre-compile the generated code
-        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code reference_code.py --generated_code generated_code.py --device-list {','.join([str(device) for device in DEVICES])} --code_type {code_type} --quiet"
+        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} {cache_tag} --reference_code reference_code.py --generated_code generated_code.py --device-list {','.join([str(device) for device in DEVICES])} --code_type {code_type} --quiet"
         process = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
@@ -614,6 +620,8 @@ async def main(args):
         DEVICES = [int(d) for d in kbEval_config["servers"][hostname]["devices"]]
 
     logger.info(f"Running on [{hostname}:{port}] with devices: {DEVICES}")
+
+    COMPILE_CACHE = kbEval_config["servers"][hostname].get("compile_cache", False)
 
     #########################################################
     # get api_key from kbEval_config["kbEvalRemoteServer"]["common"]["api_key"]
