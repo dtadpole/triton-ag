@@ -3,6 +3,7 @@ import glob
 import json
 import os
 from pathlib import Path
+import hashlib
 
 import numpy as np
 import pandas as pd
@@ -115,10 +116,13 @@ async def process_codes(reference_code_path, generated_code_path):
     # Run evaluation with retry logic
     max_retries = 3
     eval_results = {}
+    # Create a hash of the generated_code to use as eval_tag
+    eval_tag = hashlib.sha256(generated_code.encode("utf-8")).hexdigest()
+
     for attempt in range(1, max_retries + 1):
         try:
             eval_results = await kbeval_client.kb_eval(
-                [PROVIDER], reference_code=reference_code, generated_code=generated_code
+                [PROVIDER], reference_code=reference_code, generated_code=generated_code, run_tag="re_kbeval", eval_tag=eval_tag,
             )
             break  # Success, exit loop
         except Exception as e:

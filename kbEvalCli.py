@@ -377,7 +377,7 @@ def main():
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--use_param_opt", action="store_false")
     parser.add_argument("--use_cuda_cache", action="store_true")
-    parser.add_argument("--not_check_get_inputs", action="store_false")
+    parser.add_argument("--not_check_get_inputs", action="store_true")
     args = parser.parse_args()
 
     # cli_config = from_kbEval_yaml()
@@ -435,6 +435,7 @@ def main():
         check_get_inputs = False
     else:
         check_get_inputs = True
+    logger.info(f"🔍 check_get_inputs is set to [{check_get_inputs}]")
 
     # set the folder to save the compilation generated files
     os.environ["TORCH_EXTENSIONS_DIR"] = work_dir

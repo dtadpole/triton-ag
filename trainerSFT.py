@@ -11,10 +11,10 @@ from trainerBase import BaseTrainer, TrainerConfig, TrainerStatus, train_async
 from trainerUtil import format_conversation
 from logger import logger
 import torch
-from workflowUtil import TrainerSFTBlock
+from workflowUtil import TrainerBlock
 from workflowClient import WorkflowClient
 from workflowServer import WorkflowServer
-from util import TRAINER_DIR
+from util import TRAINER_DIR, INFERENCE_DIR
 
 
 class SFTConfig(BaseModel):
@@ -142,7 +142,7 @@ def sft_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_file
 
     return trainer
 
-async def sft_train_block(block: TrainerSFTBlock, trainer: SFTTrainer, callback: Optional[Callable] = None):
+async def sft_train_block(block: TrainerBlock, trainer: SFTTrainer, callback: Optional[Callable] = None):
     """Train the model for one block"""
     logger.info(f"👉 [SFTTrainer] [{block.input_tag}] SFT Training started for block...")
 
@@ -195,7 +195,7 @@ async def main():
     args = parser.parse_args()
 
     trainer = sft_get_trainer(None, args.prefix_tag, args.base_config, args.sft_config)
-    sft_block = TrainerSFTBlock(
+    sft_block = TrainerBlock(
         prefix_tag=args.prefix_tag,
         epoch_id=args.epoch_id,
         block_id=args.block_id,

@@ -4,7 +4,6 @@ HOST=$(shell hostname)
 IS_DEVSERVER=$(shell hostname | grep -E -c "dev.*\.facebook\.com")
 META_PROXY := https_proxy=http://fwdproxy:8080 http_proxy=http://fwdproxy:8080 ftp_proxy=http://fwdproxy:8080 no_proxy='\''\'\'''\''.facebook.com|.tfbnw.net|*.fb.com'\''\'\'
 VLLM_SETTING := VLLM_ALLOW_RUNTIME_LORA_UPDATING=True HF_HUB_DISABLE_XET=1 HF_HUB_ENABLE_HF_TRANSFER=0
-NAS_SERVER_IPV6 := 2401:db00:22c:260b:face:0:28:0
 
 .PHONY: help finetune finetune-single finetune-2gpu finetune-debug
 
@@ -228,6 +227,11 @@ vllm-qwen3-32b-devserver_b:
     --tensor-parallel-size 4 \
     --pipeline-parallel-size 1 \
     --enable-lora --max-lora-rank 128 --max-loras 6 \
+	--lora-modules  \
+		qwen3_32b_sft_t2=shared/finetune_model_output/sft_t2/checkpoint-289  \
+		qwen3_32b_sft_t5=shared/finetune_model_output/sft_t5/checkpoint-181  \
+		qwen3_32b_sft_t6=shared/finetune_model_output/sft_t6/checkpoint-362  \
+		qwen3_32b_sft_t7=shared/finetune_model_output/sft_t7/checkpoint-724  \
     --gpu-memory-utilization 0.95 --max_model_len 24576 \
     --load_format safetensors \
     --trust_remote_code \
@@ -250,6 +254,11 @@ vllm-qwen3-32b-devserver_a:
     --tensor-parallel-size 4 \
     --pipeline-parallel-size 1 \
     --enable-lora --max-lora-rank 128 --max-loras 6 \
+	--lora-modules  \
+		qwen3_32b_sft_t2=shared/finetune_model_output/sft_t2/checkpoint-289  \
+		qwen3_32b_sft_t5=shared/finetune_model_output/sft_t5/checkpoint-181  \
+		qwen3_32b_sft_t6=shared/finetune_model_output/sft_t6/checkpoint-362  \
+		qwen3_32b_sft_t7=shared/finetune_model_output/sft_t7/checkpoint-724  \
     --gpu-memory-utilization 0.95 --max_model_len 24576 \
     --load_format safetensors \
     --trust_remote_code \
