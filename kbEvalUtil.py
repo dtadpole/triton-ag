@@ -207,7 +207,7 @@ def load_model_and_inputs(
     return Model, get_init_inputs_fn, get_inputs_fn
 
 def load_custom_model(
-    model_custom_src: str, context: dict, build_directory: str = None, filename: str = "<string>", code_type: str = "triton"
+    model_custom_src: str, context: dict, build_directory: str = None, filename: str = "<string>", code_type: str = "triton", check_get_inputs: bool = True,
 ) -> nn.Module:
     """
     Load class from custom NN.module pytorch code
@@ -253,10 +253,11 @@ def load_custom_model(
     afterwards_get_inputs_fn = context.get("get_inputs")
     if afterwards_Model != original_Model:
         raise CompileModifiedComponentError("class [Model] has been modified")
-    if compare_functions_objects(afterwards_get_init_inputs_fn,original_get_init_inputs_fn) is False:
-        raise CompileModifiedComponentError("function [get_init_inputs] has been modified")
-    if compare_functions_objects(afterwards_get_inputs_fn, original_get_inputs_fn) is False:
-        raise CompileModifiedComponentError("function [get_inputs] has been modified")
+    if check_get_inputs is True:
+        if compare_functions_objects(afterwards_get_init_inputs_fn,original_get_init_inputs_fn) is False:
+            raise CompileModifiedComponentError("function [get_init_inputs] has been modified")
+        if compare_functions_objects(afterwards_get_inputs_fn, original_get_inputs_fn) is False:
+            raise CompileModifiedComponentError("function [get_inputs] has been modified")
 
     # check "ModelNew" exists in the context
     ModelNew = context.get("ModelNew")

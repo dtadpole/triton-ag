@@ -133,6 +133,7 @@ def eval_kernel_custom(
     code_type: str = "triton",
     max_critical_time: int = 20,
     use_cuda_cache: bool = False,
+    check_get_inputs: bool = True,
 ) -> KernelExecResult:
     """
     Evaluate the reference code against the original model
@@ -179,6 +180,7 @@ def eval_kernel_custom(
                 context,
                 build_directory=build_dir,
                 filename=generated_path,
+                check_get_inputs=check_get_inputs,
             )
 
             if code_type == "triton":
@@ -375,6 +377,7 @@ def main():
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--use_param_opt", action="store_false")
     parser.add_argument("--use_cuda_cache", action="store_true")
+    parser.add_argument("--check_get_inputs", action="store_false")
     args = parser.parse_args()
 
     # cli_config = from_kbEval_yaml()
@@ -450,6 +453,7 @@ def main():
                 measure_reference=True,
                 max_critical_time=args.max_critical_time,
                 use_cuda_cache=args.use_cuda_cache,
+                check_get_inputs=args.check_get_inputs,
             )
         else:
             result = eval_kernel_custom(
@@ -466,6 +470,7 @@ def main():
                 code_type=args.code_type,
                 max_critical_time=args.max_critical_time,
                 use_cuda_cache=args.use_cuda_cache,
+                check_get_inputs=args.check_get_inputs,
             )
     except Exception as exception:
         exit_code = 1

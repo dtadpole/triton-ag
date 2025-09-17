@@ -30,6 +30,7 @@ MAX_ERROR_COUNT = 50
 START_TIME = time.time()
 MAX_RUN_TIME = 4 * 3600  # restart periods in seconds
 COMPILE_CACHE = False
+CHECK_GET_INPUTS = True
 
 # Create app
 app = FastAPI()
@@ -445,11 +446,16 @@ async def kb_eval(
             cache_tag = "--use_cuda_cache"
         else:
             cache_tag = ""
+        if CHECK_GET_INPUTS is True:
+            check_get_inputs_tag = "--check_get_inputs"
+        else:
+            check_get_inputs_tag = ""
+
         logger.info(
             f"[KB Eval] [{eval_tag}] COMPILE_CACHE: [{COMPILE_CACHE}], cache_tag: [{cache_tag}]"
         )
         # pre-compile the generated code
-        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code reference_code.py --generated_code generated_code.py --device-list {','.join([str(device) for device in DEVICES])} --code_type {code_type} --quiet {cache_tag}"
+        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code reference_code.py --generated_code generated_code.py --device-list {','.join([str(device) for device in DEVICES])} --code_type {code_type} --quiet {cache_tag} {check_get_inputs_tag}"
         process = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
@@ -716,7 +722,7 @@ async def _check_total_error_count():
 
 async def main(args):
 
-    global MAX_TIMEOUT_SECONDS, COMPILE_CACHE
+    global MAX_TIMEOUT_SECONDS, COMPILE_CACHE, CHECK_GET_INPUTS
     MAX_TIMEOUT_SECONDS = args.max_timeout_seconds
 
     # read kbEval.yaml
@@ -752,6 +758,9 @@ async def main(args):
 
     COMPILE_CACHE = bool(kbEval_config["servers"][hostname].get("compile_cache", False))
     logger.info(f"Compile cache is {COMPILE_CACHE}")
+
+    CHECK_GET_INPUTS = bool(kbEval_config["servers"][hostname].get("check_get_inputs", True))
+    logger.info(f"Check get_inputs is {CHECK_GET_INPUTS}")
 
     #########################################################
     # get api_key from kbEval_config["kbEvalRemoteServer"]["common"]["api_key"]
