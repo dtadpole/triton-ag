@@ -446,8 +446,8 @@ async def kb_eval(
             cache_tag = "--use_cuda_cache"
         else:
             cache_tag = ""
-        if CHECK_GET_INPUTS is True:
-            check_get_inputs_tag = "--check_get_inputs"
+        if CHECK_GET_INPUTS is False:
+            check_get_inputs_tag = "--not_check_get_inputs"
         else:
             check_get_inputs_tag = ""
 

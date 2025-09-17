@@ -177,16 +177,25 @@ async def process_all_pairs(file_pairs, max_concurrent=100):
     ]
 
     # Run all tasks and gather results
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    total_tasks = len(tasks)
+    print(f"Starting processing of {total_tasks} tasks...")
 
-    # Filter out exceptions and print them
+    # Process tasks and track progress
     filtered_results = []
-    for i, result in enumerate(results):
-        if isinstance(result, Exception):
-            print(f"Error processing {file_pairs[i]}: {result}")
-        else:
+    for i, task in enumerate(asyncio.as_completed(tasks)):
+        try:
+            result = await task
             filtered_results.append(result)
+        except Exception as e:
+            # Find which file pair caused the exception
+            # This is approximate since we can't directly map as_completed results back to inputs
+            print(f"Error processing task: {e}")
 
+        # Print progress update every 5 tasks or when all tasks are done
+        if (i + 1) % 200 == 0 or (i + 1) == total_tasks:
+            print(f"Progress: {i + 1}/{total_tasks} tasks completed ({(i + 1)/total_tasks*100:.1f}%)")
+
+    print(f"All {total_tasks} tasks processed. {len(filtered_results)} succeeded.")
     return filtered_results
 
 
@@ -202,7 +211,7 @@ if __name__ == "__main__":
     # print("Done!")
     file_pairs = []
     for i in range(1, 13):
-        test_folders = "shared/.inference/codeGenEval/cudacoder_eval_4_turn.qwen32b_repeat_000_%02d"%(i)
+        test_folders = "shared/.inference/codeGenEval/cudacoder_eval_4_turn.qwen32b_000_%02d"%(i)
         foler_level1 = [os.path.join(test_folders,f_) for f_ in  os.listdir(test_folders)]
         for folder_ in foler_level1:
             folder_level2 = [os.path.join(folder_,f_) for f_ in  os.listdir(folder_)]
@@ -221,5 +230,7 @@ if __name__ == "__main__":
         reference_file, generated_files = get_reference_and_generated(folder_)
         file_pairs.extend([(reference_file, generated_file) for generated_file in generated_files])
 
-    asyncio.run(process_all_pairs(file_pairs[:200], max_concurrent=100))
+    print(f"Total pairs: {len(file_pairs)}")
+
+    asyncio.run(process_all_pairs(file_pairs, max_concurrent=150))
     print("All evaluations completed!")
