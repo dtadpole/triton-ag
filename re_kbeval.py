@@ -1,9 +1,9 @@
 import asyncio
 import glob
+import hashlib
 import json
 import os
 from pathlib import Path
-import hashlib
 
 import numpy as np
 import pandas as pd
@@ -31,7 +31,7 @@ def get_output_filename(generated_code_path):
     # Remove the root (if any) and reconstruct the relative path
     relative_path = generated_path.relative_to(*generated_path.parts[:1])
     # Change the suffix to .json
-    output_relative = relative_path.with_suffix('.json')
+    output_relative = relative_path.with_suffix(".json")
     # Prepend OUTPUT_DIR
     output_path = Path(OUTPUT_DIR) / output_relative
     # Ensure the parent directory exists
@@ -119,10 +119,21 @@ async def process_codes(reference_code_path, generated_code_path):
     # Create a hash of the generated_code to use as eval_tag
     eval_tag = hashlib.sha256(generated_code.encode("utf-8")).hexdigest()
 
+
+    # Generate output filename
+    output_path = get_output_filename(generated_code_path)
+    if os.path.exists(output_path):
+        print(f"Output file already exists: {output_path}")
+        return None
+
     for attempt in range(1, max_retries + 1):
         try:
             eval_results = await kbeval_client.kb_eval(
-                [PROVIDER], reference_code=reference_code, generated_code=generated_code, run_tag="re_kbeval", eval_tag=eval_tag,
+                [PROVIDER],
+                reference_code=reference_code,
+                generated_code=generated_code,
+                run_tag="re_kbeval",
+                eval_tag=eval_tag,
             )
             break  # Success, exit loop
         except Exception as e:
@@ -132,11 +143,12 @@ async def process_codes(reference_code_path, generated_code_path):
             else:
                 print(f"Attempt {attempt} failed with error: {e}. Retrying...")
 
+    if len(eval_results) == 0:
+        print(f"Evaluation failed for {generated_code_path}")
+        return None
     # Ensure output directory exists
     ensure_output_dir()
 
-    # Generate output filename
-    output_path = get_output_filename(generated_code_path)
 
     # Save results as JSON
     with open(output_path, "w") as f:
@@ -176,8 +188,7 @@ async def process_all_pairs(file_pairs, max_concurrent=100):
 
     # Create tasks for all file pairs
     tasks = [
-        process_with_semaphore(ref_path, gen_path)
-        for ref_path, gen_path in file_pairs
+        process_with_semaphore(ref_path, gen_path) for ref_path, gen_path in file_pairs
     ]
 
     # Run all tasks and gather results
@@ -197,7 +208,9 @@ async def process_all_pairs(file_pairs, max_concurrent=100):
 
         # Print progress update every 5 tasks or when all tasks are done
         if (i + 1) % 200 == 0 or (i + 1) == total_tasks:
-            print(f"Progress: {i + 1}/{total_tasks} tasks completed ({(i + 1)/total_tasks*100:.1f}%)")
+            print(
+                f"Progress: {i + 1}/{total_tasks} tasks completed ({(i + 1)/total_tasks*100:.1f}%)"
+            )
 
     print(f"All {total_tasks} tasks processed. {len(filtered_results)} succeeded.")
     return filtered_results
@@ -214,14 +227,64 @@ if __name__ == "__main__":
     # print(f"Generated files: {generated_files}")
     # print("Done!")
     file_pairs = []
+
+
+    # for i in range(1, 13):
+    #     test_folders = (
+    #         "shared/.inference/codeGenEval/cudacoder_eval_4_turn.qwen32b_repeat_000_%02d"
+    #         % (i)
+    #     )
+    #     foler_level1 = [
+    #         os.path.join(test_folders, f_) for f_ in os.listdir(test_folders)
+    #     ]
+    #     for folder_ in foler_level1:
+    #         folder_level2 = [os.path.join(folder_, f_) for f_ in os.listdir(folder_)]
+    #         for folder_2 in folder_level2:
+    #             reference_file, generated_files = get_reference_and_generated(folder_2)
+    #             file_pairs.extend(
+    #                 [
+    #                     (reference_file, generated_file)
+    #                     for generated_file in generated_files
+    #                 ]
+    #             )
+
     for i in range(1, 13):
-        test_folders = "shared/.inference/codeGenEval/cudacoder_eval_4_turn.qwen32b_000_%02d"%(i)
-        foler_level1 = [os.path.join(test_folders,f_) for f_ in  os.listdir(test_folders)]
+        test_folders = (
+            "shared/.inference/codeGenEval/cudacoder_eval_one_turn.sft2_1_000_%02d"
+            % (i)
+        )
+        foler_level1 = [
+            os.path.join(test_folders, f_) for f_ in os.listdir(test_folders)
+        ]
         for folder_ in foler_level1:
-            folder_level2 = [os.path.join(folder_,f_) for f_ in  os.listdir(folder_)]
+            folder_level2 = [os.path.join(folder_, f_) for f_ in os.listdir(folder_)]
             for folder_2 in folder_level2:
                 reference_file, generated_files = get_reference_and_generated(folder_2)
-                file_pairs.extend([(reference_file, generated_file) for generated_file in generated_files])
+                file_pairs.extend(
+                    [
+                        (reference_file, generated_file)
+                        for generated_file in generated_files
+                    ]
+                )
+
+    for i in range(1, 13):
+        test_folders = (
+            "shared/.inference/codeGenEval/cudacoder_eval_one_turn.sft2_2_000_%02d"
+            % (i)
+        )
+        foler_level1 = [
+            os.path.join(test_folders, f_) for f_ in os.listdir(test_folders)
+        ]
+        for folder_ in foler_level1:
+            folder_level2 = [os.path.join(folder_, f_) for f_ in os.listdir(folder_)]
+            for folder_2 in folder_level2:
+                reference_file, generated_files = get_reference_and_generated(folder_2)
+                file_pairs.extend(
+                    [
+                        (reference_file, generated_file)
+                        for generated_file in generated_files
+                    ]
+                )
 
     r1_folder1 = "shared/deepseek/deepseek-reasoner_2025_07_21_h03"
     r1_folder2 = "shared/deepseek/deepseek-reasoner_2025_07_26_h16"
