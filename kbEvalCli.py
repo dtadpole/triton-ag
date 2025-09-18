@@ -126,7 +126,7 @@ def eval_kernel_custom(
     device: torch.device,
     work_dir: str,
     seed_num: int = 42,
-    num_verify_trials: int = 2,
+    num_verify_trials: int = 3,
     num_perf_trials: int = 10,
     num_warmups: int = 3,
     measure_reference: bool = False,
