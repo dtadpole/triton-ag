@@ -271,6 +271,7 @@ def eval_kernel_custom(
 
                         else:
                             try:
+                                set_seed(seed_num)  # set seed for reproducible weights
                                 custom_model = ModelNew(*init_inputs)
                                 custom_model = custom_model.cuda(device=device)
                                 assert hasattr(custom_model, "forward")
