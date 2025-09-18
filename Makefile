@@ -4,7 +4,6 @@ HOST=$(shell hostname)
 IS_DEVSERVER=$(shell hostname | grep -E -c "dev.*\.facebook\.com")
 META_PROXY := https_proxy=http://fwdproxy:8080 http_proxy=http://fwdproxy:8080 ftp_proxy=http://fwdproxy:8080 no_proxy='\''\'\'''\''.facebook.com|.tfbnw.net|*.fb.com'\''\'\'
 VLLM_SETTING := VLLM_ALLOW_RUNTIME_LORA_UPDATING=True HF_HUB_DISABLE_XET=1 HF_HUB_ENABLE_HF_TRANSFER=0
-NAS_SERVER_IPV6 := 2401:db00:22c:260b:face:0:28:0
 
 .PHONY: help finetune finetune-single finetune-2gpu finetune-debug
 
@@ -30,6 +29,13 @@ ifeq (${IS_DEVSERVER}, 1)
 	$(META_PROXY) docker build --network=host --progress=plain  -t triton_ag .
 else
 	docker build --network=host --progress=plain  -t triton_ag .
+endif
+
+build_nginx: Dockerfile
+ifeq (${IS_DEVSERVER}, 1)
+	$(META_PROXY) docker build . -f Dockerfile.nginx --tag nginx-lb
+else
+	docker build . -f Dockerfile.nginx --tag nginx-lb
 endif
 
 build_docker_autoawq: Dockerfile_autoawq
@@ -211,6 +217,61 @@ vllm-qwen3-32b-devserver:
     --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
     --return-tokens-as-token-ids \
     --enforce-eager
+
+vllm-qwen3-32b-devserver_b:
+	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=4,5,6,7 python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen3-32B \
+    --port 8001 --host :: \
+    --api-key dummy \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 4 \
+    --pipeline-parallel-size 1 \
+    --enable-lora --max-lora-rank 128 --max-loras 6 \
+	--lora-modules  \
+		qwen3_32b_sft_t2=shared/finetune_model_output/sft_t2/checkpoint-289  \
+		qwen3_32b_sft_t5=shared/finetune_model_output/sft_t5/checkpoint-181  \
+		qwen3_32b_sft_t6=shared/finetune_model_output/sft_t6/checkpoint-362  \
+		qwen3_32b_sft_t7=shared/finetune_model_output/sft_t7/checkpoint-724  \
+    --gpu-memory-utilization 0.95 --max_model_len 24576 \
+    --load_format safetensors \
+    --trust_remote_code \
+    --guided_decoding_backend guidance --guided-decoding-disable-fallback \
+    --enable_auto_tool_choice --tool_call_parser hermes \
+    --scheduling_policy priority \
+    --enable_chunked_prefill --max_num_batched_tokens 2048 \
+    --max_log_len 0 --max_num_seqs 144 \
+    --enable_prefix_caching --prefix-caching-hash-algo builtin \
+    --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
+    --return-tokens-as-token-ids \
+    --enforce-eager
+
+vllm-qwen3-32b-devserver_a:
+	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=0,1,2,3 python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen3-32B \
+    --port 8002 --host :: \
+    --api-key dummy \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 4 \
+    --pipeline-parallel-size 1 \
+    --enable-lora --max-lora-rank 128 --max-loras 6 \
+	--lora-modules  \
+		qwen3_32b_sft_t2=shared/finetune_model_output/sft_t2/checkpoint-289  \
+		qwen3_32b_sft_t5=shared/finetune_model_output/sft_t5/checkpoint-181  \
+		qwen3_32b_sft_t6=shared/finetune_model_output/sft_t6/checkpoint-362  \
+		qwen3_32b_sft_t7=shared/finetune_model_output/sft_t7/checkpoint-724  \
+    --gpu-memory-utilization 0.95 --max_model_len 24576 \
+    --load_format safetensors \
+    --trust_remote_code \
+    --guided_decoding_backend guidance --guided-decoding-disable-fallback \
+    --enable_auto_tool_choice --tool_call_parser hermes \
+    --scheduling_policy priority \
+    --enable_chunked_prefill --max_num_batched_tokens 2048 \
+    --max_log_len 0 --max_num_seqs 144 \
+    --enable_prefix_caching --prefix-caching-hash-algo builtin \
+    --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
+    --return-tokens-as-token-ids \
+    --enforce-eager
+
 
 vllm-qwen3-32b-sft-devserver:
 	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=4,5,6,7 python -m vllm.entrypoints.openai.api_server \

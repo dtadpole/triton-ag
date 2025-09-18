@@ -4,6 +4,7 @@ import yaml
 import torch
 import torch.nn as nn
 from pydantic import BaseModel
+import hashlib
 import os
 import fcntl
 import time
@@ -11,10 +12,12 @@ import psutil
 from logger import logger
 import numpy as np
 import sys
+import subprocess
 import ast
 import signal
 import argparse
 from collections import defaultdict
+from typing import Optional
 
 
 MAX_LOCK_AGE = 20 # seconds
@@ -204,7 +207,7 @@ def load_model_and_inputs(
     return Model, get_init_inputs_fn, get_inputs_fn
 
 def load_custom_model(
-    model_custom_src: str, context: dict, build_directory: str = None, filename: str = "<string>", code_type: str = "triton"
+    model_custom_src: str, context: dict, build_directory: str = None, filename: str = "<string>", code_type: str = "triton", check_get_inputs: bool = True,
 ) -> nn.Module:
     """
     Load class from custom NN.module pytorch code
@@ -250,10 +253,11 @@ def load_custom_model(
     afterwards_get_inputs_fn = context.get("get_inputs")
     if afterwards_Model != original_Model:
         raise CompileModifiedComponentError("class [Model] has been modified")
-    if compare_functions_objects(afterwards_get_init_inputs_fn,original_get_init_inputs_fn) is False:
-        raise CompileModifiedComponentError("function [get_init_inputs] has been modified")
-    if compare_functions_objects(afterwards_get_inputs_fn, original_get_inputs_fn) is False:
-        raise CompileModifiedComponentError("function [get_inputs] has been modified")
+    if check_get_inputs is True:
+        if compare_functions_objects(afterwards_get_init_inputs_fn,original_get_init_inputs_fn) is False:
+            raise CompileModifiedComponentError("function [get_init_inputs] has been modified")
+        if compare_functions_objects(afterwards_get_inputs_fn, original_get_inputs_fn) is False:
+            raise CompileModifiedComponentError("function [get_inputs] has been modified")
 
     # check "ModelNew" exists in the context
     ModelNew = context.get("ModelNew")
@@ -490,6 +494,191 @@ def resolve_triton_code(code: str):
     # we are here if everything checks out
     return True
 
+def get_nvcc_version() -> str:
+    """Get NVCC compiler version."""
+    try:
+        result = subprocess.run(['nvcc', '--version'],
+                              capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            # Parse output like: "Cuda compilation tools, release 12.0, V12.0.76"
+            for line in result.stdout.split('\n'):
+                if 'release' in line.lower():
+                    # Extract version like "12.0" from the line
+                    parts = line.split('release')
+                    if len(parts) > 1:
+                        version_part = parts[1].split(',')[0].strip()
+                        return version_part
+            # Fallback: return full version output
+            return result.stdout.strip().replace('\n', ' ')[:50]
+        else:
+            return f"nvcc_error_{result.returncode}"
+    except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+        return f"nvcc_unknown_{str(e)[:20]}"
+
+
+def get_gpu_card_type() -> str:
+    """Get GPU card type (e.g., A100, H100, V100)."""
+    try:
+        # Try nvidia-ml-py first (more reliable)
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)  # Get first GPU
+            name = pynvml.nvmlDeviceGetName(handle).decode('utf-8')
+            return name.split()[0][:20]
+        except ImportError:
+            # Fallback to nvidia-smi
+            result = subprocess.run(['nvidia-smi', '--query-gpu=name', '--format=csv,noheader,nounits'],
+                                  capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                gpu_name = result.stdout.strip().split('\n')[0]
+                # Same normalization as above
+                return gpu_name.split()[0][:20]
+            else:
+                return "gpu_unknown"
+    except Exception as e:
+        return f"gpu_error_{str(e)[:10]}"
+
+
+def get_hostname() -> str:
+    """Get system hostname."""
+    try:
+        hostname = socket.gethostname()
+        return hostname[:30]
+    except Exception as e:
+        return f"host_unknown_{str(e)[:10]}"
+
+
+def get_pytorch_version() -> str:
+    """Get PyTorch version."""
+    try:
+        return torch.__version__
+    except Exception as e:
+        return f"torch_unknown_{str(e)[:10]}"
+
+
+def get_compute_capability() -> str:
+    """Get CUDA compute capability for the current GPU."""
+    try:
+        if torch.cuda.is_available():
+            major, minor = torch.cuda.get_device_capability(0)
+            return f"{major}.{minor}"
+        else:
+            return "no_cuda"
+    except Exception as e:
+        return f"compute_unknown_{str(e)[:10]}"
+
+def apply_black_formatter(generated_code: str) -> str:
+    """
+    Format the given Python code string using the 'black' code formatter.
+
+    Args:
+        generated_code: The Python code as a string.
+
+    Returns:
+        The formatted Python code as a string.
+
+    Raises:
+        RuntimeError: If black is not installed or formatting fails.
+    """
+    try:
+        import black
+        # Mode: use default Black mode (PEP8, line length 88)
+        mode = black.FileMode()
+        formatted_code = black.format_str(generated_code, mode=mode)
+        return formatted_code
+    except ImportError:
+        raise RuntimeError("Black formatter is not installed. Please install with 'pip install black'.")
+    except Exception as e:
+        raise RuntimeError(f"Black formatting failed: {e}")
+
+
+def generate_cache_hash(generated_code: str, file_path: str, hash_length: int=50) -> str:
+    """
+    Generate a deterministic cache hash for CUDA compilation.
+
+    Args:
+        generated_code: The generated CUDA code content
+        file_path: Path to the generated code file
+
+    Returns:
+        A deterministic hash string suitable for use as a directory name
+    """
+    # Collect all hash components
+    components = {
+        'generated_code': apply_black_formatter(generated_code),
+        'nvcc_version': get_nvcc_version(),
+        'gpu_card_type': get_gpu_card_type(),
+        'hostname': get_hostname(),
+        'pytorch_version': get_pytorch_version(),
+        'compute_capability': get_compute_capability(),
+    }
+
+    # Create a deterministic string representation
+    hash_input_parts = []
+    for key in sorted(components.keys()):  # Sort keys for deterministic order
+        value = str(components[key])
+        hash_input_parts.append(f"{key}:{value}")
+
+    hash_input = '\n'.join(hash_input_parts)
+
+    # Generate SHA256 hash and take first 16 characters for manageable directory names
+    hash_obj = hashlib.sha256(hash_input.encode('utf-8'))
+    hash_hex = hash_obj.hexdigest()[:hash_length]
+
+    return hash_hex
+
+
+def get_cache_build_directory(generated_code: str, file_path: str,
+                            shared_cache_parent: str = "/tmp/cuda_shared_cache") -> str:
+    """
+    Get the build directory path for caching based on content and system configuration.
+
+    Args:
+        generated_code: The generated CUDA code content
+        file_path: Path to the generated code file
+        shared_cache_parent: Parent directory for all cache folders
+
+    Returns:
+        Full path to the build directory for this specific configuration
+    """
+    cache_hash = generate_cache_hash(generated_code, file_path)
+    build_dir = os.path.join(shared_cache_parent, cache_hash)
+
+    # Create directory if it doesn't exist
+    os.makedirs(build_dir, exist_ok=True)
+
+    return build_dir
+
+
+def print_cache_info(generated_code: str, file_path: str) -> None:
+    """
+    Print detailed information about cache hash components for debugging.
+    """
+    print("Cache Hash Components:")
+    print("=" * 50)
+
+    components = {
+        'file_path': os.path.abspath(file_path),
+        'generated_code_length': len(generated_code),
+        'generated_code_hash': hashlib.md5(generated_code.encode()).hexdigest()[:8],
+        'nvcc_version': get_nvcc_version(),
+        'gpu_card_type': get_gpu_card_type(),
+        'hostname': get_hostname(),
+        'pytorch_version': get_pytorch_version(),
+        'compute_capability': get_compute_capability(),
+    }
+
+    for key, value in components.items():
+        print(f"{key:20}: {value}")
+
+    cache_hash = generate_cache_hash(generated_code, file_path)
+    print(f"{'cache_hash':20}: {cache_hash}")
+
+    build_dir = get_cache_build_directory(generated_code, file_path)
+    print(f"{'build_directory':20}: {build_dir}")
+
+
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser()
     argparser.add_argument("--code", type=str, required=True)
@@ -500,3 +689,13 @@ if __name__ == "__main__":
         code = f.read()
 
     print(resolve_triton_code(code))
+
+
+    # Test the hash function
+    test_code = """
+    #include <torch/extension.h>
+    __global__ void test_kernel() { }
+    """
+    test_path = "/test/path/file.py"
+
+    print_cache_info(test_code, test_path)
