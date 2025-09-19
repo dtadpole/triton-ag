@@ -6,7 +6,7 @@ Script to recursively find JSON files in a folder and delete empty or null ones 
 import argparse
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed, ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Tuple
 
@@ -14,26 +14,25 @@ from typing import List, Tuple
 def setup_logging():
     """Set up logging configuration."""
     logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s'
+        level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
     )
 
 
 def is_json_empty_or_null(file_path: Path) -> bool:
     """
-    Check if a JSON file is empty or contains only null.
+    Check if a JSON file is empty, contains only null, or has CUDA processing errors.
 
     Args:
         file_path: Path to the JSON file
 
     Returns:
-        True if file should be deleted (empty or null), False otherwise
+        True if file should be deleted (empty, null, or has CUDA errors), False otherwise
     """
     try:
         if file_path.stat().st_size == 0:
             return True
 
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             content = f.read().strip()
 
         if not content:
@@ -41,7 +40,21 @@ def is_json_empty_or_null(file_path: Path) -> bool:
 
         try:
             parsed = json.loads(content)
-            return parsed is None
+            if parsed is None:
+                return True
+
+            # Check for CUDA unknown error in metadata
+            if isinstance(parsed, dict) and "metadata" in parsed:
+                metadata = parsed["metadata"]
+                if isinstance(metadata, dict) and "processing_error" in metadata:
+                    processing_error = metadata["processing_error"]
+                    if (
+                        isinstance(processing_error, str)
+                        and "CUDA unknown error" in processing_error
+                    ):
+                        return True
+
+            return False
         except json.JSONDecodeError:
             logging.warning(f"Invalid JSON format in {file_path}, keeping file")
             return False
@@ -84,7 +97,9 @@ def find_json_files(folder_path: Path) -> List[Path]:
     return list(folder_path.rglob("*.json"))
 
 
-def clean_json_files_parallel(folder_path: Path, max_workers: int = None) -> None:
+def clean_json_files_parallel(
+    folder_path: Path, max_workers: int | None = None
+) -> None:
     """
     Clean JSON files in parallel.
 
@@ -114,8 +129,10 @@ def clean_json_files_parallel(folder_path: Path, max_workers: int = None) -> Non
     error_count = 0
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_file = {executor.submit(process_json_file, file_path): file_path
-                         for file_path in json_files}
+        future_to_file = {
+            executor.submit(process_json_file, file_path): file_path
+            for file_path in json_files
+        }
 
         for future in as_completed(future_to_file):
             file_path, was_deleted, status = future.result()
@@ -141,22 +158,14 @@ def main():
     parser = argparse.ArgumentParser(
         description="Recursively find JSON files and delete empty or null ones in parallel"
     )
-    parser.add_argument(
-        "--folder",
-        type=str,
-        help="Path to the folder to process"
-    )
+    parser.add_argument("--folder", type=str, help="Path to the folder to process")
     parser.add_argument(
         "--max-workers",
         type=int,
         default=12,
-        help="Maximum number of worker threads (default: None, uses system default)"
+        help="Maximum number of worker threads (default: None, uses system default)",
     )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Enable verbose logging"
-    )
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
 
     args = parser.parse_args()
 

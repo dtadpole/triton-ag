@@ -11,8 +11,12 @@ from kbEvalClient import KbEvalClient
 
 
 CONFIG_FILE = "kbEval.yaml"
-PROVIDER = "h8_1"
+PROVIDER = "h8_2"
 OUTPUT_DIR = "shared/re_kbeval"
+MAX_CONCURRENT = 100
+
+
+OVERWRITE = False
 
 
 def read_code_file(filename):
@@ -122,7 +126,7 @@ async def process_codes(reference_code_path, generated_code_path):
 
     # Generate output filename
     output_path = get_output_filename(generated_code_path)
-    if os.path.exists(output_path):
+    if os.path.exists(output_path) and OVERWRITE is False:
         print(f"Output file already exists: {output_path}")
         return None
 
@@ -231,7 +235,7 @@ if __name__ == "__main__":
 
     # for i in range(1, 13):
     #     test_folders = (
-    #         "shared/.inference/codeGenEval/cudacoder_eval_4_turn.qwen32b_repeat_000_%02d"
+    #         "shared/.inference/codeGenEval/cudacoder_eval_4_turn.qwen32b_000_%02d"
     #         % (i)
     #     )
     #     foler_level1 = [
@@ -248,9 +252,9 @@ if __name__ == "__main__":
     #                 ]
     #             )
 
-    for i in range(1, 13):
+    for i in range(0, 13):
         test_folders = (
-            "shared/.inference/codeGenEval/cudacoder_eval_one_turn.sft2_1_000_%02d"
+            "shared/.inference/codeGenEval/cudacoder_eval_4_turn.qwen32b_000_%02d"
             % (i)
         )
         foler_level1 = [
@@ -267,37 +271,18 @@ if __name__ == "__main__":
                     ]
                 )
 
-    for i in range(1, 13):
-        test_folders = (
-            "shared/.inference/codeGenEval/cudacoder_eval_one_turn.sft2_2_000_%02d"
-            % (i)
-        )
-        foler_level1 = [
-            os.path.join(test_folders, f_) for f_ in os.listdir(test_folders)
-        ]
-        for folder_ in foler_level1:
-            folder_level2 = [os.path.join(folder_, f_) for f_ in os.listdir(folder_)]
-            for folder_2 in folder_level2:
-                reference_file, generated_files = get_reference_and_generated(folder_2)
-                file_pairs.extend(
-                    [
-                        (reference_file, generated_file)
-                        for generated_file in generated_files
-                    ]
-                )
-
-    r1_folder1 = "shared/deepseek/deepseek-reasoner_2025_07_21_h03"
-    r1_folder2 = "shared/deepseek/deepseek-reasoner_2025_07_26_h16"
-    r1_folder1_folders = [os.path.join(r1_folder1, f_ + "/current/") for f_ in  os.listdir(r1_folder1)]
-    for folder_ in r1_folder1_folders:
-        reference_file, generated_files = get_reference_and_generated(folder_)
-        file_pairs.extend([(reference_file, generated_file) for generated_file in generated_files])
-    r1_folder2_folders = [os.path.join(r1_folder2, f_ + "/current/") for f_ in  os.listdir(r1_folder2)]
-    for folder_ in r1_folder2_folders:
-        reference_file, generated_files = get_reference_and_generated(folder_)
-        file_pairs.extend([(reference_file, generated_file) for generated_file in generated_files])
+    # r1_folder1 = "shared/deepseek/deepseek-reasoner_2025_07_21_h03"
+    # r1_folder2 = "shared/deepseek/deepseek-reasoner_2025_07_26_h16"
+    # r1_folder1_folders = [os.path.join(r1_folder1, f_ + "/current/") for f_ in  os.listdir(r1_folder1)]
+    # for folder_ in r1_folder1_folders:
+    #     reference_file, generated_files = get_reference_and_generated(folder_)
+    #     file_pairs.extend([(reference_file, generated_file) for generated_file in generated_files])
+    # r1_folder2_folders = [os.path.join(r1_folder2, f_ + "/current/") for f_ in  os.listdir(r1_folder2)]
+    # for folder_ in r1_folder2_folders:
+    #     reference_file, generated_files = get_reference_and_generated(folder_)
+    #     file_pairs.extend([(reference_file, generated_file) for generated_file in generated_files])
 
     print(f"Total pairs: {len(file_pairs)}")
 
-    asyncio.run(process_all_pairs(file_pairs, max_concurrent=150))
+    asyncio.run(process_all_pairs(file_pairs, max_concurrent=MAX_CONCURRENT))
     print("All evaluations completed!")
