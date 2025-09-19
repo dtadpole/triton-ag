@@ -93,7 +93,7 @@ def _setup_wandb_logging(prefix_tag: str = "auto", model_tag: str = "local_qwen3
     # Group by wandb log in the same way as in the shared folder
     model_tag = model_tag.replace("/", "_")
     wandb_run = wandb.init(
-        entity="code-gen",
+        # entity="code-gen",
         project=f"kb_eval",
         id=f"{prefix_tag}_{model_tag}",
         name=f"{prefix_tag}_{model_tag}_{datetime.now().strftime('%m%d')}",
@@ -623,6 +623,7 @@ async def kb_eval(
     except Exception as e:
         # global TOTAL_ERROR_COUNTER
         TOTAL_ERROR_COUNTER += 1
+        traceback.print_exc()
         logger.error(f"❌ [KB Eval] [{eval_tag}] error: {type(e).__name__}: {str(e)}")
         result = KernelExecResult(
             compiled=False,
