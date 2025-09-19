@@ -370,6 +370,7 @@ class EngineBase(ABC):
             )
             if self.config.logging.use_wandb:
                 wandb.init(
+                    entity="code-gen",
                     project=self.config.logging.wandb_project,
                     id=self.config.logging.wandb_run_id,
                     name=self.config.logging.wandb_run_name,

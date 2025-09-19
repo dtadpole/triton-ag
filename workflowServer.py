@@ -12,11 +12,11 @@ from logger import logger
 from workflowRegistry import WorkflowRegistry, QUEUE_PREFIX, ADAPTER_PREFIX
 from workflowUtil import InferenceBlock
 from replServer import ReplServer
-from util import WORKFLOW_DIR
+from util import WORKFLOW_DIR, CONFIG_FOLDER
 
 
 class WorkflowServer:
-    def __init__(self, config_path: str = "workflow.yaml"):
+    def __init__(self, config_path: str = CONFIG_FOLDER + "workflow.yaml"):
         self.router = APIRouter()
         self.config_path = config_path
         self.registries = {}
@@ -29,7 +29,7 @@ class WorkflowServer:
         for prefix_tag, registry_item in self.config.get("registry", {}).items():
             if prefix_tag not in self.registries:
                 # we found a new prefix tag, so we need to create a new registry
-                workflow_config_path = registry_item.get("config_path", "workflow/example.yaml")
+                workflow_config_path = registry_item.get("config_path", CONFIG_FOLDER + "workflow/example.yaml")
                 workflow_data_dir = registry_item.get("data_dir", WORKFLOW_DIR)
                 workflow_registry = WorkflowRegistry(
                     workflow_config_path=workflow_config_path,
@@ -66,6 +66,17 @@ class WorkflowServer:
             if prefix_tag not in self.registries:
                 raise HTTPException(status_code=404, detail=f"Prefix tag [{prefix_tag}] not found")
             return self.registries[prefix_tag].get_workflow_config()
+
+        @self.router.delete("/workflow/delete/{prefix_tag}")
+        async def workflow_delete(prefix_tag: str):
+            if prefix_tag not in self.registries:
+                raise HTTPException(status_code=404, detail=f"Prefix tag [{prefix_tag}] not found")
+            # Also remove from short_vars if present
+            short_names_to_remove = [k for k, v in self.short_vars.items() if v is None or v == self.registries.get(prefix_tag)]
+            for short_name in short_names_to_remove:
+                self.short_vars.pop(short_name, None)
+            del self.registries[prefix_tag]
+            return {"message": f"Registry with prefix tag [{prefix_tag}] deleted"}
 
         @self.router.get("/keys/{prefix_tag}")
         async def keys(prefix_tag: str):
@@ -293,7 +304,7 @@ class WorkflowServer:
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config_path", type=str, default="workflow.yaml")
+    parser.add_argument("--config_path", type=str, default=CONFIG_FOLDER + "workflow.yaml")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8488)
     args = parser.parse_args()

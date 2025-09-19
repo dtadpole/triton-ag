@@ -17,8 +17,7 @@ module:
             query: |
               SELECT filename as kb_filename, content as reference_code
               FROM read_text('{input_dir}/**/*.py')
-              ORDER BY random()
-              LIMIT {block.num_samples};
+              ORDER BY filename;
           returns:
             error_if: "`__result__ is None`"
             context_vars:
@@ -26,7 +25,7 @@ module:
             logging:
               method: "log_input_processor"
         - type: iterator
-          collection: "`[row for idx, row in query_result.df().iterrows()]`"
+          collection: "`[row for idx, row in query_result.df().iterrows()][block.block_id * block.num_samples: (block.block_id + 1) * block.num_samples]`"
           context_vars:
             row: "`__item__`"
             run_tag: "`f'{block.prefix_tag}_{block.epoch_id:03d}_{block.block_id:02d}' if block.epoch_id >= 0 and block.block_id >= 0 else f'{block.prefix_tag}_{__runtime_start_time__}'`" # run_tag is the prefix tag + epoch id + block id
@@ -51,7 +50,7 @@ module:
               returns:
                 logging:
                   method: "log_enqueue"
-            - type: iterator  ## Potential efficiency improvement, add the num_generations to the openai interface and do batch generation
+            - type: iterator
               collection: "`range(block.num_generations)`"
               context_vars:
                 gen_tag: "`f'gen_{__item__:02d}'`" # gen_tag is the generation tag
@@ -71,7 +70,6 @@ module:
                       output_dir: "`os.path.expanduser(block.output_dir)`" # output_dir is the output directory
                       num_turns_per_generation: "`block.num_turns_per_generation`" # number of turns per generation
                       vllm_providers: "`block.vllm_providers`" # vllm providers
-                      logp_providers: "`block.logp_providers`" # logp providers
                       kbeval_providers: "`block.kbeval_providers`" # kb eval providers
                       context: "`block.context`"
                   returns:
@@ -145,24 +143,8 @@ module:
           context_vars:
             turn_tag: "`f'{gen_tag}_t{__item__:02d}'`" # turn_tag is gen_01_t03
           steps:
-            - type: code
-              code_snippet_path: 'inference/model_override.py'
-              code_snippet_block: |
-                # get model override
-                __async__ = update_model_override(
-                    prefix_tag=prefix_tag,
-                    worker_name=worker_name,
-                    proc_id=proc_id,
-                    worker_id=worker_id,
-                )
-              async: true
-              returns:
-                context_vars:
-                  model_override: "`__result__`"
-                logging:
-                  info: "🔍 [{worker_name}.p{proc_id}.w{worker_id}] Model override: [{model_override}]"
             - type: endpoint
-              endpoint: inferenceClient.completion
+              endpoint: inferenceClient.chat_completion
               context_vars:
                 metadata:
                   "run_tag": "`run_tag`"
@@ -171,7 +153,6 @@ module:
                   "gen_tag": "`gen_tag`"
                   "turn_tag": "`turn_tag`"
                   "code_type": "`code_type`"
-                  "model_override": "`model_override`"
                 messages: |
                   `[
                     {"role": "system", "content": __runtime__.get_system_prompt(__context__)},
@@ -182,55 +163,40 @@ module:
                     {"role": "user", "content": __runtime__.get_user_prompt(__context__)}
                   ]
                   `
-                prompt: |
-                  `__runtime__.tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                    enable_thinking=True,
-                  )`
               args:
                 provider: "`vllm_providers`"
-                prompt: "`prompt`"
-                logprobs: true
-                model_override: "`model_override`"
+                messages: "`messages`"
+                logprobs: false
               returns:
                 error_if: "`__result__ is None`"
                 context_vars:
+                  completion: "`__result__['content']`"
+                  num_completion_tokens: "`__result__['usage']['completion_tokens'] if 'usage' in __result__ and 'completion_tokens' in __result__['usage'] else 0`"
                   metadata: |
                     `metadata | {
-                      "num_completion_tokens": len(__result__['logprobs']),
+                      "num_completion_tokens": num_completion_tokens,
                       "completion_time_seconds": __endpoint_time__,
-                      "token_per_second": len(__result__['logprobs']) / __endpoint_time__,
+                      "token_per_second": num_completion_tokens / __endpoint_time__,
                     }
                     `
                   messages: |
                     `messages + [
-                      {"role": "assistant", "content": __result__['content']}
+                      {"role": "assistant", "content": "<think>\n" + __result__["reasoning_content"] + "\n</think>\n\n" + __result__["content"] if "reasoning_content" in __result__ and __result__['reasoning_content'] is not None else __result__["content"]}
                     ]`
-                  completion:
-                    "prompt": "`prompt`"
-                    "completion": "`__result__['content']`"
-                    "logprobs": "`__result__['logprobs']`"
-                    "metadata": "`metadata`"
                   conversation:
                     messages: "`messages`"
                     metadata: "`metadata`"
                   conversation_path: "`f'{record_folder}/{turn_tag}_conversation.json'`"
-                  completion_path: "`f'{record_folder}/{turn_tag}_completion.json'`"
                 save_to:
                   - path: "`conversation_path`"
                     data: "`conversation`"
                     format: "json"
-                  - path: "`completion_path`"
-                    data: "`completion`"
-                    format: "json"
                 logging:
-                  method: "log_completion"
+                  method: "log_chat_completion"
             - type: endpoint
               endpoint: codeExtractor.extract_code
               args:
-                completion: "`__runtime__.tokenizer.decode([logprob['token_id'] for logprob in completion['logprobs']], skip_special_tokens=True)`"
+                completion: "`completion`"
               returns:
                 error_if: "`__result__ is None or __result__['code'] is None`"
                 context_vars:
@@ -251,12 +217,12 @@ module:
               endpoint: kbEvalClient.kb_eval
               args:
                 provider: "`kbeval_providers`"
-                reference_code: "`reference_code`"
-                generated_code: "`generated_code`"
                 run_tag: "`run_tag`"
                 model_tag: "`model_tag`"
                 task_tag: "`task_tag`"
                 eval_tag: "`turn_tag`" # eval_tag is the turn tag
+                reference_code: "`reference_code`"
+                generated_code: "`generated_code`"
                 code_type: "`code_type`" # code_type is the code type
               returns:
                 error_if: "`__result__ is None`"
@@ -279,27 +245,3 @@ module:
                 task_tag: "`task_tag`"
                 category: "generated"
                 data: "`generated_eval`"
-            - type: endpoint
-              endpoint: logpClient.logps
-              context_vars:
-                prompt_ids: "`__runtime__.tokenizer.encode(prompt)`"
-                completion_ids: "`[logprob['token_id'] for logprob in completion['logprobs']]`"
-                input_ids: "`prompt_ids + completion_ids`"
-              args:
-                provider: "`logp_providers`"
-                model_name: "`model_override or __runtime__.inferenceClient.model_full_name`"
-                input_ids: "`input_ids`"
-              returns:
-                error_if: "`__result__ is None`"
-                context_vars:
-                  output_data:
-                    prompt_ids: "`prompt_ids`"
-                    completion_ids: "`completion_ids`"
-                    input_ids: "`__result__['input_ids']`"
-                    logps: "`__result__['logps']`"
-                save_to:
-                  - path: "`f'{record_folder}/{turn_tag}_logps.json'`"
-                    data: "`output_data`"
-                    format: "json"
-                logging:
-                  method: "log_logps"

@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 from logger import logger
 from workflowUtil import InferenceBlock, TrainerBlock, WorkflowSyncBlock, deep_format, merge_dicts
 from pydantic import BaseModel
+from util import CONFIG_FOLDER
 
 TASK_TYPE_INFERENCE = "inference"
 TASK_TYPE_TRAINER = "trainer"
@@ -17,7 +18,7 @@ VALID_TASK_TYPES = [
 ]
 
 class WorkflowClient:
-    def __init__(self, prefix_tag: str, provider_name: str = "default", config_path: str = "workflow.yaml"):
+    def __init__(self, prefix_tag: str, provider_name: str = "default", config_path: str = CONFIG_FOLDER + "workflow.yaml"):
         self.prefix_tag = prefix_tag
         self.provider_name = provider_name
         self.config_path = config_path

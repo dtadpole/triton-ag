@@ -1,11 +1,9 @@
 # CUDA_VISIBLE_DEVICES = ${GPU}
-ENV_VARS ?= PYTHONNOUSERSITE=1 \
-        PYTHONPATH=${PYTHONPATH}:${PWD}
+ENV_VARS ?= PYTHONNOUSERSITE=1 PYTHONPATH=${PYTHONPATH}:${PWD}
 HOST=$(shell hostname)
 IS_DEVSERVER=$(shell hostname | grep -E -c "dev.*\.facebook\.com")
 META_PROXY := https_proxy=http://fwdproxy:8080 http_proxy=http://fwdproxy:8080 ftp_proxy=http://fwdproxy:8080 no_proxy='\''\'\'''\''.facebook.com|.tfbnw.net|*.fb.com'\''\'\'
 VLLM_SETTING := VLLM_ALLOW_RUNTIME_LORA_UPDATING=True HF_HUB_DISABLE_XET=1 HF_HUB_ENABLE_HF_TRANSFER=0
-NAS_SERVER_IPV6 := 2401:db00:22c:260b:face:0:28:0
 
 .PHONY: help finetune finetune-single finetune-2gpu finetune-debug
 
@@ -33,19 +31,18 @@ else
 	docker build --network=host --progress=plain  -t triton_ag .
 endif
 
+build_nginx: Dockerfile
+ifeq (${IS_DEVSERVER}, 1)
+	$(META_PROXY) docker build . -f Dockerfile.nginx --tag nginx-lb
+else
+	docker build . -f Dockerfile.nginx --tag nginx-lb
+endif
+
 build_docker_autoawq: Dockerfile_autoawq
 ifeq (${IS_DEVSERVER}, 1)
 	$(META_PROXY) docker build -f Dockerfile_autoawq --network=host --progress=plain  -t autoawq .
 else
 	docker build -f Dockerfile_autoawq --network=host --progress=plain  -t autoawq .
-endif
-
-
-build_docker_nas: Dockerfile_nas
-ifeq (${IS_DEVSERVER}, 1)
-	$(META_PROXY) docker build -f Dockerfile_nas --network=host --progress=plain  -t nas .
-else
-	docker build -f Dockerfile_nas --network=host --progress=plain  -t nas .
 endif
 
 
@@ -76,7 +73,7 @@ env_start:
 		--security-opt apparmor:unconfined \
 		--privileged \
 		localhost/triton_ag \
-		/bin/bash -c "make wandb_login && make mount_shared_drive && tail -f /dev/null"
+		/bin/bash -c "make mount_shared_drive && make wandb_login && tail -f /dev/null"
 
 env:
 	docker exec -it codegen /bin/bash
@@ -85,15 +82,24 @@ wandb_login:
 	wandb login --host=https://fairwandb.org
 
 mount_shared_drive:
-	sshfs -o IdentityFile=/root/.ssh/id_rsa_shared -p 8081 codegen@devgpu139.cco2.facebook.com:/shared/ shared/
+	sshfs -o IdentityFile=/root/.ssh/id_rsa_shared -p 8081 codegen@devvm8492.cco0.facebook.com:/shared/ shared/
+
+mount_shared_code:
+	sshfs -o IdentityFile=/root/.ssh/id_rsa_shared -p 8082 codegen@devvm8492.cco0.facebook.com:/shared/ /workspace/
 
 mlflow:
 	# mlflow server --host localhost --port 5051
 	mlflow server --host localhost --port 5051 --backend-store-uri sqlite:///mlflow.sqlite
 
+workflow_server:
+	while true; do python ./workflowServer.py --host :: --port 8488; sleep 5; done
+
+sync_config:
+	cp workflow.yaml shared/config/workflow.yaml
+	cp workflow/* shared/config/workflow/
 
 lora_merge_compress_autoawq:
-	CUDA_VISIBLE_DEVICES=4 python lora_merge_awq.py
+	CUDA_VISIBLE_DEVICES=2 python lora_merge_awq.py
 
 lora_merge_compress:
 	CUDA_VISIBLE_DEVICES=4 python lora_merge_llmcomp_awq.py
@@ -123,7 +129,13 @@ finetune-single:
 
 finetune-2gpu:
 	@echo "Starting data parallel fine-tuning on 2 GPUs..."
-	bash -c "CUDA_VISIBLE_DEVICES=4,5 torchrun --nproc_per_node=2 --master_port=29500 finetune_unsloth.py"
+	bash -c "CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 --master_port=29500 finetune_unsloth.py"
+
+
+finetune-4gpu:
+	@echo "Starting data parallel fine-tuning on 4 GPUs..."
+	bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29500 finetune_unsloth.py"
+
 
 vllm-qwen3-8b:
 	vllm serve unsloth/DeepSeek-R1-0528-Qwen3-8B-bnb-4bit \
@@ -131,15 +143,15 @@ vllm-qwen3-8b:
 	--enable-auto-tool-choice \
 	--tool-call-parser hermes
 
-vllm-qwen3-32b-devserver:
-	CUDA_VISIBLE_DEVICES=4 vllm serve Qwen/Qwen3-32B-AWQ \
-	--max-model-len 40960 \
-	--enable-auto-tool-choice \
-	--tool-call-parser hermes \
-	--dtype bfloat16 \
-	--return-tokens-as-token-ids \
-	--host "::" \
-	--port 8091
+# vllm-qwen3-32b-devserver:
+# 	CUDA_VISIBLE_DEVICES=4 vllm serve Qwen/Qwen3-32B-AWQ \
+# 	--max-model-len 40960 \
+# 	--enable-auto-tool-choice \
+# 	--tool-call-parser hermes \
+# 	--dtype bfloat16 \
+# 	--return-tokens-as-token-ids \
+# 	--host "::" \
+# 	--port 8091
 
 
 vllm_env:
@@ -184,14 +196,133 @@ vllm-qwen3-14b-devserver:
     --enforce-eager
 
 
-vllm-qwen25-7b-devserver:
-	CUDA_VISIBLE_DEVICES=2,5 vllm serve unsloth/Qwen2.5-7B \
-	--max_model_len 40960 \
-	--enable-auto-tool-choice \
-	--tool-call-parser hermes \
-	--tensor-parallel-size 2 \
-	--host "::" \
-	--port 8091
+vllm-qwen3-32b-devserver:
+	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=4,5,6,7 python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen3-32B \
+    --port 8091 --host :: \
+    --api-key dummy \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 4 \
+    --pipeline-parallel-size 1 \
+    --enable-lora --max-lora-rank 128 --max-loras 6 \
+    --gpu-memory-utilization 0.95 --max_model_len 24576 \
+    --load_format safetensors \
+    --trust_remote_code \
+    --guided_decoding_backend guidance --guided-decoding-disable-fallback \
+    --enable_auto_tool_choice --tool_call_parser hermes \
+    --scheduling_policy priority \
+    --enable_chunked_prefill --max_num_batched_tokens 2048 \
+    --max_log_len 0 --max_num_seqs 144 \
+    --enable_prefix_caching --prefix-caching-hash-algo builtin \
+    --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
+    --return-tokens-as-token-ids \
+    --enforce-eager
+
+vllm-qwen3-32b-devserver_b:
+	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=4,5,6,7 python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen3-32B \
+    --port 8001 --host :: \
+    --api-key dummy \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 4 \
+    --pipeline-parallel-size 1 \
+    --enable-lora --max-lora-rank 128 --max-loras 6 \
+	--lora-modules  \
+		qwen3_32b_sft_t2=shared/finetune_model_output/sft_t2/checkpoint-289  \
+		qwen3_32b_sft_t5=shared/finetune_model_output/sft_t5/checkpoint-181  \
+		qwen3_32b_sft_t6=shared/finetune_model_output/sft_t6/checkpoint-362  \
+		qwen3_32b_sft_t7=shared/finetune_model_output/sft_t7/checkpoint-724  \
+    --gpu-memory-utilization 0.95 --max_model_len 24576 \
+    --load_format safetensors \
+    --trust_remote_code \
+    --guided_decoding_backend guidance --guided-decoding-disable-fallback \
+    --enable_auto_tool_choice --tool_call_parser hermes \
+    --scheduling_policy priority \
+    --enable_chunked_prefill --max_num_batched_tokens 2048 \
+    --max_log_len 0 --max_num_seqs 144 \
+    --enable_prefix_caching --prefix-caching-hash-algo builtin \
+    --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
+    --return-tokens-as-token-ids \
+    --enforce-eager
+
+vllm-qwen3-32b-devserver_a:
+	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=0,1,2,3 python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen3-32B \
+    --port 8002 --host :: \
+    --api-key dummy \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 4 \
+    --pipeline-parallel-size 1 \
+    --enable-lora --max-lora-rank 128 --max-loras 6 \
+	--lora-modules  \
+		qwen3_32b_sft_t2=shared/finetune_model_output/sft_t2/checkpoint-289  \
+		qwen3_32b_sft_t5=shared/finetune_model_output/sft_t5/checkpoint-181  \
+		qwen3_32b_sft_t6=shared/finetune_model_output/sft_t6/checkpoint-362  \
+		qwen3_32b_sft_t7=shared/finetune_model_output/sft_t7/checkpoint-724  \
+    --gpu-memory-utilization 0.95 --max_model_len 24576 \
+    --load_format safetensors \
+    --trust_remote_code \
+    --guided_decoding_backend guidance --guided-decoding-disable-fallback \
+    --enable_auto_tool_choice --tool_call_parser hermes \
+    --scheduling_policy priority \
+    --enable_chunked_prefill --max_num_batched_tokens 2048 \
+    --max_log_len 0 --max_num_seqs 144 \
+    --enable_prefix_caching --prefix-caching-hash-algo builtin \
+    --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
+    --return-tokens-as-token-ids \
+    --enforce-eager
+
+
+vllm-qwen3-32b-sft-devserver:
+	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=4,5,6,7 python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen3-32B \
+    --port 8091 --host :: \
+    --api-key dummy \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 4 \
+    --pipeline-parallel-size 1 \
+    --enable-lora --max-lora-rank 128 --max-loras 6 \
+	--lora-modules  \
+		qwen3_32b_sft_t2=shared/finetune_model_output/sft_t2/checkpoint-289  \
+		qwen3_32b_sft_t5=shared/finetune_model_output/sft_t5/checkpoint-181  \
+		qwen3_32b_sft_t6=shared/finetune_model_output/sft_t6/checkpoint-362  \
+		qwen3_32b_sft_t7=shared/finetune_model_output/sft_t7/checkpoint-724  \
+    --gpu-memory-utilization 0.95 --max_model_len 24576 \
+    --load_format safetensors \
+    --trust_remote_code \
+    --guided_decoding_backend guidance --guided-decoding-disable-fallback \
+    --enable_auto_tool_choice --tool_call_parser hermes \
+    --scheduling_policy priority \
+    --enable_chunked_prefill --max_num_batched_tokens 2048 \
+    --max_log_len 0 --max_num_seqs 144 \
+    --enable_prefix_caching --prefix-caching-hash-algo builtin \
+    --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
+    --return-tokens-as-token-ids \
+    --enforce-eager
+
+
+vllm-qwen3-32b-awq-sft-devserver:
+	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=0,1 python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen3-32B-AWQ \
+    --port 8091 --host :: \
+    --api-key dummy \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 2 \
+    --pipeline-parallel-size 1 \
+    --enable-lora --max-lora-rank 128 --max-loras 6 \
+    --gpu-memory-utilization 0.95 --max_model_len 24576 \
+    --load_format safetensors \
+    --trust_remote_code \
+    --guided_decoding_backend guidance --guided-decoding-disable-fallback \
+    --enable_auto_tool_choice --tool_call_parser hermes \
+    --scheduling_policy priority \
+    --enable_chunked_prefill --max_num_batched_tokens 2048 \
+    --max_log_len 0 --max_num_seqs 144 \
+    --enable_prefix_caching --prefix-caching-hash-algo builtin \
+    --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
+    --return-tokens-as-token-ids \
+    --enforce-eager
+
 
 sglang-qwen3-8b:
 	sglang serve qwen/qwen3-8b-instruct \
@@ -235,11 +366,8 @@ llama.cpp-server-qwen3-32b:
 	--host 0.0.0.0
 
 jupyter:
-	echo ${ENV_VARS}
-	env ${ENV_VARS} jupyter notebook --allow-root --port 8082 --ip 0.0.0.0 --NotebookApp.token='' --NotebookApp.password=''
+	${ENV_VARS} jupyter notebook --allow-root --port 8086 --ip 0.0.0.0 --NotebookApp.token='' --NotebookApp.password=''
 
-
-MODEL_TO_SERVE ?= finetune_model_output/sft_t2/qwen3_32b_awq
 
 # MODEL_TO_SERVE ?= Qwen/Qwen3-32B-AWQ
 

@@ -14,7 +14,9 @@ import traceback
 from threading import Timer
 from pydantic import BaseModel
 from torch import nn
-from kbEvalUtil import KernelExecResult, from_kbEval_yaml, format_exception, CorrectnessResult, CorrectnessError, CorrectnessShapeMismatchError, CorrectnessValueMismatchError, CorrectnessProcessingError, CompileError, CompileInstantiationError, CompileRuntimeError, set_seed, get_timing_stats, time_execution_with_cuda_event, load_model_and_inputs, load_custom_model, graceful_eval_cleanup, on_critical_alarm, on_critical_timeout, on_process_timeout, resolve_triton_code
+from kbEvalUtil import KernelExecResult, from_kbEval_yaml, format_exception, CorrectnessResult, CorrectnessError, CorrectnessProcessingError, CompileError, CompileInstantiationError, CompileRuntimeError
+from kbEvalUtil import CorrectnessShapeMismatchError, CorrectnessValueMismatchError, set_seed, get_timing_stats, time_execution_with_cuda_event, load_model_and_inputs, load_custom_model, graceful_eval_cleanup, on_critical_alarm, on_critical_timeout, on_process_timeout, resolve_triton_code
+from kbEvalUtil import get_cache_build_directory, generate_cache_hash
 import torch
 import asyncio
 import os
@@ -124,12 +126,14 @@ def eval_kernel_custom(
     device: torch.device,
     work_dir: str,
     seed_num: int = 42,
-    num_verify_trials: int = 2,
+    num_verify_trials: int = 3,
     num_perf_trials: int = 10,
     num_warmups: int = 3,
     measure_reference: bool = False,
     code_type: str = "triton",
     max_critical_time: int = 20,
+    use_cuda_cache: bool = False,
+    check_get_inputs: bool = True,
 ) -> KernelExecResult:
     """
     Evaluate the reference code against the original model
@@ -162,11 +166,21 @@ def eval_kernel_custom(
         if not measure_reference:
             # load custom model only if not measuring reference
             # remember to load models before acquiring lock
+            if use_cuda_cache is False:
+                build_dir = work_dir
+            else:
+                shared_cache_parent = os.path.join(KB_EVAL_DIR, "compile_cache")
+                build_dir = get_cache_build_directory(
+                    generated_code, generated_path, shared_cache_parent
+                )
+            os.environ["TORCH_EXTENSIONS_DIR"] = build_dir
+            logger.info(f"🔍 Setting TORCH_EXTENSIONS_DIR to [{build_dir}]")
             ModelNew = load_custom_model(
                 generated_code,
                 context,
-                build_directory=work_dir,
+                build_directory=build_dir,
                 filename=generated_path,
+                check_get_inputs=check_get_inputs,
             )
 
             if code_type == "triton":
@@ -257,6 +271,7 @@ def eval_kernel_custom(
 
                         else:
                             try:
+                                set_seed(seed_num)  # set seed for reproducible weights
                                 custom_model = ModelNew(*init_inputs)
                                 custom_model = custom_model.cuda(device=device)
                                 assert hasattr(custom_model, "forward")
@@ -361,18 +376,37 @@ def main():
     parser.add_argument("--device-list", type=str, default="0")
     parser.add_argument("--max_critical_time", type=int, default=15)
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--use_param_opt", action="store_false")
+    parser.add_argument("--use_cuda_cache", action="store_true")
+    parser.add_argument("--not_check_get_inputs", action="store_true")
     args = parser.parse_args()
 
-    cli_config = from_kbEval_yaml()
-    for key, value in cli_config.get("env_vars", {}).items():
-        os.environ[key] = str(value)
+    # cli_config = from_kbEval_yaml()
+    # for key, value in cli_config.get("env_vars", {}).items():
+    #     os.environ[key] = str(value)
+
+    if args.use_param_opt:
+        try:
+            if torch.cuda.is_available():
+                major = torch.cuda.get_device_capability(0)[0]
+                minor = torch.cuda.get_device_capability(0)[1]
+                os.environ["TORCH_CUDA_ARCH_LIST"] = f"{major}.{minor}"
+                os.environ["CUDAARCHS"] = f"{major}{minor}"
+                os.environ.update({
+                    'MAX_JOBS': str(6),
+                    'NVCC_APPEND_FLAGS': "--threads=4",
+                    'CUDA_NVCC_FLAGS': "-O1 --use_fast_math --ptxas-options=-O1"
+                })
+            else:
+                print("Warning: torch.cuda.is_available() is False. No CUDA device detected.")
+        except Exception as e:
+            print(f"Warning: Failed to detect CUDA architecture: {e}")
+
 
     # temp_dir is {HOME}/.kbeval/{run_tag}/{model_tag}/{task_tag}/{eval_tag}
     run_tag = args.run_tag if args.run_tag != "auto" else f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     work_dir = os.path.join(KB_EVAL_DIR, run_tag, args.model_tag, args.task_tag, args.eval_tag)
     os.makedirs(work_dir, exist_ok=True)
-    os.environ["TORCH_EXTENSIONS_DIR"] = work_dir
-    logger.info(f"🔍 Setting TORCH_EXTENSIONS_DIR to [{work_dir}]")
 
     devices = args.device_list.split(",")
     # select the device from devices randomly (The randomness is a bit questionable, as one device got overloaded)
@@ -398,6 +432,16 @@ def main():
     result = None
     exit_code = 0
 
+    if args.not_check_get_inputs is True:
+        check_get_inputs = False
+    else:
+        check_get_inputs = True
+    logger.info(f"🔍 check_get_inputs is set to [{check_get_inputs}]")
+
+    # set the folder to save the compilation generated files
+    os.environ["TORCH_EXTENSIONS_DIR"] = work_dir
+    logger.info(f"🔍 Setting TORCH_EXTENSIONS_DIR to [{work_dir}]")
+
     # if measure_reference or code_type is `triton`, evaluate the reference code only
     try:
         if args.measure_reference:
@@ -414,6 +458,8 @@ def main():
                 work_dir=work_dir,
                 measure_reference=True,
                 max_critical_time=args.max_critical_time,
+                use_cuda_cache=args.use_cuda_cache,
+                check_get_inputs=check_get_inputs,
             )
         else:
             result = eval_kernel_custom(
@@ -429,6 +475,8 @@ def main():
                 work_dir=work_dir,
                 code_type=args.code_type,
                 max_critical_time=args.max_critical_time,
+                use_cuda_cache=args.use_cuda_cache,
+                check_get_inputs=check_get_inputs,
             )
     except Exception as exception:
         exit_code = 1
