@@ -24,14 +24,16 @@ class KbEvalClient:
         self.provider_config_cache = {}
 
         # Get kbEval config from kbEval.yaml
+        self.config_file = config_file
         self.server_last_refresh_time = time.time()
         self.server_stats = {}
 
     def _provider_config_from_yaml(
         self,
         provider_name: str,
-        yaml_file: str="kbEval.yaml",
     ) -> Dict[str, Any]:
+
+        yaml_file = self.config_file
         """Load provider config from YAML file."""
         if provider_name in self.provider_config_cache:
             return self.provider_config_cache[provider_name]

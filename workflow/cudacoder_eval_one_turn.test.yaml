@@ -1,0 +1,72 @@
+# built in queues
+queues:
+  - name: trainer.sft.1
+  - name: trainer.rft.1
+  - name: trainer.grpo.1
+  - name: rsync.rsync.1
+  - name: test.test.1
+
+global:
+  prefix_tag: "cudacoder_eval_one_turn.test"
+  start_epoch: 0
+  start_block: 0
+  end_epoch: 1
+  end_block: 13
+
+init:
+  codeGenEval.base:
+    - queue_type: inference
+      queue_name: codeGenEval.base
+      prefix_tag: "{prefix_tag}"
+      epoch_id: "{epoch_id}"
+      block_id: "{block_id}"
+      input_tag: "{input_tag}"
+      num_samples: 8
+      num_generations: 4
+      num_turns_per_generation: 1
+      parallel_workers: 32
+      model_name: qwen3-32b
+      vllm_providers: ["h100_8b"]
+      logp_providers: ["h100_8b"]
+      kbeval_providers: ["h8_1"]
+      module_file: inference/codeGenFullEval.module.chat.yaml
+      prompt_file: inference/cuda.prompt.yaml
+      example_file: inference/cuda.example.yaml
+      input_dir: /workspace/kernel_bench/level1
+      output_dir: shared/.inference/codeGenEval
+    - queue_type: inference
+      queue_name: codeGenEval.base
+      prefix_tag: "{prefix_tag}"
+      epoch_id: "{epoch_id}"
+      block_id: "{block_id}"
+      input_tag: "{input_tag}"
+      num_samples: 8
+      num_generations: 4
+      num_turns_per_generation: 1
+      parallel_workers: 32
+      model_name: qwen3-32b
+      vllm_providers: ["h100_8b"]
+      logp_providers: ["h100_8b"]
+      kbeval_providers: ["h8_1"]
+      module_file: inference/codeGenFullEval.module.chat.yaml
+      prompt_file: inference/cuda.prompt.yaml
+      example_file: inference/cuda.example.yaml
+      input_dir: /workspace/kernel_bench/level2
+      output_dir: shared/.inference/codeGenEval
+
+inference:
+  codeGenEval.base:
+    default:
+      input_dir: shared/.inference/composer/input
+      output_dir: shared/.inference/composer/output
+      module_file: inference/codeGenFullEval.module.chat.yaml
+      prompt_file: inference/cuda.prompt.yaml
+      example_file: inference/cuda.example.yaml
+      provider_name: h100_8b
+      model_name: qwen3-32b
+      num_generations: 4
+      num_turns_per_generation: 1
+      parallel_workers: 32
+      logprobs: true
+      input_tag: kernel_bench
+      model_override: null
