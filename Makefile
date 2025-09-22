@@ -38,6 +38,15 @@ else
 	docker build . -f Dockerfile.nginx --tag nginx-lb
 endif
 
+build_vllm_gptoss: Dockerfile_vllm_gpt_oss
+ifeq (${IS_DEVSERVER}, 1)
+	echo "Current hostname is "${HOST}
+	$(META_PROXY) docker build . -f Dockerfile_vllm_gpt_oss --format=docker --tag vllm_gptoss
+else
+	docker build . -f Dockerfile_vllm_gpt_oss --format=docker --tag vllm_gptoss
+endif
+
+
 build_docker_autoawq: Dockerfile_autoawq
 ifeq (${IS_DEVSERVER}, 1)
 	$(META_PROXY) docker build -f Dockerfile_autoawq --network=host --progress=plain  -t autoawq .
@@ -463,3 +472,98 @@ vllm-qwen3-32b:
 	--tensor-parallel-size 2 \
 	--host "::" \
 	--port 8001
+
+vllm_gptoss_a:
+	CUDA_VISIBLE_DEVICES=0,1 docker run -it \
+		--name vllm_gptoss_a \
+		--replace \
+		--gpus all \
+		--cap-add SYS_ADMIN \
+		--net=host \
+		--shm-size=128g \
+		--pids-limit -1 \
+		--ulimit nofile=65536:65536 \
+		--ulimit nproc=-1:-1\
+		--ulimit memlock=-1:-1 \
+		-v ~/.ssh/:/root/.ssh \
+		-v ~/.bashrc:/root/.bashrc \
+		-v ~/.netrc:/root/.netrc \
+		-v ~/.gitconfig:/root/.gitconfig \
+		-v ~/.keys/:/root/.keys/ \
+		-e CUDA_VISIBLE_DEVICES=0,1 \
+		-e HF_HOME=/root/.cache/huggingface \
+		-e HTTP_PROXY="http://fwdproxy:8080" \
+		-e HTTPS_PROXY="http://fwdproxy:8080" \
+		-v /data/users/${USER}/huggingface:/root/.cache/huggingface \
+		-v ${PWD}:/workspace/ \
+		--cap-add SYS_ADMIN \
+		--device /dev/fuse \
+		--security-opt apparmor:unconfined \
+		--privileged \
+		vllm/vllm-openai:latest \
+		--model openai/gpt-oss-120b \
+		--port 8001 --host :: \
+		--api-key dummy \
+		--data-parallel-size 1 \
+		--tensor-parallel-size 2 \
+		--pipeline-parallel-size 1 \
+		--gpu-memory-utilization 0.9 --max_model_len 24576 \
+		--load_format safetensors \
+		--trust_remote_code \
+		--guided_decoding_backend guidance --guided-decoding-disable-fallback \
+		--enable_auto_tool_choice --tool_call_parser hermes \
+		--scheduling_policy priority \
+		--enable_chunked_prefill --max_num_batched_tokens 2048 \
+		--max_log_len 0 --max_num_seqs 144 \
+		--enable_prefix_caching --prefix-caching-hash-algo builtin \
+		--generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
+		--return-tokens-as-token-ids \
+		--async-scheduling
+
+
+vllm_gptoss_b:
+	docker run -it \
+		--name vllm_gptoss_b \
+		--replace \
+		--gpus all \
+		--cap-add SYS_ADMIN \
+		--net=host \
+		--shm-size=128g \
+		--pids-limit -1 \
+		--ulimit nofile=65536:65536 \
+		--ulimit nproc=-1:-1\
+		--ulimit memlock=-1:-1 \
+		-v ~/.ssh/:/root/.ssh \
+		-v ~/.bashrc:/root/.bashrc \
+		-v ~/.netrc:/root/.netrc \
+		-v ~/.gitconfig:/root/.gitconfig \
+		-v ~/.keys/:/root/.keys/ \
+		-e CUDA_VISIBLE_DEVICES=2,3 \
+		-e HF_HOME=/root/.cache/huggingface \
+		-e HTTP_PROXY="http://fwdproxy:8080" \
+		-e HTTPS_PROXY="http://fwdproxy:8080" \
+		-v /data/users/${USER}/huggingface:/root/.cache/huggingface \
+		-v ${PWD}:/workspace/ \
+		--cap-add SYS_ADMIN \
+		--device /dev/fuse \
+		--security-opt apparmor:unconfined \
+		--privileged \
+		vllm/vllm-openai:latest \
+		--model openai/gpt-oss-120b \
+		--port 8002 --host :: \
+		--api-key dummy \
+		--data-parallel-size 1 \
+		--tensor-parallel-size 2 \
+		--pipeline-parallel-size 1 \
+		--gpu-memory-utilization 0.9 --max_model_len 24576 \
+		--load_format safetensors \
+		--trust_remote_code \
+		--guided_decoding_backend guidance --guided-decoding-disable-fallback \
+		--enable_auto_tool_choice --tool_call_parser hermes \
+		--scheduling_policy priority \
+		--enable_chunked_prefill --max_num_batched_tokens 2048 \
+		--max_log_len 0 --max_num_seqs 144 \
+		--enable_prefix_caching --prefix-caching-hash-algo builtin \
+		--generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
+		--return-tokens-as-token-ids \
+		--async-scheduling

@@ -811,7 +811,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_host", action="store_true")
     parser.add_argument("--port", type=int, default=8456)
-    parser.add_argument("--workers", type=int, default=os.cpu_count())
+    parser.add_argument("--workers", type=int, default=(os.cpu_count()-10)) #
     parser.add_argument("--device", type=str, default="4")
     parser.add_argument("--max_timeout_seconds", type=int, default=240)
     args = parser.parse_args()
