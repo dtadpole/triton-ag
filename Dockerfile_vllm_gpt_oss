@@ -1,0 +1,23 @@
+# FROM pytorch/pytorch:2.8.0-cuda12.9-cudnn9-runtime
+FROM docker.io/vllm/vllm-openai:gptoss
+# Prevent interactive prompts during package installation
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV CUDA_HOME=/usr/local/cuda
+ARG WORK_DIR=none
+ARG HTTP_PROXY="http://fwdproxy:8080"
+ARG HTTPS_PROXY="http://fwdproxy:8080"
+
+RUN echo 'APT::Sandbox::User "root";' | tee -a /etc/apt/apt.conf.d/10sandbox
+
+# Vllm issue https://github.com/vllm-project/vllm/issues/22525
+# add below items and then run docker container with -v /home/akhojast/triton-ag/encodings/:/etc/encodings/:ro
+
+# RUN https_proxy=http://fwdproxy:8080 http_proxy=http://fwdproxy:8080 wget https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken
+# RUN https_proxy=http://fwdproxy:8080 http_proxy=http://fwdproxy:8080 wget https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken
+# RUN mkdir /etc/encodings && mv o200k_base.tiktoken /etc/encodings && mv cl100k_base.tiktoken /etc/encodings
+# ENV TIKTOKEN_ENCODINGS_BASE=/etc/encodings
+
+ENV PATH="/root/.local/bin/:$PATH"
+WORKDIR /workspace
