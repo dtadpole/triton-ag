@@ -227,7 +227,7 @@ vllm-qwen3-32b-devserver:
     --return-tokens-as-token-ids \
     --enforce-eager
 
-vllm-qwen3-32b-devserver_b:
+vllm-qwen3-32b-devserver_a:
 	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=4,5,6,7 python -m vllm.entrypoints.openai.api_server \
     --model Qwen/Qwen3-32B \
     --port 8001 --host :: \
@@ -254,7 +254,7 @@ vllm-qwen3-32b-devserver_b:
     --return-tokens-as-token-ids \
     --enforce-eager
 
-vllm-qwen3-32b-devserver_a:
+vllm-qwen3-32b-devserver_b:
 	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=0,1,2,3 python -m vllm.entrypoints.openai.api_server \
     --model Qwen/Qwen3-32B \
     --port 8002 --host :: \

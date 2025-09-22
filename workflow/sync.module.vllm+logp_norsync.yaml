@@ -1,0 +1,21 @@
+sync_task:
+  # required input variables:
+  # - block.prefix_tag
+  # - block.context[checkpoint_name]
+  # - block.context[vllm_providers]
+  # - block.context[logp_providers]
+  # - block.context[sync_hosts]
+  steps:
+    - type: code
+      code_snippet_path: 'workflow/sync_lora_all.py'
+      code_snippet_block: |
+        __async__ = sync_lora_all(
+            prefix_tag=block.prefix_tag,
+            checkpoint_name=block.context['checkpoint_name'],
+            vllm_providers=block.context['vllm_providers'],
+            logp_providers=block.context['logp_providers'],
+        )
+      async: true
+      returns:
+        logging:
+          info: "✅ Sync completed for LoRA adapter [{block.context[checkpoint_name]}] to vllm {block.context[vllm_providers]} and logp {block.context[logp_providers]}"
