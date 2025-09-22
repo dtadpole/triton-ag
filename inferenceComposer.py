@@ -37,8 +37,8 @@ class ComposerClient:
         module_file: str = "inference/codeGenEval.module.yaml",
         prompt_file: str = "inference/triton.prompt.yaml",
         example_file: str = "inference/triton.example.yaml",
-        output_dir: str = "~/.inference/output",
-        stats_dir: str = "~/.trainer/stats",
+        output_dir: str = INFERENCE_DIR + "/output",
+        stats_dir: str = TRAINER_DIR + "/stats",
     ):
         with open(prompt_file, 'r') as f:
             self.prompt_config = yaml.safe_load(f)

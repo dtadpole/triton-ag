@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from torch.utils.data import Dataset
 from trainerUtil import SimpleCollator
 from workflowUtil import merge_dicts
+from util import INFERENCE_DIR, TRAINER_DIR
 
 class TrainerStatus(BaseModel):
     """Running status of the trainer"""
@@ -60,7 +61,7 @@ class EngineTrainingConfig(BaseModel):
     eval_steps: int = 20
     retain_steps: int = 1000
     logging_steps: int = 1
-    checkpoint_path: str = "~/.trainer"
+    checkpoint_path: str = TRAINER_DIR
     latest_checkpoint_name: Optional[str] = "checkpoint-latest"
     max_grad_norm: float = 0.1
     scheduler_type: str = "cosine"

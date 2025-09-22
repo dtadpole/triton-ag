@@ -5,6 +5,7 @@ import traceback
 from logger import logger
 from datetime import datetime
 from pydantic import BaseModel, Field
+from util import INFERENCE_DIR, TRAINER_DIR
 
 
 MODEL_OVERRIDE_KEY = "adapter.model_override"
@@ -26,8 +27,8 @@ class TrainerBlock(BaseModel):
     epoch_id: int
     block_id: int
     input_tag: str
-    input_dir: str = Field(default="~/.inference/output")
-    output_dir: str = Field(default="~/.trainer")
+    input_dir: str = Field(default=INFERENCE_DIR + "/output")
+    output_dir: str = Field(default=TRAINER_DIR)
     context: dict = Field(default={})
 
 class InferenceBlock(BaseModel):
