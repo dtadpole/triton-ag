@@ -72,6 +72,7 @@ class VLLMClient:
     def __init__(self, provider_name: str, config_file: str = "inferenceClient.yaml"):
         provider_common_config = self.from_yaml(provider_name, config_file)
         self.base_url = provider_common_config.get('base_url', 'http://localhost:8091/v1')
+        self.lora_folder = provider_common_config.get('lora_folder', '~/.trainer')
         self.hostname = self.base_url.split('://')[1].split(':')[0]
         self.port = self.base_url.split(':')[2].split('/')[0]
         self.api_key_path = os.path.expanduser(provider_common_config.get('api_key_path', '~/.keys/local.api.key'))
@@ -88,7 +89,7 @@ class VLLMClient:
         if provider_name not in config.get('providers', {}):
             raise ValueError(f"Provider [{provider_name}] not found in [{config_file}], available providers: {config.get('providers', {}).keys()}")
         provider_common_config = config.get('providers', {}).get(provider_name, {}).get('common', {})
-        return provider_common_config        
+        return provider_common_config
 
     def load_config(self, config_path: str = "configEndpoints.yaml"):
         """Load config from yaml file"""
