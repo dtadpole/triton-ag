@@ -1,8 +1,10 @@
 async def vllm_load_lora_adapters(vllm_provider: str, checkpoint_name: str):
     from configEndpoints import VLLMClient
+    import os
     # get the vllm client
     vllm_client = VLLMClient(provider_name=vllm_provider)
-    await vllm_client.load_lora_adapter(lora_name=checkpoint_name, lora_path=checkpoint_name)
+    lora_path = os.path.join(vllm_client.lora_folder, checkpoint_name)
+    await vllm_client.load_lora_adapter(lora_name=checkpoint_name, lora_path=lora_path)
 
 async def vllm_unload_lora_adapters(vllm_provider: str, checkpoint_name: str):
     from configEndpoints import VLLMClient

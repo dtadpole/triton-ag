@@ -20,6 +20,7 @@ async def sync_lora_all(
             prefix_tag=prefix_tag,
             vllm_provider=vllm_provider,
             recent_checkpoint_name=checkpoint_name,
+            last_modified_within=60 * 60 * 4, # 4 hours
         )
         # unload unused vllm adapters
         logger.info(f"🔍 Unused LoRA adapters: [{unused_vllm_adapters}] on vLLM server [{vllm_provider}]")
@@ -35,6 +36,7 @@ async def sync_lora_all(
             prefix_tag=prefix_tag,
             logp_provider=logp_provider,
             recent_checkpoint_name=checkpoint_name,
+            last_modified_within=60 * 60 * 4, # 4 hours
         )
         logger.info(f"🔍 Unused LoRA adapters: [{unused_logp_adapters}] on LogP server [{logp_provider}]")
         for unused_logp_adapter in unused_logp_adapters:
