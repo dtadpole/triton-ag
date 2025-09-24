@@ -12,7 +12,7 @@ global:
   start_epoch: 0
   start_block: 0
   end_epoch: 1
-  end_block: 13
+  end_block: 4
 
 init:
   codeGenEval.base:
@@ -22,13 +22,13 @@ init:
       epoch_id: "{epoch_id}"
       block_id: "{block_id}"
       input_tag: "{input_tag}"
-      num_samples: 16
+      num_samples: 4
       num_generations: 8
-      num_turns_per_generation: 4
+      num_turns_per_generation: 1
       parallel_workers: 48
       model_name: qwen3-32b
-      vllm_providers: ["h100_8_5_a"]
-      logp_providers: ["h100_8_5_b"]
+      vllm_providers: ["h100_8_5_a", "h100_8_5_b"]
+      logp_providers: ["a100_4_2_a", "a100_4_2_b"]
       kbeval_providers: ["h8_1"]
       module_file: inference/codeGenEval.module.vllm+logp.yaml
       prompt_file: inference/cuda.prompt.yaml
@@ -46,8 +46,8 @@ init:
     #   num_turns_per_generation: 4
     #   parallel_workers: 48
     #   model_name: qwen3-32b
-    #   vllm_providers: ["h100_8_5_a"]
-    #   logp_providers: ["h100_8_5_b"]
+    #   vllm_providers: ["h100_8_5_a", "h100_8_5_b"]
+    #   logp_providers: ["a100_4_2_a", "a100_4_2_b"]
     #   kbeval_providers: ["h8_1"]
     #   module_file: inference/codeGenEval.module.vllm+logp.yaml
     #   prompt_file: inference/cuda.prompt.yaml
@@ -109,8 +109,8 @@ trainer:
           module_file: workflow/sync.module.vllm+logp_norsync.yaml
           context:
             checkpoint_name: "{env[checkpoint_name]}"
-            vllm_providers: ["h100_8_5_a"]
-            logp_providers: ["h100_8_5_b"]
+            vllm_providers: ["h100_8_5_a", "h100_8_5_b"]
+            logp_providers: ["a100_4_2_a", "a100_4_2_b"]
             sync_hosts: []
             # sync_hosts: ["devvm8490.cco0.facebook.com"]
 
