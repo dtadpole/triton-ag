@@ -87,6 +87,26 @@ env_start:
 env:
 	docker exec -it codegen /bin/bash
 
+
+env_vllm:
+	docker run -it \
+		--name vllm \
+		--replace \
+		--gpus all \
+		--net=host \
+		--shm-size=128g \
+		--pids-limit -1 \
+		--ulimit nofile=65536:65536 \
+		--ulimit nproc=-1:-1\
+		--ulimit memlock=-1:-1 \
+		-v ~/.netrc:/root/.netrc \
+		-v ~/.keys/:/root/.keys/ \
+		-v ${PWD}:/workspace/ \
+		-v /data/users/jingbo25/triton-ag-data/.trainer/:/workspace/shared/.trainer \
+		-v /data/users/${USER}/:/root/.cache/ \
+		--security-opt=label=disable \
+		docker://dtadpole/vllm:v0.8
+
 wandb_login:
 	wandb login --host=https://fairwandb.org
 
@@ -236,23 +256,17 @@ vllm-qwen3-32b-devserver_a:
     --tensor-parallel-size 4 \
     --pipeline-parallel-size 1 \
     --enable-lora --max-lora-rank 128 --max-loras 6 \
-	--lora-modules  \
-		qwen3_32b_sft_t2=shared/finetune_model_output/sft_t2/checkpoint-289  \
-		qwen3_32b_sft_t5=shared/finetune_model_output/sft_t5/checkpoint-181  \
-		qwen3_32b_sft_t6=shared/finetune_model_output/sft_t6/checkpoint-362  \
-		qwen3_32b_sft_t7=shared/finetune_model_output/sft_t7/checkpoint-724  \
-    --gpu-memory-utilization 0.95 --max_model_len 24576 \
+    --gpu-memory-utilization 0.80 --max_model_len 24576 \
     --load_format safetensors \
     --trust_remote_code \
     --guided_decoding_backend guidance --guided-decoding-disable-fallback \
     --enable_auto_tool_choice --tool_call_parser hermes \
     --scheduling_policy priority \
     --enable_chunked_prefill --max_num_batched_tokens 2048 \
-    --max_log_len 0 --max_num_seqs 144 \
+    --max_log_len 0 --max_num_seqs 128 \
     --enable_prefix_caching --prefix-caching-hash-algo builtin \
     --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
-    --return-tokens-as-token-ids \
-    --enforce-eager
+    --return-tokens-as-token-ids
 
 vllm-qwen3-32b-devserver_b:
 	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=0,1,2,3 python -m vllm.entrypoints.openai.api_server \
@@ -263,23 +277,17 @@ vllm-qwen3-32b-devserver_b:
     --tensor-parallel-size 4 \
     --pipeline-parallel-size 1 \
     --enable-lora --max-lora-rank 128 --max-loras 6 \
-	--lora-modules  \
-		qwen3_32b_sft_t2=shared/finetune_model_output/sft_t2/checkpoint-289  \
-		qwen3_32b_sft_t5=shared/finetune_model_output/sft_t5/checkpoint-181  \
-		qwen3_32b_sft_t6=shared/finetune_model_output/sft_t6/checkpoint-362  \
-		qwen3_32b_sft_t7=shared/finetune_model_output/sft_t7/checkpoint-724  \
-    --gpu-memory-utilization 0.95 --max_model_len 24576 \
+    --gpu-memory-utilization 0.80 --max_model_len 24576 \
     --load_format safetensors \
     --trust_remote_code \
     --guided_decoding_backend guidance --guided-decoding-disable-fallback \
     --enable_auto_tool_choice --tool_call_parser hermes \
     --scheduling_policy priority \
     --enable_chunked_prefill --max_num_batched_tokens 2048 \
-    --max_log_len 0 --max_num_seqs 144 \
+    --max_log_len 0 --max_num_seqs 128 \
     --enable_prefix_caching --prefix-caching-hash-algo builtin \
     --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
-    --return-tokens-as-token-ids \
-    --enforce-eager
+    --return-tokens-as-token-ids
 
 
 vllm-qwen3-32b-sft-devserver:
