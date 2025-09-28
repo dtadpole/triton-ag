@@ -1,0 +1,22 @@
+FROM docker://dtadpole/vllm:v0.8
+
+ARG HTTP_PROXY="http://fwdproxy:8080"
+ARG HTTPS_PROXY="http://fwdproxy:8080"
+
+RUN export HTTP_PROXY="http://fwdproxy:8080"
+RUN export HTTPS_PROXY="http://fwdproxy:8080"
+
+RUN echo 'APT::Sandbox::User "root";' | tee -a /etc/apt/apt.conf.d/10sandbox
+
+
+# add -o APT::Sandbox::User=root for proxy to work
+RUN apt-get update
+RUN apt-get -o APT::Sandbox::User=root install -y less nano git tmux sshfs fuse3
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=${CUDA_HOME}/bin:${PATH}
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+WORKDIR /workspace

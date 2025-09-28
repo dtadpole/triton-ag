@@ -23,7 +23,7 @@ def grpo_compute_rewards(
         # for each list, reverse iterate the list, and accumulate discounted reward for earlier turns
         for i, turn in enumerate(reversed(value)):
             correctness_reward = 0.3 if turn["correctness"] else 0.0
-            speedup_reward = (turn["ref_runtime"] / turn["runtime"]) if turn["runtime"] > 0 and turn['ref_runtime'] > 0 else 0.0
+            speedup_reward = (turn["ref_runtime"] / turn["runtime"]) if turn["runtime"] > 0 and turn['ref_runtime'] > 0 else 0.0 # could be noisy
             step_reward = correctness_reward + speedup_reward
             trajectory_reward = step_reward + gamma * trajectory_reward
             turn["reward_items"] = {
@@ -179,7 +179,7 @@ def grpo_group_to_dataset(
             'logp_server_attention_mask': logp_server_attention_mask,
             'input_ids': logp_server_input_ids,
             'attention_mask': logp_server_attention_mask,
-        }) 
+        })
     return group_dataset
 
 
