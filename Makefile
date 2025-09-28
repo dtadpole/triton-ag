@@ -127,6 +127,22 @@ sync_config:
 	cp workflow.yaml shared/config/workflow.yaml
 	cp workflow/* shared/config/workflow/
 
+snapshot_config:
+	@if [ -z "$(prefix_tag)" ]; then \
+		echo "Error: prefix_tag is required. Usage: make snapshot_config prefix_tag=<tag_name>"; \
+		exit 1; \
+	fi
+	@echo "Creating config snapshot with prefix: $(prefix_tag)"
+	@mkdir -p shared/config/snapshot/$(prefix_tag)
+	@find . -maxdepth 2 -name "*.yaml" -not -path "./shared/*" -type f | while read file; do \
+		rel_path=$$(echo $$file | sed 's|^\./||'); \
+		dest_dir=shared/config/snapshot/$(prefix_tag)/$$(dirname $$rel_path); \
+		mkdir -p $$dest_dir; \
+		cp $$file shared/config/snapshot/$(prefix_tag)/$$rel_path; \
+		echo "Copied $$file -> shared/config/snapshot/$(prefix_tag)/$$rel_path"; \
+	done
+	@echo "Config snapshot completed in shared/config/snapshot/$(prefix_tag)/"
+
 lora_merge_compress_autoawq:
 	CUDA_VISIBLE_DEVICES=2 python lora_merge_awq.py
 
