@@ -31,9 +31,10 @@ class TrainerMain:
         engine_config_file = "engineBase.yaml"
         rft_config_file = "trainerRFT.yaml"
         grpo_config_file = "trainerGRPO.yaml"
+        grpo_module_file = "trainer/grpo.module.yaml"
         # initialize trainers (for now, we only have grpo)
         rft_trainer = rft_get_trainer(self.engine, self.prefix_tag, engine_config_file, rft_config_file)
-        grpo_trainer = grpo_get_trainer(self.engine, self.prefix_tag, engine_config_file, grpo_config_file)
+        grpo_trainer = grpo_get_trainer(self.engine, self.prefix_tag, engine_config_file, grpo_config_file, module_file=grpo_module_file)
 
         while True:
             try:
