@@ -81,6 +81,99 @@ def grpo_compute_rewards(
     return groups
 
 
+def grpo_compute_rewards_v2(
+    query_result: list[dict],
+    gamma: float = 0.5,
+    speedup_threahold: float = 1.3,
+    improvement_bonus: float = 0.1,
+    debug: bool = False,
+) -> dict[str, list[dict]]:
+    # for each task_tag, group by gen_tag, and return a list of turns, each turn is a sorted list of rows
+    results_by_gen = {
+        k: list(g) for k, g in groupby(
+            sorted(query_result, key=itemgetter("task_tag","turn_tag")),
+            key=itemgetter("task_tag","gen_tag")
+        )
+    }
+    if debug:
+        print('\nProcessing trajectory (by task_tag, gen_tag)\n')
+    for key, value in results_by_gen.items():
+        previous_max = -1
+        previous_max_speedup = 0
+        # for each list, iteration from first to last, and if current step_reward is better than previous best, give an extra reward
+        for i, turn in enumerate(value):
+            correctness_reward = 0.3 if turn["correctness"] else 0.0
+            speedup_ = (turn["ref_runtime"] / turn["runtime"]) if turn["runtime"] > 0 and turn['ref_runtime'] > 0 else 0.0 # could be noisy
+            if speedup_ >= speedup_threahold:
+                speedup_reward = 0.3
+            else:
+                speedup_reward = 0
+            step_reward = correctness_reward + speedup_reward
+            if previous_max != -1 and (step_reward > previous_max or speedup_ > previous_max_speedup >= speedup_threahold): # reward incremental speed up
+                previous_max = max(previous_max, step_reward)
+                previous_max_speedup = max(previous_max_speedup, speedup_)
+                step_reward += improvement_bonus
+            trajectory_reward = step_reward
+            turn["reward_items"] = {
+                "correctness": correctness_reward,
+                "speedup": speedup_reward,
+                "step_reward": step_reward,
+                "trajectory_reward": trajectory_reward,
+            }
+            turn['reward'] = trajectory_reward
+            turn['turn_only_tag'] = turn['turn_tag'].split('_')[-1]
+        # debug message prints reward for a trajectory
+        if debug:
+            print(key, '=>', [f'{turn["reward"]:.2f}' for turn in value])
+
+    # for each task_tag, group by gen_tag, and return a list of turns, each turn is a sorted list of generations
+    results_by_turn_only = {
+        k: list(g) for k, g in groupby(
+            sorted(query_result, key=itemgetter("task_tag","turn_only_tag","gen_tag")),
+            key=itemgetter("task_tag","turn_only_tag")
+        )
+    }
+    if debug:
+        print('\nProcessing trajectory (by task_tag, turn_only_tag)\n')
+    groups = {}
+    for key, value in results_by_turn_only.items():
+        # if all the rewards in the group for different gen_tag are 0, then ignore the group
+        if all(gen["reward"] == 0.0 for gen in value):
+            continue
+        if len(value) == 1:
+            # ignore single item groups
+            continue
+        # ignore the case when the reward contrast is not large enough, such the case all generations are full scores
+        max_reward_ = max(gen["reward"] for gen in value)
+        min_reward_ = min(gen["reward"] for gen in value)
+        if (max_reward_ - min_reward_) < 0.01:
+            continue
+        # otherwise, create a group with prompt, logprobs, (including the task_tag and turn_only_tag)
+        group = [{
+            "task_tag": item["task_tag"],
+            "gen_tag": item["gen_tag"],
+            "turn_only_tag": item["turn_only_tag"],
+            "turn_tag": item["turn_tag"],
+            "reward": item["reward"],
+            "reward_items": item["reward_items"],
+            "prompt": item["prompt"],
+            "logprobs": item["logprobs"],
+            "logp_server_prompt_ids": item["prompt_ids"],
+            "logp_server_completion_ids": item["completion_ids"],
+            "logp_server_input_ids": item["input_ids"],
+            "logp_server_logps": item["logps"],
+            "runtime": item["runtime"],
+            "checkpoint_name": item["metadata"]["model_override"].split("/")[-1] if "model_override" in item["metadata"] and item["metadata"]["model_override"] else None,
+        } for item in value]
+        # add the group to the groups dict
+        groups[key] = group
+
+        if debug:
+            print(key, '=>', [f'{gen["reward"]:.2f}' for gen in value])
+
+    return groups
+
+
 def grpo_compute_advantages(
     groups: dict[str, list[dict]],
     reward_scale: bool = True,
