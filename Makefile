@@ -47,6 +47,14 @@ else
 endif
 
 
+build_vllm: Dockerfile_vllm
+ifeq (${IS_DEVSERVER}, 1)
+	echo "Current hostname is "${HOST}
+	$(META_PROXY) docker build . -f Dockerfile_vllm --no-cache --net=host --format=docker --tag vllm
+else
+	docker build . -f Dockerfile_vllm --net=host --format=docker --tag vllm
+endif
+
 build_docker_autoawq: Dockerfile_autoawq
 ifeq (${IS_DEVSERVER}, 1)
 	$(META_PROXY) docker build -f Dockerfile_autoawq --network=host --progress=plain  -t autoawq .
@@ -59,7 +67,7 @@ env_autoawq:
 	docker run -it  --gpus all --net=host -p 8081:8081 -p 8082:8082 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.inference/:/root/.inference/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/autoawq /bin/bash
 
 env_start:
-	docker run -d \
+	$(META_PROXY) docker run -d \
 		--name codegen \
 		--replace \
 		--gpus all \
@@ -87,25 +95,33 @@ env_start:
 env:
 	docker exec -it codegen /bin/bash
 
-
 env_vllm:
-	docker run -it \
+	docker exec -it vllm /bin/bash
+
+env_vllm_start:
+	docker run -d \
 		--name vllm \
 		--replace \
 		--gpus all \
+		--cap-add SYS_ADMIN \
 		--net=host \
 		--shm-size=128g \
 		--pids-limit -1 \
 		--ulimit nofile=65536:65536 \
 		--ulimit nproc=-1:-1\
 		--ulimit memlock=-1:-1 \
+		-v ~/.ssh/:/root/.ssh \
 		-v ~/.netrc:/root/.netrc \
+		-v ~/.gitconfig:/root/.gitconfig \
 		-v ~/.keys/:/root/.keys/ \
-		-v ${PWD}:/workspace/ \
-		-v /data/users/jingbo25/triton-ag-data/.trainer/:/workspace/shared/.trainer \
 		-v /data/users/${USER}/:/root/.cache/ \
-		--security-opt=label=disable \
-		docker://dtadpole/vllm:v0.8
+		-v ${PWD}:/workspace/ \
+		--cap-add SYS_ADMIN \
+		--device /dev/fuse \
+		--security-opt apparmor:unconfined \
+		--privileged \
+		localhost/vllm \
+		/bin/bash -c "make mount_shared_drive && tail -f /dev/null"
 
 wandb_login:
 	wandb login --host=https://fairwandb.org
