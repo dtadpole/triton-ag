@@ -4,7 +4,7 @@ def is_devserver() -> bool:
     import socket
 
     hostname = socket.gethostname()
-    return "facebook.com" in hostname
+    return "facebook.com" in hostname or "fbinfra.net" in hostname
 
 ## Define the global data folders
 if is_devserver():
