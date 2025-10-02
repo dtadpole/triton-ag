@@ -393,7 +393,7 @@ def main():
                 os.environ["TORCH_CUDA_ARCH_LIST"] = f"{major}.{minor}"
                 os.environ["CUDAARCHS"] = f"{major}{minor}"
                 os.environ.update({
-                    'MAX_JOBS': str(6),
+                    'MAX_JOBS': str(4),
                     'NVCC_APPEND_FLAGS': "--threads=4",
                     'CUDA_NVCC_FLAGS': "-O1 --use_fast_math --ptxas-options=-O1"
                 })
