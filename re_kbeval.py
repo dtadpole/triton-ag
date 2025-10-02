@@ -11,12 +11,13 @@ from kbEvalClient import KbEvalClient
 
 
 CONFIG_FILE = "kbEval.yaml"
-PROVIDER = "h8_2"
+PROVIDER = "od_a8_2"
 OUTPUT_DIR = "shared/re_kbeval"
 MAX_CONCURRENT = 100
 
 
-OVERWRITE = False
+OVERWRITE = True
+REFERENCE_EVAL_ONLY = True
 
 
 def read_code_file(filename):
@@ -120,9 +121,12 @@ async def process_codes(reference_code_path, generated_code_path):
     # Run evaluation with retry logic
     max_retries = 3
     eval_results = {}
+    eval_results_ref = {}
     # Create a hash of the generated_code to use as eval_tag
     eval_tag = hashlib.sha256(generated_code.encode("utf-8")).hexdigest()
 
+    # generate output filename for reference
+    reference_output_path = get_output_filename(reference_code_path)
 
     # Generate output filename
     output_path = get_output_filename(generated_code_path)
@@ -130,14 +134,45 @@ async def process_codes(reference_code_path, generated_code_path):
         print(f"Output file already exists: {output_path}")
         return None
 
+    if REFERENCE_EVAL_ONLY is False:
+        for attempt in range(1, max_retries + 1):
+            try:
+                eval_results = await kbeval_client.kb_eval(
+                    [PROVIDER],
+                    reference_code=reference_code,
+                    generated_code=generated_code,
+                    run_tag="re_kbeval",
+                    eval_tag=eval_tag,
+                )
+                break  # Success, exit loop
+            except Exception as e:
+                if attempt == max_retries:
+                    print(f"Evaluation failed after {max_retries} attempts: {e}")
+                    raise
+                else:
+                    print(f"Attempt {attempt} failed with error: {e}. Retrying...")
+
+        if len(eval_results) == 0:
+            print(f"Evaluation failed for {generated_code_path}")
+            return None
+        # Ensure output directory exists
+        ensure_output_dir()
+
+
+        # Save results as JSON
+        with open(output_path, "w") as f:
+            json.dump(eval_results, f, indent=2)
+        print(f"Results saved to: {output_path}")
+
+    # evaluation for reference
     for attempt in range(1, max_retries + 1):
         try:
-            eval_results = await kbeval_client.kb_eval(
+            task_tag = reference_code_path.split("/")[-2]
+            eval_results_ref = await kbeval_client.kb_eval_ref(
                 [PROVIDER],
                 reference_code=reference_code,
-                generated_code=generated_code,
                 run_tag="re_kbeval",
-                eval_tag=eval_tag,
+                task_tag=task_tag,
             )
             break  # Success, exit loop
         except Exception as e:
@@ -147,18 +182,10 @@ async def process_codes(reference_code_path, generated_code_path):
             else:
                 print(f"Attempt {attempt} failed with error: {e}. Retrying...")
 
-    if len(eval_results) == 0:
-        print(f"Evaluation failed for {generated_code_path}")
-        return None
-    # Ensure output directory exists
-    ensure_output_dir()
+    with open(reference_output_path, "w") as f:
+        json.dump(eval_results_ref, f, indent=2)
+    print(f"Results saved to: {reference_output_path}")
 
-
-    # Save results as JSON
-    with open(output_path, "w") as f:
-        json.dump(eval_results, f, indent=2)
-
-    print(f"Results saved to: {output_path}")
     return eval_results
 
 
@@ -258,7 +285,7 @@ if __name__ == "__main__":
             % (i)
         )
         foler_level1 = [
-            os.path.join(test_folders, f_) for f_ in os.listdir(test_folders)
+            os.path.join(test_folders, f_) for f_ in os.listdir(test_folders) if "deepseek-reasoner" in f_
         ]
         for folder_ in foler_level1:
             folder_level2 = [os.path.join(folder_, f_) for f_ in os.listdir(folder_)]
@@ -267,7 +294,7 @@ if __name__ == "__main__":
                 file_pairs.extend(
                     [
                         (reference_file, generated_file)
-                        for generated_file in generated_files
+                        for generated_file in generated_files[0:1]
                     ]
                 )
 
@@ -283,6 +310,5 @@ if __name__ == "__main__":
     #     file_pairs.extend([(reference_file, generated_file) for generated_file in generated_files])
 
     print(f"Total pairs: {len(file_pairs)}")
-
     asyncio.run(process_all_pairs(file_pairs, max_concurrent=MAX_CONCURRENT))
     print("All evaluations completed!")
