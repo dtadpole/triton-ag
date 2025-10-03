@@ -343,7 +343,8 @@ def time_execution_with_cuda_event(
             kernel_fn(*args)
             end_event.record(stream=stream)
             # Synchronize to ensure the events have completed
-            torch.cuda.synchronize(device=device)
+            # torch.cuda.synchronize(device=device)
+            end_event.synchronize()
 
             # Calculate the elapsed time in milliseconds
             elapsed_time_ms = start_event.elapsed_time(end_event)
