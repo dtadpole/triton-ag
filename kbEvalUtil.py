@@ -319,16 +319,16 @@ def time_execution_with_cuda_event(
         device = torch.cuda.current_device()
 
     elapsed_times = []
-    stream = torch.cuda.Stream(device=device)
-    with torch.cuda.device(device), torch.cuda.stream(stream):
+    # stream = torch.cuda.Stream(device=device) # comment out to use default stream
+    with torch.cuda.device(device):
         # Warm ups
         for _ in range(num_warmups):
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
             # use exact same device as the actual trials
-            start_event.record(stream=stream)
+            start_event.record()
             kernel_fn(*args)
-            end_event.record(stream=stream)
+            end_event.record()
             # Synchronize to ensure the events have completed
             torch.cuda.synchronize(device=device)
 
@@ -339,12 +339,12 @@ def time_execution_with_cuda_event(
             end_event = torch.cuda.Event(enable_timing=True)
             # start_event.device = device
             # end_event.device = device
-            start_event.record(stream=stream)
+            start_event.record()
             kernel_fn(*args)
-            end_event.record(stream=stream)
+            end_event.record()
             # Synchronize to ensure the events have completed
-            # torch.cuda.synchronize(device=device)
-            end_event.synchronize()
+            torch.cuda.synchronize(device=device)
+            # end_event.synchronize()
 
             # Calculate the elapsed time in milliseconds
             elapsed_time_ms = start_event.elapsed_time(end_event)
