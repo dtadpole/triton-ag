@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from torch import nn
 from kbEvalUtil import KernelExecResult, from_kbEval_yaml, format_exception, CorrectnessResult, CorrectnessError, CorrectnessProcessingError, CompileError, CompileInstantiationError, CompileRuntimeError
 from kbEvalUtil import CorrectnessShapeMismatchError, CorrectnessValueMismatchError, set_seed, get_timing_stats, time_execution_with_cuda_event, load_model_and_inputs, load_custom_model, graceful_eval_cleanup, on_critical_alarm, on_critical_timeout, on_process_timeout, resolve_triton_code
-from kbEvalUtil import get_cache_build_directory, generate_cache_hash
+from kbEvalUtil import get_cache_build_directory, generate_cache_hash, resolve_custom_cuda_kernel
 import torch
 import asyncio
 import os
@@ -186,6 +186,9 @@ def eval_kernel_custom(
             if code_type == "triton":
                 # check there is function call from ModelNew.forward to @triton.jit function(s)
                 resolve_triton_code(generated_code)
+            elif code_type == "cuda":
+                # check if the generated cuda code is a valid cuda kernel
+                resolve_custom_cuda_kernel(generated_code)
 
     except CompileError as e:
         formatted_error = format_exception(e)
