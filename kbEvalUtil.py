@@ -440,6 +440,29 @@ class FunctionCallMapper(ast.NodeVisitor):
             return self._get_call_name(node.func)
         return None
 
+def resolve_custom_cuda_kernel(code: str):
+    """
+    Resolve the custom CUDA kernel code, check for valid kernel implementation
+    and raise corresponding errors based on validation results.
+    """
+    validation_results = validate_custom_cuda_kernel(code)
+    if not validation_results["has_kernel_function"]:
+        raise CompileResolveComponentError("No __global__ kernel function found")
+    if not validation_results["has_kernel_launch"]:
+        raise CompileResolveComponentError("No kernel launch syntax (<<< >>>) found")
+    if not validation_results["has_thread_indexing"]:
+        raise CompileResolveComponentError("No CUDA thread indexing (threadIdx, blockIdx, etc.) found")
+    if validation_results["library_shortcuts"]:
+        shortcuts = ", ".join(validation_results["library_shortcuts"][:3])
+        if len(validation_results["library_shortcuts"]) > 3:
+            shortcuts += f" (and {len(validation_results['library_shortcuts']) - 3} more)"
+        raise CompileResolveComponentError(f"Custom CUDA kernel uses library shortcuts: {shortcuts}")
+    if not validation_results["is_valid_custom_kernel"]:
+        raise CompileResolveComponentError("Invalid custom CUDA kernel implementation")
+    logger.info(f"Custom CUDA kernel validation passed")
+    return True
+
+
 def resolve_triton_code(code: str):
     """
     Resolve the triton code, check there is function call from ModelNew.forward to @triton.jit function(s)
@@ -680,22 +703,355 @@ def print_cache_info(generated_code: str, file_path: str) -> None:
     print(f"{'build_directory':20}: {build_dir}")
 
 
+def validate_custom_cuda_kernel(cuda_source: str) -> dict:
+    """
+    Comprehensive validation for custom CUDA kernels based on KernelBench operations.
+    Detects library shortcuts that bypass actual kernel implementation.
+    """
+    results = {
+        "has_kernel_function": False,
+        "has_kernel_launch": False,
+        "has_thread_indexing": False,
+        "library_shortcuts": [],
+        "is_valid_custom_kernel": False
+    }
+
+    # Check for kernel definition
+    if "__global__" in cuda_source:
+        results["has_kernel_function"] = True
+
+    # Check for kernel launch
+    if "<<<" in cuda_source and ">>>" in cuda_source:
+        results["has_kernel_launch"] = True
+
+    # Check for thread indexing
+    thread_patterns = ["threadIdx", "blockIdx", "blockDim", "gridDim"]
+    if any(pattern in cuda_source for pattern in thread_patterns):
+        results["has_thread_indexing"] = True
+
+    # EXPANDED: Comprehensive library shortcuts based on KernelBench Level 1 & 2
+    shortcuts = {
+        # ===== PyTorch ATen Library (Most Common Hack!) =====
+        "torch::": [
+            # Level 1: Matrix Operations
+            "torch::matmul", "torch::mm", "torch::bmm", "torch::addmm",
+            "torch::baddbmm", "torch::dot", "torch::mv", "torch::ger",
+
+            # Level 1: Convolution Operations
+            "torch::conv1d", "torch::conv2d", "torch::conv3d",
+            "torch::conv_transpose1d", "torch::conv_transpose2d", "torch::conv_transpose3d",
+
+            # Level 1: Pooling Operations
+            "torch::max_pool1d", "torch::max_pool2d", "torch::max_pool3d",
+            "torch::avg_pool1d", "torch::avg_pool2d", "torch::avg_pool3d",
+            "torch::adaptive_avg_pool1d", "torch::adaptive_avg_pool2d", "torch::adaptive_avg_pool3d",
+            "torch::adaptive_max_pool1d", "torch::adaptive_max_pool2d", "torch::adaptive_max_pool3d",
+
+            # Level 1: Activation Functions
+            "torch::relu", "torch::gelu", "torch::silu", "torch::sigmoid",
+            "torch::tanh", "torch::softmax", "torch::log_softmax",
+            "torch::leaky_relu", "torch::elu", "torch::selu", "torch::prelu",
+            "torch::softplus", "torch::softsign", "torch::hardtanh", "torch::hardsigmoid",
+            "torch::hardswish", "torch::mish", "torch::swish",
+
+            # Level 1: Normalization Layers
+            "torch::layer_norm", "torch::batch_norm", "torch::group_norm",
+            "torch::instance_norm", "torch::local_response_norm",
+
+            # Level 1: Loss Functions
+            "torch::cross_entropy", "torch::nll_loss", "torch::mse_loss",
+            "torch::l1_loss", "torch::smooth_l1_loss", "torch::binary_cross_entropy",
+            "torch::binary_cross_entropy_with_logits", "torch::kl_div",
+            "torch::cosine_embedding_loss", "torch::ctc_loss",
+
+            # Level 1: Reduction Operations
+            "torch::sum", "torch::mean", "torch::prod", "torch::max", "torch::min",
+            "torch::argmax", "torch::argmin", "torch::median", "torch::std", "torch::var",
+            "torch::norm", "torch::dist", "torch::logsumexp",
+
+            # Level 1: Element-wise Operations
+            "torch::add", "torch::sub", "torch::mul", "torch::div",
+            "torch::pow", "torch::exp", "torch::log", "torch::sqrt",
+            "torch::abs", "torch::neg", "torch::reciprocal",
+            "torch::clamp", "torch::clip",
+
+            # Level 1: Dropout & Regularization
+            "torch::dropout", "torch::alpha_dropout", "torch::feature_alpha_dropout",
+
+            # Level 1: Embedding Operations
+            "torch::embedding", "torch::embedding_bag",
+
+            # Level 1: Attention Operations
+            "torch::scaled_dot_product_attention", "torch::multi_head_attention_forward",
+
+            # Level 1: Upsampling/Interpolation
+            "torch::upsample_nearest1d", "torch::upsample_nearest2d", "torch::upsample_nearest3d",
+            "torch::upsample_linear1d", "torch::upsample_bilinear2d", "torch::upsample_trilinear3d",
+            "torch::interpolate",
+
+            # Level 2: Fused Operations (Common Patterns)
+            "torch::addmm", "torch::addbmm", "torch::addmv",
+            "torch::addr", "torch::baddbmm",
+        ],
+
+        # ===== ATen Native & CUDA Implementations =====
+        "at::native::": [
+            "at::native::", # Catch-all for any native implementation
+        ],
+        "at::cuda::": [
+            "at::cuda::", # Catch-all for CUDA implementations
+        ],
+        "at::": [
+            "at::matmul", "at::conv", "at::batch_norm", "at::layer_norm",
+            "at::softmax", "at::log_softmax", "at::relu", "at::gelu",
+        ],
+
+        # ===== cuBLAS (BLAS Library) =====
+        "cublas": [
+            # GEMM variants (Matrix Multiply)
+            "cublasSgemm", "cublasDgemm", "cublasHgemm", "cublasCgemm", "cublasZgemm",
+            "cublasGemmEx", "cublasGemmBatchedEx", "cublasGemmStridedBatchedEx",
+
+            # Other BLAS operations
+            "cublasSaxpy", "cublasDaxpy", "cublasSdot", "cublasDdot",
+            "cublasSscal", "cublasDscal", "cublasSnrm2", "cublasDnrm2",
+            "cublasSgemv", "cublasDgemv", "cublasSger", "cublasDger",
+        ],
+
+        # ===== cuDNN (Deep Neural Network Library) =====
+        "cudnn": [
+            # Convolution
+            "cudnnConvolutionForward", "cudnnConvolutionBackwardData", "cudnnConvolutionBackwardFilter",
+            "cudnnConvolutionBiasActivationForward",
+
+            # Pooling
+            "cudnnPoolingForward", "cudnnPoolingBackward",
+
+            # Activation
+            "cudnnActivationForward", "cudnnActivationBackward",
+
+            # Softmax
+            "cudnnSoftmaxForward", "cudnnSoftmaxBackward",
+
+            # Normalization
+            "cudnnBatchNormalizationForward", "cudnnBatchNormalizationBackward",
+            "cudnnNormalizationForward", "cudnnNormalizationBackward",
+
+            # RNN
+            "cudnnRNNForward", "cudnnRNNBackward",
+
+            # Dropout
+            "cudnnDropoutForward", "cudnnDropoutBackward",
+        ],
+
+        # ===== Thrust (High-level CUDA C++ Library) =====
+        "thrust::": [
+            "thrust::reduce", "thrust::transform", "thrust::sort",
+            "thrust::copy", "thrust::fill", "thrust::sequence",
+            "thrust::transform_reduce", "thrust::inclusive_scan", "thrust::exclusive_scan",
+            "thrust::gather", "thrust::scatter", "thrust::partition",
+            "thrust::unique", "thrust::remove", "thrust::count",
+        ],
+
+        # ===== CUB (CUDA Unbound Library) =====
+        "cub::": [
+            "cub::DeviceReduce", "cub::DeviceScan", "cub::DeviceHistogram",
+            "cub::BlockReduce", "cub::BlockScan", "cub::WarpReduce",
+            "cub::DeviceSelect", "cub::DevicePartition",
+        ],
+
+        # ===== cuFFT (Fast Fourier Transform) =====
+        "cufft": [
+            "cufftExecC2C", "cufftExecR2C", "cufftExecC2R",
+            "cufftPlan1d", "cufftPlan2d", "cufftPlan3d",
+        ],
+
+        # ===== cuSPARSE (Sparse Matrix Operations) =====
+        "cusparse": [
+            "cusparseSpMV", "cusparseSpMM", "cusparseSpGEMM",
+            "cusparseCsrgemm", "cusparseCsrmv",
+        ],
+
+        # ===== cuSOLVER (Linear Algebra Solvers) =====
+        "cusolver": [
+            "cusolverDnSgeqrf", "cusolverDnSgetrf", "cusolverDnSpotrf",
+        ],
+
+        # ===== cuRAND (Random Number Generation) =====
+        "curand": [
+            "curandGenerateUniform", "curandGenerateNormal",
+            "curandGenerateLogNormal", "curandGeneratePoisson",
+        ],
+
+        # ===== CUTLASS (CUDA Templates for Linear Algebra Subroutines) =====
+        "cutlass::": [
+            "cutlass::gemm", "cutlass::conv",
+        ],
+
+        # ===== NCCL (NVIDIA Collective Communications Library) =====
+        "nccl": [
+            "ncclAllReduce", "ncclBroadcast", "ncclReduce",
+            "ncclAllGather", "ncclReduceScatter",
+        ],
+
+        # ===== TensorRT Core Operations =====
+        "tensorrt": [
+            "tensorrt::ILayer", "tensorrt::IConvolutionLayer",
+        ],
+    }
+
+    # Check for library shortcuts
+    for category, patterns in shortcuts.items():
+        for pattern in patterns:
+            if pattern in cuda_source:
+                results["library_shortcuts"].append(pattern)
+
+    # Determine if it's a valid custom kernel
+    results["is_valid_custom_kernel"] = (
+        results["has_kernel_function"] and
+        results["has_kernel_launch"] and
+        results["has_thread_indexing"] and
+        len(results["library_shortcuts"]) == 0
+    )
+
+    return results
+
+
+# ===== ADDITIONAL VALIDATION: Check for Functional Patterns =====
+def check_kernel_implementation_patterns(cuda_source: str) -> dict:
+    """
+    Check if the kernel actually implements the algorithm vs calling libraries.
+    """
+    patterns = {
+        # Good signs - actual implementation
+        "implements_algorithm": False,
+        "uses_shared_memory": False,
+        "uses_thread_cooperation": False,
+        "manual_memory_access": False,
+
+        # Bad signs - library delegation
+        "delegates_to_library": False,
+        "minimal_cuda_code": False,
+    }
+
+    # Good patterns (indicates real implementation)
+    good_indicators = {
+        "uses_shared_memory": ["__shared__", "extern __shared__"],
+        "uses_thread_cooperation": ["__syncthreads()", "cooperative_groups"],
+        "manual_memory_access": ["data_ptr<", "[idx]", "[threadIdx", "[blockIdx"],
+        "implements_algorithm": [
+            "for", "while",  # loops for computation
+            "float sum", "double sum", "int sum",  # accumulation variables
+            "atomicAdd", "atomicMax", "atomicMin",  # atomic operations
+        ]
+    }
+
+    for pattern_name, indicators in good_indicators.items():
+        if any(ind in cuda_source for ind in indicators):
+            patterns[pattern_name] = True
+
+    # Check if it's mostly just a wrapper
+    lines = cuda_source.split('\n')
+    code_lines = [l.strip() for l in lines if l.strip() and not l.strip().startswith('//')]
+
+    if len(code_lines) < 10:
+        patterns["minimal_cuda_code"] = True
+
+    # Check if it delegates to library (torch::, at::, cublas, etc)
+    library_patterns = ["torch::", "at::", "cublas", "cudnn", "thrust::"]
+    if any(lib in cuda_source for lib in library_patterns):
+        patterns["delegates_to_library"] = True
+
+    return patterns
+
+
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser()
     argparser.add_argument("--code", type=str, required=True)
+    argparser.add_argument("--code_type", type=str, required=False, default="triton")
     args = argparser.parse_args()
 
     # read code from file
     with open(args.code, "r") as f:
         code = f.read()
 
-    print(resolve_triton_code(code))
-
+    if args.code_type == "triton":
+        print(resolve_triton_code(code))
+    else:
+        print(resolve_custom_cuda_kernel(code))
 
     # Test the hash function
     test_code = """
-    #include <torch/extension.h>
-    __global__ void test_kernel() { }
+import torch.nn as nn
+from torch.utils.cpp_extension import load_inline
+
+cuda_source = '''
+#include <torch/extension.h>
+#include <cuda_runtime.h>
+
+__global__ void hinge_loss_kernel(const float* predictions, const float* targets, float* loss, int n) {
+    extern __shared__ float sdata[];
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Compute clamped values
+    float value = 0.0f;
+    if (idx < n) {
+        float temp = 1.0f - predictions[idx] * targets[idx];
+        value = fmaxf(0.0f, temp);
+    }
+
+    // Parallel reduction for sum
+    sdata[threadIdx.x] = value;
+    __syncthreads();
+
+    for (int s = blockDim.x/2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            sdata[threadIdx.x] += sdata[threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        atomicAdd(loss, sdata[0]);
+    }
+}
+
+torch::Tensor hinge_loss_cuda(torch::Tensor predictions, torch::Tensor targets) {
+    int n = predictions.numel();
+    auto loss = torch::zeros({}, predictions.options());
+
+    if (n > 0) {
+        int threads = 1024;
+        int blocks = (n + threads - 1) / threads;
+        hinge_loss_kernel<<<blocks, threads, threads * sizeof(float)>>>(
+            predictions.data_ptr<float>(),
+            targets.data_ptr<float>(),
+            loss.data_ptr<float>(),
+            n
+        );
+    }
+
+    return loss / n;
+}
+'''
+
+cpp_source = "torch::Tensor hinge_loss_cuda(torch::Tensor predictions, torch::Tensor targets);"
+
+hinge_loss_ext = load_inline(
+    name='hinge_loss_ext',
+    cpp_sources=cpp_source,
+    cuda_sources=cuda_source,
+    functions=['hinge_loss_cuda'],
+    verbose=False
+)
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+
+    def forward(self, predictions, targets):
+        return hinge_loss_ext.hinge_loss_cuda(predictions, targets)
+
     """
     test_path = "/test/path/file.py"
 
