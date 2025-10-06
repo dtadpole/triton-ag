@@ -900,6 +900,76 @@ def validate_custom_cuda_kernel(cuda_source: str) -> dict:
         ],
     }
 
+    pytorch_heavy_ops = [
+        # Matrix Operations (Level 1)
+        'torch.matmul', 'torch.mm', 'torch.bmm', 'torch.einsum',
+
+        # Convolution Operations (Level 1)
+        'nn.Conv1d', 'nn.Conv2d', 'nn.Conv3d',
+        'nn.ConvTranspose1d', 'nn.ConvTranspose2d', 'nn.ConvTranspose3d',
+        'F.conv1d', 'F.conv2d', 'F.conv3d',
+        'F.conv_transpose1d', 'F.conv_transpose2d', 'F.conv_transpose3d',
+
+        # Pooling Operations (Level 1)
+        'nn.MaxPool1d', 'nn.MaxPool2d', 'nn.MaxPool3d',
+        'nn.AvgPool1d', 'nn.AvgPool2d', 'nn.AvgPool3d',
+        'nn.AdaptiveAvgPool1d', 'nn.AdaptiveAvgPool2d', 'nn.AdaptiveAvgPool3d',
+        'nn.AdaptiveMaxPool1d', 'nn.AdaptiveMaxPool2d', 'nn.AdaptiveMaxPool3d',
+        'F.max_pool1d', 'F.max_pool2d', 'F.max_pool3d',
+        'F.avg_pool1d', 'F.avg_pool2d', 'F.avg_pool3d',
+        'F.adaptive_avg_pool1d', 'F.adaptive_avg_pool2d', 'F.adaptive_avg_pool3d',
+
+        # Activation Functions (Level 1)
+        'nn.ReLU', 'nn.LeakyReLU', 'nn.GELU', 'nn.SiLU', 'nn.Mish',
+        'nn.Sigmoid', 'nn.Tanh', 'nn.Softmax', 'nn.LogSoftmax',
+        'nn.ELU', 'nn.SELU', 'nn.PReLU', 'nn.Softplus', 'nn.Softsign',
+        'nn.Hardtanh', 'nn.HardSigmoid', 'nn.Hardswish', 'nn.Swish',
+        'F.relu', 'F.leaky_relu', 'F.gelu', 'F.silu', 'F.mish',
+        'F.sigmoid', 'F.tanh', 'F.softmax', 'F.log_softmax',
+        'torch.relu', 'torch.sigmoid', 'torch.tanh',
+
+        # Normalization Operations (Level 1)
+        'nn.BatchNorm1d', 'nn.BatchNorm2d', 'nn.BatchNorm3d',
+        'nn.LayerNorm', 'nn.GroupNorm', 'nn.InstanceNorm1d', 'nn.InstanceNorm2d', 'nn.InstanceNorm3d',
+        'F.batch_norm', 'F.layer_norm', 'F.group_norm', 'F.instance_norm',
+
+        # Loss Functions (Level 1)
+        'nn.CrossEntropyLoss', 'nn.NLLLoss', 'nn.MSELoss', 'nn.L1Loss',
+        'nn.SmoothL1Loss', 'nn.BCELoss', 'nn.BCEWithLogitsLoss',
+        'nn.KLDivLoss', 'nn.CosineEmbeddingLoss', 'nn.CTCLoss',
+        'F.cross_entropy', 'F.nll_loss', 'F.mse_loss', 'F.l1_loss',
+
+        # Reduction Operations (Level 1)
+        'torch.sum', 'torch.mean', 'torch.prod', 'torch.max', 'torch.min',
+        'torch.argmax', 'torch.argmin', 'torch.median', 'torch.std', 'torch.var',
+        'torch.norm', 'torch.dist', 'torch.logsumexp',
+
+        # Linear/Recurrent Operations (Level 1)
+        'nn.Linear', 'nn.LSTM', 'nn.GRU', 'nn.RNN',
+        'F.linear',
+
+        # Attention Operations (Level 1)
+        'nn.MultiheadAttention', 'nn.Transformer',
+        'F.scaled_dot_product_attention', 'F.multi_head_attention_forward',
+
+        # Embedding Operations (Level 1)
+        'nn.Embedding', 'nn.EmbeddingBag',
+        'F.embedding', 'F.embedding_bag',
+
+        # Dropout (Level 1)
+        'nn.Dropout', 'nn.Dropout1d', 'nn.Dropout2d', 'nn.Dropout3d',
+        'F.dropout',
+
+        # Upsampling/Interpolation (Level 1)
+        'F.interpolate', 'F.upsample',
+        'F.upsample_nearest', 'F.upsample_bilinear',
+        'nn.Upsample', 'nn.UpsamplingNearest2d', 'nn.UpsamplingBilinear2d',
+    ]
+    results["has_heavy_pytorch_ops"] = False
+    for op in pytorch_heavy_ops:
+        if op in cuda_source:
+            results["has_heavy_pytorch_ops"] = True
+            break
     # Check for library shortcuts
     for category, patterns in shortcuts.items():
         for pattern in patterns:
@@ -911,7 +981,8 @@ def validate_custom_cuda_kernel(cuda_source: str) -> dict:
         results["has_kernel_function"] and
         results["has_kernel_launch"] and
         results["has_thread_indexing"] and
-        len(results["library_shortcuts"]) == 0
+        len(results["library_shortcuts"]) == 0 and
+        not results["has_heavy_pytorch_ops"]
     )
 
     return results
