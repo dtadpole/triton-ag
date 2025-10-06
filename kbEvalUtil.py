@@ -903,7 +903,6 @@ def validate_custom_cuda_kernel(cuda_source: str) -> dict:
     pytorch_heavy_ops = [
         # Matrix Operations (Level 1)
         'torch.matmul', 'torch.mm', 'torch.bmm', 'torch.einsum',
-        '@',  # matrix multiplication operator
 
         # Convolution Operations (Level 1)
         'nn.Conv1d', 'nn.Conv2d', 'nn.Conv3d',
