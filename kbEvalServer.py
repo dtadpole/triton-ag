@@ -43,7 +43,7 @@ parallel_request_counter_lock = asyncio.Lock()
 
 DEVICES = []
 
-MAX_TIMEOUT_SECONDS = 270  # 4.5 minutes
+MAX_TIMEOUT_SECONDS = 600  # 10 minutes
 
 # Cache hit/miss tracking
 CACHE_HIT_THRESHOLD = 20  # seconds - if command completes within this, it's a cache hit
