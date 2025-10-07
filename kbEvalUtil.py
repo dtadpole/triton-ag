@@ -764,12 +764,12 @@ def validate_custom_cuda_kernel(cuda_source: str) -> dict:
             "torch::binary_cross_entropy_with_logits", "torch::kl_div",
             "torch::cosine_embedding_loss", "torch::ctc_loss",
 
-            # Level 1: Reduction Operations
+            # Level 1: Reduction Operations ??
             "torch::sum", "torch::mean", "torch::prod", "torch::max", "torch::min",
             "torch::argmax", "torch::argmin", "torch::median", "torch::std", "torch::var",
             "torch::norm", "torch::dist", "torch::logsumexp",
 
-            # Level 1: Element-wise Operations
+            # Level 1: Element-wise Operations ??
             "torch::add", "torch::sub", "torch::mul", "torch::div",
             "torch::pow", "torch::exp", "torch::log", "torch::sqrt",
             "torch::abs", "torch::neg", "torch::reciprocal",
