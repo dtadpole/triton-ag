@@ -633,7 +633,7 @@ def generate_cache_hash(generated_code: str, file_path: str, hash_length: int=50
         'generated_code': apply_black_formatter(generated_code),
         'nvcc_version': get_nvcc_version(),
         'gpu_card_type': get_gpu_card_type(),
-        'hostname': get_hostname(),
+        # 'hostname': get_hostname(), # Remove hostname to leverage CPU from other hosts to compile the code
         'pytorch_version': get_pytorch_version(),
         'compute_capability': get_compute_capability(),
     }
