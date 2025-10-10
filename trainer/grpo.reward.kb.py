@@ -3,6 +3,8 @@ import numpy as np
 from transformers import AutoTokenizer
 from operator import itemgetter
 from itertools import groupby
+import scipy.stats as stats
+import math
 
 def grpo_compute_rewards(
     query_result: list[dict],
@@ -84,7 +86,7 @@ def grpo_compute_rewards(
 def grpo_compute_rewards_v2(
     query_result: list[dict],
     gamma: float = 0.5,
-    speedup_threahold: float = 1.3,
+    speedup_threahold: float = 1.8,
     improvement_bonus: float = 0.1,
     debug: bool = False,
 ) -> dict[str, list[dict]]:
@@ -369,6 +371,69 @@ def grpo_group_to_dataset(
     return group_dataset
 
 
+def is_mean_larger(mean, std, min_val, max_val, num_trials, fixed_value, alpha=0.05):
+    """
+    Performs a one-sample t-test to determine if the sample mean is
+    statistically significantly larger than a fixed value.
+
+    Parameters:
+    -----------
+    mean : float
+        Sample mean
+    std : float
+        Sample standard deviation
+    min_val : float
+        Minimum value in sample (not used in calculation, for reference)
+    max_val : float
+        Maximum value in sample (not used in calculation, for reference)
+    num_trials : int
+        Number of samples/trials
+    fixed_value : float
+        The hypothesized population mean to test against
+    alpha : float, optional
+        Significance level (default=0.05)
+
+    Returns:
+    --------
+    dict : Dictionary containing:
+        - 'is_larger': bool, True if mean is statistically larger
+        - 't_statistic': float, the calculated t-statistic
+        - 'p_value': float, one-tailed p-value
+        - 'critical_value': float, critical t-value at given alpha
+        - 'effect_size': float, Cohen's d effect size
+    """
+
+    # Calculate t-statistic
+    # t = (sample_mean - hypothesized_mean) / (std_error)
+    # where std_error = std / sqrt(n)
+    std_error = std / math.sqrt(num_trials)
+    t_statistic = (mean - fixed_value) / std_error
+
+    # Degrees of freedom
+    df = num_trials - 1
+
+    # One-tailed p-value (testing if mean > fixed_value)
+    p_value = 1 - stats.t.cdf(t_statistic, df)
+
+    # Critical value for one-tailed test
+    critical_value = stats.t.ppf(1 - alpha, df)
+
+    # Effect size (Cohen's d)
+    cohens_d = (mean - fixed_value) / std
+
+    # Determine if statistically significant
+    is_larger = p_value < alpha
+
+    return {
+        'is_larger': is_larger,
+        't_statistic': t_statistic,
+        'p_value': p_value,
+        'critical_value': critical_value,
+        'effect_size': cohens_d,
+        'alpha': alpha
+    }
+
+
 if __name__ == "__main__":
     import duckdb
     import argparse
@@ -451,3 +516,18 @@ if __name__ == "__main__":
         print('    => len(logp_server_input_ids): ', [f'{len(gen["logp_server_input_ids"])}' for gen in value if "logp_server_input_ids" in gen])
         print('    => len(logp_server_logps): ', [f'{len(gen["logp_server_logps"])}' for gen in value if "logp_server_logps" in gen])
         print('    => len(logp_server_attention_mask): ', [f'{len(gen["logp_server_attention_mask"])}' for gen in value if "logp_server_attention_mask" in gen])
+
+    result = is_mean_larger(
+        mean=105,
+        std=10,
+        min_val=85,
+        max_val=125,
+        num_trials=10,
+        fixed_value=100,
+        alpha=0.05
+    )
+    print(f"Is mean statistically larger? {result['is_larger']}")
+    print(f"T-statistic: {result['t_statistic']:.4f}")
+    print(f"P-value: {result['p_value']:.4f}")
+    print(f"Critical value: {result['critical_value']:.4f}")
+    print(f"Effect size (Cohen's d): {result['effect_size']:.4f}")

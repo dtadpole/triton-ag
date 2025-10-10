@@ -13,7 +13,7 @@ from kbEvalClient import KbEvalClient
 CONFIG_FILE = "kbEval.yaml"
 PROVIDER = ["h8_4", "h8_2"]
 OUTPUT_DIR = "shared/re_kbeval"
-MAX_CONCURRENT = 100
+MAX_CONCURRENT = 50
 
 
 OVERWRITE = True
@@ -265,26 +265,26 @@ if __name__ == "__main__":
     #                 current_paris
     #             )
 
-    for i in range(0, 13):
-        test_folders = (
-            "shared/.inference/codeGenEval/cudacoder_eval_4_turn.qwen32b_repeat_000_%02d"
-            % (i)
-        )
-        foler_level1 = [
-            os.path.join(test_folders, f_) for f_ in os.listdir(test_folders) if "qwen3-32b" in f_
-        ]
-        for folder_ in foler_level1:
-            folder_level2 = [os.path.join(folder_, f_) for f_ in os.listdir(folder_)]
-            for folder_2 in folder_level2:
-                reference_file, generated_files = get_reference_and_generated(folder_2)
-                current_paris = [
-                        [reference_file, generated_file, True]
-                        for generated_file in generated_files
-                    ]
-                current_paris[0][2] = False
-                file_pairs.extend(
-                    current_paris
-                )
+    # for i in range(0, 13):
+    #     test_folders = (
+    #         "shared/.inference/codeGenEval/cudacoder_eval_4_turn.qwen32b_repeat_000_%02d"
+    #         % (i)
+    #     )
+    #     foler_level1 = [
+    #         os.path.join(test_folders, f_) for f_ in os.listdir(test_folders) if "qwen3-32b" in f_
+    #     ]
+    #     for folder_ in foler_level1:
+    #         folder_level2 = [os.path.join(folder_, f_) for f_ in os.listdir(folder_)]
+    #         for folder_2 in folder_level2:
+    #             reference_file, generated_files = get_reference_and_generated(folder_2)
+    #             current_paris = [
+    #                     [reference_file, generated_file, True]
+    #                     for generated_file in generated_files
+    #                 ]
+    #             current_paris[0][2] = False
+    #             file_pairs.extend(
+    #                 current_paris
+    #             )
     # for i in range(0, 13):
     #     test_folders = (
     #         "shared/.inference/codeGenEval/cudacoder_eval_4_turn.qwen32b_000_%02d"
@@ -353,6 +353,11 @@ if __name__ == "__main__":
     #     if key in folders_to_return:
     #         filtered_pairs.append(pair)
     # file_pairs = filtered_pairs
+
+    df = pd.read_pickle("notebooks/error_255_t07.pkl")
+    for r, g in df[["reference_code", "generated_code"]].values:
+        file_pairs.append([r, g, True])
+
     print(f"Total pairs: {len(file_pairs)}")
     asyncio.run(process_all_pairs(file_pairs, max_concurrent=MAX_CONCURRENT))
     print("All evaluations completed!")
