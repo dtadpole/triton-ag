@@ -15,12 +15,24 @@ module:
           input_tag: '`block.input_tag`'
         args:
           query: |
-            WITH evals AS (
+            WITH refs AS(
+                SELECT
+                    regexp_replace(filename, '/[^/]*$', '') AS task_id,
+                    runtime_stats
+                FROM read_json_auto('{input_dir}/{input_tag}/**/reference_eval.json', filename = true)
+            ),
+            evals AS (
                 SELECT
                     filename AS eval_file,
                     regexp_replace(filename, '_generated_eval\.json$', '') AS stem,
-                    compiled, correctness, runtime, reference_runtime as ref_runtime
+                    regexp_replace(filename, '/[^/]*$', '') AS task_id,
+                    compiled, correctness, runtime, reference_runtime as ref_runtime, runtime_stats
                 FROM read_json_auto('{input_dir}/{input_tag}/**/*_generated_eval.json', filename = true)
+            ),
+            evals_join AS (
+                SELECT e.*, r.runtime_stats as ref_runtime_stats
+                FROM evals e
+                LEFT JOIN refs r USING (task_id)
             ),
             comps AS (
                 SELECT
@@ -38,12 +50,12 @@ module:
                 FROM read_json_auto('{input_dir}/{input_tag}/**/*_logps.json', filename = true)
             )
             SELECT
-                e.compiled, e.correctness, e.runtime, e.ref_runtime,
+                e.compiled, e.correctness, e.runtime, e.ref_runtime, e.runtime_stats, e.ref_runtime_stats,
                 c.prompt, c.completion, c.logprobs, c.metadata,
                 e.eval_file, c.completion_file,
                 l.prompt_ids, l.completion_ids, l.input_ids, l.logps,
                 c.task_tag, c.gen_tag, c.turn_tag
-            FROM evals e
+            FROM evals_join e
             JOIN comps c USING (stem)
             JOIN logps l USING (stem)
             ORDER BY task_tag, gen_tag, turn_tag
@@ -60,7 +72,7 @@ module:
         code_snippet_path: 'trainer/grpo.reward.kb.py'
         code_snippet_block: |
           # compute rewards and advantages
-          groups = grpo_compute_rewards_v2(
+          groups = grpo_compute_rewards_v3(
               query_result,
               gamma=grpo_config.gamma,
           )
