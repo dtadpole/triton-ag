@@ -289,22 +289,20 @@ def grpo_compute_rewards_v4(
     if debug:
         print('\nProcessing trajectory (by task_tag, gen_tag)\n')
     for key, value in results_by_gen.items():
-        previous_max = 0.3
-        previous_max_speedup = 9999
+        previous_max_speedup = 0
         # for each list, iteration from first to last, and if current step_reward is better than previous best, give an extra reward
         for i, turn in enumerate(value):
             correctness_reward = 0.3 if turn["correctness"] else 0.0
             speedup_test_result = speedup_threshold_alpha(turn["ref_runtime_stats"], turn["runtime_stats"], alpha=0.05) if turn["runtime"] > 0 and turn['ref_runtime'] > 0 else {} # could be noisy
             speedup_ = speedup_test_result["max_speedup_threshold"] if "max_speedup_threshold" in speedup_test_result else -1
             if speedup_ > 0:
-                speedup_reward = min(0.3, (speedup_ / speedup_threahold)**8 * 0.3)
+                speedup_reward = min(0.3, (speedup_ / speedup_threahold)**6 * 0.3)
             else:
                 speedup_reward = 0
             step_reward = correctness_reward + speedup_reward
-            if i > 0 and (speedup_ > speedup_threahold * 0.8 and speedup_ > previous_max_speedup * 1.1): # reward incremental speed up
-                previous_max = max(previous_max, step_reward)
-                previous_max_speedup = max(previous_max_speedup, speedup_)
+            if i > 0 and (previous_max_speedup >= speedup_threahold and speedup_ > previous_max_speedup * 1.5): # reward incremental speed up
                 step_reward += improvement_bonus
+            previous_max_speedup = max(previous_max_speedup, speedup_)
             trajectory_reward = step_reward
             turn["reward_items"] = {
                 "correctness": correctness_reward,

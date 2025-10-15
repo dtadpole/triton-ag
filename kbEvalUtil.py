@@ -592,6 +592,7 @@ def get_compute_capability() -> str:
     except Exception as e:
         return f"compute_unknown_{str(e)[:10]}"
 
+
 def apply_black_formatter(generated_code: str) -> str:
     """
     Format the given Python code string using the 'black' code formatter.
@@ -794,105 +795,105 @@ def validate_custom_cuda_kernel(cuda_source: str) -> dict:
             "torch::addr", "torch::baddbmm",
         ],
 
-        # ===== ATen Native & CUDA Implementations =====
-        "at::native::": [
-            "at::native::", # Catch-all for any native implementation
-        ],
-        "at::cuda::": [
-            "at::cuda::", # Catch-all for CUDA implementations
-        ],
-        "at::": [
-            "at::matmul", "at::conv", "at::batch_norm", "at::layer_norm",
-            "at::softmax", "at::log_softmax", "at::relu", "at::gelu",
-        ],
+        # # ===== ATen Native & CUDA Implementations =====
+        # "at::native::": [
+        #     "at::native::", # Catch-all for any native implementation
+        # ],
+        # "at::cuda::": [
+        #     "at::cuda::", # Catch-all for CUDA implementations
+        # ],
+        # "at::": [
+        #     "at::matmul", "at::conv", "at::batch_norm", "at::layer_norm",
+        #     "at::softmax", "at::log_softmax", "at::relu", "at::gelu",
+        # ],
 
-        # ===== cuBLAS (BLAS Library) =====
-        "cublas": [
-            # GEMM variants (Matrix Multiply)
-            "cublasSgemm", "cublasDgemm", "cublasHgemm", "cublasCgemm", "cublasZgemm",
-            "cublasGemmEx", "cublasGemmBatchedEx", "cublasGemmStridedBatchedEx",
+        # # ===== cuBLAS (BLAS Library) =====
+        # "cublas": [
+        #     # GEMM variants (Matrix Multiply)
+        #     "cublasSgemm", "cublasDgemm", "cublasHgemm", "cublasCgemm", "cublasZgemm",
+        #     "cublasGemmEx", "cublasGemmBatchedEx", "cublasGemmStridedBatchedEx",
 
-            # Other BLAS operations
-            "cublasSaxpy", "cublasDaxpy", "cublasSdot", "cublasDdot",
-            "cublasSscal", "cublasDscal", "cublasSnrm2", "cublasDnrm2",
-            "cublasSgemv", "cublasDgemv", "cublasSger", "cublasDger",
-        ],
+        #     # Other BLAS operations
+        #     "cublasSaxpy", "cublasDaxpy", "cublasSdot", "cublasDdot",
+        #     "cublasSscal", "cublasDscal", "cublasSnrm2", "cublasDnrm2",
+        #     "cublasSgemv", "cublasDgemv", "cublasSger", "cublasDger",
+        # ],
 
-        # ===== cuDNN (Deep Neural Network Library) =====
-        "cudnn": [
-            # Convolution
-            "cudnnConvolutionForward", "cudnnConvolutionBackwardData", "cudnnConvolutionBackwardFilter",
-            "cudnnConvolutionBiasActivationForward",
+        # # ===== cuDNN (Deep Neural Network Library) =====
+        # "cudnn": [
+        #     # Convolution
+        #     "cudnnConvolutionForward", "cudnnConvolutionBackwardData", "cudnnConvolutionBackwardFilter",
+        #     "cudnnConvolutionBiasActivationForward",
 
-            # Pooling
-            "cudnnPoolingForward", "cudnnPoolingBackward",
+        #     # Pooling
+        #     "cudnnPoolingForward", "cudnnPoolingBackward",
 
-            # Activation
-            "cudnnActivationForward", "cudnnActivationBackward",
+        #     # Activation
+        #     "cudnnActivationForward", "cudnnActivationBackward",
 
-            # Softmax
-            "cudnnSoftmaxForward", "cudnnSoftmaxBackward",
+        #     # Softmax
+        #     "cudnnSoftmaxForward", "cudnnSoftmaxBackward",
 
-            # Normalization
-            "cudnnBatchNormalizationForward", "cudnnBatchNormalizationBackward",
-            "cudnnNormalizationForward", "cudnnNormalizationBackward",
+        #     # Normalization
+        #     "cudnnBatchNormalizationForward", "cudnnBatchNormalizationBackward",
+        #     "cudnnNormalizationForward", "cudnnNormalizationBackward",
 
-            # RNN
-            "cudnnRNNForward", "cudnnRNNBackward",
+        #     # RNN
+        #     "cudnnRNNForward", "cudnnRNNBackward",
 
-            # Dropout
-            "cudnnDropoutForward", "cudnnDropoutBackward",
-        ],
+        #     # Dropout
+        #     "cudnnDropoutForward", "cudnnDropoutBackward",
+        # ],
 
-        # ===== Thrust (High-level CUDA C++ Library) =====
-        "thrust::": [
-            "thrust::reduce", "thrust::transform", "thrust::sort",
-            "thrust::copy", "thrust::fill", "thrust::sequence",
-            "thrust::transform_reduce", "thrust::inclusive_scan", "thrust::exclusive_scan",
-            "thrust::gather", "thrust::scatter", "thrust::partition",
-            "thrust::unique", "thrust::remove", "thrust::count",
-        ],
+        # # ===== Thrust (High-level CUDA C++ Library) =====
+        # "thrust::": [
+        #     "thrust::reduce", "thrust::transform", "thrust::sort",
+        #     "thrust::copy", "thrust::fill", "thrust::sequence",
+        #     "thrust::transform_reduce", "thrust::inclusive_scan", "thrust::exclusive_scan",
+        #     "thrust::gather", "thrust::scatter", "thrust::partition",
+        #     "thrust::unique", "thrust::remove", "thrust::count",
+        # ],
 
-        # ===== CUB (CUDA Unbound Library) =====
-        "cub::": [
-            "cub::DeviceReduce", "cub::DeviceScan", "cub::DeviceHistogram",
-            "cub::BlockReduce", "cub::BlockScan", "cub::WarpReduce",
-            "cub::DeviceSelect", "cub::DevicePartition",
-        ],
+        # # ===== CUB (CUDA Unbound Library) =====
+        # "cub::": [
+        #     "cub::DeviceReduce", "cub::DeviceScan", "cub::DeviceHistogram",
+        #     "cub::BlockReduce", "cub::BlockScan", "cub::WarpReduce",
+        #     "cub::DeviceSelect", "cub::DevicePartition",
+        # ],
 
-        # ===== cuFFT (Fast Fourier Transform) =====
-        "cufft": [
-            "cufftExecC2C", "cufftExecR2C", "cufftExecC2R",
-            "cufftPlan1d", "cufftPlan2d", "cufftPlan3d",
-        ],
+        # # ===== cuFFT (Fast Fourier Transform) =====
+        # "cufft": [
+        #     "cufftExecC2C", "cufftExecR2C", "cufftExecC2R",
+        #     "cufftPlan1d", "cufftPlan2d", "cufftPlan3d",
+        # ],
 
-        # ===== cuSPARSE (Sparse Matrix Operations) =====
-        "cusparse": [
-            "cusparseSpMV", "cusparseSpMM", "cusparseSpGEMM",
-            "cusparseCsrgemm", "cusparseCsrmv",
-        ],
+        # # ===== cuSPARSE (Sparse Matrix Operations) =====
+        # "cusparse": [
+        #     "cusparseSpMV", "cusparseSpMM", "cusparseSpGEMM",
+        #     "cusparseCsrgemm", "cusparseCsrmv",
+        # ],
 
-        # ===== cuSOLVER (Linear Algebra Solvers) =====
-        "cusolver": [
-            "cusolverDnSgeqrf", "cusolverDnSgetrf", "cusolverDnSpotrf",
-        ],
+        # # ===== cuSOLVER (Linear Algebra Solvers) =====
+        # "cusolver": [
+        #     "cusolverDnSgeqrf", "cusolverDnSgetrf", "cusolverDnSpotrf",
+        # ],
 
-        # ===== cuRAND (Random Number Generation) =====
-        "curand": [
-            "curandGenerateUniform", "curandGenerateNormal",
-            "curandGenerateLogNormal", "curandGeneratePoisson",
-        ],
+        # # ===== cuRAND (Random Number Generation) =====
+        # "curand": [
+        #     "curandGenerateUniform", "curandGenerateNormal",
+        #     "curandGenerateLogNormal", "curandGeneratePoisson",
+        # ],
 
-        # ===== CUTLASS (CUDA Templates for Linear Algebra Subroutines) =====
-        "cutlass::": [
-            "cutlass::gemm", "cutlass::conv",
-        ],
+        # # ===== CUTLASS (CUDA Templates for Linear Algebra Subroutines) =====
+        # "cutlass::": [
+        #     "cutlass::gemm", "cutlass::conv",
+        # ],
 
-        # ===== NCCL (NVIDIA Collective Communications Library) =====
-        "nccl": [
-            "ncclAllReduce", "ncclBroadcast", "ncclReduce",
-            "ncclAllGather", "ncclReduceScatter",
-        ],
+        # # ===== NCCL (NVIDIA Collective Communications Library) =====
+        # "nccl": [
+        #     "ncclAllReduce", "ncclBroadcast", "ncclReduce",
+        #     "ncclAllGather", "ncclReduceScatter",
+        # ],
 
         # ===== TensorRT Core Operations =====
         "tensorrt": [
