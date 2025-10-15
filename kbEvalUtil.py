@@ -456,7 +456,9 @@ def resolve_custom_cuda_kernel(code: str):
         shortcuts = ", ".join(validation_results["library_shortcuts"][:3])
         if len(validation_results["library_shortcuts"]) > 3:
             shortcuts += f" (and {len(validation_results['library_shortcuts']) - 3} more)"
-        raise CompileResolveComponentError(f"Custom CUDA kernel uses library shortcuts: {shortcuts}")
+        raise CompileResolveComponentError(f"Custom CUDA kernel uses torch or trensorrt library shortcuts: {shortcuts}, which is not allowed")
+    if validation_results["has_heavy_pytorch_ops"]:
+        raise CompileResolveComponentError(f"Custom CUDA kernel calls pytorch library, which is not allowed")
     if not validation_results["is_valid_custom_kernel"]:
         raise CompileResolveComponentError("Invalid custom CUDA kernel implementation")
     logger.info(f"Custom CUDA kernel validation passed")

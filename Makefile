@@ -127,7 +127,7 @@ wandb_login:
 	wandb login --host=https://fairwandb.org
 
 mount_shared_drive:
-	sshfs -o IdentityFile=/root/.ssh/id_rsa_shared -p 8081 codegen@devvm8492.cco0.facebook.com:/shared/ shared/
+	echo 'dummy' | sshfs -o password_stdin -p 8081 codegen@devvm8492.cco0.facebook.com:/shared/ shared/
 
 mount_shared_code:
 	sshfs -o IdentityFile=/root/.ssh/id_rsa_shared -p 8082 codegen@devvm8492.cco0.facebook.com:/shared/ /workspace/
