@@ -157,12 +157,28 @@ async def sft_train_block(block: TrainerBlock, trainer: SFTTrainer, callback: Op
             raise FileNotFoundError(error_msg)
 
         # query from search_path folder, find all the conversation_*.json files, and load them into a dataframe
-        result = duckdb.sql(f"""SELECT filename, messages, metadata
-                            FROM read_json_auto('{search_path}/**/*_conversation.json', sample_size=-1, ignore_errors=true)
-                            WHERE messages[3]['content'] IS NOT NULL
-                        """)
-
+        result = duckdb.sql(f"""
+        WITH convs AS (
+            SELECT regexp_replace(filename, '_conversation\.json$', '') AS stem,
+                messages,
+                metadata
+            FROM read_json_auto('{search_path}/**/*_conversation.json', sample_size=-1, ignore_errors=true)
+            WHERE messages[3]['content'] IS NOT NULL
+        ),
+        evals AS(
+            SELECT
+                filename AS eval_file,
+                regexp_replace(filename, '_generated_eval\.json$', '') AS stem,
+                regexp_replace(filename, '/[^/]*$', '') AS task_id,
+                compiled, correctness, runtime, reference_runtime as ref_runtime, runtime_stats
+            FROM read_json_auto('{search_path}/**/*_generated_eval.json', filename = true)
+        )
+        SELECT convs.messages, convs.metadata, evals.*
+        FROM convs
+        LEFT JOIN evals  USING(stem)
+        """)
         result_df = result.df()
+        result_df = result_df[result_df["correctness"] == True] # only keep the correct ones
         # create a dataset from result_df['messages']
         message_dataset = MessageDataset(result_df['messages'].tolist(), trainer.tokenizer, trainer.sft_config)
 
