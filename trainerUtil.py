@@ -67,12 +67,12 @@ def format_conversation(messages: List[Dict[str, Any]],
                         ignore_index: int = -100,
                         tools: List[Union[Dict, Callable]] = [],
                         messages_from_openai_agent: bool = False,
-                        user_chat_template_for_masking: bool = True) -> Dict[str, Any]:
+                        use_custom_chat_template_for_masking: bool = True) -> Dict[str, Any]:
     # Always format conversation using chat template to keep the formatted text consistent with pre-trained model
     if messages_from_openai_agent is True:
         raise ValueError("OpenAI Agent format is not supported yet")
 
-    if user_chat_template_for_masking is False:
+    if use_custom_chat_template_for_masking is False:
         try:
             # Use the tokenizer's chat template
             formatted_text = tokenizer.apply_chat_template(
@@ -107,11 +107,15 @@ def format_conversation(messages: List[Dict[str, Any]],
             labels = torch.tensor(labels)
     else:
         try:
+            if mask_non_last_assistant_tokens:
+                custom_chat_template = "\n".join(qwen3_custom_chat_template_list_last_assistant)
+            else:
+                custom_chat_template = "\n".join(qwen3_custom_chat_template_list)
             # Use the tokenizer's chat template
             formatted_text = tokenizer.apply_chat_template(
                 messages,
                 toosl = tools,
-                chat_template="\n".join(qwen3_custom_chat_template_list),
+                chat_template=custom_chat_template,
                 tokenize=False,
                 enable_thinking=True,
                 add_generation_prompt=False
@@ -119,7 +123,7 @@ def format_conversation(messages: List[Dict[str, Any]],
             encoding = tokenizer.apply_chat_template(
                 messages,
                 toosl = tools,
-                chat_template="\n".join(qwen3_custom_chat_template_list),
+                chat_template=custom_chat_template,
                 return_dict=True,
                 tokenize=True,
                 enable_thinking=True,
@@ -314,7 +318,7 @@ class SimpleCollator:
     def __call__(self, batch):
         # Extract sequences
         input_ids = [
-            item['input_ids'].detach().cpu().clone() 
+            item['input_ids'].detach().cpu().clone()
                 if isinstance(item['input_ids'], torch.Tensor)
                 else torch.tensor(item['input_ids'])
             for item in batch
@@ -449,60 +453,136 @@ def test_data_util():
                 "content": "Today's date is 2025-06-14."
             }
         ]
-    },
-    {
-        "tools": [],
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are a helpful assistant."
-            },
-            {
-                "role": "user",
-                "content": "What is the weather in Tokyo?"
-            },
-            {
-                "role": "assistant",
-                "content": "I will use the get_weather function to get the weather in Tokyo.",
-                "tool_calls": [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "get_weather",
-                            "arguments": {
-                                "city": "Tokyo"
-                            }
-                        }
-                    }
-                ]
-            },
-            {
-                "role": "tool",
-                "name": "get_weather",
-                "content": json.dumps({
-                    "city": "Tokyo",
-                    "weather": "sunny"
-                })
-            },
-            {
-                "role": "assistant",
-                "content": "The weather in Tokyo is sunny."
-            }
-        ]
-    }]
+    }
+    ]
 
     for message in messages:
         ## Use chat_completion to get the formatted text
-        formatted_data = format_conversation(message["messages"], tokenizer, tools=message["tools"], mask_non_assistant_tokens=args.mask_non_assistant_tokens, mask_non_last_assistant_tokens=args.mask_non_last_assistant_tokens, user_chat_template_for_masking=False)
+        formatted_data = format_conversation(message["messages"], tokenizer, tools=message["tools"], mask_non_assistant_tokens=args.mask_non_assistant_tokens, mask_non_last_assistant_tokens=args.mask_non_last_assistant_tokens, use_custom_chat_template_for_masking=False)
         logger.info(f"🔍 [test_data_util] Formatted text: {formatted_data['text']}")
         print_masking_analysis(formatted_data, tokenizer)
         ## Use the tokenizer to get the formatted text and masks
-        formatted_data = format_conversation(message["messages"], tokenizer, tools=message["tools"], mask_non_assistant_tokens=args.mask_non_assistant_tokens, mask_non_last_assistant_tokens=args.mask_non_last_assistant_tokens, user_chat_template_for_masking=True)
+        formatted_data = format_conversation(message["messages"], tokenizer, tools=message["tools"], mask_non_assistant_tokens=args.mask_non_assistant_tokens, mask_non_last_assistant_tokens=False, use_custom_chat_template_for_masking=True)
+        logger.info(f"🔍 [test_data_util] Formatted text: {formatted_data['text']}")
+        print_masking_analysis(formatted_data, tokenizer)
+
+        ## Use the tokenizer to get the formatted text and masks
+        formatted_data = format_conversation(message["messages"], tokenizer, tools=message["tools"], mask_non_assistant_tokens=args.mask_non_assistant_tokens, mask_non_last_assistant_tokens=True, use_custom_chat_template_for_masking=True)
         logger.info(f"🔍 [test_data_util] Formatted text: {formatted_data['text']}")
         print_masking_analysis(formatted_data, tokenizer)
 
 # added the support for return_assistant_tokens_mask in apply_chat_template
 # {% generation %} and {% endgeneration %} are used to mark the assistant tokens
+qwen3_custom_chat_template_list_last_assistant = ['{%- if tools %}',
+ "    {{- '<|im_start|>system\\n' }}",
+ "    {%- if messages[0].role == 'system' %}",
+ "        {{- messages[0].content + '\\n\\n' }}",
+ '    {%- endif %}',
+ '    {{- "# Tools\\n\\nYou may call one or more functions to assist with the user query.\\n\\nYou are provided with function signatures within <tools></tools> XML tags:\\n<tools>" }}',
+ '    {%- for tool in tools %}',
+ '        {{- "\\n" }}',
+ '        {{- tool | tojson }}',
+ '    {%- endfor %}',
+ '    {{- "\\n</tools>\\n\\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\\n<tool_call>\\n{\\"name\\": <function-name>, \\"arguments\\": <args-json-object>}\\n</tool_call><|im_end|>\\n" }}',
+ '{%- else %}',
+ "    {%- if messages[0].role == 'system' %}",
+ "        {{- '<|im_start|>system\\n' + messages[0].content + '<|im_end|>\\n' }}",
+ '    {%- endif %}',
+ '{%- endif %}',
+ '{%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1, last_assistant_index=-1) %}',
+ '{%- for message in messages[::-1] %}',
+ '    {%- set index = (messages|length - 1) - loop.index0 %}',
+ '    {%- if ns.multi_step_tool and message.role == "user" and message.content is string and not(message.content.startswith(\'<tool_response>\') and message.content.endswith(\'</tool_response>\')) %}',
+ '        {%- set ns.multi_step_tool = false %}',
+ '        {%- set ns.last_query_index = index %}',
+ '    {%- endif %}',
+ '    {%- if ns.last_assistant_index == -1 and message.role == "assistant" %}',
+ '        {%- set ns.last_assistant_index = index %}',
+ '    {%- endif %}',
+ '{%- endfor %}',
+ '{%- for message in messages %}',
+ '    {%- if message.content is string %}',
+ '        {%- set content = message.content %}',
+ '    {%- else %}',
+ "        {%- set content = '' %}",
+ '    {%- endif %}',
+ '    {%- if (message.role == "user") or (message.role == "system" and not loop.first) %}',
+ "        {{- '<|im_start|>' + message.role + '\\n' + content + '<|im_end|>' + '\\n' }}",
+ '    {%- elif message.role == "assistant" %}',
+ "        {%- set reasoning_content = '' %}",
+ '        {%- if message.reasoning_content is string %}',
+ '            {%- set reasoning_content = message.reasoning_content %}',
+ '        {%- else %}',
+ "            {%- if '</think>' in content %}",
+ "                {%- set reasoning_content = content.split('</think>')[0].rstrip('\\n').split('<think>')[-1].lstrip('\\n') %}",
+ "                {%- set content = content.split('</think>')[-1].lstrip('\\n') %}",
+ '            {%- endif %}',
+ '        {%- endif %}',
+ '        {%- if loop.index0 == ns.last_assistant_index %}',
+ '            {%- if loop.last or (not loop.last and reasoning_content) %}',
+ "                {% generation %}{{- '<|im_start|>' + message.role + '\\n<think>\\n' + reasoning_content.strip('\\n') + '\\n</think>\\n\\n' + content.lstrip('\\n') }} {% endgeneration %}",
+ '            {%- else %}',
+ "                {% generation %}{{- '<|im_start|>' + message.role + '\\n' + content }}{% endgeneration %}",
+ '            {%- endif %}',
+ '        {%- else %}',
+ "            {{- '<|im_start|>' + message.role + '\\n' + content }}",
+ '        {%- endif %}',
+ '        {%- if message.tool_calls %}',
+ '            {%- for tool_call in message.tool_calls %}',
+ '                {%- if (loop.first and content) or (not loop.first) %}',
+ "                    {{- '\\n' }}",
+ '                {%- endif %}',
+ '                {%- if tool_call.function %}',
+ '                    {%- set tool_call = tool_call.function %}',
+ '                {%- endif %}',
+ '                {%- if loop.index0 == ns.last_assistant_index %}',
+ '                    {% generation %}{{- \'<tool_call>\\n{"name": "\' }}',
+ '                    {{- tool_call.name }}',
+ '                    {{- \'", "arguments": \' }}',
+ '                    {%- if tool_call.arguments is string %}',
+ '                        {{- tool_call.arguments }}',
+ '                    {%- else %}',
+ '                        {{- tool_call.arguments | tojson }}',
+ '                    {%- endif %}',
+ "                    {{- '}\\n</tool_call>' }}{% endgeneration %}",
+ '                {%- else %}',
+ '                    {{- \'<tool_call>\\n{"name": "\' }}',
+ '                    {{- tool_call.name }}',
+ '                    {{- \'", "arguments": \' }}',
+ '                    {%- if tool_call.arguments is string %}',
+ '                        {{- tool_call.arguments }}',
+ '                    {%- else %}',
+ '                        {{- tool_call.arguments | tojson }}',
+ '                    {%- endif %}',
+ "                    {{- '}\\n</tool_call>' }}",
+ '                {%- endif %}',
+ '            {%- endfor %}',
+ '        {%- endif %}',
+ '        {%- if loop.index0 == ns.last_assistant_index %}',
+ "            {% generation %}{{- '<|im_end|>\\n' }}{% endgeneration %}",
+ '        {%- else %}',
+ "            {{- '<|im_end|>\\n' }}",
+ '        {%- endif %}',
+ '    {%- elif message.role == "tool" %}',
+ '        {%- if loop.first or (messages[loop.index0 - 1].role != "tool") %}',
+ "            {{- '<|im_start|>user' }}",
+ '        {%- endif %}',
+ "        {{- '\\n<tool_response>\\n' }}",
+ '        {{- content }}',
+ "        {{- '\\n</tool_response>' }}",
+ '        {%- if loop.last or (messages[loop.index0 + 1].role != "tool") %}',
+ "            {{- '<|im_end|>\\n' }}",
+ '        {%- endif %}',
+ '    {%- endif %}',
+ '{%- endfor %}',
+ '{%- if add_generation_prompt %}',
+ "    {{- '<|im_start|>assistant\\n' }}",
+ '    {%- if enable_thinking is defined and enable_thinking is false %}',
+ "        {{- '<think>\\n\\n</think>\\n\\n' }}",
+ '    {%- endif %}',
+ '{%- endif %}']
+
+
 qwen3_custom_chat_template_list = ['{%- if tools %}',
  "    {{- '<|im_start|>system\\n' }}",
  "    {%- if messages[0].role == 'system' %}",

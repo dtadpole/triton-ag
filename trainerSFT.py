@@ -191,7 +191,7 @@ async def sft_train_block(block: TrainerBlock, trainer: SFTTrainer, callback: Op
 
     # train the block
     try:
-        await trainer.engine.train_block(block.input_tag, message_dataset, callback=callback)
+        await trainer.engine.train_block(block.input_tag, message_dataset, callback=callback, save_at_end=True)
         await asyncio.sleep(1)
         logger.info(f"🎉 [SFTTrainer] [{block.input_tag}] Training completed successfully!")
     except Exception as e:
