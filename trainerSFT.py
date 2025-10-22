@@ -170,12 +170,13 @@ async def sft_train_block(block: TrainerBlock, trainer: SFTTrainer, callback: Op
                 filename AS eval_file,
                 regexp_replace(filename, '_generated_eval\.json$', '') AS stem,
                 regexp_replace(filename, '/[^/]*$', '') AS task_id,
-                compiled, correctness, runtime, reference_runtime as ref_runtime, runtime_stats
+                compiled, correctness, runtime
             FROM read_json_auto('{search_path}/**/*_generated_eval.json', filename = true)
         )
-        SELECT convs.messages, convs.metadata, evals.*
+        SELECT convs.messages, convs.metadata, convs.stem, evals.*
         FROM convs
         LEFT JOIN evals  USING(stem)
+        ORDER BY convs.stem;
         """)
         result_df = result.df()
         result_df = result_df[result_df["correctness"] == True] # only keep the correct ones
