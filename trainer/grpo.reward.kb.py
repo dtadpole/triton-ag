@@ -592,13 +592,13 @@ def speedup_alpha(ref_dict, test_dict, speedup_threshold=1.3, alpha=0.05):
     }
     """
 
-    mean_ref = ref_dict['mean']
-    std_ref = ref_dict['std']
-    n_ref = ref_dict['num_trials']
+    mean_ref = float(ref_dict['mean'])
+    std_ref = float(ref_dict['std'])
+    n_ref = int(ref_dict['num_trials'])
 
-    mean_test = test_dict['mean']
-    std_test = test_dict['std']
-    n_test = test_dict['num_trials']
+    mean_test = float(test_dict['mean'])
+    std_test = float(test_dict['std'])
+    n_test = float(test_dict['num_trials'])
 
     # Observed speedup
     observed_speedup = mean_test / mean_ref
