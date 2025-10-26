@@ -689,11 +689,7 @@ def speedup_threshold_alpha(ref_dict, test_dict, alpha=0.05):
 
     mean_test = float(test_dict['mean'])
     std_test = float(test_dict['std'])
-<<<<<<< HEAD
     n_test = int(test_dict['num_trials'])
-=======
-    n_test = float(test_dict['num_trials'])
->>>>>>> 9e880e8498bccd100e34a15bb2c4a19c2ff7d376
 
     # Observed speedup
     observed_speedup = mean_test / mean_ref
