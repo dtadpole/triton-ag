@@ -1,0 +1,321 @@
+module:
+  name: codeGen
+  # built-in context like `self` has already been set
+  # here we add addotional context variables for easier access by the program
+  # variables will be evaluated sequentially, so that later variables can use earlier variables
+  context_vars:
+    model_tag: "`__runtime__.model_tag`"
+    tokenizer: "`__runtime__.tokenizer`"
+
+  # input processor adds jobs to the queue
+  input_processor:
+    task_sampler:
+      steps:
+        - type: endpoint
+          endpoint: duckdbClient.sql
+          args:
+            query: |
+              SELECT filename as kb_filename, content as reference_code
+              FROM read_text('{input_dir}/**/*.py');
+          returns:
+            error_if: "`__result__ is None`"
+            context_vars:
+              query_result: "`__result__`"
+            logging:
+              method: "log_input_processor"
+        - type: code
+          context_vars:
+            model_tag: "`__runtime__.model_tag`"
+          code_snippet_path: 'inference/reward_sampling.py'
+          code_snippet_block: |
+            sampled_df = sample_based_on_reward(
+                query_result=query_result,
+                block=block,
+                model_tag=model_tag,
+                speedup_threahold=1.3,
+                recent_n_logs=100,
+                reward_average_n=5,
+                temperature=1.0,
+                min_exploration=0.04
+            )
+            __result__ = sampled_df
+          returns:
+            error_if: '`__result__ is None`'
+        - type: iterator
+          collection: "`[row for idx, row in sampled_df.iterrows()]`"
+          context_vars:
+            row: "`__item__`"
+            run_tag: "`f'{block.prefix_tag}_{block.epoch_id:03d}_{block.block_id:02d}' if block.epoch_id >= 0 and block.block_id >= 0 else f'{block.prefix_tag}_{__runtime_start_time__}'`" # run_tag is the prefix tag + epoch id + block id
+            task_tag: "`'_'.join('_'.join(row.kb_filename.split('/')[-2:]).split('_')[:5])`" # task_tag joins the level and filename, and returns the first 5 parts
+            gen_tag: "reference"
+          steps:
+            - type: endpoint
+              endpoint: queue.put_nowait
+              args:
+                item:
+                  worker: "eval.reference"
+                  prefix_tag: "`prefix_tag`"
+                  run_tag: "`run_tag`"
+                  model_tag: "`model_tag`"
+                  task_tag: "`task_tag`"
+                  kb_filename: "`row.kb_filename`" # kb_filename is the filename
+                  reference_code: "`row.reference_code`" # reference code
+                  output_dir: "`os.path.expanduser(block.output_dir)`" # output_dir is the output directory
+                  kbeval_providers: "`block.kbeval_providers`" # kb eval providers
+                  context: "`block.context`"
+                  # generate code and evaluate
+              returns:
+                logging:
+                  method: "log_enqueue"
+            - type: iterator  ## Potential efficiency improvement, add the num_generations to the openai interface and do batch generation
+              collection: "`range(block.num_generations)`"
+              context_vars:
+                gen_tag: "`f'gen_{__item__:02d}'`" # gen_tag is the generation tag
+              steps:
+                - type: endpoint
+                  endpoint: queue.put_nowait
+                  args:
+                    item:
+                      worker: "codeGenEval.base"
+                      prefix_tag: "`prefix_tag`"
+                      run_tag: "`run_tag`"
+                      model_tag: "`model_tag`"
+                      task_tag: "`task_tag`"
+                      gen_tag: "`gen_tag`" # gen_tag is the generation tag
+                      reference_code: "`row.reference_code`" # reference code
+                      code_type: "`__runtime__.get_prompt_code_type(__context__)`"
+                      output_dir: "`os.path.expanduser(block.output_dir)`" # output_dir is the output directory
+                      num_turns_per_generation: "`block.num_turns_per_generation`" # number of turns per generation
+                      vllm_providers: "`block.vllm_providers`" # vllm providers
+                      logp_providers: "`block.logp_providers`" # logp providers
+                      kbeval_providers: "`block.kbeval_providers`" # kb eval providers
+                      context: "`block.context`"
+                  returns:
+                    logging:
+                      method: "log_enqueue"
+
+  # queue worker reads from the queue and executes the worker
+  queue_worker:
+    # reference worker
+    eval.reference:
+      context_vars:
+        record_folder: "`f'{output_dir}/{run_tag}/{model_tag}/{task_tag}'`"
+      steps:
+        - type: endpoint
+          endpoint: kbEvalClient.kb_eval_ref
+          args:
+            provider: "`kbeval_providers`"
+            reference_code: "`reference_code`"
+            run_tag: "`run_tag`"
+            model_tag: "`model_tag`"
+            task_tag: "`task_tag`"
+          # returned variables will be added to the context
+          returns:
+            error_if: "`__result__ is None or __result__['runtime'] <= 0`"
+            context_vars:
+              reference_eval: "`__result__`"
+              reference_eval_path: "`f'{record_folder}/reference_eval.json'`"
+              reference_code_path: "`f'{record_folder}/reference_code.py'`"
+            save_to:
+              - path: "`reference_code_path`"
+                data: "`reference_code`"
+                format: "text"
+              - path: "`reference_eval_path`"
+                data: "`reference_eval`"
+                format: "json"
+            logging:
+              method: "log_kb_eval_ref"
+        - type: endpoint
+          endpoint: statsClient.add_data_point
+          args:
+            prefix_tag: "`prefix_tag`"
+            model_tag: "`model_tag`"
+            task_tag: "`task_tag`"
+            category: "reference"
+            data: "`reference_eval`"
+    # codeGenEval worker
+    codeGenEval.base:
+      context_vars:
+        record_folder: "`f'{output_dir}/{run_tag}/{model_tag}/{task_tag}'`"
+        generated_code: null
+        generated_eval: null
+        conversation: null
+        completion: null
+      steps:
+        - type: endpoint
+          endpoint: statsClient.wait_for_stats
+          args:
+            prefix_tag: "`prefix_tag`"
+            model_tag: "`model_tag`"
+            task_tag: "`task_tag`"
+            category: "reference"
+          returns:
+            error_if: "`__result__ is None or __result__['runtime'] <= 0`"
+            context_vars:
+              reference_eval: "`__result__`"
+              reference_eval_path: "`f'{stats_dir}/{prefix_tag}/reference/{task_tag}/reference.jsonl'`"
+            logging:
+              method: "log_kb_eval_ref"
+        - type: iterator
+          collection: "`range(num_turns_per_generation)`"
+          context_vars:
+            turn_tag: "`f'{gen_tag}_t{__item__:02d}'`" # turn_tag is gen_01_t03
+          steps:
+            - type: code
+              code_snippet_path: 'inference/model_override.py'
+              code_snippet_block: |
+                # get model override
+                __async__ = update_model_override(
+                    prefix_tag=prefix_tag,
+                    worker_name=worker_name,
+                    proc_id=proc_id,
+                    worker_id=worker_id,
+                )
+              async: true
+              returns:
+                context_vars:
+                  model_override: "`__result__`"
+                logging:
+                  info: "🔍 [{worker_name}.p{proc_id}.w{worker_id}] Model override: [{model_override}]"
+            - type: endpoint
+              endpoint: inferenceClient.completion
+              context_vars:
+                metadata:
+                  "run_tag": "`run_tag`"
+                  "model_tag": "`model_tag`"
+                  "task_tag": "`task_tag`"
+                  "gen_tag": "`gen_tag`"
+                  "turn_tag": "`turn_tag`"
+                  "code_type": "`code_type`"
+                  "model_override": "`model_override`"
+                messages: |
+                  `[
+                    {"role": "system", "content": __runtime__.get_system_prompt(__context__)},
+                    {"role": "user", "content": __runtime__.get_user_prompt(__context__)}
+                  ] if conversation is None else conversation['messages'][:-1] + [
+                    {"role": "assistant", "content": f"```python\n{generated_code}\n```"}
+                  ] + [
+                    {"role": "user", "content": __runtime__.get_user_prompt(__context__)}
+                  ]
+                  `
+                prompt: |
+                  `__runtime__.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=True,
+                  )`
+              args:
+                provider: "`vllm_providers`"
+                prompt: "`prompt`"
+                logprobs: true
+                model_override: "`model_override`"
+              returns:
+                error_if: "`__result__ is None`"
+                context_vars:
+                  metadata: |
+                    `metadata | {
+                      "num_completion_tokens": len(__result__['logprobs']),
+                      "completion_time_seconds": __endpoint_time__,
+                      "token_per_second": len(__result__['logprobs']) / __endpoint_time__,
+                    }
+                    `
+                  messages: |
+                    `messages + [
+                      {"role": "assistant", "content": __result__['content']}
+                    ]`
+                  completion:
+                    "prompt": "`prompt`"
+                    "completion": "`__result__['content']`"
+                    "logprobs": "`__result__['logprobs']`"
+                    "metadata": "`metadata`"
+                  conversation:
+                    messages: "`messages`"
+                    metadata: "`metadata`"
+                  conversation_path: "`f'{record_folder}/{turn_tag}_conversation.json'`"
+                  completion_path: "`f'{record_folder}/{turn_tag}_completion.json'`"
+                save_to:
+                  - path: "`conversation_path`"
+                    data: "`conversation`"
+                    format: "json"
+                  - path: "`completion_path`"
+                    data: "`completion`"
+                    format: "json"
+                logging:
+                  method: "log_completion"
+            - type: endpoint
+              endpoint: codeExtractor.extract_code
+              args:
+                completion: "`__runtime__.tokenizer.decode([logprob['token_id'] for logprob in completion['logprobs']], skip_special_tokens=True)`"
+              returns:
+                error_if: "`__result__ is None or __result__['code'] is None`"
+                context_vars:
+                  generated_code: "`__result__['code']`"
+                  generated_reasoning: "`__result__['reasoning']`"
+                  generated_code_path: "`f'{record_folder}/{turn_tag}_generated_code.py'`"
+                  generated_reasoning_path: "`f'{record_folder}/{turn_tag}_generated_reasoning.txt'`"
+                save_to:
+                  - path: "`generated_code_path`"
+                    data: "`generated_code`"
+                    format: "text"
+                  - path: "`generated_reasoning_path`"
+                    data: "`generated_reasoning`"
+                    format: "text"
+                logging:
+                  method: "log_code_extraction"
+            - type: endpoint
+              endpoint: kbEvalClient.kb_eval
+              args:
+                provider: "`kbeval_providers`"
+                reference_code: "`reference_code`"
+                generated_code: "`generated_code`"
+                run_tag: "`run_tag`"
+                model_tag: "`model_tag`"
+                task_tag: "`task_tag`"
+                eval_tag: "`turn_tag`" # eval_tag is the turn tag
+                code_type: "`code_type`" # code_type is the code type
+              returns:
+                error_if: "`__result__ is None`"
+                context_vars:
+                  reference_runtime: "`reference_eval['runtime']`"
+                  speedup: "`reference_runtime / __result__['runtime'] if __result__['runtime'] > 0 and reference_runtime > 0 else 0.0`"
+                  generated_eval: '`__result__ | { "reference_runtime": reference_runtime, "speedup": speedup }`'
+                  generated_eval_path: "`f'{record_folder}/{turn_tag}_generated_eval.json'`"
+                save_to:
+                  - path: "`generated_eval_path`"
+                    data: "`generated_eval`"
+                    format: "json"
+                logging:
+                  method: "log_kb_eval"
+            - type: endpoint
+              endpoint: statsClient.add_data_point
+              args:
+                prefix_tag: "`prefix_tag`"
+                model_tag: "`model_tag`"
+                task_tag: "`task_tag`"
+                category: "generated"
+                data: "`generated_eval`"
+            - type: endpoint
+              endpoint: logpClient.logps
+              context_vars:
+                prompt_ids: "`__runtime__.tokenizer.encode(prompt)`"
+                completion_ids: "`[logprob['token_id'] for logprob in completion['logprobs']]`"
+                input_ids: "`prompt_ids + completion_ids`"
+              args:
+                provider: "`logp_providers`"
+                model_name: "`model_override or __runtime__.inferenceClient.model_full_name`"
+                input_ids: "`input_ids`"
+              returns:
+                error_if: "`__result__ is None`"
+                context_vars:
+                  output_data:
+                    prompt_ids: "`prompt_ids`"
+                    completion_ids: "`completion_ids`"
+                    input_ids: "`__result__['input_ids']`"
+                    logps: "`__result__['logps']`"
+                save_to:
+                  - path: "`f'{record_folder}/{turn_tag}_logps.json'`"
+                    data: "`output_data`"
+                    format: "json"
+                logging:
+                  method: "log_logps"

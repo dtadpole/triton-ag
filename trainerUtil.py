@@ -1,5 +1,7 @@
 import json
 import yaml
+import numpy as np
+import pandas as pd
 import argparse
 import torch
 from pydantic import BaseModel
@@ -409,6 +411,170 @@ def print_masking_analysis(batch, tokenizer):
 
     logger.info("=" * 50)
     logger.info("DONE")
+
+
+def softmax_temperature_sampling(
+    candidates_df,
+    rewards_df,
+    n_samples,
+    temperature=1.0,
+    min_exploration=0.05,
+    task_id_col='task_id',
+    reward_col='reward',
+    return_probabilities=False,
+    random_state=None
+):
+    """
+    Sample candidates based on inverse normalized task rewards.
+
+    The function:
+    1. Normalizes rewards to [0, 1] range (0=worst, 1=best)
+    2. Inverts them: sampling_weight = (1 - normalized_reward)^(1/temperature)
+    3. Low-performing tasks (reward→0, normalized→0) get high sampling weight (→1)
+    4. High-performing tasks (reward→1, normalized→1) get low sampling weight (→0)
+
+    Parameters:
+    -----------
+    candidates_df : pd.DataFrame
+        DataFrame containing candidate information
+        Must have column specified by task_id_col
+
+    rewards_df : pd.DataFrame
+        DataFrame containing task rewards/performance
+        Must have columns specified by task_id_col and reward_col
+
+    n_samples : int
+        Number of candidates to sample
+
+    temperature : float, default=1.0
+        Controls the sampling distribution:
+        - Lower (e.g., 0.1-0.5): Strong focus on hard/low-reward tasks
+        - 1.0: Linear inverse relationship
+        - Higher (e.g., 2.0-5.0): More uniform sampling
+
+    min_exploration : float, default=0.05
+        Minimum probability for each task to prevent curriculum collapse
+        Should be in range [0, 1]
+
+    task_id_col : str, default='task_id'
+        Name of the column containing task IDs (used in both DataFrames)
+
+    reward_col : str, default='reward'
+        Name of the column containing rewards in rewards_df
+
+    return_probabilities : bool, default=False
+        If True, also return the sampling probabilities for each candidate
+
+    random_state : int or None, default=None
+        Random seed for reproducibility
+
+    Returns:
+    --------
+    sampled_df : pd.DataFrame
+        Sampled candidates (low-reward tasks are sampled more frequently)
+
+    probabilities : pd.Series (optional)
+        Sampling probability for each candidate (if return_probabilities=True)
+    """
+
+    # Validate column names exist
+    if task_id_col not in candidates_df.columns:
+        raise ValueError(f"Column '{task_id_col}' not found in candidates_df. "
+                        f"Available columns: {list(candidates_df.columns)}")
+
+    if task_id_col not in rewards_df.columns:
+        raise ValueError(f"Column '{task_id_col}' not found in rewards_df. "
+                        f"Available columns: {list(rewards_df.columns)}")
+
+    if reward_col not in rewards_df.columns:
+        raise ValueError(f"Column '{reward_col}' not found in rewards_df. "
+                        f"Available columns: {list(rewards_df.columns)}")
+
+    # Validate inputs
+    if n_samples > len(candidates_df):
+        raise ValueError(f"n_samples ({n_samples}) cannot exceed number of candidates ({len(candidates_df)})")
+
+    if not 0 <= min_exploration <= 1:
+        raise ValueError(f"min_exploration must be in [0, 1], got {min_exploration}")
+
+    if temperature <= 0:
+        raise ValueError(f"temperature must be positive, got {temperature}")
+
+    # Set random seed if provided
+    if random_state is not None:
+        np.random.seed(random_state)
+
+    # Step 1: Normalize rewards to [0, 1]
+    rewards_work = rewards_df.copy()
+
+    min_reward = rewards_work[reward_col].min()
+    max_reward = rewards_work[reward_col].max()
+
+    if max_reward == min_reward:
+        # All rewards are the same, use uniform sampling
+        rewards_work['normalized_reward'] = 0.5
+    else:
+        # Min-max normalization
+        rewards_work['normalized_reward'] = (rewards_work[reward_col] - min_reward) / (max_reward - min_reward)
+
+    # Step 2: Compute inverse with temperature
+    # Task with normalized_reward = 1.0 → inverse = 0.0 → almost no samples
+    # Task with normalized_reward = 0.0 → inverse = 1.0 → most samples
+    inverse_scores = 1.0 - rewards_work['normalized_reward']
+
+    # Apply temperature: raise to power (1/temperature)
+    # Lower temperature → more extreme differences
+    # Higher temperature → more uniform
+    inverse_scores_temp = np.power(inverse_scores, 1.0 / temperature)
+
+    # Step 3: Convert to probabilities (normalize to sum to 1)
+    if inverse_scores_temp.sum() == 0:
+        # Edge case: all scores are 0
+        task_probs = np.ones(len(rewards_work)) / len(rewards_work)
+    else:
+        task_probs = inverse_scores_temp / inverse_scores_temp.sum()
+
+    # Step 4: Add minimum exploration probability
+    n_tasks = len(rewards_work)
+    uniform_prob = 1.0 / n_tasks
+    task_probs = (1 - min_exploration) * task_probs + min_exploration * uniform_prob
+    task_probs = task_probs / task_probs.sum()
+
+    # Create task probability mapping
+    rewards_work['task_prob'] = task_probs
+    task_prob_map = rewards_work[[task_id_col, 'task_prob']].set_index(task_id_col)['task_prob'].to_dict()
+
+    # Step 5: Assign probabilities to candidates based on their task
+    candidates_work = candidates_df.copy()
+    candidates_work['candidate_prob'] = candidates_work[task_id_col].map(task_prob_map)
+
+    # Check for missing task mappings
+    if candidates_work['candidate_prob'].isna().any():
+        missing_tasks = candidates_work[candidates_work['candidate_prob'].isna()][task_id_col].unique()
+        raise ValueError(f"Missing rewards for {task_id_col}(s): {missing_tasks}")
+
+    # Normalize candidate probabilities to sum to 1
+    candidate_probs = candidates_work['candidate_prob'].values
+    candidate_probs = candidate_probs / candidate_probs.sum()
+
+    # Step 6: Sample candidates based on probabilities
+    sampled_indices = np.random.choice(
+        len(candidates_work),
+        size=n_samples,
+        replace=False,
+        p=candidate_probs
+    )
+
+    # Get sampled candidates
+    sampled_df = candidates_df.iloc[sampled_indices].copy()
+    sampled_df = sampled_df.reset_index(drop=True)
+
+    if return_probabilities:
+        sampled_probs = pd.Series(candidate_probs[sampled_indices])
+        return sampled_df, sampled_probs.reset_index(drop=True)
+
+    return sampled_df
+
 
 
 def test_data_util():

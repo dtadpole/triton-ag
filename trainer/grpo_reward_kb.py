@@ -386,9 +386,11 @@ def grpo_compute_rewards_v5(
         # for each list, iteration from first to last, and if current step_reward is better than previous best, give an extra reward
         for i, turn in enumerate(value):
             correctness_reward = 0.3 if turn["correctness"] else 0.0
-            speedup_test_result = speedup_threshold_alpha(turn["ref_runtime_stats"], turn["runtime_stats"], alpha=0.05) if turn["runtime"] > 0 and turn['ref_runtime'] > 0 else {} # could be noisy
-            speedup_ = speedup_test_result["max_speedup_threshold"] if "max_speedup_threshold" in speedup_test_result else 0
-            # speedup_ = (turn["ref_runtime"] / turn["runtime"]) if turn["runtime"] > 0 and turn['ref_runtime'] > 0 else 0.0 # could be noisy
+            try: # in case the reference runtime is not available caused by the kb eval error
+                speedup_test_result = speedup_threshold_alpha(turn["ref_runtime_stats"], turn["runtime_stats"], alpha=0.05) if turn["runtime"] > 0 and turn['ref_runtime'] > 0 else {} # could be noisy
+                speedup_ = speedup_test_result["max_speedup_threshold"] if "max_speedup_threshold" in speedup_test_result else 0
+            except:
+                speedup_ = (turn["ref_runtime"] / turn["runtime"]) if turn["runtime"] > 0 and turn['ref_runtime'] > 0 else 0.0 # could be noisy
             speedup_reward = min(0.3, (speedup_ / speedup_threahold)**4 * 0.3)
 
             step_reward = correctness_reward + speedup_reward
