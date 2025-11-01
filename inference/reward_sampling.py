@@ -7,6 +7,12 @@ from trainerUtil import softmax_temperature_sampling
 from util import TRAINER_DIR
 
 
+def read_json(json_path):
+    with open(json_path) as f:
+        res = json.load(f)
+    return res
+
+
 def simple_reward(result_line, speedup_threahold=1.3):
     reward = 0
     reward += 0.3 if result_line["correctness"] else 0
@@ -74,4 +80,19 @@ def sample_based_on_reward(query_result,
                                               min_exploration=min_exploration,
                                               n_samples=n_samples,
                                               )
+    return sampled_df
+
+
+def sample_based_on_list(query_result, task_list_file="inference/other_tasks.json"):
+    """
+    Sample based on the tasks list file
+    """
+    all_tasks_df = query_result.df()
+    all_tasks_df["task_tag"] = all_tasks_df["kb_filename"].apply(lambda x: '_'.join('_'.join(x.split('/')[-2:]).split('_')[:5]))
+    task_data = read_json(task_list_file)
+    if "tasks" in task_data:
+        target_tasks = task_data["tasks"]
+    else:
+        raise ValueError(f"[{task_list_file}] does not contain tasks key")
+    sampled_df = all_tasks_df[all_tasks_df["task_tag"].apply(lambda x: x in target_tasks)]
     return sampled_df
