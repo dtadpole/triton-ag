@@ -288,7 +288,7 @@ class GRPOTrainer():
                 # compute loss
                 if self.grpo_config.loss_type == "episode":
                     loss = -final_ratio_advantage.mean()
-                elif self.grpo_config.loss_type == "token":
+                elif self.grpo_config.loss_type == "token":  # DAPO token level loss refer https://arxiv.org/html/2503.14476v1 for more data points
                     loss = -torch.sum(final_ratio_advantage) / total_tokens_in_group
                 elif self.grpo_config.loss_type == "group_max":
                     loss = -torch.sum(final_ratio_advantage) / max_tokens_in_group
