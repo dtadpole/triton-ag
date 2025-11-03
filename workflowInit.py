@@ -4,6 +4,7 @@ from loguru import logger
 from workflowUtil import InferenceBlock, WorkflowSyncBlock, TrainerBlock, merge_dicts, deep_format
 from workflowClient import WorkflowClient
 from configInterpreter import ConfigInterpreter
+import math
 
 class WorkflowInit:
     def __init__(self, prefix_tag: str):
@@ -37,10 +38,21 @@ class WorkflowInit:
                 for e in range(start_epoch, end_epoch)
                 for b in range(start_block if e == start_epoch else 0, (end_block) if e == end_epoch else (end_block))]
 
-        for e, b in pairs:
+        # hint length
+        hint_length_prob_start = args.hint_length_prob_start
+        hint_length_prob_end = args.hint_length_prob_end # 0
+        if hint_length_prob_end != 0:
+            print(f"Soft warning: hint_length_prob_start: {hint_length_prob_start}, hint_length_prob_end: {hint_length_prob_end} and hint_length_prob_end != 0")
+
+        total_pairs = len(pairs)
+        for idx, (e, b) in enumerate(pairs):
             try:
+                # Cosine annealing from hint_length_prob_start to hint_length_prob_end
+                hint_length_prob = hint_length_prob_end + 0.5 * (hint_length_prob_start - hint_length_prob_end) * (1 + math.cos(math.pi * idx / (total_pairs - 1 if total_pairs > 1 else 1)))
+
                 print(e, b)
                 workitems_config = init_config.get(args.queue_name, [])
+
                 for workitem_config in workitems_config:
                     logger.info(f"🔍 [WorkflowInit] [{self.prefix_tag}] [{e}] [{b}] [{workitem_config}]")
                     queue_type = workitem_config.get("queue_type")
@@ -52,6 +64,7 @@ class WorkflowInit:
                             "epoch_id": e,
                             "block_id": b,
                             "input_tag": f"{self.prefix_tag}_{e:03d}_{b:02d}",
+                            "hint_length_prob": hint_length_prob,
                         })
                         inferenceBlock = InferenceBlock(**merge_dicts(await self._get_queue_default(queue_type, queue_name), task_data))
                         await self.workflowClient.enqueue(queue_full_name, inferenceBlock.model_dump(), create_queue=True)
@@ -76,6 +89,8 @@ async def main():
     parser.add_argument("--start_block", type=int, default=-1)
     parser.add_argument("--end_epoch", type=int, default=-1)
     parser.add_argument("--end_block", type=int, default=-1)
+    parser.add_argument("--hint_length_prob_start", type=int, default=0)
+    parser.add_argument("--hint_length_prob_end", type=int, default=0)
     args = parser.parse_args()
 
     if args.prefix_tag.startswith("auto"):

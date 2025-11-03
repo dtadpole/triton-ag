@@ -53,6 +53,7 @@ class InferenceBlock(BaseModel):
     input_dir: str = Field(default="~/KernelBench/KernelBench")
     output_dir: str = Field(default="~/.inference/output")
     context: dict = Field(default_factory=dict)
+    hint_len_prob: float = Field(default=0) # ADD THIS TO UFT, the hint length prob. https://arxiv.org/pdf/2505.16984
 
 
 
