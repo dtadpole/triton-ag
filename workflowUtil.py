@@ -52,6 +52,7 @@ class InferenceBlock(BaseModel):
     example_file: str = Field(default="inference/triton.example.yaml")
     input_dir: str = Field(default="~/KernelBench/KernelBench")
     output_dir: str = Field(default="~/.inference/output")
+    sft_dir: str = Field(default="~/.inference/sft")
     context: dict = Field(default_factory=dict)
     hint_length_prob: float = Field(default=0) # ADD THIS TO UFT, the hint length prob. https://arxiv.org/pdf/2505.16984
 

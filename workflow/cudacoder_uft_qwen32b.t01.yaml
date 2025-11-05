@@ -8,10 +8,10 @@ queues:
 
 # global variables
 global:
-  prefix_tag: "cudacoder_gspo_qwen32b.t11"
+  prefix_tag: "cudacoder_uft_qwen32b.t01"
   start_epoch: 0
   start_block: 0
-  end_epoch: 1
+  end_epoch: 1 # Fix it to 1 for sft/uft, doesn't train more than 1 epoch yet.
   end_block: 10
 
 init:
@@ -22,25 +22,26 @@ init:
       epoch_id: "{epoch_id}"
       block_id: "{block_id}"
       input_tag: "{input_tag}"
-      num_samples: 8
-      num_generations: 8
-      num_turns_per_generation: 4
+      num_samples: 1
+      num_generations: 2
+      num_turns_per_generation: 1
       parallel_workers: 32
       model_name: qwen3-32b
       vllm_providers: ["h100_8_5_a"]
       logp_providers: ["h100_8_5_b", "h100_8_5_c"]
       kbeval_providers: ["h8_4", "h8_2"]
-      module_file: inference/codeGenEval.module.vllm+logp.rewardsampling.yaml
+      module_file: inference/codeGenEval.module.uft.vllm+logp.yaml
       prompt_file: inference/cuda.prompt.yaml
       example_file: inference/cuda.example.yaml
       input_dir: /workspace/kernel_bench/level?
       output_dir: shared/.inference/codeGenEval
+      sft_dir : shared/.inference/sft/task_selected_sampling
       hint_length_prob: "{hint_length_prob}"
 
 inference:
   codeGenEval.base:
     default:
-      module_file: inference/codeGenEval.module.vllm+logp.rewardsampling.yaml
+      module_file: inference/codeGenEval.module.uft.vllm+logp.yaml
       prompt_file: inference/cuda.prompt.yaml
       example_file: inference/cuda.example.yaml
       input_dir: /workspace/kernel_bench/level?

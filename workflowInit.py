@@ -49,7 +49,7 @@ class WorkflowInit:
             try:
                 # Cosine annealing from hint_length_prob_start to hint_length_prob_end
                 hint_length_prob = hint_length_prob_end + 0.5 * (hint_length_prob_start - hint_length_prob_end) * (1 + math.cos(math.pi * idx / (total_pairs - 1 if total_pairs > 1 else 1)))
-
+                print(f"hint_length_prob: {hint_length_prob}")
                 print(e, b)
                 workitems_config = init_config.get(args.queue_name, [])
 

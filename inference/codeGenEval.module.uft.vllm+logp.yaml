@@ -15,10 +15,36 @@ module:
           endpoint: duckdbClient.sql
           args:
             query: |
-              SELECT filename as kb_filename, content as reference_code
-              FROM read_text('{input_dir}/**/*.py')
-              ORDER BY random()
-              LIMIT {block.num_samples};
+              WITH all_tasks AS(
+                  SELECT filename as kb_filename, content as reference_code,
+                  regexp_replace(
+                      regexp_extract(
+                          filename,
+                          '([^/]+/\d+)',
+                          1
+                      ),
+                      '/',
+                      '_'
+                  ) as task_name
+                  FROM read_text('{input_dir}/**/*.py')
+              ),
+              conversations AS (
+                  SELECT regexp_extract(
+                          filename,
+                          '(level\d+_\d+)',
+                          1
+                      ) as task_name,
+                      filename as sft_filename,
+                      messages,
+                      metadata
+                  FROM read_json_auto('{block.sft_dir}/**/*_conversation.json', sample_size=-1, ignore_errors=true)
+                  WHERE messages[3]['content'] IS NOT NULL
+              )
+              SELECT
+                  c.*, a.reference_code, a.kb_filename
+              FROM conversations c
+              LEFT JOIN all_tasks a USING(task_name)
+              ORDER BY sft_filename
           returns:
             error_if: "`__result__ is None`"
             context_vars:
@@ -26,11 +52,11 @@ module:
             logging:
               method: "log_input_processor"
         - type: iterator
-          collection: "`[row for idx, row in query_result.df().iterrows()]`"
+          collection: "`[row for idx, row in query_result.df().iterrows()][block.block_id * block.num_samples: (block.block_id + 1) * block.num_samples]`"
           context_vars:
             row: "`__item__`"
             run_tag: "`f'{block.prefix_tag}_{block.epoch_id:03d}_{block.block_id:02d}' if block.epoch_id >= 0 and block.block_id >= 0 else f'{block.prefix_tag}_{__runtime_start_time__}'`" # run_tag is the prefix tag + epoch id + block id
-            task_tag: "`'_'.join('_'.join(row.kb_filename.split('/')[-2:]).split('_')[:5])`" # task_tag joins the level and filename, and returns the first 5 parts
+            task_tag: "`('_'.join(row.sft_filename.split('/')[-2:]))[:-5]`" # task_tag joins the level and filename, and returns the first 5 parts
             gen_tag: "reference"
           steps:
             - type: endpoint
@@ -73,7 +99,7 @@ module:
                       vllm_providers: "`block.vllm_providers`" # vllm providers
                       logp_providers: "`block.logp_providers`" # logp providers
                       kbeval_providers: "`block.kbeval_providers`" # kb eval providers
-                      context: "`block.context`"
+                      context: "`{**block.context, 'uft_messages': row.messages}`"
                   returns:
                     logging:
                       method: "log_enqueue"
@@ -125,6 +151,7 @@ module:
         generated_eval: null
         conversation: null
         completion: null
+        uft_messages: "`context['uft_messages']`"
       steps:
         - type: endpoint
           endpoint: statsClient.wait_for_stats
@@ -141,9 +168,9 @@ module:
             logging:
               method: "log_kb_eval_ref"
         - type: iterator
-          collection: "`range(num_turns_per_generation)`"
+          collection: "`range(1)`" # only generate 1 turn for UFT
           context_vars:
-            turn_tag: "`f'{gen_tag}_t{__item__:02d}'`" # turn_tag is gen_01_t03
+            turn_tag: "`f'{gen_tag}_t{__item__:02d}'`" # turn_tag is gen_01_t00. For UFT, we only generate the 1st turn
           steps:
             - type: code
               code_snippet_path: 'inference/model_override.py'
@@ -161,6 +188,21 @@ module:
                   model_override: "`__result__`"
                 logging:
                   info: "🔍 [{worker_name}.p{proc_id}.w{worker_id}] Model override: [{model_override}]"
+            - type: code
+              code_snippet_path: 'inference/uft_hints.py'
+              code_snippet_block: |
+                # get hints and prompot
+                __async__ = uft_hints(
+                    messages=uft_messages,
+                    hint_length_prob=block.hint_length_prob,
+                    tokenizer=__runtime__.tokenizer
+                )
+              async: true
+              returns:
+                context_vars:
+                  hint: "`__result__['hint']`"
+                  prompt: "`__result__['prompt']`"
+                  messages: "`uft_messages`"
             - type: endpoint
               endpoint: inferenceClient.completion
               context_vars:
@@ -172,23 +214,6 @@ module:
                   "turn_tag": "`turn_tag`"
                   "code_type": "`code_type`"
                   "model_override": "`model_override`"
-                messages: |
-                  `[
-                    {"role": "system", "content": __runtime__.get_system_prompt(__context__)},
-                    {"role": "user", "content": __runtime__.get_user_prompt(__context__)}
-                  ] if conversation is None else conversation['messages'][:-1] + [
-                    {"role": "assistant", "content": f"```python\n{generated_code}\n```"}
-                  ] + [
-                    {"role": "user", "content": __runtime__.get_user_prompt(__context__)}
-                  ]
-                  `
-                prompt: |
-                  `__runtime__.tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                    enable_thinking=True,
-                  )`
               args:
                 provider: "`vllm_providers`"
                 prompt: "`prompt`"
@@ -201,12 +226,13 @@ module:
                     `metadata | {
                       "num_completion_tokens": len(__result__['logprobs']),
                       "completion_time_seconds": __endpoint_time__,
+                      "hint": hint,
                       "token_per_second": len(__result__['logprobs']) / __endpoint_time__,
                     }
                     `
                   messages: |
-                    `messages + [
-                      {"role": "assistant", "content": __result__['content']}
+                    `messages[:-1] + [
+                      {"role": "assistant", "content": hint + __result__['content']}
                     ]`
                   completion:
                     "prompt": "`prompt`"
