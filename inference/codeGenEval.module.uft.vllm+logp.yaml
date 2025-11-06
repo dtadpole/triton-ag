@@ -99,7 +99,8 @@ module:
                       vllm_providers: "`block.vllm_providers`" # vllm providers
                       logp_providers: "`block.logp_providers`" # logp providers
                       kbeval_providers: "`block.kbeval_providers`" # kb eval providers
-                      context: "`{**block.context, 'uft_messages': row.messages}`"
+                      context: "`{**block.context, 'uft_messages': list(row.messages), 'hint_length_prob': block.hint_length_prob}`"
+
                   returns:
                     logging:
                       method: "log_enqueue"
@@ -152,6 +153,7 @@ module:
         conversation: null
         completion: null
         uft_messages: "`context['uft_messages']`"
+        hint_length_prob: "`context['hint_length_prob']`"
       steps:
         - type: endpoint
           endpoint: statsClient.wait_for_stats
@@ -194,7 +196,7 @@ module:
                 # get hints and prompot
                 __async__ = uft_hints(
                     messages=uft_messages,
-                    hint_length_prob=block.hint_length_prob,
+                    hint_length_prob=hint_length_prob,
                     tokenizer=__runtime__.tokenizer
                 )
               async: true
@@ -226,14 +228,12 @@ module:
                     `metadata | {
                       "num_completion_tokens": len(__result__['logprobs']),
                       "completion_time_seconds": __endpoint_time__,
+                      "hint_length_prob": hint_length_prob,
                       "hint": hint,
                       "token_per_second": len(__result__['logprobs']) / __endpoint_time__,
                     }
                     `
-                  messages: |
-                    `messages[:-1] + [
-                      {"role": "assistant", "content": hint + __result__['content']}
-                    ]`
+                  messages: "`messages[:-1] + [{'role': 'assistant', 'content': hint + __result__['content']}]`"
                   completion:
                     "prompt": "`prompt`"
                     "completion": "`__result__['content']`"

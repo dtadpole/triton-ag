@@ -19,14 +19,17 @@ async def uft_hints(messages, hint_length_prob, tokenizer):
     Returns:
         A text prompt string with partial hint from the last turn, ready for LLM completion
     """
-    if not messages or len(messages) == 0:
+    if messages is None or len(messages) == 0:
         raise ValueError("Messages list is empty")
 
     last_message = messages[-1]
-    last_content = last_message.get('content', '')
+    last_content = last_message.get("content", "")
 
     # Tokenize the last message content
     last_message_tokens = tokenizer.encode(last_content, add_special_tokens=False)
+    # Convert to list to ensure we're working with standard Python types
+    if hasattr(last_message_tokens, "tolist"):
+        last_message_tokens = last_message_tokens.tolist()
     total_length = len(last_message_tokens)
 
     if total_length == 0:
@@ -83,26 +86,29 @@ async def main():
     messages = [
         {
             "role": "system",
-            "content": "You are a helpful AI assistant specialized in Python programming."
+            "content": "You are a helpful AI assistant specialized in Python programming.",
         },
-        {
-            "role": "user",
-            "content": "Write a function to calculate fibonacci numbers."
-        },
+        {"role": "user", "content": "Write a function to calculate fibonacci numbers."},
         {
             "role": "assistant",
-            "content": "def fibonacci(n):\n    if n <= 1:\n        return n\n    return fibonacci(n-1) + fibonacci(n-2)"
-        }
+            "content": "def fibonacci(n):\n    if n <= 1:\n        return n\n    return fibonacci(n-1) + fibonacci(n-2)",
+        },
     ]
 
     print("\nOriginal messages:")
     for i, msg in enumerate(messages):
         print(f"\n[Message {i}] Role: {msg['role']}")
-        print(f"Content: {msg['content'][:100]}..." if len(msg['content']) > 100 else f"Content: {msg['content']}")
+        print(
+            f"Content: {msg['content'][:100]}..."
+            if len(msg["content"]) > 100
+            else f"Content: {msg['content']}"
+        )
 
     # Get the full last message for comparison
-    last_message_content = messages[-1]['content']
-    last_message_tokens = tokenizer.encode(last_message_content, add_special_tokens=False)
+    last_message_content = messages[-1]["content"]
+    last_message_tokens = tokenizer.encode(
+        last_message_content, add_special_tokens=False
+    )
     print(f"\nLast message has {len(last_message_tokens)} tokens")
 
     # Test with different hint_length_prob values
@@ -134,4 +140,5 @@ async def main():
 
 if __name__ == "__main__":
     import asyncio
+
     asyncio.run(main())
