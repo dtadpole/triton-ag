@@ -17,7 +17,9 @@ from logger import logger
 from pydantic import BaseModel
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from trainerUtil import make_checkpoint_callback, SimpleCollator
+from trainerUtil import format_conversation, make_checkpoint_callback, SimpleCollator
+from trainerGRPO import GRPOConfig
+from trainerSFT import SFTConfig
 from util import INFERENCE_DIR, TRAINER_DIR
 from workflowSync import WorkflowSync
 from workflowUtil import TrainerBlock
@@ -34,37 +36,25 @@ LOG_PROB_AVERAGE_RATIO = "log_prob_avg_ratio"
 LOG_PROB_FORWARD_GENERATION_DIFF = "log_prob_forward_generation_diff"
 LOG_PROB_GENERATION_VLLM_DIFF = "log_prob_generation_vllm_diff"
 LOG_PROB_FORWARD_VLLM_DIFF = "log_prob_forward_vllm_diff"
+GRPO_LOSS = "grpo_loss"
+SFT_LOSS = "sft_loss"
 
 
 class UFTConfig(BaseModel):
     """UFT configuration"""
 
-    max_seq_length: int = 16384
-    mask_non_assistant_tokens: bool = True
-    discard_long_conversations: bool = True
-    clip_ratio_epsilon_lower: float = 0.2
-    clip_ratio_epsilon_upper: float = 0.3
-    gspo_clip_ratio_epsilon_lower: float = 3e-4
-    gspo_clip_ratio_epsilon_upper: float = 4e-4
-    bound_advantage_range: float = 3.0
-    beta: float = 0.0  # KL divergence coefficient
-    beta_uft: float = 0.0  # UFT loss coefficient
-    reward_scale: bool = True
-    reward_epsilon: float = 1e-3
-    reward_noise: float = 1e-2
-    # loss_type: str = "token" # "episode" or "token" or "seq_max" or "gspo"
-    loss_type: str = "gspo"  # "episode" or "token" or "seq_max" or "gspo"
-    gamma: float = 0.5
-    use_truncated_is: bool = False
-    truncated_is_ratio: float = 2.0
+    beta_coef: float = (
+        0.1  # Total loss = (1 - beta_coef) * grpo_loss + beta_coef * sft_loss
+    )
 
     @classmethod
-    def from_yaml(cls, file_path: str) -> "UFTConfig":
-        """Load UFT configuration from YAML file"""
+    def from_yaml(cls, file_path: str) -> Tuple["UFTConfig", GRPOConfig]:
+        """Load UFT and GRPO configurations from YAML file"""
         with open(os.path.expanduser(file_path), "r") as f:
             config = yaml.safe_load(f)
-        uft_config = config.get("uft", {})
-        return cls(**uft_config)
+        uft_config = cls(**config.get("uft", {}))
+        grpo_config = GRPOConfig(**config.get("grpo", {}))
+        return uft_config, grpo_config
 
 
 class UFTTrainer:
@@ -75,6 +65,8 @@ class UFTTrainer:
         engine: EngineBase,
         prefix_tag: str,
         uft_config: UFTConfig,
+        grpo_config: GRPOConfig,
+        sft_config: SFTConfig,
         module_file: str = "trainer/uft.module.yaml",
     ):
         """Initialize UFT trainer"""
@@ -84,6 +76,8 @@ class UFTTrainer:
         self.configInterpreter = ConfigInterpreter()
         self.duckdbClient = DuckDBClient()
         self.uft_config = uft_config
+        self.grpo_config = grpo_config
+        self.sft_config = sft_config
         self.module_file = module_file
         self.module_config = yaml.safe_load(open(module_file, "r")).get("module", {})
         # self.lora_cache = TrainerLoraCache(
@@ -103,20 +97,28 @@ class UFTTrainer:
             "gc": gc,
             "time": time,
             "uft_config": self.uft_config,
+            "grpo_config": self.grpo_config,
+            "sft_config": self.sft_config,
         }
         context_var_config = self.module_config.get("context_vars", {})
         self.context_vars = self.configInterpreter.prepare_context_vars(
             self, context_var_config, self.context_vars
         )
 
-        logger.info(f"⭐ [UFTTrainer] Initialized with UFTConfig: {uft_config}")
+        logger.info(
+            f"⭐ [UFTTrainer] Initialized with UFTConfig: {uft_config}, GRPOConfig: {grpo_config}, SFTConfig: {sft_config}"
+        )
 
     def short_name(self):
         return "uft"
 
-    def _update_uft_config(self, uft_config: UFTConfig):
-        """Update UFT config"""
+    def _update_uft_config(
+        self, uft_config: UFTConfig, grpo_config: GRPOConfig, sft_config: SFTConfig
+    ):
+        """Update UFT, GRPO, and SFT configs"""
         self.uft_config = uft_config
+        self.grpo_config = grpo_config
+        self.sft_config = sft_config
 
     def log_raw_data(self, data: Any, context_vars: Dict[str, Any]):
         """Log raw data"""
@@ -278,19 +280,19 @@ class UFTTrainer:
                 log_prob_forward_vllm_diff.item()
             )
 
-            if self.uft_config.loss_type == "gspo":
+            if self.grpo_config.loss_type == "gspo":
 
-                if self.uft_config.use_truncated_is:
+                if self.grpo_config.use_truncated_is:
                     is_ratio = torch.exp(
                         generation_completion_log_probs - vllm_completion_log_probs_i
                     ).detach()
                     clip_metrics[IS_RATIO_TRUNCATED_PERCENTAGE].append(
-                        torch.sum(is_ratio > self.uft_config.truncated_is_ratio).item()
+                        torch.sum(is_ratio > self.grpo_config.truncated_is_ratio).item()
                         * 100.0
                         / len(forward_completion_log_probs)
                     )
                     truncated_is_ratio = torch.clamp(
-                        is_ratio, max=self.uft_config.truncated_is_ratio
+                        is_ratio, max=self.grpo_config.truncated_is_ratio
                     )
                     log_ratio = truncated_is_ratio * raw_log_ratio
                 else:
@@ -307,22 +309,22 @@ class UFTTrainer:
                 clip_metrics[CLIP_RATIO_UPPER_PERCENTAGE].append(
                     torch.sum(
                         sequence_ratio
-                        > 1 + self.uft_config.gspo_clip_ratio_epsilon_upper
+                        > 1 + self.grpo_config.gspo_clip_ratio_epsilon_upper
                     ).item()
                     * 100.0
                 )
                 clip_metrics[CLIP_RATIO_LOWER_PERCENTAGE].append(
                     torch.sum(
                         sequence_ratio
-                        < 1 - self.uft_config.gspo_clip_ratio_epsilon_lower
+                        < 1 - self.grpo_config.gspo_clip_ratio_epsilon_lower
                     ).item()
                     * 100.0
                 )
 
                 clamped_sequence_ratio = torch.clamp(
                     sequence_ratio,
-                    1 - self.uft_config.gspo_clip_ratio_epsilon_lower,
-                    1 + self.uft_config.gspo_clip_ratio_epsilon_upper,
+                    1 - self.grpo_config.gspo_clip_ratio_epsilon_lower,
+                    1 + self.grpo_config.gspo_clip_ratio_epsilon_upper,
                 )
 
                 sequence_ratio_advantage = torch.min(
@@ -333,25 +335,26 @@ class UFTTrainer:
                 # calculate clipped upper and lower percentage
                 clip_metrics[BOUND_ADVANTAGE_UPPER_PERCENTAGE].append(
                     torch.sum(
-                        sequence_ratio_advantage > self.uft_config.bound_advantage_range
+                        sequence_ratio_advantage
+                        > self.grpo_config.bound_advantage_range
                     ).item()
                     * 100.0
                 )
                 clip_metrics[BOUND_ADVANTAGE_LOWER_PERCENTAGE].append(
                     torch.sum(
                         sequence_ratio_advantage
-                        < -self.uft_config.bound_advantage_range
+                        < -self.grpo_config.bound_advantage_range
                     ).item()
                     * 100.0
                 )
 
                 final_sequence_ratio_advantage = torch.clamp(
                     sequence_ratio_advantage,
-                    -self.uft_config.bound_advantage_range,
-                    self.uft_config.bound_advantage_range,
+                    -self.grpo_config.bound_advantage_range,
+                    self.grpo_config.bound_advantage_range,
                 )
 
-                loss = -final_sequence_ratio_advantage.mean()
+                grpo_loss = -final_sequence_ratio_advantage.mean()
 
             else:
                 ratio = torch.exp(raw_log_ratio)
@@ -361,14 +364,14 @@ class UFTTrainer:
                 # calculate clipped upper and lower percentage
                 clip_metrics[CLIP_RATIO_UPPER_PERCENTAGE].append(
                     torch.sum(
-                        ratio > 1 + self.uft_config.clip_ratio_epsilon_upper
+                        ratio > 1 + self.grpo_config.clip_ratio_epsilon_upper
                     ).item()
                     * 100.0
                     / len(forward_completion_log_probs)
                 )
                 clip_metrics[CLIP_RATIO_LOWER_PERCENTAGE].append(
                     torch.sum(
-                        ratio < 1 - self.uft_config.clip_ratio_epsilon_lower
+                        ratio < 1 - self.grpo_config.clip_ratio_epsilon_lower
                     ).item()
                     * 100.0
                     / len(forward_completion_log_probs)
@@ -376,8 +379,8 @@ class UFTTrainer:
 
                 clamped_ratio = torch.clamp(
                     ratio,
-                    1 - self.uft_config.clip_ratio_epsilon_lower,
-                    1 + self.uft_config.clip_ratio_epsilon_upper,
+                    1 - self.grpo_config.clip_ratio_epsilon_lower,
+                    1 + self.grpo_config.clip_ratio_epsilon_upper,
                 )
 
                 # min ratio advantage is min of ratio_advantage and clamped_ratio_advantage
@@ -388,14 +391,14 @@ class UFTTrainer:
                 # calculate clipped upper and lower percentage
                 clip_metrics[BOUND_ADVANTAGE_UPPER_PERCENTAGE].append(
                     torch.sum(
-                        ratio_advantage > self.uft_config.bound_advantage_range
+                        ratio_advantage > self.grpo_config.bound_advantage_range
                     ).item()
                     * 100.0
                     / len(forward_completion_log_probs)
                 )
                 clip_metrics[BOUND_ADVANTAGE_LOWER_PERCENTAGE].append(
                     torch.sum(
-                        ratio_advantage < -self.uft_config.bound_advantage_range
+                        ratio_advantage < -self.grpo_config.bound_advantage_range
                     ).item()
                     * 100.0
                     / len(forward_completion_log_probs)
@@ -404,44 +407,96 @@ class UFTTrainer:
                 # calculate clipped upper and lower percentage
                 bounded_ratio_advantage = torch.clamp(
                     ratio_advantage,
-                    -self.uft_config.bound_advantage_range,
-                    self.uft_config.bound_advantage_range,
+                    -self.grpo_config.bound_advantage_range,
+                    self.grpo_config.bound_advantage_range,
                 )
 
-                if self.uft_config.use_truncated_is:
+                if self.grpo_config.use_truncated_is:
                     is_ratio = torch.exp(
                         generation_completion_log_probs - vllm_completion_log_probs_i
                     ).detach()
                     clip_metrics[IS_RATIO_TRUNCATED_PERCENTAGE].append(
-                        torch.sum(is_ratio > self.uft_config.truncated_is_ratio).item()
+                        torch.sum(is_ratio > self.grpo_config.truncated_is_ratio).item()
                         * 100.0
                         / len(forward_completion_log_probs)
                     )
                     truncated_is_ratio = torch.clamp(
-                        is_ratio, max=self.uft_config.truncated_is_ratio
+                        is_ratio, max=self.grpo_config.truncated_is_ratio
                     )
                     final_ratio_advantage = truncated_is_ratio * bounded_ratio_advantage
                 else:
                     final_ratio_advantage = bounded_ratio_advantage
 
                 # compute loss
-                if self.uft_config.loss_type == "episode":
-                    loss = -final_ratio_advantage.mean()
+                if self.grpo_config.loss_type == "episode":
+                    grpo_loss = -final_ratio_advantage.mean()
                 elif (
-                    self.uft_config.loss_type == "token"
+                    self.grpo_config.loss_type == "token"
                 ):  # DAPO token level loss refer https://arxiv.org/html/2503.14476v1 for more data points
-                    loss = -torch.sum(final_ratio_advantage) / total_tokens_in_group
-                elif self.uft_config.loss_type == "group_max":
-                    loss = -torch.sum(final_ratio_advantage) / max_tokens_in_group
-                elif self.uft_config.loss_type == "seq_max":
-                    loss = (
+                    grpo_loss = (
+                        -torch.sum(final_ratio_advantage) / total_tokens_in_group
+                    )
+                elif self.grpo_config.loss_type == "group_max":
+                    grpo_loss = -torch.sum(final_ratio_advantage) / max_tokens_in_group
+                elif self.grpo_config.loss_type == "seq_max":
+                    grpo_loss = (
                         -torch.sum(final_ratio_advantage)
-                        / self.uft_config.max_seq_length
+                        / self.grpo_config.max_seq_length
                     )
                 else:
                     raise ValueError(
-                        f"❌ [UFTTrainingGroup] Invalid loss type: {self.uft_config.loss_type}"
+                        f"❌ [UFTTrainingGroup] Invalid loss type: {self.grpo_config.loss_type}"
                     )
+
+            # Compute SFT loss on hint tokens only
+            # Structure: previous_conversation + hint + completion
+            # - GRPO loss is computed on completion tokens
+            # - SFT loss should be computed on hint tokens (using previous_conversation as context)
+
+            # Get hint information from batch
+            hint_length = batch.get('hint_length', [0])[i]
+            previous_conversation_length = batch.get('previous_conversation_length', [0])[i]
+
+            # Only compute SFT loss if hint exists
+            if hint_length > 0 and previous_conversation_length >= 0:
+                # Create labels for SFT, masking everything except hint tokens
+                labels = input_ids[i].clone()
+
+                # Mask everything to -100 initially
+                labels[:] = -100
+
+                # Unmask only the hint tokens (we want to predict these)
+                # The hint starts at previous_conversation_length and has hint_length tokens
+                hint_start = previous_conversation_length
+                hint_end = previous_conversation_length + hint_length
+
+                # For next token prediction, we predict tokens [hint_start+1:hint_end+1]
+                # based on context tokens [hint_start:hint_end]
+                # So we unmask labels[hint_start+1:hint_end+1]
+                if hint_end < len(labels):
+                    labels[hint_start+1:hint_end+1] = input_ids[i][hint_start+1:hint_end+1]
+
+                # Compute cross-entropy loss for SFT
+                # Shift logits and labels for next token prediction
+                shift_logits = model_outputs.logits[i][:-1, :].contiguous()
+                shift_labels = labels[1:].contiguous()
+                sft_loss = F.cross_entropy(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1),
+                    ignore_index=-100,
+                    reduction='mean'
+                )
+            else:
+                # No hint, skip SFT loss (set to 0)
+                sft_loss = torch.tensor(0.0, device=self.engine.device)
+
+            # Combine GRPO and SFT losses using beta_coef
+            # Total loss = (1 - beta_coef) * grpo_loss + beta_coef * sft_loss
+            loss = (1 - self.uft_config.beta_coef) * grpo_loss + self.uft_config.beta_coef * sft_loss
+
+            # Track individual losses for logging
+            clip_metrics[GRPO_LOSS].append(grpo_loss.item())
+            clip_metrics[SFT_LOSS].append(sft_loss.item() if isinstance(sft_loss, torch.Tensor) else sft_loss)
 
             batch_loss += loss
 
@@ -496,6 +551,8 @@ class UFTTrainer:
             LOG_PROB_FORWARD_GENERATION_DIFF: [],
             LOG_PROB_GENERATION_VLLM_DIFF: [],
             LOG_PROB_FORWARD_VLLM_DIFF: [],
+            GRPO_LOSS: [],
+            SFT_LOSS: [],
         }
         for batch_idx, batch in enumerate(dataloader):
             # Training step
@@ -508,7 +565,7 @@ class UFTTrainer:
 
             # Scale loss for gradient accumulation
             if (
-                self.uft_config.loss_type != "token"
+                self.grpo_config.loss_type != "token"
             ):  # for token level loss, the loss has already been scaled by the group size
                 mini_batch_loss = (
                     mini_batch_loss
@@ -643,7 +700,7 @@ def uft_get_trainer(
         raise e
 
     try:
-        uft_config = UFTConfig.from_yaml(uft_config_file)
+        uft_config, grpo_config = UFTConfig.from_yaml(uft_config_file)
         logger.info(
             f"⚙️ [UFTTrainer] [{prefix_tag}] UFT configuration loaded from [{uft_config_file}]"
         )
@@ -654,10 +711,13 @@ def uft_get_trainer(
         raise e
 
     try:
+        # SFTConfig is not needed in UFT but kept for compatibility
         trainer = UFTTrainer(
             engine=engine,
             prefix_tag=prefix_tag,
             uft_config=uft_config,
+            grpo_config=grpo_config,
+            sft_config=None,  # Not used in UFT
             module_file=module_file,
         )
         logger.info(f"⭐ [UFTTrainer] [{prefix_tag}] Trainer initialized")

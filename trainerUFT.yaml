@@ -1,0 +1,35 @@
+# ============================================================================
+# TrainerUFT Configuration File
+# ============================================================================
+# Configuration for Unified Fine-Tuning with combined GRPO and SFT loss
+
+# GRPO configuration (used for GRPO loss computation and reward processing)
+grpo:
+  max_seq_length: 24576
+  mask_non_assistant_tokens: true
+  discard_long_conversations: true # false will truncate the conversation to the max_seq_length
+  clip_ratio_epsilon_lower: 0.2
+  clip_ratio_epsilon_upper: 0.28
+  gspo_clip_ratio_epsilon_lower: 0.02  # default: 3e-4
+  gspo_clip_ratio_epsilon_upper: 0.016  # default: 4e-4
+  bound_advantage_range: 5.0
+  beta: 0.0  # KL divergence coefficient
+  reward_scale: true
+  reward_epsilon: 1e-3
+  reward_noise: 1e-2
+  loss_type: gspo
+  gamma: 0.5
+  use_truncated_is: false
+  truncated_is_ratio: 2.0
+
+# UFT-specific configuration
+uft:
+  beta_coef: 0.1 # Total loss = (1 - beta_coef) * grpo_loss + beta_coef * sft_loss
+
+# ============================================================================
+# TRAINING CONFIGURATION
+# ============================================================================
+training:
+  # Basic training parameters
+  micro_batch_size: 1
+  loss_multiplier: 1.0

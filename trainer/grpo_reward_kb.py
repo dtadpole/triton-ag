@@ -74,6 +74,7 @@ def grpo_compute_rewards(
             "logp_server_logps": item["logps"],
             "runtime": item["runtime"],
             "checkpoint_name": item["metadata"]["model_override"].split("/")[-1] if "model_override" in item["metadata"] and item["metadata"]["model_override"] else None,
+            "hint": item.get("hint", ""),  # Add hint from query_result if it exists
         } for item in value]
         # add the group to the groups dict
         groups[key] = group

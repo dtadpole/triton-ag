@@ -39,8 +39,8 @@ class WorkflowInit:
                 for b in range(start_block if e == start_epoch else 0, (end_block) if e == end_epoch else (end_block))]
 
         # hint length
-        hint_length_prob_start = args.hint_length_prob_start
-        hint_length_prob_end = args.hint_length_prob_end # 0
+        hint_length_prob_start = global_config.get("hint_length_prob_start", 0)
+        hint_length_prob_end = global_config.get("hint_length_prob_end", 0)
         if hint_length_prob_end != 0:
             print(f"Soft warning: hint_length_prob_start: {hint_length_prob_start}, hint_length_prob_end: {hint_length_prob_end} and hint_length_prob_end != 0")
 
