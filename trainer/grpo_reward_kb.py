@@ -467,6 +467,8 @@ def grpo_compute_advantages(
     reward_epsilon: float = 1e-3,
     reward_noise: float = 1e-2,
     debug: bool = False,
+    weight_more_max_reward: bool = False,  # weight more max reward
+    weight_more_max_reward_scale: float = 1.0,  # weight more max reward scale
 ):
     """Compute advantages for the generated tokens"""
     if debug:
@@ -481,6 +483,11 @@ def grpo_compute_advantages(
             advantages = (rewards - mean_reward) / (std_reward + reward_epsilon)
         else:
             advantages = rewards - mean_reward
+
+        if weight_more_max_reward:
+            argmax_index = np.where(rewards == max(rewards))
+            advantages[argmax_index] *= weight_more_max_reward_scale
+
         # add noise to the advantages
         advantages = advantages + np.random.normal(0, reward_noise, size=advantages.shape)
         # add the advantages to the group

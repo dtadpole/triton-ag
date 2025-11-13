@@ -321,11 +321,12 @@ class UFTTrainer:
                     * 100.0
                 )
 
-                clamped_sequence_ratio = torch.clamp(
+                clamped_sequence_ratio_ = torch.clamp(
                     sequence_ratio,
                     1 - self.grpo_config.gspo_clip_ratio_epsilon_lower,
                     1 + self.grpo_config.gspo_clip_ratio_epsilon_upper,
                 )
+                clamped_sequence_ratio = clamped_sequence_ratio_ + self.grpo_config.clip_gradient_scale * (sequence_ratio - clamped_sequence_ratio_.detach())
 
                 sequence_ratio_advantage = torch.min(
                     sequence_ratio * advantages[i],
@@ -377,11 +378,12 @@ class UFTTrainer:
                     / len(forward_completion_log_probs)
                 )
 
-                clamped_ratio = torch.clamp(
+                clamped_ratio_ = torch.clamp(
                     ratio,
                     1 - self.grpo_config.clip_ratio_epsilon_lower,
                     1 + self.grpo_config.clip_ratio_epsilon_upper,
                 )
+                clamped_ratio = clamped_ratio_ + self.grpo_config.clip_gradient_scale * (ratio - clamped_ratio_.detach())
 
                 # min ratio advantage is min of ratio_advantage and clamped_ratio_advantage
                 ratio_advantage = torch.min(

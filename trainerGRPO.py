@@ -52,6 +52,7 @@ class GRPOConfig(BaseModel):
     loss_type: str = "gspo" # "episode" or "token" or "seq_max" or "gspo"
     gamma: float = 0.5
     use_truncated_is: bool = False
+    clip_gradient_scale: float = 0.0
     truncated_is_ratio: float = 2.0
 
     @classmethod
@@ -244,7 +245,9 @@ class GRPOTrainer():
                 clip_metrics[CLIP_RATIO_UPPER_PERCENTAGE].append(torch.sum(sequence_ratio > 1+self.grpo_config.gspo_clip_ratio_epsilon_upper).item() * 100.0)
                 clip_metrics[CLIP_RATIO_LOWER_PERCENTAGE].append(torch.sum(sequence_ratio < 1-self.grpo_config.gspo_clip_ratio_epsilon_lower).item() * 100.0)
 
-                clamped_sequence_ratio = torch.clamp(sequence_ratio, 1-self.grpo_config.gspo_clip_ratio_epsilon_lower, 1+self.grpo_config.gspo_clip_ratio_epsilon_upper)
+                clamped_sequence_ratio_ = torch.clamp(sequence_ratio, 1-self.grpo_config.gspo_clip_ratio_epsilon_lower, 1+self.grpo_config.gspo_clip_ratio_epsilon_upper)
+                # soft gradient clipping for the ratio outside the range, if clip_gradient_scale = 0, then it is full clipping
+                clamped_sequence_ratio = clamped_sequence_ratio_ + self.grpo_config.clip_gradient_scale * (sequence_ratio - clamped_sequence_ratio_.detach())
 
                 sequence_ratio_advantage = torch.min(sequence_ratio * advantages[i], clamped_sequence_ratio * advantages[i])
 
@@ -265,7 +268,9 @@ class GRPOTrainer():
                 clip_metrics[CLIP_RATIO_UPPER_PERCENTAGE].append(torch.sum(ratio > 1+self.grpo_config.clip_ratio_epsilon_upper).item() * 100.0 / len(forward_completion_log_probs))
                 clip_metrics[CLIP_RATIO_LOWER_PERCENTAGE].append(torch.sum(ratio < 1-self.grpo_config.clip_ratio_epsilon_lower).item() * 100.0 / len(forward_completion_log_probs))
 
-                clamped_ratio = torch.clamp(ratio, 1-self.grpo_config.clip_ratio_epsilon_lower, 1+self.grpo_config.clip_ratio_epsilon_upper)
+                clamped_ratio_ = torch.clamp(ratio, 1-self.grpo_config.clip_ratio_epsilon_lower, 1+self.grpo_config.clip_ratio_epsilon_upper)
+                # soft gradient clipping for the ratio outside the range, if clip_gradient_scale = 0, then it is full clipping
+                clamped_ratio = clamped_ratio_ + self.grpo_config.clip_gradient_scale * (ratio - clamped_ratio_.detach())
 
                 # min ratio advantage is min of ratio_advantage and clamped_ratio_advantage
                 ratio_advantage = torch.min(ratio * advantages[i], clamped_ratio * advantages[i]) # dim: (completion_len)
