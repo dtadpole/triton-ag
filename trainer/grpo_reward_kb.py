@@ -1,11 +1,12 @@
-import torch
-import numpy as np
-from transformers import AutoTokenizer
-from operator import itemgetter
-from itertools import groupby
-import scipy.stats as stats
-from scipy.optimize import brentq
 import math
+from itertools import groupby
+from operator import itemgetter
+
+import numpy as np
+import scipy.stats as stats
+import torch
+from scipy.optimize import brentq
+from transformers import AutoTokenizer
 
 
 def grpo_compute_rewards(
@@ -910,12 +911,13 @@ def speedup_threshold_alpha(ref_dict, test_dict, alpha=0.05):
 
 
 if __name__ == "__main__":
-    import duckdb
     import argparse
 
     # add parent directory to path
     import os
     import sys
+
+    import duckdb
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
