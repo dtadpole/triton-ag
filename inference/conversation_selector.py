@@ -18,7 +18,7 @@ async def select_conversation_from_previous_turn(
     record_folder: str,
     min_num_generations: int = 3,
     selection_strategy: str = "random",
-    timeout: int = 300,
+    timeout: int = 800,
 ):
     """
     Select a conversation from the previous turn.
