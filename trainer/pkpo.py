@@ -8,21 +8,26 @@ The main function to use is `sloo_minus_one` which transforms a batch of rewards
 to optimize for the maximum reward (pass@k) instead of average reward (pass@1).
 """
 
-import numpy as np
 from typing import Callable
+
+import numpy as np
 
 
 def _m_normed(N: int, K: int, i: int, j: int) -> float:
     """Helper function for computing normalized matrix elements."""
     if i == j and i >= K - 1:
         return (
-            K / (N - K + 1) *
-            np.prod(np.arange(i - K + 2, i + 1) / np.arange(N - K + 2, N + 1))
+            K
+            / (N - K + 1)
+            * np.prod(np.arange(i - K + 2, i + 1) / np.arange(N - K + 2, N + 1))
         )
     elif j > i and j >= K - 1 and K >= 2:
         return (
-            K / (N - K + 1) * (K - 1) / N *
-            np.prod(np.arange(j - K + 2, j) / np.arange(N - K + 2, N))
+            K
+            / (N - K + 1)
+            * (K - 1)
+            / N
+            * np.prod(np.arange(j - K + 2, j) / np.arange(N - K + 2, N))
         )
     return 0
 
@@ -61,11 +66,13 @@ def _sorted_apply(func: Callable) -> Callable:
     Decorator that sorts input array, applies function, then un-sorts output.
     This ensures the transformation respects the original sample ordering.
     """
+
     def inner(x: np.ndarray, *args, **kwargs) -> np.ndarray:
         i_sort = np.argsort(x)
         func_x = np.zeros_like(x)
         func_x[i_sort] = func(x[i_sort], *args, **kwargs)
         return func_x
+
     return inner
 
 
@@ -85,7 +92,7 @@ def s(g: np.ndarray, K: int):
     """
     N = len(g)
     c = g * _m_diagonal(N, K)
-    c[:(N - 1)] += g[1:] * _deltas(N + 1, K)
+    c[: (N - 1)] += g[1:] * _deltas(N + 1, K)
     return np.cumsum(c[::-1])[::-1]
 
 
@@ -157,6 +164,83 @@ def sloo_minus_one(g: np.ndarray, K: int) -> np.ndarray:
         return g - g.mean()
 
     return s(g, K) - _b(g, K - 1) * K / (K - 1) / len(g)
+
+
+def grpo_compute_advantages(
+    groups: dict[str, list[dict]],
+    reward_scale: bool = True,
+    reward_epsilon: float = 1e-3,
+    reward_noise: float = 1e-2,
+    debug: bool = False,
+    weight_more_max_reward: bool = False,  # weight more max reward
+    weight_more_max_reward_scale: float = 1.0,  # weight more max reward scale
+    k: int = 1,  # k for PKPO
+):
+    """Compute advantages for the generated tokens
+
+    This function supports both standard GRPO (k=1) and PKPO (k>1) for optimizing pass@k.
+
+    Args:
+        groups: Dictionary of groups with rewards
+        reward_scale: Whether to scale advantages by std
+        reward_epsilon: Small value to prevent division by zero
+        reward_noise: Amount of noise to add to advantages
+        debug: Print debug information
+        weight_more_max_reward: Whether to weight max reward more
+        weight_more_max_reward_scale: Scale factor for max reward weighting
+        k: k value for PKPO (1 for standard GRPO, >1 for PKPO)
+            Note: If k > number of samples in a group, it will be capped to
+            the number of samples (optimize for best possible sample)
+
+    Returns:
+        groups with advantages added
+    """
+    if debug:
+        print("\nComputing advantages\n")
+    for key, group in groups.items():
+        # calculate mean and stdev of the rewards
+        rewards = np.array([result["reward"] for result in group])
+        n_samples = len(rewards)
+        mean_reward = np.mean(rewards)
+        std_reward = np.std(rewards)
+
+        # Handle edge case: k should not exceed number of samples
+        # PKPO requires K <= n for the transformation to be valid
+        effective_k = k
+        if k > n_samples:
+            effective_k = n_samples
+            if debug:
+                print(
+                    f"Warning: k={k} > n_samples={n_samples} for group {key}. "
+                    f"Using k={effective_k} instead."
+                )
+
+        # Compute advantages based on effective k
+        if effective_k == 1:
+            advantages_prev = rewards - mean_reward
+        else:
+            advantages_prev = sloo_minus_one(rewards, K=effective_k)
+
+        if reward_scale:
+            advantages = advantages_prev / (std_reward + reward_epsilon)
+        else:
+            advantages = advantages_prev
+
+        if weight_more_max_reward:
+            argmax_index = np.where(rewards == max(rewards))
+            advantages[argmax_index] *= weight_more_max_reward_scale
+
+        # add noise to the advantages
+        advantages = advantages + np.random.normal(
+            0, reward_noise, size=advantages.shape
+        )
+        # add the advantages to the group
+        for gen, advantage in zip(group, advantages):
+            gen["advantage"] = advantage
+        if debug:
+            print(key, "=>", [f'{gen["advantage"]:.2f}' for gen in group])
+
+    return groups
 
 
 # Example usage and testing

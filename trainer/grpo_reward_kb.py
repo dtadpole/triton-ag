@@ -6,6 +6,7 @@ import numpy as np
 import scipy.stats as stats
 import torch
 from scipy.optimize import brentq
+from trainer.pkpo import grpo_compute_advantages
 from transformers import AutoTokenizer
 
 
@@ -572,46 +573,6 @@ def grpo_compute_rewards_v5(
 
         if debug:
             print(key, "=>", [f'{gen["reward"]:.2f}' for gen in value])
-
-    return groups
-
-
-def grpo_compute_advantages(
-    groups: dict[str, list[dict]],
-    reward_scale: bool = True,
-    reward_epsilon: float = 1e-3,
-    reward_noise: float = 1e-2,
-    debug: bool = False,
-    weight_more_max_reward: bool = False,  # weight more max reward
-    weight_more_max_reward_scale: float = 1.0,  # weight more max reward scale
-):
-    """Compute advantages for the generated tokens"""
-    if debug:
-        print("\nComputing advantages\n")
-    for key, group in groups.items():
-        # calculate mean and stdev of the rewards
-        rewards = np.array([result["reward"] for result in group])
-        mean_reward = np.mean(rewards)
-        std_reward = np.std(rewards)
-        # whether to scale the rewards
-        if reward_scale:
-            advantages = (rewards - mean_reward) / (std_reward + reward_epsilon)
-        else:
-            advantages = rewards - mean_reward
-
-        if weight_more_max_reward:
-            argmax_index = np.where(rewards == max(rewards))
-            advantages[argmax_index] *= weight_more_max_reward_scale
-
-        # add noise to the advantages
-        advantages = advantages + np.random.normal(
-            0, reward_noise, size=advantages.shape
-        )
-        # add the advantages to the group
-        for gen, advantage in zip(group, advantages):
-            gen["advantage"] = advantage
-        if debug:
-            print(key, "=>", [f'{gen["advantage"]:.2f}' for gen in group])
 
     return groups
 

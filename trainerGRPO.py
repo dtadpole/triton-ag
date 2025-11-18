@@ -1,3 +1,4 @@
+from trainer.pkpo import pkpo_advantages
 import os
 import gc
 import torch
@@ -54,6 +55,7 @@ class GRPOConfig(BaseModel):
     use_truncated_is: bool = False
     clip_gradient_scale: float = 0.0
     truncated_is_ratio: float = 2.0
+    pkpo_advantages_k: int = 1
 
     @classmethod
     def from_yaml(cls, file_path: str) -> "GRPOConfig":

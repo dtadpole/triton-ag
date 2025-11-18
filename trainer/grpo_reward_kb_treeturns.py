@@ -7,12 +7,11 @@ import math
 from itertools import groupby
 from operator import itemgetter
 
-import numpy as np
 import scipy.stats as stats
 import torch
 from scipy.optimize import brentq
+from trainer.pkpo import grpo_compute_advantages
 from transformers import AutoTokenizer
-from trainer.pkpo import sloo_minus_one
 
 
 def grpo_compute_rewards_v5_treeturns(
@@ -85,7 +84,9 @@ def grpo_compute_rewards_v5_treeturns(
                     # No selection file for this turn - cannot award improvement bonus
                     # The generation must start from the beginning
                     if debug:
-                        print(f"  [Turn {i}] No selection data - skipping improvement bonus")
+                        print(
+                            f"  [Turn {i}] No selection data - skipping improvement bonus"
+                        )
                 else:
                     # Get the selected conversation's speedup for comparison
                     selected_speedup = 0
@@ -117,7 +118,9 @@ def grpo_compute_rewards_v5_treeturns(
                         had_improvement = True
                         improvement_bonus_get = improvement_bonus
                         if debug:
-                            print(f"  [Turn {i}] Improvement bonus awarded: speedup {speedup_:.2f} > selected {selected_speedup:.2f}")
+                            print(
+                                f"  [Turn {i}] Improvement bonus awarded: speedup {speedup_:.2f} > selected {selected_speedup:.2f}"
+                            )
 
             trajectory_reward = step_reward
             turn["reward_items"] = {
@@ -188,51 +191,6 @@ def grpo_compute_rewards_v5_treeturns(
 
         if debug:
             print(key, "=>", [f'{gen["reward"]:.2f}' for gen in value])
-
-    return groups
-
-
-def grpo_compute_advantages(
-    groups: dict[str, list[dict]],
-    reward_scale: bool = True,
-    reward_epsilon: float = 1e-3,
-    reward_noise: float = 1e-2,
-    debug: bool = False,
-    weight_more_max_reward: bool = False,  # weight more max reward
-    weight_more_max_reward_scale: float = 1.0,  # weight more max reward scale
-    k: int = 1,  # k for PKPO
-):
-    """Compute advantages for the generated tokens"""
-    if debug:
-        print("\nComputing advantages\n")
-    for key, group in groups.items():
-        # calculate mean and stdev of the rewards
-        rewards = np.array([result["reward"] for result in group])
-        mean_reward = np.mean(rewards)
-        std_reward = np.std(rewards)
-        # whether to scale the rewards
-        if k == 1:
-            advantages_prev = rewards - mean_reward
-        else:
-            advantages_prev = sloo_minus_one(rewards, K=k)
-        if reward_scale:
-            advantages = advantages_prev / (std_reward + reward_epsilon)
-        else:
-            advantages = advantages_prev
-
-        if weight_more_max_reward:
-            argmax_index = np.where(rewards == max(rewards))
-            advantages[argmax_index] *= weight_more_max_reward_scale
-
-        # add noise to the advantages
-        advantages = advantages + np.random.normal(
-            0, reward_noise, size=advantages.shape
-        )
-        # add the advantages to the group
-        for gen, advantage in zip(group, advantages):
-            gen["advantage"] = advantage
-        if debug:
-            print(key, "=>", [f'{gen["advantage"]:.2f}' for gen in group])
 
     return groups
 
@@ -427,19 +385,25 @@ def speedup_threshold_alpha(ref_dict, test_dict, alpha=0.05):
 
 
 if __name__ == "__main__":
-    import duckdb
     import argparse
 
     # add parent directory to path
     import os
     import sys
 
+    import duckdb
+
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--gamma", type=float, default=0.5)
     parser.add_argument("--input_dir", type=str, required=True)
-    parser.add_argument("--input_tag", type=str, required=True, help="Input tag (e.g., cudacoder_treeturns_gspo_qwen32b.t01_000_04)")
+    parser.add_argument(
+        "--input_tag",
+        type=str,
+        required=True,
+        help="Input tag (e.g., cudacoder_treeturns_gspo_qwen32b.t01_000_04)",
+    )
     parser.add_argument("--tokenizer_name", type=str, default="Qwen/Qwen3-8B")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
@@ -533,13 +497,15 @@ ORDER BY task_tag, gen_tag, turn_tag
     # Print the full DataFrame to eyeball the results
     import pandas as pd
 
-    pd.set_option('display.max_rows', None)
-    pd.set_option('display.max_columns', None)
-    pd.set_option('display.width', None)
-    pd.set_option('display.max_colwidth', 50)
+    pd.set_option("display.max_rows", None)
+    pd.set_option("display.max_columns", None)
+    pd.set_option("display.width", None)
+    pd.set_option("display.max_colwidth", 50)
 
     print("\nFull DataFrame (first 100 rows):")
-    with pd.option_context('display.max_rows', 100, 'display.max_columns', 20, 'display.width', 150):
+    with pd.option_context(
+        "display.max_rows", 100, "display.max_columns", 20, "display.width", 150
+    ):
         print(result.df().head(100))
 
     # Show sample of data
@@ -550,11 +516,13 @@ ORDER BY task_tag, gen_tag, turn_tag
     print(f"Number of unique turns: {df['turn_tag'].nunique()}")
 
     # Check if selection data exists
-    has_selection_data = df['selected_turn_tag'].notna().any()
+    has_selection_data = df["selected_turn_tag"].notna().any()
     print(f"\nSelection data found: {has_selection_data}")
     if has_selection_data:
         print(f"  - Rows with selection data: {df['selected_turn_tag'].notna().sum()}")
-        print(f"  - Sample selected turn tags: {df['selected_turn_tag'].dropna().unique()[:5]}")
+        print(
+            f"  - Sample selected turn tags: {df['selected_turn_tag'].dropna().unique()[:5]}"
+        )
     print()
 
     print("Computing rewards (Tree Turns Mode)...")
