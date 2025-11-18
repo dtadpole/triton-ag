@@ -314,28 +314,3 @@ module:
             task_tag: "`task_tag`"
             category: "generated"
             data: "`generated_eval`"
-        # Compute log probabilities
-        - type: endpoint
-          endpoint: logpClient.logps
-          context_vars:
-            prompt_ids: "`__runtime__.tokenizer.encode(prompt)`"
-            completion_ids: "`[logprob['token_id'] for logprob in completion['logprobs']]`"
-            input_ids: "`prompt_ids + completion_ids`"
-          args:
-            provider: "`logp_providers`"
-            model_name: "`model_override or __runtime__.inferenceClient.model_full_name`"
-            input_ids: "`input_ids`"
-          returns:
-            error_if: "`__result__ is None`"
-            context_vars:
-              output_data:
-                prompt_ids: "`prompt_ids`"
-                completion_ids: "`completion_ids`"
-                input_ids: "`__result__['input_ids']`"
-                logps: "`__result__['logps']`"
-            save_to:
-              - path: "`f'{record_folder}/{turn_tag}_logps.json'`"
-                data: "`output_data`"
-                format: "json"
-            logging:
-              method: "log_logps"
