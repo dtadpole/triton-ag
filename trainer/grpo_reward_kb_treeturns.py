@@ -12,6 +12,7 @@ import scipy.stats as stats
 import torch
 from scipy.optimize import brentq
 from transformers import AutoTokenizer
+from trainer.pkpo import sloo_minus_one
 
 
 def grpo_compute_rewards_v5_treeturns(
@@ -71,6 +72,7 @@ def grpo_compute_rewards_v5_treeturns(
             # Calculate improvement bonus based on selected conversation from previous turn
             # IMPORTANT: Only award improvement bonus if selection file exists for this turn
             # If selection file is missing, the turn must start from the beginning (no tree structure)
+            improvement_bonus_get = 0.0
             if i > 0 and had_improvement is False:
                 # Check if selection data exists - if not, no improvement bonus possible
                 # This handles the case where the selection file is missing for a turn
@@ -113,6 +115,7 @@ def grpo_compute_rewards_v5_treeturns(
                     if speedup_ > selected_speedup >= speedup_threahold:
                         step_reward += improvement_bonus
                         had_improvement = True
+                        improvement_bonus_get = improvement_bonus
                         if debug:
                             print(f"  [Turn {i}] Improvement bonus awarded: speedup {speedup_:.2f} > selected {selected_speedup:.2f}")
 
@@ -122,6 +125,7 @@ def grpo_compute_rewards_v5_treeturns(
                 "speedup": speedup_reward,
                 "step_reward": step_reward,
                 "trajectory_reward": trajectory_reward,
+                "improvement_bonus": improvement_bonus_get,
             }
             turn["reward"] = trajectory_reward
             turn["turn_only_tag"] = turn["turn_tag"].split("_")[-1]
@@ -196,6 +200,7 @@ def grpo_compute_advantages(
     debug: bool = False,
     weight_more_max_reward: bool = False,  # weight more max reward
     weight_more_max_reward_scale: float = 1.0,  # weight more max reward scale
+    k: int = 1,  # k for PKPO
 ):
     """Compute advantages for the generated tokens"""
     if debug:
@@ -206,10 +211,14 @@ def grpo_compute_advantages(
         mean_reward = np.mean(rewards)
         std_reward = np.std(rewards)
         # whether to scale the rewards
-        if reward_scale:
-            advantages = (rewards - mean_reward) / (std_reward + reward_epsilon)
+        if k == 1:
+            advantages_prev = rewards - mean_reward
         else:
-            advantages = rewards - mean_reward
+            advantages_prev = sloo_minus_one(rewards, K=k)
+        if reward_scale:
+            advantages = advantages_prev / (std_reward + reward_epsilon)
+        else:
+            advantages = advantages_prev
 
         if weight_more_max_reward:
             argmax_index = np.where(rewards == max(rewards))
