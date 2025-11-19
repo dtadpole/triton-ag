@@ -1,4 +1,3 @@
-from trainer.pkpo import pkpo_advantages
 import os
 import gc
 import torch
@@ -56,6 +55,9 @@ class GRPOConfig(BaseModel):
     clip_gradient_scale: float = 0.0
     truncated_is_ratio: float = 2.0
     pkpo_advantages_k: int = 1
+    speedup_reward: float = 0.3
+    correctness_reward: float = 0.3
+    improvement_bonus: float = 0.2
 
     @classmethod
     def from_yaml(cls, file_path: str) -> "GRPOConfig":
@@ -331,6 +333,7 @@ class GRPOTrainer():
                     group_reward_items[key] = []
                 group_reward_items[key].append(value)
         group_reward_items_mean = {k: np.mean(v) for k, v in group_reward_items.items()}
+        group_reward_items_max = {k: np.max(v) for k, v in group_reward_items.items()}
         group_reward_items_std = {k: np.std(v) for k, v in group_reward_items.items()}
 
         max_tokens_in_group = max([len(result["vllm_completion_ids"]) for result in group_dataset])
@@ -394,6 +397,8 @@ class GRPOTrainer():
         }
         for key, value in group_reward_items_mean.items():
             metrics[f"reward/item_{key}_mean"] = value
+        for key, value in group_reward_items_max.items():
+            metrics[f"reward/item_{key}_max"] = value
         for key, value in group_reward_items_std.items():
             metrics[f"reward/item_{key}_std"] = value
         for key, value in clip_metrics.items():

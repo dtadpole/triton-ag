@@ -201,8 +201,6 @@ def grpo_compute_advantages(
         # calculate mean and stdev of the rewards
         rewards = np.array([result["reward"] for result in group])
         n_samples = len(rewards)
-        mean_reward = np.mean(rewards)
-        std_reward = np.std(rewards)
 
         # Handle edge case: k should not exceed number of samples
         # PKPO requires K <= n for the transformation to be valid
@@ -217,17 +215,21 @@ def grpo_compute_advantages(
 
         # Compute advantages based on effective k
         if effective_k == 1:
-            advantages_prev = rewards - mean_reward
+            transformed_reward = rewards
         else:
-            advantages_prev = sloo_minus_one(rewards, K=effective_k)
+            transformed_reward = sloo_minus_one(rewards, K=effective_k)
 
+        mean_reward = np.mean(transformed_reward)
+        std_reward = np.std(transformed_reward)
+
+        advantages_prev = transformed_reward - mean_reward
         if reward_scale:
             advantages = advantages_prev / (std_reward + reward_epsilon)
         else:
             advantages = advantages_prev
 
         if weight_more_max_reward:
-            argmax_index = np.where(rewards == max(rewards))
+            argmax_index = np.where(transformed_reward == max(transformed_reward))
             advantages[argmax_index] *= weight_more_max_reward_scale
 
         # add noise to the advantages

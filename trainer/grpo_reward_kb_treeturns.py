@@ -17,8 +17,10 @@ from transformers import AutoTokenizer
 def grpo_compute_rewards_v5_treeturns(
     query_result: list[dict],
     gamma: float = 0.5,
-    speedup_threahold: float = 1.3,  # code-gen specific parameter
-    improvement_bonus: float = 0.2,  # code-gen specific parameter
+    speedup_threahold_: float = 1.3,  # code-gen specific parameter
+    improvement_bonus_: float = 0.2,  # code-gen specific parameter
+    correctness_reward_: float = 0.3,  # code-gen specific parameter
+    speedup_reward_: float = 0.3,  # code-gen specific parameter
     debug: bool = False,
 ) -> dict[str, list[dict]]:
     """
@@ -44,7 +46,7 @@ def grpo_compute_rewards_v5_treeturns(
         had_improvement = False
         # for each list, iteration from first to last, and if current step_reward is better than previous best, give an extra reward
         for i, turn in enumerate(value):
-            correctness_reward = 0.3 if turn["correctness"] else 0.0
+            correctness_reward = correctness_reward_ if turn["correctness"] else 0.0
             try:  # in case the reference runtime is not available caused by the kb eval error
                 speedup_test_result = (
                     speedup_threshold_alpha(
@@ -64,7 +66,7 @@ def grpo_compute_rewards_v5_treeturns(
                     if turn["runtime"] > 0 and turn["ref_runtime"] > 0
                     else 0.0
                 )  # could be noisy
-            speedup_reward = min(0.3, (speedup_ / speedup_threahold) ** 4 * 0.3)
+            speedup_reward = min(speedup_reward_, (speedup_ / speedup_threahold_) ** 4 * speedup_reward_)
 
             step_reward = correctness_reward + speedup_reward
 
@@ -113,10 +115,10 @@ def grpo_compute_rewards_v5_treeturns(
                                 )
 
                     # Award improvement bonus if current speedup is better than selected speedup
-                    if speedup_ > selected_speedup >= speedup_threahold:
-                        step_reward += improvement_bonus
+                    if speedup_ > selected_speedup >= speedup_threahold_:
+                        step_reward += improvement_bonus_
                         had_improvement = True
-                        improvement_bonus_get = improvement_bonus
+                        improvement_bonus_get = improvement_bonus_
                         if debug:
                             print(
                                 f"  [Turn {i}] Improvement bonus awarded: speedup {speedup_:.2f} > selected {selected_speedup:.2f}"

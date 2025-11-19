@@ -15,6 +15,7 @@ from torch.utils.data import Dataset
 from trainerUtil import SimpleCollator
 from workflowUtil import merge_dicts
 from util import INFERENCE_DIR, TRAINER_DIR
+import random
 
 class TrainerStatus(BaseModel):
     """Running status of the trainer"""
@@ -365,7 +366,8 @@ class EngineBase(ABC):
             dist.is_initialized() and dist.get_rank() == 0
         ) or not dist.is_initialized():
             # Initialize logging
-            self.config.logging.wandb_run_id = self.prefix_tag
+            random.seed(40)
+            self.config.logging.wandb_run_id = self.prefix_tag + f"{random.randint(0, 99999):05d}"
             self.config.logging.wandb_run_name = (
                 self.prefix_tag + "_" + datetime.now().strftime("%m%d")
             )
