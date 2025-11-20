@@ -171,9 +171,9 @@ def grpo_compute_advantages(
     reward_scale: bool = True,
     reward_epsilon: float = 1e-3,
     reward_noise: float = 1e-2,
+    good_reward_threshold: float = 0.3,
+    bad_reward_threshold: float = 0.05,
     debug: bool = False,
-    weight_more_max_reward: bool = False,  # weight more max reward
-    weight_more_max_reward_scale: float = 1.0,  # weight more max reward scale
     k: int = 1,  # k for PKPO
 ):
     """Compute advantages for the generated tokens
@@ -214,28 +214,43 @@ def grpo_compute_advantages(
                 )
 
         # Compute advantages based on effective k
-        if effective_k == 1:
-            transformed_reward = rewards
-        else:
-            transformed_reward = sloo_minus_one(rewards, K=effective_k)
 
-        mean_reward = np.mean(transformed_reward)
-        std_reward = np.std(transformed_reward)
+        mean_reward = np.mean(rewards)
+        std_reward = np.std(rewards)
 
-        advantages_prev = transformed_reward - mean_reward
+        advantages_prev = rewards - mean_reward
+
         if reward_scale:
             advantages = advantages_prev / (std_reward + reward_epsilon)
         else:
             advantages = advantages_prev
 
-        if weight_more_max_reward:
-            argmax_index = np.where(transformed_reward == max(transformed_reward))
-            advantages[argmax_index] *= weight_more_max_reward_scale
+        if effective_k == 1:
+            advantages_calculated = advantages
+        else:
+            advantages_calculated = sloo_minus_one(rewards, K=effective_k) # PKPO direct calculate advantage based on rewards
+            if reward_scale:
+                advantages_calculated = advantages_calculated / (std_reward + reward_epsilon)
+
 
         # add noise to the advantages
-        advantages = advantages + np.random.normal(
+        advantages = advantages_calculated + np.random.normal(
             0, reward_noise, size=advantages.shape
         )
+
+        # Clip advantages: minimum 0 for good rewards, maximum 0 for bad
+        # It is used to clip the advantages that encourage bad behaviors even it is relatively better
+        # or discourage the good behaviors when it is relatively worse
+        filter_index = (rewards >= good_reward_threshold) & (
+            advantages < 0
+        )
+        advantages[filter_index] = 0
+
+        filter_index = (rewards <= bad_reward_threshold) & (
+            advantages > 0
+        )
+        advantages[filter_index] = 0
+
         # add the advantages to the group
         for gen, advantage in zip(group, advantages):
             gen["advantage"] = advantage
