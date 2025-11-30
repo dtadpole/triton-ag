@@ -1,25 +1,26 @@
-import os
+import argparse
+import asyncio
 import gc
+import json
+import os
+import time
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import numpy as np
 import torch
 import torch.nn.functional as F
-import numpy as np
-from typing import Dict, List, Optional, Any, Tuple, Callable
 import yaml
-import asyncio
-import argparse
-import json
-from pydantic import BaseModel
-from engineBase import EngineBase, EngineConfig
-from trainerUtil import SimpleCollator, make_checkpoint_callback
-from logger import logger
-import time
-from torch.utils.data import DataLoader
-from tqdm import tqdm
 from configEndpoints import DuckDBClient
 from configInterpreter import ConfigInterpreter
-from workflowUtil import TrainerBlock
-from workflowSync import WorkflowSync
+from engineBase import EngineBase, EngineConfig
+from logger import logger
+from pydantic import BaseModel
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from trainerUtil import make_checkpoint_callback, SimpleCollator
 from util import INFERENCE_DIR, TRAINER_DIR
+from workflowSync import WorkflowSync
+from workflowUtil import TrainerBlock
 
 LATEST_REFERENCE_NAME = "reference_state_latest.pt"
 
@@ -62,6 +63,7 @@ class GRPOConfig(BaseModel):
     improvement_bonus: float = 0.2
     good_reward_threshold: float = 0.3
     bad_reward_threshold: float = 0.05
+    entropy_coeff: float = 0.0  # Entropy regularization coefficient (0.0 = disabled)
 
     @classmethod
     def from_yaml(cls, file_path: str) -> "GRPOConfig":
@@ -365,6 +367,16 @@ class GRPOTrainer:
 
                 loss = -final_sequence_ratio_advantage.mean()
 
+                # Add entropy regularization if enabled
+                if self.grpo_config.entropy_coeff > 0:
+                    # Calculate entropy: H = -sum(p * log(p))
+                    # = -sum(exp(log_p) * log_p)
+                    probs = torch.exp(forward_completion_log_probs)
+                    entropy = -torch.sum(probs * forward_completion_log_probs)
+                    # Subtract entropy to encourage exploration
+                    # (maximize entropy = minimize -entropy)
+                    loss = loss - self.grpo_config.entropy_coeff * entropy
+
             else:
                 ratio = torch.exp(raw_log_ratio)
 
@@ -460,6 +472,16 @@ class GRPOTrainer:
                     raise ValueError(
                         f"❌ [GRPOTrainingGroup] Invalid loss type: {self.grpo_config.loss_type}"
                     )
+
+                # Add entropy regularization if enabled
+                if self.grpo_config.entropy_coeff > 0:
+                    # Calculate entropy: H = -sum(p * log(p))
+                    # = -sum(exp(log_p) * log_p)
+                    probs = torch.exp(forward_completion_log_probs)
+                    entropy = -torch.sum(probs * forward_completion_log_probs)
+                    # Subtract entropy to encourage exploration
+                    # (maximize entropy = minimize -entropy)
+                    loss = loss - self.grpo_config.entropy_coeff * entropy
 
             batch_loss += loss
 
