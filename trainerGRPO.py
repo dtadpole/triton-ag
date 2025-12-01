@@ -508,6 +508,13 @@ class GRPOTrainer:
         group_reward_mean = np.mean([result["reward"] for result in group_dataset])
         group_reward_std = np.std([result["reward"] for result in group_dataset])
 
+        advantages_list = [result["advantage"] for result in group_dataset]
+        group_advantage_mean = np.mean(advantages_list)
+        group_advantage_std = np.std(advantages_list)
+        group_advantage_positive_pct = (
+            np.mean([adv > 0 for adv in advantages_list]) * 100.0
+        )
+
         group_reward_items = {}
         for result in group_dataset:
             for key, value in result["reward_items"].items():
@@ -586,6 +593,9 @@ class GRPOTrainer:
             f"train_{self.short_name()}/num_group_results": len(group_dataset),
             f"reward/total_mean": group_reward_mean,
             f"reward/total_std": group_reward_std,
+            f"advantage/mean": group_advantage_mean,
+            f"advantage/std": group_advantage_std,
+            f"advantage/positive_pct": group_advantage_positive_pct,
         }
         for key, value in group_reward_items_mean.items():
             metrics[f"reward/item_{key}_mean"] = value
