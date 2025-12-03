@@ -14,13 +14,179 @@ from trainer.pkpo import grpo_compute_advantages
 from transformers import AutoTokenizer
 
 
+def grpo_compute_rewards_v6_treeturns(
+    query_result: list[dict],
+    speedup_threahold_: float = 1.3,  # code-gen specific parameter
+    improvement_bonus_: float = 0.2,  # code-gen specific parameter
+    compile_reward_: float = 0.15,  # code-gen specific parameter
+    correctness_reward_: float = 0.3,  # code-gen specific parameter
+    speedup_reward_: float = 0.3,  # code-gen specific parameter
+    debug: bool = False,
+) -> dict[str, list[dict]]:
+    """
+    Compute rewards for tree-based multi-turn conversations.
+
+    The improvement bonus is based on the selected conversation from the previous turn,
+    not comparing within the same generation trajectory.
+
+    For turn 0: No improvement bonus (first turn)
+    For turn > 0: Compare against selected conversation's speedup from previous turn
+    """
+    # for each task_tag, group by gen_tag, and return a list of turns, each turn is a sorted list of rows
+    results_by_gen = {
+        k: list(g)
+        for k, g in groupby(
+            sorted(query_result, key=itemgetter("task_tag", "turn_tag")),
+            key=itemgetter("task_tag", "gen_tag"),
+        )
+    }
+    if debug:
+        print("\nProcessing trajectory (by task_tag, gen_tag) - Tree Turns Mode\n")
+    for key, value in results_by_gen.items():
+        had_improvement = False
+        # for each list, iteration from first to last, and if current step_reward is better than previous best, give an extra reward
+        for i, turn in enumerate(value):
+            if turn["compiled"] is False:
+                correctness_reward = 0.0
+            elif turn["compiled"] is True and turn["correctness"] is False:
+                correctness_reward = compile_reward_
+            elif turn["compiled"] is True and turn["correctness"] is True:
+                correctness_reward = correctness_reward_
+            else:
+                correctness_reward = 0.0
+            speedup_ = (
+                (turn["ref_runtime"] / turn["runtime"])
+                if turn["runtime"] > 0 and turn["ref_runtime"] > 0
+                else 0.0
+            )  # could be noisy
+            speedup_reward = min(speedup_reward_, (speedup_ / speedup_threahold_) ** 4 * speedup_reward_)
+
+            step_reward = correctness_reward + speedup_reward
+
+            # Calculate improvement bonus based on selected conversation from previous turn
+            # IMPORTANT: Only award improvement bonus if selection file exists for this turn
+            # If selection file is missing, the turn must start from the beginning (no tree structure)
+            improvement_bonus_get = 0.0
+            if i > 0 and had_improvement is False:
+                # Check if selection data exists - if not, no improvement bonus possible
+                # This handles the case where the selection file is missing for a turn
+                has_selection_data = (
+                    turn.get("selected_turn_tag") is not None
+                    and turn.get("selected_runtime_stats") is not None
+                )
+
+                if not has_selection_data:
+                    # No selection file for this turn - cannot award improvement bonus
+                    # The generation must start from the beginning
+                    if debug:
+                        print(
+                            f"  [Turn {i}] No selection data - skipping improvement bonus"
+                        )
+                else:
+                    # Get the selected conversation's speedup for comparison
+                    selected_speedup = 0
+                    if turn.get("ref_runtime_stats"):
+                        if (
+                            turn.get("selected_runtime")
+                            and turn["selected_runtime"] > 0
+                            and turn.get("ref_runtime")
+                            and turn["ref_runtime"] > 0
+                        ):
+                            selected_speedup = (
+                                turn["ref_runtime"] / turn["selected_runtime"]
+                            )
+
+                    # Award improvement bonus if current speedup is better than selected speedup
+                    if speedup_ > selected_speedup >= speedup_threahold_:
+                        step_reward += improvement_bonus_
+                        had_improvement = True
+                        improvement_bonus_get = improvement_bonus_
+                        if debug:
+                            print(
+                                f"  [Turn {i}] Improvement bonus awarded: speedup {speedup_:.2f} > selected {selected_speedup:.2f}"
+                            )
+
+            trajectory_reward = step_reward
+            turn["reward_items"] = {
+                "correctness": correctness_reward,
+                "speedup": speedup_reward,
+                "step_reward": step_reward,
+                "trajectory_reward": trajectory_reward,
+                "improvement_bonus": improvement_bonus_get,
+            }
+            turn["reward"] = trajectory_reward
+            turn["turn_only_tag"] = turn["turn_tag"].split("_")[-1]
+        # debug message prints reward for a trajectory
+        if debug:
+            print(key, "=>", [f'{turn["reward"]:.2f}' for turn in value])
+
+    # for each task_tag, group by gen_tag, and return a list of turns, each turn is a sorted list of generations
+    results_by_turn_only = {
+        k: list(g)
+        for k, g in groupby(
+            sorted(
+                query_result, key=itemgetter("task_tag", "turn_only_tag", "gen_tag")
+            ),
+            key=itemgetter("task_tag", "turn_only_tag"),
+        )
+    }
+    if debug:
+        print("\nProcessing trajectory (by task_tag, turn_only_tag)\n")
+    groups = {}
+    for key, value in results_by_turn_only.items():
+        # if all the rewards in the group for different gen_tag are 0, then ignore the group
+        if all(gen["reward"] == 0.0 for gen in value):
+            continue
+        if len(value) == 1:
+            # ignore single item groups
+            continue
+        # # ignore the case when the reward contrast is not large enough, such the case all generations are full scores
+        # max_reward_ = max(gen["reward"] for gen in value)
+        # min_reward_ = min(gen["reward"] for gen in value)
+        # if (max_reward_ - min_reward_) < min_reward_diff_:
+        #     continue
+        # otherwise, create a group with prompt, logprobs, (including the task_tag and turn_only_tag)
+        group = [
+            {
+                "task_tag": item["task_tag"],
+                "gen_tag": item["gen_tag"],
+                "turn_only_tag": item["turn_only_tag"],
+                "turn_tag": item["turn_tag"],
+                "reward": item["reward"],
+                "reward_items": item["reward_items"],
+                "prompt": item["prompt"],
+                "logprobs": item["logprobs"],
+                "logp_server_prompt_ids": item["prompt_ids"],
+                "logp_server_completion_ids": item["completion_ids"],
+                "logp_server_input_ids": item["input_ids"],
+                "logp_server_logps": item["logps"],
+                "runtime": item["runtime"],
+                "checkpoint_name": (
+                    item["metadata"]["model_override"].split("/")[-1]
+                    if "model_override" in item["metadata"]
+                    and item["metadata"]["model_override"]
+                    else None
+                ),
+            }
+            for item in value
+        ]
+        # add the group to the groups dict
+        groups[key] = group
+
+        if debug:
+            print(key, "=>", [f'{gen["reward"]:.2f}' for gen in value])
+
+    return groups
+
+
 def grpo_compute_rewards_v5_treeturns(
     query_result: list[dict],
     gamma: float = 0.5,
-    speedup_threahold_: float = 1.3,  # code-gen specific parameter
+    speedup_threahold_: float = 2,  # code-gen specific parameter
     improvement_bonus_: float = 0.2,  # code-gen specific parameter
-    correctness_reward_: float = 0.3,  # code-gen specific parameter
+    correctness_reward_: float = 0.2,  # code-gen specific parameter
     speedup_reward_: float = 0.3,  # code-gen specific parameter
+    min_reward_diff_: float = 0.001,  # code-gen specific parameter
     debug: bool = False,
 ) -> dict[str, list[dict]]:
     """
@@ -161,7 +327,7 @@ def grpo_compute_rewards_v5_treeturns(
         # ignore the case when the reward contrast is not large enough, such the case all generations are full scores
         max_reward_ = max(gen["reward"] for gen in value)
         min_reward_ = min(gen["reward"] for gen in value)
-        if (max_reward_ - min_reward_) < 0.01:
+        if (max_reward_ - min_reward_) < min_reward_diff_:
             continue
         # otherwise, create a group with prompt, logprobs, (including the task_tag and turn_only_tag)
         group = [

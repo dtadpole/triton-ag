@@ -166,7 +166,7 @@ lora_merge_compress:
 	CUDA_VISIBLE_DEVICES=4 python lora_merge_llmcomp_awq.py
 
 kbEval:
-	while true; do python kbEvalServer.py; sleep 1; done
+	while true; do python kbEvalServer.py; sleep 5; done
 
 kbeval_local:
 	python kbEvalServer.py --local_host --port 5676 --device 7
