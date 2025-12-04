@@ -297,7 +297,7 @@ vllm-qwen3-32b-devserver_a:
     --enable_chunked_prefill --max_num_batched_tokens 2048 \
     --max_log_len 0 --max_num_seqs 64 \
     --enable_prefix_caching --prefix-caching-hash-algo builtin \
-    --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
+    --generation-config vllm --override-generation-config '{"temperature":0.9,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
     --return-tokens-as-token-ids
 
 
