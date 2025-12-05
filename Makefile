@@ -650,7 +650,7 @@ vllm_gptoss_b:
 		-v ~/.netrc:/root/.netrc \
 		-v ~/.gitconfig:/root/.gitconfig \
 		-v ~/.keys/:/root/.keys/ \
-		-e CUDA_VISIBLE_DEVICES=2,3 \
+		-e CUDA_VISIBLE_DEVICES=0 \
 		-e HF_HOME=/root/.cache/huggingface \
 		-e HTTP_PROXY="http://fwdproxy:8080" \
 		-e HTTPS_PROXY="http://fwdproxy:8080" \
@@ -660,22 +660,20 @@ vllm_gptoss_b:
 		--device /dev/fuse \
 		--security-opt apparmor:unconfined \
 		--privileged \
-		vllm/vllm-openai:latest \
+		vllm/vllm-openai:v0.10.2 \
 		--model openai/gpt-oss-120b \
 		--port 8002 --host :: \
 		--api-key dummy \
 		--data-parallel-size 1 \
-		--tensor-parallel-size 2 \
+		--tensor-parallel-size 1 \
 		--pipeline-parallel-size 1 \
 		--gpu-memory-utilization 0.9 --max_model_len 24576 \
 		--load_format safetensors \
 		--trust_remote_code \
 		--guided_decoding_backend guidance --guided-decoding-disable-fallback \
-		--enable_auto_tool_choice --tool_call_parser hermes \
 		--scheduling_policy priority \
 		--enable_chunked_prefill --max_num_batched_tokens 2048 \
 		--max_log_len 0 --max_num_seqs 144 \
-		--enable_prefix_caching --prefix-caching-hash-algo builtin \
+		--enable_prefix_caching --prefix-caching-hash-algo sha256 \
 		--generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
-		--return-tokens-as-token-ids \
 		--async-scheduling
