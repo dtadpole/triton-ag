@@ -64,6 +64,10 @@ class GRPOConfig(BaseModel):
     good_reward_threshold: float = 0.3
     bad_reward_threshold: float = 0.05
     entropy_coeff: float = 0.0  # Entropy regularization coefficient (0.0 = disabled)
+    # Dr. GRPO length bias fix (from "Understanding R1-Zero-Like Training")
+    # When True, use constant normalizer (max_seq_length) instead of response length
+    # This removes the bias where shorter responses get larger gradients
+    gspo_use_constant_length_normalizer: bool = False
 
     @classmethod
     def from_yaml(cls, file_path: str) -> "GRPOConfig":
@@ -365,7 +369,16 @@ class GRPOTrainer:
                     self.grpo_config.bound_advantage_range,
                 )
 
-                loss = -final_sequence_ratio_advantage.mean()
+                # Dr. GRPO length bias fix: use constant normalizer (max_seq_length)
+                # instead of actual response length to ensure equal gradient contribution
+                # regardless of response length.
+                if self.grpo_config.gspo_use_constant_length_normalizer:
+                    loss = (
+                        -torch.sum(final_sequence_ratio_advantage)
+                        / self.grpo_config.max_seq_length
+                    )
+                else:
+                    loss = -final_sequence_ratio_advantage.mean()
 
                 # Add entropy regularization if enabled
                 if self.grpo_config.entropy_coeff > 0:
