@@ -307,9 +307,17 @@ class GRPOTrainer:
                 else:
                     log_ratio = raw_log_ratio
 
-                sequence_log_ratio = torch.sum(log_ratio) / len(
-                    forward_completion_log_probs
-                )
+                # Dr. GRPO length bias fix: use constant normalizer (max_seq_length)
+                # instead of actual response length to ensure equal gradient contribution
+                # regardless of response length.
+                if self.grpo_config.gspo_use_constant_length_normalizer:
+                    sequence_log_ratio = (
+                        torch.sum(log_ratio) / self.grpo_config.max_seq_length
+                    )
+                else:
+                    sequence_log_ratio = torch.sum(log_ratio) / len(
+                        forward_completion_log_probs
+                    )
                 sequence_ratio = torch.exp(sequence_log_ratio)
 
                 clip_metrics[LOG_PROB_AVERAGE_RATIO].append(sequence_ratio.item())
@@ -369,16 +377,7 @@ class GRPOTrainer:
                     self.grpo_config.bound_advantage_range,
                 )
 
-                # Dr. GRPO length bias fix: use constant normalizer (max_seq_length)
-                # instead of actual response length to ensure equal gradient contribution
-                # regardless of response length.
-                if self.grpo_config.gspo_use_constant_length_normalizer:
-                    loss = (
-                        -torch.sum(final_sequence_ratio_advantage)
-                        / self.grpo_config.max_seq_length
-                    )
-                else:
-                    loss = -final_sequence_ratio_advantage.mean()
+                loss = -final_sequence_ratio_advantage.mean()
 
                 # Add entropy regularization if enabled
                 if self.grpo_config.entropy_coeff > 0:
