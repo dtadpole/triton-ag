@@ -55,6 +55,8 @@ class InferenceBlock(BaseModel):
     sft_dir: str = Field(default="~/.inference/sft")
     context: dict = Field(default_factory=dict)
     hint_length_prob: float = Field(default=0) # ADD THIS TO UFT, the hint length prob. https://arxiv.org/pdf/2505.16984
+    min_num_generations: int = Field(default=3) # TreeTurns parameters. Wait for the minimum number of generations before starting the next turn.
+    selection_strategy: str = Field(default="random") # The selection strategy for the previous turns: "random", "best_speedup"
 
 
 

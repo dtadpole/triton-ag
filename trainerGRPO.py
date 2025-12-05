@@ -1,25 +1,26 @@
-import os
+import argparse
+import asyncio
 import gc
+import json
+import os
+import time
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import numpy as np
 import torch
 import torch.nn.functional as F
-import numpy as np
-from typing import Dict, List, Optional, Any, Tuple, Callable
 import yaml
-import asyncio
-import argparse
-import json
-from pydantic import BaseModel
-from engineBase import EngineBase, EngineConfig
-from trainerUtil import SimpleCollator, make_checkpoint_callback
-from logger import logger
-import time
-from torch.utils.data import DataLoader
-from tqdm import tqdm
 from configEndpoints import DuckDBClient
 from configInterpreter import ConfigInterpreter
-from workflowUtil import TrainerBlock
-from workflowSync import WorkflowSync
+from engineBase import EngineBase, EngineConfig
+from logger import logger
+from pydantic import BaseModel
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from trainerUtil import make_checkpoint_callback, SimpleCollator
 from util import INFERENCE_DIR, TRAINER_DIR
+from workflowSync import WorkflowSync
+from workflowUtil import TrainerBlock
 
 LATEST_REFERENCE_NAME = "reference_state_latest.pt"
 
@@ -34,8 +35,10 @@ LOG_PROB_FORWARD_GENERATION_DIFF = "log_prob_forward_generation_diff"
 LOG_PROB_GENERATION_VLLM_DIFF = "log_prob_generation_vllm_diff"
 LOG_PROB_FORWARD_VLLM_DIFF = "log_prob_forward_vllm_diff"
 
+
 class GRPOConfig(BaseModel):
     """GRPO configuration"""
+
     max_seq_length: int = 16384
     mask_non_assistant_tokens: bool = True
     discard_long_conversations: bool = True
@@ -49,25 +52,37 @@ class GRPOConfig(BaseModel):
     reward_epsilon: float = 1e-3
     reward_noise: float = 1e-2
     # loss_type: str = "token" # "episode" or "token" or "seq_max" or "gspo"
-    loss_type: str = "gspo" # "episode" or "token" or "seq_max" or "gspo"
+    loss_type: str = "gspo"  # "episode" or "token" or "seq_max" or "gspo"
     gamma: float = 0.5
     use_truncated_is: bool = False
     clip_gradient_scale: float = 0.0
     truncated_is_ratio: float = 2.0
+    pkpo_advantages_k: int = 1
+    speedup_reward: float = 0.3
+    correctness_reward: float = 0.3
+    improvement_bonus: float = 0.2
+    good_reward_threshold: float = 0.3
+    bad_reward_threshold: float = 0.05
+    entropy_coeff: float = 0.0  # Entropy regularization coefficient (0.0 = disabled)
+    # Dr. GRPO length bias fix (from "Understanding R1-Zero-Like Training")
+    # When True, use constant normalizer (max_seq_length) instead of response length
+    # This removes the bias where shorter responses get larger gradients
+    gspo_use_constant_length_normalizer: bool = False
 
     @classmethod
     def from_yaml(cls, file_path: str) -> "GRPOConfig":
         """Load GRPO configuration from YAML file"""
-        with open(os.path.expanduser(file_path), 'r') as f:
+        with open(os.path.expanduser(file_path), "r") as f:
             config = yaml.safe_load(f)
-        grpo_config = config.get('grpo', {})
+        grpo_config = config.get("grpo", {})
         return cls(**grpo_config)
 
 
-class GRPOTrainer():
+class GRPOTrainer:
     """GRPO (Generalized Preference Optimization) trainer for preference learning"""
 
-    def __init__(self,
+    def __init__(
+        self,
         engine: EngineBase,
         prefix_tag: str,
         grpo_config: GRPOConfig,
@@ -81,7 +96,7 @@ class GRPOTrainer():
         self.duckdbClient = DuckDBClient()
         self.grpo_config = grpo_config
         self.module_file = module_file
-        self.module_config = yaml.safe_load(open(module_file, 'r')).get('module', {})
+        self.module_config = yaml.safe_load(open(module_file, "r")).get("module", {})
         # self.lora_cache = TrainerLoraCache(
         #     prefix_tag,
         #     self.engine.model,
@@ -100,14 +115,15 @@ class GRPOTrainer():
             "time": time,
             "grpo_config": self.grpo_config,
         }
-        context_var_config = self.module_config.get('context_vars', {})
-        self.context_vars = self.configInterpreter.prepare_context_vars(self, context_var_config, self.context_vars)
-
+        context_var_config = self.module_config.get("context_vars", {})
+        self.context_vars = self.configInterpreter.prepare_context_vars(
+            self, context_var_config, self.context_vars
+        )
 
         logger.info(f"⭐ [GRPOTrainer] Initialized with GRPOConfig: {grpo_config}")
 
     def short_name(self):
-        return 'grpo'
+        return "grpo"
 
     def _update_grpo_config(self, grpo_config: GRPOConfig):
         """Update GRPO config"""
@@ -115,7 +131,9 @@ class GRPOTrainer():
 
     def log_raw_data(self, data: Any, context_vars: Dict[str, Any]):
         """Log raw data"""
-        logger.info(f"🔍 [GRPOTrainer] DuckDB search has found [{len(data)}] rows.\n{data}")
+        logger.info(
+            f"🔍 [GRPOTrainer] DuckDB search has found [{len(data)}] rows.\n{data}"
+        )
 
     def _calculate_log_probs(
         self,
@@ -124,16 +142,21 @@ class GRPOTrainer():
         completion_token_ids: torch.Tensor,
     ):
         """Get log probabilities for the completion tokens"""
-        output_completion_logits = logits[prompt_token_len-1:-1, :]
-        log_probs = F.log_softmax(output_completion_logits, dim=-1) # dim: (completion_len, vocab_size)
+        output_completion_logits = logits[prompt_token_len - 1 : -1, :]
+        log_probs = F.log_softmax(
+            output_completion_logits, dim=-1
+        )  # dim: (completion_len, vocab_size)
         # get log probabilities for the completion tokens
-        labels = torch.tensor(completion_token_ids, device=self.engine.device) \
-            if isinstance(completion_token_ids, list) \
+        labels = (
+            torch.tensor(completion_token_ids, device=self.engine.device)
+            if isinstance(completion_token_ids, list)
             else completion_token_ids.to(self.engine.device)
-        action_log_probs = log_probs[:len(completion_token_ids), :].gather(
-            dim=-1,
-            index=labels.unsqueeze(-1)
-        ).squeeze(-1)  # (completion_len)
+        )
+        action_log_probs = (
+            log_probs[: len(completion_token_ids), :]
+            .gather(dim=-1, index=labels.unsqueeze(-1))
+            .squeeze(-1)
+        )  # (completion_len)
         return action_log_probs
 
     '''
@@ -174,18 +197,20 @@ class GRPOTrainer():
         """Compute loss for the generated tokens"""
         # turn_tags = batch['turn_tag']
         # rewards = batch['reward']
-        advantages = batch['advantage']
-        prompt_token_ids = batch['logp_server_prompt_ids']
-        completion_token_ids = batch['logp_server_completion_ids']
-        generation_log_probs = batch['logp_server_logps']
-        vllm_completion_log_probs = batch['vllm_completion_log_probs']
-        input_ids = batch['input_ids'].to(self.engine.device)
-        attention_mask = batch['attention_mask'].to(self.engine.device)
+        advantages = batch["advantage"]
+        prompt_token_ids = batch["logp_server_prompt_ids"]
+        completion_token_ids = batch["logp_server_completion_ids"]
+        generation_log_probs = batch["logp_server_logps"]
+        vllm_completion_log_probs = batch["vllm_completion_log_probs"]
+        input_ids = batch["input_ids"].to(self.engine.device)
+        attention_mask = batch["attention_mask"].to(self.engine.device)
 
-        model_outputs = self.engine.model(input_ids=input_ids, attention_mask=attention_mask)
+        model_outputs = self.engine.model(
+            input_ids=input_ids, attention_mask=attention_mask
+        )
 
         batch_loss = 0.0
-        for i in range(len(advantages)): # for each generation result in the batch
+        for i in range(len(advantages)):  # for each generation result in the batch
             # get the logits for the completion tokens only, remove the prompt tokens
             prompt_token_len = len(prompt_token_ids[i])
             forward_completion_log_probs = self._calculate_log_probs(
@@ -205,59 +230,165 @@ class GRPOTrainer():
             #     completion_log_probs_tensor = completion_log_probs_override
             #     log_prob_override_mse = torch.mean(torch.abs(torch.tensor(completion_log_probs[i], device=self.device) - completion_log_probs_tensor))
             # else:
-            generation_completion_log_probs = torch.tensor(generation_log_probs[i][len(prompt_token_ids[i])-1:len(prompt_token_ids[i])-1+len(completion_token_ids[i])], device=self.engine.device)
-            vllm_completion_log_probs_i = torch.tensor(vllm_completion_log_probs[i], device=self.engine.device)
+            generation_completion_log_probs = torch.tensor(
+                generation_log_probs[i][
+                    len(prompt_token_ids[i])
+                    - 1 : len(prompt_token_ids[i])
+                    - 1
+                    + len(completion_token_ids[i])
+                ],
+                device=self.engine.device,
+            )
+            vllm_completion_log_probs_i = torch.tensor(
+                vllm_completion_log_probs[i], device=self.engine.device
+            )
             # calculate log ratio (in log space is subtraction)
-            if generation_completion_log_probs.shape != forward_completion_log_probs.shape:
-                raise ValueError(f"❌ [GRPOTrainer] Generation completion log probabilities and forward completion log probabilities have different shapes: {generation_completion_log_probs.shape} != {forward_completion_log_probs.shape}")
-            if vllm_completion_log_probs_i.shape != generation_completion_log_probs.shape:
-                raise ValueError(f"❌ [GRPOTrainer] VLLM completion log probabilities and generation completion log probabilities have different shapes: {vllm_completion_log_probs_i.shape} != {generation_completion_log_probs.shape}")
+            if (
+                generation_completion_log_probs.shape
+                != forward_completion_log_probs.shape
+            ):
+                raise ValueError(
+                    f"❌ [GRPOTrainer] Generation completion log probabilities and forward completion log probabilities have different shapes: {generation_completion_log_probs.shape} != {forward_completion_log_probs.shape}"
+                )
+            if (
+                vllm_completion_log_probs_i.shape
+                != generation_completion_log_probs.shape
+            ):
+                raise ValueError(
+                    f"❌ [GRPOTrainer] VLLM completion log probabilities and generation completion log probabilities have different shapes: {vllm_completion_log_probs_i.shape} != {generation_completion_log_probs.shape}"
+                )
 
             # log_prob_override_mse is always zero here
-            log_prob_forward_generation_diff = torch.mean(torch.abs(forward_completion_log_probs - generation_completion_log_probs))
-            log_prob_generation_vllm_diff = torch.mean(torch.abs(generation_completion_log_probs - vllm_completion_log_probs_i))
-            log_prob_forward_vllm_diff = torch.mean(torch.abs(forward_completion_log_probs - vllm_completion_log_probs_i))
+            log_prob_forward_generation_diff = torch.mean(
+                torch.abs(
+                    forward_completion_log_probs - generation_completion_log_probs
+                )
+            )
+            log_prob_generation_vllm_diff = torch.mean(
+                torch.abs(generation_completion_log_probs - vllm_completion_log_probs_i)
+            )
+            log_prob_forward_vllm_diff = torch.mean(
+                torch.abs(forward_completion_log_probs - vllm_completion_log_probs_i)
+            )
 
             # log probs is calculated in log space, so we need to subtract the log probabilities
-            raw_log_ratio = forward_completion_log_probs - generation_completion_log_probs
+            raw_log_ratio = (
+                forward_completion_log_probs - generation_completion_log_probs
+            )
 
-            clip_metrics[LOG_PROB_AVERAGE_VALUE].append(torch.mean(forward_completion_log_probs).item())
-            clip_metrics[LOG_PROB_FORWARD_GENERATION_DIFF].append(log_prob_forward_generation_diff.item())
-            clip_metrics[LOG_PROB_GENERATION_VLLM_DIFF].append(log_prob_generation_vllm_diff.item())
-            clip_metrics[LOG_PROB_FORWARD_VLLM_DIFF].append(log_prob_forward_vllm_diff.item())
+            clip_metrics[LOG_PROB_AVERAGE_VALUE].append(
+                torch.mean(forward_completion_log_probs).item()
+            )
+            clip_metrics[LOG_PROB_FORWARD_GENERATION_DIFF].append(
+                log_prob_forward_generation_diff.item()
+            )
+            clip_metrics[LOG_PROB_GENERATION_VLLM_DIFF].append(
+                log_prob_generation_vllm_diff.item()
+            )
+            clip_metrics[LOG_PROB_FORWARD_VLLM_DIFF].append(
+                log_prob_forward_vllm_diff.item()
+            )
 
             if self.grpo_config.loss_type == "gspo":
 
                 if self.grpo_config.use_truncated_is:
-                    is_ratio = torch.exp(generation_completion_log_probs - vllm_completion_log_probs_i).detach()
-                    clip_metrics[IS_RATIO_TRUNCATED_PERCENTAGE].append(torch.sum(is_ratio > self.grpo_config.truncated_is_ratio).item() * 100.0 / len(forward_completion_log_probs))
-                    truncated_is_ratio = torch.clamp(is_ratio, max=self.grpo_config.truncated_is_ratio)
+                    is_ratio = torch.exp(
+                        generation_completion_log_probs - vllm_completion_log_probs_i
+                    ).detach()
+                    clip_metrics[IS_RATIO_TRUNCATED_PERCENTAGE].append(
+                        torch.sum(is_ratio > self.grpo_config.truncated_is_ratio).item()
+                        * 100.0
+                        / len(forward_completion_log_probs)
+                    )
+                    truncated_is_ratio = torch.clamp(
+                        is_ratio, max=self.grpo_config.truncated_is_ratio
+                    )
                     log_ratio = truncated_is_ratio * raw_log_ratio
                 else:
                     log_ratio = raw_log_ratio
 
-                sequence_log_ratio = torch.sum(log_ratio) / len(forward_completion_log_probs)
+                sequence_log_ratio = torch.sum(log_ratio) / len(
+                    forward_completion_log_probs
+                )
                 sequence_ratio = torch.exp(sequence_log_ratio)
 
                 clip_metrics[LOG_PROB_AVERAGE_RATIO].append(sequence_ratio.item())
 
                 # calculate clipped upper and lower percentage
-                clip_metrics[CLIP_RATIO_UPPER_PERCENTAGE].append(torch.sum(sequence_ratio > 1+self.grpo_config.gspo_clip_ratio_epsilon_upper).item() * 100.0)
-                clip_metrics[CLIP_RATIO_LOWER_PERCENTAGE].append(torch.sum(sequence_ratio < 1-self.grpo_config.gspo_clip_ratio_epsilon_lower).item() * 100.0)
+                clip_metrics[CLIP_RATIO_UPPER_PERCENTAGE].append(
+                    torch.sum(
+                        sequence_ratio
+                        > 1 + self.grpo_config.gspo_clip_ratio_epsilon_upper
+                    ).item()
+                    * 100.0
+                )
+                clip_metrics[CLIP_RATIO_LOWER_PERCENTAGE].append(
+                    torch.sum(
+                        sequence_ratio
+                        < 1 - self.grpo_config.gspo_clip_ratio_epsilon_lower
+                    ).item()
+                    * 100.0
+                )
 
-                clamped_sequence_ratio_ = torch.clamp(sequence_ratio, 1-self.grpo_config.gspo_clip_ratio_epsilon_lower, 1+self.grpo_config.gspo_clip_ratio_epsilon_upper)
+                clamped_sequence_ratio_ = torch.clamp(
+                    sequence_ratio,
+                    1 - self.grpo_config.gspo_clip_ratio_epsilon_lower,
+                    1 + self.grpo_config.gspo_clip_ratio_epsilon_upper,
+                )
                 # soft gradient clipping for the ratio outside the range, if clip_gradient_scale = 0, then it is full clipping
-                clamped_sequence_ratio = clamped_sequence_ratio_ + self.grpo_config.clip_gradient_scale * (sequence_ratio - clamped_sequence_ratio_.detach())
+                clamped_sequence_ratio = (
+                    clamped_sequence_ratio_
+                    + self.grpo_config.clip_gradient_scale
+                    * (sequence_ratio - clamped_sequence_ratio_.detach())
+                )
 
-                sequence_ratio_advantage = torch.min(sequence_ratio * advantages[i], clamped_sequence_ratio * advantages[i])
+                sequence_ratio_advantage = torch.min(
+                    sequence_ratio * advantages[i],
+                    clamped_sequence_ratio * advantages[i],
+                )
 
                 # calculate clipped upper and lower percentage
-                clip_metrics[BOUND_ADVANTAGE_UPPER_PERCENTAGE].append(torch.sum(sequence_ratio_advantage > self.grpo_config.bound_advantage_range).item() * 100.0)
-                clip_metrics[BOUND_ADVANTAGE_LOWER_PERCENTAGE].append(torch.sum(sequence_ratio_advantage < -self.grpo_config.bound_advantage_range).item() * 100.0)
+                clip_metrics[BOUND_ADVANTAGE_UPPER_PERCENTAGE].append(
+                    torch.sum(
+                        sequence_ratio_advantage
+                        > self.grpo_config.bound_advantage_range
+                    ).item()
+                    * 100.0
+                )
+                clip_metrics[BOUND_ADVANTAGE_LOWER_PERCENTAGE].append(
+                    torch.sum(
+                        sequence_ratio_advantage
+                        < -self.grpo_config.bound_advantage_range
+                    ).item()
+                    * 100.0
+                )
 
-                final_sequence_ratio_advantage = torch.clamp(sequence_ratio_advantage, -self.grpo_config.bound_advantage_range, self.grpo_config.bound_advantage_range)
+                final_sequence_ratio_advantage = torch.clamp(
+                    sequence_ratio_advantage,
+                    -self.grpo_config.bound_advantage_range,
+                    self.grpo_config.bound_advantage_range,
+                )
 
-                loss = -final_sequence_ratio_advantage.mean()
+                # Dr. GRPO length bias fix: use constant normalizer (max_seq_length)
+                # instead of actual response length to ensure equal gradient contribution
+                # regardless of response length.
+                if self.grpo_config.gspo_use_constant_length_normalizer:
+                    loss = (
+                        -torch.sum(final_sequence_ratio_advantage)
+                        / self.grpo_config.max_seq_length
+                    )
+                else:
+                    loss = -final_sequence_ratio_advantage.mean()
+
+                # Add entropy regularization if enabled
+                if self.grpo_config.entropy_coeff > 0:
+                    # Calculate entropy: H = -sum(p * log(p))
+                    # = -sum(exp(log_p) * log_p)
+                    probs = torch.exp(forward_completion_log_probs)
+                    entropy = -torch.sum(probs * forward_completion_log_probs)
+                    # Subtract entropy to encourage exploration
+                    # (maximize entropy = minimize -entropy)
+                    loss = loss - self.grpo_config.entropy_coeff * entropy
 
             else:
                 ratio = torch.exp(raw_log_ratio)
@@ -265,27 +396,73 @@ class GRPOTrainer():
                 clip_metrics[LOG_PROB_AVERAGE_RATIO].append(ratio.mean().item())
 
                 # calculate clipped upper and lower percentage
-                clip_metrics[CLIP_RATIO_UPPER_PERCENTAGE].append(torch.sum(ratio > 1+self.grpo_config.clip_ratio_epsilon_upper).item() * 100.0 / len(forward_completion_log_probs))
-                clip_metrics[CLIP_RATIO_LOWER_PERCENTAGE].append(torch.sum(ratio < 1-self.grpo_config.clip_ratio_epsilon_lower).item() * 100.0 / len(forward_completion_log_probs))
+                clip_metrics[CLIP_RATIO_UPPER_PERCENTAGE].append(
+                    torch.sum(
+                        ratio > 1 + self.grpo_config.clip_ratio_epsilon_upper
+                    ).item()
+                    * 100.0
+                    / len(forward_completion_log_probs)
+                )
+                clip_metrics[CLIP_RATIO_LOWER_PERCENTAGE].append(
+                    torch.sum(
+                        ratio < 1 - self.grpo_config.clip_ratio_epsilon_lower
+                    ).item()
+                    * 100.0
+                    / len(forward_completion_log_probs)
+                )
 
-                clamped_ratio_ = torch.clamp(ratio, 1-self.grpo_config.clip_ratio_epsilon_lower, 1+self.grpo_config.clip_ratio_epsilon_upper)
+                clamped_ratio_ = torch.clamp(
+                    ratio,
+                    1 - self.grpo_config.clip_ratio_epsilon_lower,
+                    1 + self.grpo_config.clip_ratio_epsilon_upper,
+                )
                 # soft gradient clipping for the ratio outside the range, if clip_gradient_scale = 0, then it is full clipping
-                clamped_ratio = clamped_ratio_ + self.grpo_config.clip_gradient_scale * (ratio - clamped_ratio_.detach())
+                clamped_ratio = (
+                    clamped_ratio_
+                    + self.grpo_config.clip_gradient_scale
+                    * (ratio - clamped_ratio_.detach())
+                )
 
                 # min ratio advantage is min of ratio_advantage and clamped_ratio_advantage
-                ratio_advantage = torch.min(ratio * advantages[i], clamped_ratio * advantages[i]) # dim: (completion_len)
+                ratio_advantage = torch.min(
+                    ratio * advantages[i], clamped_ratio * advantages[i]
+                )  # dim: (completion_len)
 
                 # calculate clipped upper and lower percentage
-                clip_metrics[BOUND_ADVANTAGE_UPPER_PERCENTAGE].append(torch.sum(ratio_advantage > self.grpo_config.bound_advantage_range).item() * 100.0 / len(forward_completion_log_probs))
-                clip_metrics[BOUND_ADVANTAGE_LOWER_PERCENTAGE].append(torch.sum(ratio_advantage < -self.grpo_config.bound_advantage_range).item() * 100.0 / len(forward_completion_log_probs))
+                clip_metrics[BOUND_ADVANTAGE_UPPER_PERCENTAGE].append(
+                    torch.sum(
+                        ratio_advantage > self.grpo_config.bound_advantage_range
+                    ).item()
+                    * 100.0
+                    / len(forward_completion_log_probs)
+                )
+                clip_metrics[BOUND_ADVANTAGE_LOWER_PERCENTAGE].append(
+                    torch.sum(
+                        ratio_advantage < -self.grpo_config.bound_advantage_range
+                    ).item()
+                    * 100.0
+                    / len(forward_completion_log_probs)
+                )
 
                 # calculate clipped upper and lower percentage
-                bounded_ratio_advantage = torch.clamp(ratio_advantage, -self.grpo_config.bound_advantage_range, self.grpo_config.bound_advantage_range)
+                bounded_ratio_advantage = torch.clamp(
+                    ratio_advantage,
+                    -self.grpo_config.bound_advantage_range,
+                    self.grpo_config.bound_advantage_range,
+                )
 
                 if self.grpo_config.use_truncated_is:
-                    is_ratio = torch.exp(generation_completion_log_probs - vllm_completion_log_probs_i).detach()
-                    clip_metrics[IS_RATIO_TRUNCATED_PERCENTAGE].append(torch.sum(is_ratio > self.grpo_config.truncated_is_ratio).item() * 100.0 / len(forward_completion_log_probs))
-                    truncated_is_ratio = torch.clamp(is_ratio, max=self.grpo_config.truncated_is_ratio)
+                    is_ratio = torch.exp(
+                        generation_completion_log_probs - vllm_completion_log_probs_i
+                    ).detach()
+                    clip_metrics[IS_RATIO_TRUNCATED_PERCENTAGE].append(
+                        torch.sum(is_ratio > self.grpo_config.truncated_is_ratio).item()
+                        * 100.0
+                        / len(forward_completion_log_probs)
+                    )
+                    truncated_is_ratio = torch.clamp(
+                        is_ratio, max=self.grpo_config.truncated_is_ratio
+                    )
                     final_ratio_advantage = truncated_is_ratio * bounded_ratio_advantage
                 else:
                     final_ratio_advantage = bounded_ratio_advantage
@@ -293,20 +470,42 @@ class GRPOTrainer():
                 # compute loss
                 if self.grpo_config.loss_type == "episode":
                     loss = -final_ratio_advantage.mean()
-                elif self.grpo_config.loss_type == "token":  # DAPO token level loss refer https://arxiv.org/html/2503.14476v1 for more data points
+                elif (
+                    self.grpo_config.loss_type == "token"
+                ):  # DAPO token level loss refer https://arxiv.org/html/2503.14476v1 for more data points
                     loss = -torch.sum(final_ratio_advantage) / total_tokens_in_group
                 elif self.grpo_config.loss_type == "group_max":
                     loss = -torch.sum(final_ratio_advantage) / max_tokens_in_group
                 elif self.grpo_config.loss_type == "seq_max":
-                    loss = -torch.sum(final_ratio_advantage) / self.grpo_config.max_seq_length
+                    loss = (
+                        -torch.sum(final_ratio_advantage)
+                        / self.grpo_config.max_seq_length
+                    )
                 else:
-                    raise ValueError(f"❌ [GRPOTrainingGroup] Invalid loss type: {self.grpo_config.loss_type}")
+                    raise ValueError(
+                        f"❌ [GRPOTrainingGroup] Invalid loss type: {self.grpo_config.loss_type}"
+                    )
+
+                # Add entropy regularization if enabled
+                if self.grpo_config.entropy_coeff > 0:
+                    # Calculate entropy: H = -sum(p * log(p))
+                    # = -sum(exp(log_p) * log_p)
+                    probs = torch.exp(forward_completion_log_probs)
+                    entropy = -torch.sum(probs * forward_completion_log_probs)
+                    # Subtract entropy to encourage exploration
+                    # (maximize entropy = minimize -entropy)
+                    loss = loss - self.grpo_config.entropy_coeff * entropy
 
             batch_loss += loss
 
         return batch_loss
 
-    def train_group(self, group_dataset: list[dict], callback: Optional[Callable] = None, total_groups: int = 0):
+    def train_group(
+        self,
+        group_dataset: list[dict],
+        callback: Optional[Callable] = None,
+        total_groups: int = 0,
+    ):
         """Train the model for one group"""
         dataloader = DataLoader(
             group_dataset,
@@ -314,13 +513,20 @@ class GRPOTrainer():
             shuffle=True,
             num_workers=self.engine.config.training.dataloader_num_workers,
             pin_memory=True,
-            collate_fn=SimpleCollator(tokenizer=self.tokenizer)
+            collate_fn=SimpleCollator(tokenizer=self.tokenizer),
         )
 
         accumulated_loss = 0.0
 
         group_reward_mean = np.mean([result["reward"] for result in group_dataset])
         group_reward_std = np.std([result["reward"] for result in group_dataset])
+
+        advantages_list = [result["advantage"] for result in group_dataset]
+        group_advantage_mean = np.mean(advantages_list)
+        group_advantage_std = np.std(advantages_list)
+        group_advantage_positive_pct = (
+            np.mean([adv > 0 for adv in advantages_list]) * 100.0
+        )
 
         group_reward_items = {}
         for result in group_dataset:
@@ -329,10 +535,15 @@ class GRPOTrainer():
                     group_reward_items[key] = []
                 group_reward_items[key].append(value)
         group_reward_items_mean = {k: np.mean(v) for k, v in group_reward_items.items()}
+        group_reward_items_max = {k: np.max(v) for k, v in group_reward_items.items()}
         group_reward_items_std = {k: np.std(v) for k, v in group_reward_items.items()}
 
-        max_tokens_in_group = max([len(result["vllm_completion_ids"]) for result in group_dataset])
-        total_tokens_in_group = sum([len(result["vllm_completion_ids"]) for result in group_dataset])
+        max_tokens_in_group = max(
+            [len(result["vllm_completion_ids"]) for result in group_dataset]
+        )
+        total_tokens_in_group = sum(
+            [len(result["vllm_completion_ids"]) for result in group_dataset]
+        )
 
         self.engine.model.train()
         clip_metrics = {
@@ -357,8 +568,14 @@ class GRPOTrainer():
             )
 
             # Scale loss for gradient accumulation
-            if self.grpo_config.loss_type != "token": # for token level loss, the loss has already been scaled by the group size
-                mini_batch_loss = mini_batch_loss * self.engine.config.training.loss_multiplier / len(dataloader) # divide by the group size
+            if (
+                self.grpo_config.loss_type != "token"
+            ):  # for token level loss, the loss has already been scaled by the group size
+                mini_batch_loss = (
+                    mini_batch_loss
+                    * self.engine.config.training.loss_multiplier
+                    / len(dataloader)
+                )  # divide by the group size
             # run backward step
             self.engine._backward_step(mini_batch_loss)
 
@@ -389,9 +606,14 @@ class GRPOTrainer():
             f"train_{self.short_name()}/num_group_results": len(group_dataset),
             f"reward/total_mean": group_reward_mean,
             f"reward/total_std": group_reward_std,
+            f"advantage/mean": group_advantage_mean,
+            f"advantage/std": group_advantage_std,
+            f"advantage/positive_pct": group_advantage_positive_pct,
         }
         for key, value in group_reward_items_mean.items():
             metrics[f"reward/item_{key}_mean"] = value
+        for key, value in group_reward_items_max.items():
+            metrics[f"reward/item_{key}_max"] = value
         for key, value in group_reward_items_std.items():
             metrics[f"reward/item_{key}_std"] = value
         for key, value in clip_metrics.items():
@@ -400,42 +622,45 @@ class GRPOTrainer():
 
         # Save checkpoint
         if self.engine.status.global_step % self.engine.config.training.save_steps == 0:
-            self.engine._save_checkpoint(self.engine.status.global_step, callback=callback)
+            self.engine._save_checkpoint(
+                self.engine.status.global_step, callback=callback
+            )
 
-
-    async def train_grpo_block(self, block: TrainerBlock, callback: Optional[Callable] = None):
+    async def train_grpo_block(
+        self, block: TrainerBlock, callback: Optional[Callable] = None
+    ):
         """Train the model for one block"""
         # Create data loader
         context_vars = self.configInterpreter.prepare_context_vars(
             runtime=self,
-            context_config=self.module_config.get('context_vars', {}),
-            context_vars=self.context_vars | {
-                "block": block
-            },
+            context_config=self.module_config.get("context_vars", {}),
+            context_vars=self.context_vars | {"block": block},
         )
         success = await self.configInterpreter.execute(
             runtime=self,
-            config=self.module_config.get('input_processor', {}),
+            config=self.module_config.get("input_processor", {}),
             context_vars=context_vars,
         )
         if not success:
-            logger.error(f"❌ [GRPOTrainer] [{block.input_tag}] Failed to execute module config: {self.module_config.get('processor', {}).get('grpo_trainer', {})}")
+            logger.error(
+                f"❌ [GRPOTrainer] [{block.input_tag}] Failed to execute module config: {self.module_config.get('processor', {}).get('grpo_trainer', {})}"
+            )
             return
 
-        group_datasets = context_vars.get('__result__', {})
+        group_datasets = context_vars.get("__result__", {})
 
-        logger.info(f"👉 [{self.__class__.__name__}] [{block.input_tag}] Block started with [{len(group_datasets)}] groups, Initial global step: [{self.engine.status.global_step}]")
+        logger.info(
+            f"👉 [{self.__class__.__name__}] [{block.input_tag}] Block started with [{len(group_datasets)}] groups, Initial global step: [{self.engine.status.global_step}]"
+        )
 
         start_time = time.time()
         # Create progress bar
-        progress_bar = tqdm(
-            total=len(group_datasets),
-            desc=block.input_tag,
-            initial=0
-        )
+        progress_bar = tqdm(total=len(group_datasets), desc=block.input_tag, initial=0)
 
         for group_tag, group_dataset in group_datasets.items():
-            self.train_group(group_dataset, callback=callback, total_groups=len(group_datasets))
+            self.train_group(
+                group_dataset, callback=callback, total_groups=len(group_datasets)
+            )
             # Update step counter
             progress_bar.update(1)
             await asyncio.sleep(0.1)
@@ -448,10 +673,14 @@ class GRPOTrainer():
             # always save checkpoint at the end of the block
             self.engine._save_checkpoint(self.engine.status.global_step)
         except Exception as e:
-            logger.error(f"❌ [GRPOTrainer] [{block.input_tag}] Failed to save checkpoint: {e}")
+            logger.error(
+                f"❌ [GRPOTrainer] [{block.input_tag}] Failed to save checkpoint: {e}"
+            )
 
         total_time = time.time() - start_time
-        logger.info(f"🎉 [{self.__class__.__name__}] [{block.input_tag}] Block completed in [{total_time:.1f}s] - Final global step: [{self.engine.status.global_step}]")
+        logger.info(
+            f"🎉 [{self.__class__.__name__}] [{block.input_tag}] Block completed in [{total_time:.1f}s] - Final global step: [{self.engine.status.global_step}]"
+        )
         progress_bar.close()
         await asyncio.sleep(0.1)
 
@@ -465,27 +694,45 @@ def grpo_get_trainer(
 ):
     """Get a GRPO trainer"""
     try:
-        engine._update_config(EngineConfig.from_yaml(engine_config_file, override_yaml_path=grpo_config_file))
-        logger.info(f"⚙️ [GRPOTrainer] [{prefix_tag}] Engine config [{engine.__class__.__name__}] loaded from [{engine_config_file}]")
+        engine._update_config(
+            EngineConfig.from_yaml(
+                engine_config_file, override_yaml_path=grpo_config_file
+            )
+        )
+        logger.info(
+            f"⚙️ [GRPOTrainer] [{prefix_tag}] Engine config [{engine.__class__.__name__}] loaded from [{engine_config_file}]"
+        )
     except Exception as e:
-        logger.error(f"❌ [GRPOTrainer] [{prefix_tag}] Engine config [{engine.__class__.__name__}] failed to load: [{type(e)}] {e}")
+        logger.error(
+            f"❌ [GRPOTrainer] [{prefix_tag}] Engine config [{engine.__class__.__name__}] failed to load: [{type(e)}] {e}"
+        )
         raise e
 
     try:
         grpo_config = GRPOConfig.from_yaml(grpo_config_file)
-        logger.info(f"⚙️ [GRPOTrainer] [{prefix_tag}] GRPO configuration loaded from [{grpo_config_file}]")
+        logger.info(
+            f"⚙️ [GRPOTrainer] [{prefix_tag}] GRPO configuration loaded from [{grpo_config_file}]"
+        )
     except Exception as e:
-        logger.error(f"❌ [GRPOTrainer] [{prefix_tag}] Failed to load GRPO configuration: {e}")
+        logger.error(
+            f"❌ [GRPOTrainer] [{prefix_tag}] Failed to load GRPO configuration: {e}"
+        )
         raise e
 
     try:
-        trainer = GRPOTrainer(engine=engine, prefix_tag=prefix_tag, grpo_config=grpo_config, module_file=module_file)
+        trainer = GRPOTrainer(
+            engine=engine,
+            prefix_tag=prefix_tag,
+            grpo_config=grpo_config,
+            module_file=module_file,
+        )
         logger.info(f"⭐ [GRPOTrainer] [{prefix_tag}] Trainer initialized")
     except Exception as e:
         logger.error(f"❌ [GRPOTrainer] [{prefix_tag}] Initialization failed: {e}")
         raise e
 
     return trainer
+
 
 async def main():
     """Main function for GRPO training"""
@@ -508,8 +755,12 @@ async def main():
 
     engine_config = EngineConfig.from_yaml(args.engine_config)
     engine_config.model.engine = args.engine
-    engine = EngineBase.create_engine(args.prefix_tag, engine_config) # no status for testing
-    trainer = grpo_get_trainer(engine, args.prefix_tag, args.engine_config, args.grpo_config)
+    engine = EngineBase.create_engine(
+        args.prefix_tag, engine_config
+    )  # no status for testing
+    trainer = grpo_get_trainer(
+        engine, args.prefix_tag, args.engine_config, args.grpo_config
+    )
     grpo_block = TrainerBlock(
         queue_name=args.queue_name,
         prefix_tag=args.prefix_tag,
@@ -530,6 +781,7 @@ async def main():
 
     await trainer.train_grpo_block(grpo_block, callback=callback_func)
     await asyncio.sleep(1)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

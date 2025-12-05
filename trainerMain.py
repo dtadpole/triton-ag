@@ -32,7 +32,8 @@ class TrainerMain:
         engine_config_file = "engineBase.yaml"
         rft_config_file = "trainerRFT.yaml"
         grpo_config_file = "trainerGRPO.yaml"
-        grpo_module_file = "trainer/grpo.module.yaml"
+        # grpo_module_file = "trainer/grpo.module.yaml"
+        grpo_module_file = "trainer/grpo_treeturns.module.yaml" #
         uft_config_file = "trainerUFT.yaml"
         uft_module_file = "trainer/uft.module.yaml"
         # initialize trainers (for now, we have rft, grpo, and uft)

@@ -48,16 +48,39 @@ module:
                     regexp_replace(filename, '_logps\.json$', '') AS stem,
                     prompt_ids, completion_ids, input_ids, logps
                 FROM read_json_auto('{input_dir}/{input_tag}/**/*_logps.json', filename = true)
+            ),
+            selections AS (
+                SELECT
+                    regexp_replace(filename, '/[^/]*$', '') AS task_id,
+                    regexp_extract(filename, '.*/t(\d+)_selected_from_t(\d+)\.json$', 1) AS current_turn,
+                    turn_tag AS selected_turn_tag,
+                    generated_eval_path
+                FROM read_json_auto('{input_dir}/{input_tag}/**/*_selected_from_*.json', filename = true)
+            ),
+            selected_evals AS (
+                SELECT
+                    s.task_id,
+                    s.current_turn,
+                    s.selected_turn_tag,
+                    e.runtime AS selected_runtime,
+                    e.runtime_stats AS selected_runtime_stats,
+                    e.correctness AS selected_correctness
+                FROM selections s
+                LEFT JOIN evals e
+                ON regexp_extract(s.generated_eval_path, 'shared(.*)$', 1)  = regexp_extract(e.eval_file, 'shared(.*)$', 1)
             )
             SELECT
                 e.compiled, e.correctness, e.runtime, e.ref_runtime, e.runtime_stats, e.ref_runtime_stats,
                 c.prompt, c.completion, c.logprobs, c.metadata,
                 e.eval_file, c.completion_file,
                 l.prompt_ids, l.completion_ids, l.input_ids, l.logps,
-                c.task_tag, c.gen_tag, c.turn_tag
+                c.task_tag, c.gen_tag, c.turn_tag,
+                se.selected_turn_tag, se.selected_runtime, se.selected_runtime_stats, se.selected_correctness
             FROM evals_join e
             JOIN comps c USING (stem)
             JOIN logps l USING (stem)
+            LEFT JOIN selected_evals se
+            ON (e.task_id = se.task_id AND SUBSTRING(c.turn_tag, LENGTH(c.turn_tag) - 1, 2) = se.current_turn)
             ORDER BY task_tag, gen_tag, turn_tag
         returns:
           error_if: '`__result__ is None`'
@@ -69,12 +92,14 @@ module:
       - type: code
         context_vars:
           tokenizer: '`__runtime__.tokenizer`'
-        code_snippet_path: 'trainer/grpo_reward_kb.py'
+        code_snippet_path: 'trainer/grpo_reward_kb_treeturns.py'
         code_snippet_block: |
           # compute rewards and advantages
-          groups = grpo_compute_rewards_v5(
+          groups = grpo_compute_rewards_v6_treeturns(
               query_result,
-              gamma=grpo_config.gamma,
+              correctness_reward_=grpo_config.correctness_reward,
+              speedup_reward_=grpo_config.speedup_reward,
+              improvement_bonus_=grpo_config.improvement_bonus,
           )
           groups = grpo_compute_advantages(
               groups,
@@ -82,6 +107,8 @@ module:
               reward_epsilon=grpo_config.reward_epsilon,
               reward_noise=grpo_config.reward_noise,
               k=grpo_config.pkpo_advantages_k,
+              good_reward_threshold=grpo_config.good_reward_threshold,
+              bad_reward_threshold=grpo_config.bad_reward_threshold,
           )
           # create group datasets
           group_datasets = {key: grpo_group_to_dataset(value, tokenizer) for key, value in groups.items()}
