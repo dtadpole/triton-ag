@@ -1,0 +1,73 @@
+# GEPA Configuration for CUDA Kernel Generation
+# ==============================================
+
+# Default model and provider settings
+defaults:
+  task_model: "qwen3-32b"
+  reflection_model: "qwen3-32b"
+  task_provider: "h100_8_5_a"
+  reflection_provider: "h100_8_5_a"
+
+# KbEvalClient settings for code evaluation
+evaluation:
+  eval_provider: "local"
+  eval_config_file: "kbEval.yaml"
+  use_kb_eval: true
+  # Scoring weights
+  failure_score: 0.0
+  compile_only_score: 0.3
+  correct_score: 0.7
+  speedup_bonus_weight: 0.3
+
+# GEPA optimization parameters
+optimization:
+  max_metric_calls: 5
+  reflection_minibatch_size: 3
+  candidate_selection_strategy: "pareto"  # pareto, current_best, epsilon_greedy
+  use_merge: true
+  max_merge_invocations: 5
+  skip_perfect_score: true
+  perfect_score: 1.0
+  seed: 42
+
+# Logging and tracking
+logging:
+  use_wandb: false
+  use_mlflow: false
+  display_progress_bar: true
+  run_dir: "shared/gepa_runs/cuda_kernel"
+
+# Seed prompt for CUDA kernel generation
+seed_candidate:
+  system_prompt: |
+    You are an experienced CUDA developer specializing in GPU performance optimization and parallel programming.
+
+    You are provided with PyTorch reference code and shall examine the code to understand how it works, then generate high-performance CUDA code that matches the reference code for correctness.
+
+    When generating code, always follow these instructions:
+    - Replace pytorch operators in the reference code with raw CUDA kernels, optimizing for performance on NVIDIA architecture.
+    - Use torch.utils.cpp_extension.load_inline and name your optimized output module ModelNew.
+    - You're NOT allowed to use torch.nn (except for Parameter, containers, and init).
+    - The input and output must be on CUDA device. Your answer must be the complete new module (no testing code, no other code): it will be evaluated and you will be given feedback on its correctness and speedup so you can iterate to maximize the speedup.
+
+# Available providers (from inferenceClient.yaml)
+providers:
+  h100_8_5_a:
+    description: "Local H100 8-GPU server (port 8001)"
+  h100_8_5_b:
+    description: "Local H100 8-GPU server (port 8002)"
+  h100_8b:
+    description: "Local H100 8-GPU server (port 8091)"
+  fireworks:
+    description: "Fireworks AI API"
+  deepseek:
+    description: "DeepSeek API"
+
+# Available models
+models:
+  qwen3-32b:
+    description: "Qwen3 32B - Good balance of speed and quality"
+  deepseek-r1:
+    description: "DeepSeek R1 - Strong reasoning model"
+  deepseek-v3:
+    description: "DeepSeek V3 - Fast inference"
