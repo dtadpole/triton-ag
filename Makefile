@@ -677,3 +677,31 @@ vllm_gptoss_b:
 		--enable_prefix_caching --prefix-caching-hash-algo sha256 \
 		--generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
 		--async-scheduling
+
+env_gepa_start:
+	${ENV_VARS} $(META_PROXY) docker run -d \
+		--name gepa \
+		--replace \
+		--gpus all \
+		--cap-add SYS_ADMIN \
+		--net=host \
+		--shm-size=128g \
+		--pids-limit -1 \
+		--ulimit nofile=65536:65536 \
+		--ulimit nproc=-1:-1\
+		--ulimit memlock=-1:-1 \
+		-v ~/.ssh/:/root/.ssh \
+		-v ~/.bashrc:/root/.bashrc \
+		-v ~/.netrc:/root/.netrc \
+		-v ~/.gitconfig:/root/.gitconfig \
+		-v ~/.keys/:/root/.keys/ \
+		-v /data/users/${USER}/:/root/.cache/ \
+		-v ${PWD}:/workspace/ \
+		--cap-add SYS_ADMIN --device /dev/fuse \
+		--security-opt apparmor:unconfined \
+		--privileged \
+		localhost/gepa \
+		/bin/bash -c "make mount_shared_drive && make wandb_login && tail -f /dev/null"
+
+env_gepa:
+	docker exec -it -e PYTHONNOUSERSITE=1 gepa /bin/bash
