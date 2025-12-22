@@ -169,6 +169,7 @@ def sloo_minus_one(g: np.ndarray, K: int) -> np.ndarray:
 def grpo_compute_advantages(
     groups: dict[str, list[dict]],
     reward_scale: bool = True,
+    reward_scale_value: float = None,
     reward_epsilon: float = 1e-3,
     reward_noise: float = 1e-2,
     good_reward_threshold: float = 0.3,
@@ -182,7 +183,10 @@ def grpo_compute_advantages(
 
     Args:
         groups: Dictionary of groups with rewards
-        reward_scale: Whether to scale advantages by std
+        reward_scale: Whether to scale advantages by std or a constant value
+        reward_scale_value: If provided and reward_scale is True, use this value for
+            normalization instead of std. If None and reward_scale is True, use std.
+            If reward_scale is False, this parameter is ignored.
         reward_epsilon: Small value to prevent division by zero
         reward_noise: Amount of noise to add to advantages
         debug: Print debug information
@@ -220,8 +224,15 @@ def grpo_compute_advantages(
 
         advantages_prev = rewards - mean_reward
 
+        # Determine the normalization divisor based on reward_scale and reward_scale_value
         if reward_scale:
-            advantages = advantages_prev / (std_reward + reward_epsilon)
+            if reward_scale_value is not None:
+                # Use provided constant value for normalization
+                scale_divisor = reward_scale_value + reward_epsilon
+            else:
+                # Use std for normalization (original GRPO behavior)
+                scale_divisor = std_reward + reward_epsilon
+            advantages = advantages_prev / scale_divisor
         else:
             advantages = advantages_prev
 
@@ -230,7 +241,10 @@ def grpo_compute_advantages(
         else:
             advantages_calculated = sloo_minus_one(rewards, K=effective_k) # PKPO direct calculate advantage based on rewards
             if reward_scale:
-                advantages_calculated = advantages_calculated / (std_reward + reward_epsilon)
+                if reward_scale_value is not None:
+                    advantages_calculated = advantages_calculated / (reward_scale_value + reward_epsilon)
+                else:
+                    advantages_calculated = advantages_calculated / (std_reward + reward_epsilon)
 
 
         # add noise to the advantages

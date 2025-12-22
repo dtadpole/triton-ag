@@ -5,30 +5,32 @@
 
 grpo:
   max_seq_length: 24576
+  ave_seq_length: 8000
   mask_non_assistant_tokens: true
   discard_long_conversations: true # false will truncate the conversation to the max_seq_length
   clip_ratio_epsilon_lower: 0.2
   clip_ratio_epsilon_upper: 0.28
-  gspo_clip_ratio_epsilon_lower: 0.004 # default: 3e-4
-  gspo_clip_ratio_epsilon_upper: 0.01 # default: 4e-4
+  gspo_clip_ratio_epsilon_lower: 0.0004 # default: 3e-4
+  gspo_clip_ratio_epsilon_upper: 0.0008 # default: 4e-4
   clip_gradient_scale: 0.0  # The scale applied to the gradient when it is outside of the range [epsilon_lower, epsilon_upper]. 0.0 means max clipping and no gradient outside the range.
   bound_advantage_range: 5.0
   beta: 0.0  # KL divergence coefficient
   loss_type: gspo
   gamma: 0.5
   use_truncated_is: false
-  reward_scale: false # GRPO default is true, but it has bias for group with small variance. Switch from true to false, the grad norm is 6.24x less, we may need to increase the learning rate by 6.24x
-  gspo_use_constant_length_normalizer: true # GRPO default is false. Simply flipping from false to true, the grad norm is 15x less, we may need to increase the learning rate by 15x
+  reward_scale: true # GRPO default is true, but it has bias for group with small variance. Switch from true to false, the grad norm is 6.24x less
+  reward_scale_value: 0.3 # if value is specified, it is used to scale the reward for the advantage calculation, otherwise std of rewards is used
+  gspo_use_constant_length_normalizer: true # GRPO default is false. Simply flipping from false to true, the grad norm is 15x less
   truncated_is_ratio: 2.0
   use_entropy_shaping: true
   entropy_shaping_alpha: 1.0
   entropy_shaping_kappa: 2.0
   pkpo_advantages_k: 1
-  correctness_reward: 0.3
+  correctness_reward: 0.2
   speedup_reward: 0.3
   improvement_bonus: 0.2
-  good_reward_threshold: 0.5
-  bad_reward_threshold: 0.10
+  good_reward_threshold: 0.3
+  bad_reward_threshold: 0.09
 
 # ============================================================================
 # TRAINING CONFIGURATION

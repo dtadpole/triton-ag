@@ -172,7 +172,7 @@ def _compile_and_load_model(model_src: str, context: dict, filename: str = "<str
     return context
 
 def load_model_and_inputs(
-    model_src: str, context: dict, filename: str = "<string>"
+    model_src: str, context: dict, filename: str = "<string>", compile_pytorch: bool = False
 ) -> tuple[nn.Module, callable, callable]:
     """
     Load class from original NN.module pytorch code
@@ -182,6 +182,8 @@ def load_model_and_inputs(
 
     # check "Model" exists in the context
     Model = context.get("Model")
+    if compile_pytorch:
+        Model = Model.compile(mode="inductor")
     if not Model:
         raise CompileMissingComponentError("class [Model] not found")
     elif not isinstance(Model, type):

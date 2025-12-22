@@ -18,8 +18,8 @@ def grpo_compute_rewards_v6_treeturns(
     query_result: list[dict],
     speedup_threahold_: float = 1.3,  # code-gen specific parameter
     improvement_bonus_: float = 0.2,  # code-gen specific parameter
-    compile_reward_: float = 0.15,  # code-gen specific parameter
-    correctness_reward_: float = 0.3,  # code-gen specific parameter
+    compile_reward_: float = 0.1,  # code-gen specific parameter
+    correctness_reward_: float = 0.2,  # code-gen specific parameter
     speedup_reward_: float = 0.3,  # code-gen specific parameter
     debug: bool = False,
 ) -> dict[str, list[dict]]:

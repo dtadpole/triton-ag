@@ -4,7 +4,7 @@ import gc
 import json
 import os
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -40,6 +40,7 @@ class GRPOConfig(BaseModel):
     """GRPO configuration"""
 
     max_seq_length: int = 16384
+    ave_seq_length: int = 8000  # Average sequence length for constant length normalizer
     mask_non_assistant_tokens: bool = True
     discard_long_conversations: bool = True
     clip_ratio_epsilon_lower: float = 0.2
@@ -49,6 +50,8 @@ class GRPOConfig(BaseModel):
     bound_advantage_range: float = 3.0
     beta: float = 0.0  # KL divergence coefficient
     reward_scale: bool = True
+    # If provided, use this value for advantage normalization instead of std
+    reward_scale_value: Optional[float] = None
     reward_epsilon: float = 1e-3
     reward_noise: float = 1e-2
     # loss_type: str = "token" # "episode" or "token" or "seq_max" or "gspo"
@@ -65,7 +68,7 @@ class GRPOConfig(BaseModel):
     bad_reward_threshold: float = 0.05
     entropy_coeff: float = 0.0  # Entropy regularization coefficient (0.0 = disabled)
     # Dr. GRPO length bias fix (from "Understanding R1-Zero-Like Training")
-    # When True, use constant normalizer (max_seq_length) instead of response length
+    # When True, use constant normalizer (ave_seq_length) instead of response length
     # This removes the bias where shorter responses get larger gradients
     gspo_use_constant_length_normalizer: bool = False
 
@@ -307,17 +310,28 @@ class GRPOTrainer:
                 else:
                     log_ratio = raw_log_ratio
 
-                # Dr. GRPO length bias fix: use constant normalizer (max_seq_length)
+                # Dr. GRPO length bias fix: use constant normalizer (ave_seq_length)
                 # instead of actual response length to ensure equal gradient contribution
                 # regardless of response length.
+                # Ajust the clip ratio caused by the length differences
                 if self.grpo_config.gspo_use_constant_length_normalizer:
+                    length_ratio = len(forward_completion_log_probs) / self.grpo_config.ave_seq_length
+                    effective_eps_upper = self.grpo_config.gspo_clip_ratio_epsilon_upper * length_ratio
+                    effective_eps_lower = self.grpo_config.gspo_clip_ratio_epsilon_lower * length_ratio
                     sequence_log_ratio = (
-                        torch.sum(log_ratio) / self.grpo_config.max_seq_length
+                        torch.sum(log_ratio) / self.grpo_config.ave_seq_length
                     )
+                    # Add these metrics to verify length adjustment
+                    clip_metrics.setdefault("LENGTH_RATIO", []).append(length_ratio)
+                    clip_metrics.setdefault("EFFECTIVE_EPS_UPPER", []).append(effective_eps_upper)
+                    clip_metrics.setdefault("EFFECTIVE_EPS_LOWER", []).append(effective_eps_lower)
                 else:
+                    length_ratio = 1.0
                     sequence_log_ratio = torch.sum(log_ratio) / len(
                         forward_completion_log_probs
                     )
+                    effective_eps_upper = self.grpo_config.gspo_clip_ratio_epsilon_upper
+                    effective_eps_lower = self.grpo_config.gspo_clip_ratio_epsilon_lower
                 sequence_ratio = torch.exp(sequence_log_ratio)
 
                 clip_metrics[LOG_PROB_AVERAGE_RATIO].append(sequence_ratio.item())
@@ -326,22 +340,22 @@ class GRPOTrainer:
                 clip_metrics[CLIP_RATIO_UPPER_PERCENTAGE].append(
                     torch.sum(
                         sequence_ratio
-                        > 1 + self.grpo_config.gspo_clip_ratio_epsilon_upper
+                        > 1 + effective_eps_upper
                     ).item()
                     * 100.0
                 )
                 clip_metrics[CLIP_RATIO_LOWER_PERCENTAGE].append(
                     torch.sum(
                         sequence_ratio
-                        < 1 - self.grpo_config.gspo_clip_ratio_epsilon_lower
+                        < 1 - effective_eps_lower
                     ).item()
                     * 100.0
                 )
 
                 clamped_sequence_ratio_ = torch.clamp(
                     sequence_ratio,
-                    1 - self.grpo_config.gspo_clip_ratio_epsilon_lower,
-                    1 + self.grpo_config.gspo_clip_ratio_epsilon_upper,
+                    1 - effective_eps_lower,
+                    1 + effective_eps_upper,
                 )
                 # soft gradient clipping for the ratio outside the range, if clip_gradient_scale = 0, then it is full clipping
                 clamped_sequence_ratio = (
@@ -605,9 +619,9 @@ class GRPOTrainer:
             f"train_{self.short_name()}/num_group_results": len(group_dataset),
             f"reward/total_mean": group_reward_mean,
             f"reward/total_std": group_reward_std,
-            f"advantage/mean": group_advantage_mean,
-            f"advantage/std": group_advantage_std,
-            f"advantage/positive_pct": group_advantage_positive_pct,
+            f"reward/advantage_mean": group_advantage_mean,
+            f"reward/advantage_std": group_advantage_std,
+            f"reward/advantage_positive_pct": group_advantage_positive_pct,
         }
         for key, value in group_reward_items_mean.items():
             metrics[f"reward/item_{key}_mean"] = value
