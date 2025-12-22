@@ -5,6 +5,7 @@ import traceback
 from logger import logger
 from datetime import datetime
 from pydantic import BaseModel, Field
+from util import INFERENCE_DIR, TRAINER_DIR
 
 
 MODEL_OVERRIDE_KEY = "adapter.model_override"
@@ -26,8 +27,8 @@ class TrainerBlock(BaseModel):
     epoch_id: int
     block_id: int
     input_tag: str
-    input_dir: str = Field(default="~/.inference/output")
-    output_dir: str = Field(default="~/.trainer")
+    input_dir: str = Field(default=INFERENCE_DIR + "/output")
+    output_dir: str = Field(default=TRAINER_DIR)
     context: dict = Field(default={})
 
 class InferenceBlock(BaseModel):
@@ -51,7 +52,11 @@ class InferenceBlock(BaseModel):
     example_file: str = Field(default="inference/triton.example.yaml")
     input_dir: str = Field(default="~/KernelBench/KernelBench")
     output_dir: str = Field(default="~/.inference/output")
+    sft_dir: str = Field(default="~/.inference/sft")
     context: dict = Field(default_factory=dict)
+    hint_length_prob: float = Field(default=0) # ADD THIS TO UFT, the hint length prob. https://arxiv.org/pdf/2505.16984
+    min_num_generations: int = Field(default=3) # TreeTurns parameters. Wait for the minimum number of generations before starting the next turn.
+    selection_strategy: str = Field(default="random") # The selection strategy for the previous turns: "random", "best_speedup"
 
 
 

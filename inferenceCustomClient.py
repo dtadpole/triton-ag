@@ -18,6 +18,11 @@ def from_yaml(path):
 class InferenceCustomClient:
     def __init__(self, config_path="inferenceCustom.yaml"):
         self.provider_config_cache = {}
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f)
+        provider_config = config.get("providers", {})
+        for provider in provider_config.keys():
+            self.provider_config_cache[provider] = self._provider_config_from_yaml(provider, yaml_file=config_path)
 
     def _provider_config_from_yaml(
         self,

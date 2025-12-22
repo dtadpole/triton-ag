@@ -15,6 +15,7 @@ from trainerUtil import make_checkpoint_callback
 from engineBase import EngineConfig, EngineBase, TrainerStatus
 from trainerRFT import RFTConfig, rft_get_trainer
 from trainerGRPO import GRPOConfig, grpo_get_trainer
+from trainerUFT import UFTConfig, uft_get_trainer
 
 
 ALPHA = 1.1
@@ -31,9 +32,14 @@ class TrainerMain:
         engine_config_file = "engineBase.yaml"
         rft_config_file = "trainerRFT.yaml"
         grpo_config_file = "trainerGRPO.yaml"
-        # initialize trainers (for now, we only have grpo)
+        # grpo_module_file = "trainer/grpo.module.yaml"
+        grpo_module_file = "trainer/grpo_treeturns.module.yaml" #
+        uft_config_file = "trainerUFT.yaml"
+        uft_module_file = "trainer/uft.module.yaml"
+        # initialize trainers (for now, we have rft, grpo, and uft)
         rft_trainer = rft_get_trainer(self.engine, self.prefix_tag, engine_config_file, rft_config_file)
-        grpo_trainer = grpo_get_trainer(self.engine, self.prefix_tag, engine_config_file, grpo_config_file)
+        grpo_trainer = grpo_get_trainer(self.engine, self.prefix_tag, engine_config_file, grpo_config_file, module_file=grpo_module_file)
+        uft_trainer = uft_get_trainer(self.engine, self.prefix_tag, engine_config_file, uft_config_file, module_file=uft_module_file)
 
         while True:
             try:
@@ -42,26 +48,29 @@ class TrainerMain:
                 # queue name is {task_type}:{task_name}
                 RFT_QUEUE_NAME = 'trainer.rft.1'
                 GRPO_QUEUE_NAME = 'trainer.grpo.1'
+                UFT_QUEUE_NAME = 'trainer.uft.1'
 
                 rft_qsize = await self.reg_client.qsize(RFT_QUEUE_NAME)
                 grpo_qsize = await self.reg_client.qsize(GRPO_QUEUE_NAME)
+                uft_qsize = await self.reg_client.qsize(UFT_QUEUE_NAME)
 
                 # randomly pick a queue to dequeue from based on the qsize as the probability
-                # sft_qsize / (sft_qsize + rft_qsize + grpo_qsize)
-                # rft_qsize / (sft_qsize + rft_qsize + grpo_qsize)
-                # grpo_qsize / (sft_qsize + rft_qsize + grpo_qsize)
-                total_qsize = rft_qsize + grpo_qsize
+                # rft_qsize / (rft_qsize + grpo_qsize + uft_qsize)
+                # grpo_qsize / (rft_qsize + grpo_qsize + uft_qsize)
+                # uft_qsize / (rft_qsize + grpo_qsize + uft_qsize)
+                total_qsize = rft_qsize + grpo_qsize + uft_qsize
                 # randomly pick a queue to dequeue from based on the probability
                 if total_qsize == 0:
                     logger.info(f"🔍 [trainerMain] No items to process, sleeping for [10] seconds")
                     await asyncio.sleep(10)
                     continue
                 else:
-                    logger.info(f"🔍 [trainerMain] Queue sizes: rft: [{rft_qsize}], grpo: [{grpo_qsize}]")
+                    logger.info(f"🔍 [trainerMain] Queue sizes: rft: [{rft_qsize}], grpo: [{grpo_qsize}], uft: [{uft_qsize}]")
 
                 # calculate the probability for each queue, use ALPHA (>1.0) to enhance the probability for larger queues
                 rft_prob = (rft_qsize / total_qsize) ** ALPHA
                 grpo_prob = (grpo_qsize / total_qsize) ** ALPHA
+                uft_prob = (uft_qsize / total_qsize) ** ALPHA
 
                 if random.random() < rft_prob:
                     rft_item = await self.reg_client.dequeue(queue_name=RFT_QUEUE_NAME)
@@ -107,13 +116,36 @@ class TrainerMain:
                     )
                     await grpo_trainer.train_grpo_block(grpo_block, callback_func)
 
+                if random.random() < uft_prob:
+                    uft_item = await self.reg_client.dequeue(queue_name=UFT_QUEUE_NAME)
+                    if uft_item['prefix_tag'] != self.prefix_tag:
+                        logger.error(f"❌ [trainerMain] Skipping item with prefix: {uft_item['prefix_tag']}")
+                        continue
+                    uft_block = TrainerBlock(**uft_item)
+                    logger.info(f"🧪 [trainerMain] Training UFT block: {uft_block.input_tag}")
+                    # update config before running
+                    engine_config = EngineConfig.from_yaml(engine_config_file, override_yaml_path=uft_config_file)
+                    uft_config, grpo_config = UFTConfig.from_yaml(uft_config_file)
+                    uft_trainer.engine._update_config(engine_config)
+                    uft_trainer._update_uft_config(uft_config, grpo_config, None)
+                    logger.info(f"🔍 [trainerMain] Base config: {uft_trainer.engine.config.model_dump_json()}")
+                    logger.info(f"🔍 [trainerMain] UFT config: {uft_trainer.uft_config.model_dump_json()}")
+                    logger.info(f"🔍 [trainerMain] GRPO config (for UFT): {uft_trainer.grpo_config.model_dump_json()}")
+                    # run in executor to avoid blocking the event loop
+                    callback_func = make_checkpoint_callback(
+                        prefix_tag=self.prefix_tag,
+                        trainer_block=uft_block,
+                        workflow_provider="default",
+                    )
+                    await uft_trainer.train_uft_block(uft_block, callback_func)
+
             except Exception as e:
                 logger.error(f"❌ [trainerMain] Error: [{type(e)}: {e}]")
                 traceback.print_exc()
                 await asyncio.sleep(5)
 
 async def main():
-    parser = argparse.ArgumentParser(description="Train a model using mixed RFT and GRPO trainers")
+    parser = argparse.ArgumentParser(description="Train a model using mixed RFT, GRPO, and UFT trainers")
     parser.add_argument("--engine", type=str, default="unsloth")
     parser.add_argument("--engine_config", type=str, default="engineBase.yaml")
     parser.add_argument("--prefix_tag", type=str, default="auto.trainer.main")

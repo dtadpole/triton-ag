@@ -47,6 +47,14 @@ else
 endif
 
 
+build_vllm: Dockerfile_vllm
+ifeq (${IS_DEVSERVER}, 1)
+	echo "Current hostname is "${HOST}
+	$(META_PROXY) docker build . -f Dockerfile_vllm --no-cache --net=host --format=docker --tag vllm
+else
+	docker build . -f Dockerfile_vllm --net=host --format=docker --tag vllm
+endif
+
 build_docker_autoawq: Dockerfile_autoawq
 ifeq (${IS_DEVSERVER}, 1)
 	$(META_PROXY) docker build -f Dockerfile_autoawq --network=host --progress=plain  -t autoawq .
@@ -59,7 +67,7 @@ env_autoawq:
 	docker run -it  --gpus all --net=host -p 8081:8081 -p 8082:8082 -v ~/.bashrc:/root/.bashrc -v ~/.gitconfig:/root/.gitconfig -v ~/.keys/:/root/.keys/ -v /data/users/${USER}/:/root/.cache/ -v ~/.inference/:/root/.inference/ -v ~/.kbeval:/root/.kbeval/ -v ${PWD}:/workspace/ localhost/autoawq /bin/bash
 
 env_start:
-	docker run -d \
+	$(META_PROXY) docker run -d \
 		--name codegen \
 		--replace \
 		--gpus all \
@@ -87,11 +95,39 @@ env_start:
 env:
 	docker exec -it codegen /bin/bash
 
+env_vllm:
+	docker exec -it vllm /bin/bash
+
+env_vllm_start:
+	docker run -d \
+		--name vllm \
+		--replace \
+		--gpus all \
+		--cap-add SYS_ADMIN \
+		--net=host \
+		--shm-size=128g \
+		--pids-limit -1 \
+		--ulimit nofile=65536:65536 \
+		--ulimit nproc=-1:-1\
+		--ulimit memlock=-1:-1 \
+		-v ~/.ssh/:/root/.ssh \
+		-v ~/.netrc:/root/.netrc \
+		-v ~/.gitconfig:/root/.gitconfig \
+		-v ~/.keys/:/root/.keys/ \
+		-v /data/users/${USER}/:/root/.cache/ \
+		-v ${PWD}:/workspace/ \
+		--cap-add SYS_ADMIN \
+		--device /dev/fuse \
+		--security-opt apparmor:unconfined \
+		--privileged \
+		localhost/vllm \
+		/bin/bash -c "make mount_shared_drive && tail -f /dev/null"
+
 wandb_login:
-	wandb login --host=https://fairwandb.org
+	wandb login --host=https://api.wandb.ai
 
 mount_shared_drive:
-	sshfs -o IdentityFile=/root/.ssh/id_rsa_shared -p 8081 codegen@devvm8492.cco0.facebook.com:/shared/ shared/
+	echo 'dummy' | sshfs -o password_stdin -p 8081 codegen@devvm8492.cco0.facebook.com:/shared/ shared/
 
 mount_shared_code:
 	sshfs -o IdentityFile=/root/.ssh/id_rsa_shared -p 8082 codegen@devvm8492.cco0.facebook.com:/shared/ /workspace/
@@ -107,6 +143,22 @@ sync_config:
 	cp workflow.yaml shared/config/workflow.yaml
 	cp workflow/* shared/config/workflow/
 
+snapshot_config:
+	@if [ -z "$(prefix_tag)" ]; then \
+		echo "Error: prefix_tag is required. Usage: make snapshot_config prefix_tag=<tag_name>"; \
+		exit 1; \
+	fi
+	@echo "Creating config snapshot with prefix: $(prefix_tag)"
+	@mkdir -p shared/config/snapshot/$(prefix_tag)
+	@find . -maxdepth 2 -name "*.yaml" -not -path "./shared/*" -type f | while read file; do \
+		rel_path=$$(echo $$file | sed 's|^\./||'); \
+		dest_dir=shared/config/snapshot/$(prefix_tag)/$$(dirname $$rel_path); \
+		mkdir -p $$dest_dir; \
+		cp $$file shared/config/snapshot/$(prefix_tag)/$$rel_path; \
+		echo "Copied $$file -> shared/config/snapshot/$(prefix_tag)/$$rel_path"; \
+	done
+	@echo "Config snapshot completed in shared/config/snapshot/$(prefix_tag)/"
+
 lora_merge_compress_autoawq:
 	CUDA_VISIBLE_DEVICES=2 python lora_merge_awq.py
 
@@ -114,7 +166,7 @@ lora_merge_compress:
 	CUDA_VISIBLE_DEVICES=4 python lora_merge_llmcomp_awq.py
 
 kbEval:
-	while true; do python kbEvalServer.py; sleep 1; done
+	while true; do python kbEvalServer.py; sleep 5; done
 
 kbeval_local:
 	python kbEvalServer.py --local_host --port 5676 --device 7
@@ -227,7 +279,7 @@ vllm-qwen3-32b-devserver:
     --return-tokens-as-token-ids \
     --enforce-eager
 
-vllm-qwen3-32b-devserver_b:
+vllm-qwen3-32b-devserver_a:
 	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=4,5,6,7 python -m vllm.entrypoints.openai.api_server \
     --model Qwen/Qwen3-32B \
     --port 8001 --host :: \
@@ -236,25 +288,41 @@ vllm-qwen3-32b-devserver_b:
     --tensor-parallel-size 4 \
     --pipeline-parallel-size 1 \
     --enable-lora --max-lora-rank 128 --max-loras 6 \
-	--lora-modules  \
-		qwen3_32b_sft_t2=shared/finetune_model_output/sft_t2/checkpoint-289  \
-		qwen3_32b_sft_t5=shared/finetune_model_output/sft_t5/checkpoint-181  \
-		qwen3_32b_sft_t6=shared/finetune_model_output/sft_t6/checkpoint-362  \
-		qwen3_32b_sft_t7=shared/finetune_model_output/sft_t7/checkpoint-724  \
-    --gpu-memory-utilization 0.95 --max_model_len 24576 \
+    --gpu-memory-utilization 0.90 --max_model_len 24576 \
     --load_format safetensors \
     --trust_remote_code \
     --guided_decoding_backend guidance --guided-decoding-disable-fallback \
     --enable_auto_tool_choice --tool_call_parser hermes \
     --scheduling_policy priority \
     --enable_chunked_prefill --max_num_batched_tokens 2048 \
-    --max_log_len 0 --max_num_seqs 144 \
+    --max_log_len 0 --max_num_seqs 64 \
     --enable_prefix_caching --prefix-caching-hash-algo builtin \
     --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
-    --return-tokens-as-token-ids \
-    --enforce-eager
+    --return-tokens-as-token-ids
 
-vllm-qwen3-32b-devserver_a:
+
+vllm-deepseek-r1-qwen3-32b-devserver_a:
+	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=4,5,6,7 python -m vllm.entrypoints.openai.api_server \
+    --model deepseek-ai/DeepSeek-R1-Distill-Qwen-32B \
+    --port 8001 --host :: \
+    --api-key dummy \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 4 \
+    --pipeline-parallel-size 1 \
+    --enable-lora --max-lora-rank 128 --max-loras 6 \
+    --gpu-memory-utilization 0.90 --max_model_len 24576 \
+    --load_format safetensors \
+    --trust_remote_code \
+    --guided_decoding_backend guidance --guided-decoding-disable-fallback \
+    --enable_auto_tool_choice --tool_call_parser hermes \
+    --scheduling_policy priority \
+    --enable_chunked_prefill --max_num_batched_tokens 2048 \
+    --max_log_len 0 --max_num_seqs 128 \
+    --enable_prefix_caching --prefix-caching-hash-algo builtin \
+    --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
+    --return-tokens-as-token-ids
+
+vllm-qwen3-32b-devserver_b:
 	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=0,1,2,3 python -m vllm.entrypoints.openai.api_server \
     --model Qwen/Qwen3-32B \
     --port 8002 --host :: \
@@ -263,23 +331,67 @@ vllm-qwen3-32b-devserver_a:
     --tensor-parallel-size 4 \
     --pipeline-parallel-size 1 \
     --enable-lora --max-lora-rank 128 --max-loras 6 \
-	--lora-modules  \
-		qwen3_32b_sft_t2=shared/finetune_model_output/sft_t2/checkpoint-289  \
-		qwen3_32b_sft_t5=shared/finetune_model_output/sft_t5/checkpoint-181  \
-		qwen3_32b_sft_t6=shared/finetune_model_output/sft_t6/checkpoint-362  \
-		qwen3_32b_sft_t7=shared/finetune_model_output/sft_t7/checkpoint-724  \
-    --gpu-memory-utilization 0.95 --max_model_len 24576 \
+    --gpu-memory-utilization 0.90 --max_model_len 24576 \
     --load_format safetensors \
     --trust_remote_code \
     --guided_decoding_backend guidance --guided-decoding-disable-fallback \
     --enable_auto_tool_choice --tool_call_parser hermes \
     --scheduling_policy priority \
     --enable_chunked_prefill --max_num_batched_tokens 2048 \
-    --max_log_len 0 --max_num_seqs 144 \
+    --max_log_len 0 --max_num_seqs 128 \
     --enable_prefix_caching --prefix-caching-hash-algo builtin \
     --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
-    --return-tokens-as-token-ids \
-    --enforce-eager
+    --return-tokens-as-token-ids
+
+
+vllm-qwen3-32b-devserver_c:
+	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=0,1,2,3 python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen3-32B \
+    --port 8001 --host :: \
+    --api-key dummy \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 4 \
+    --pipeline-parallel-size 1 \
+    --enable-lora --max-lora-rank 128 --max-loras 6 \
+	--lora-modules  \
+		cudacoder_gspo_qwen32b_t03_ckpt1200=shared/.trainer/cudacoder_gspo_qwen32b.t03/checkpoint-1200  \
+		cudacoder_gspo_qwen32b_t03_ckpt2400=shared/.trainer/cudacoder_gspo_qwen32b.t03/checkpoint-2400  \
+    --gpu-memory-utilization 0.90 --max_model_len 24576 \
+    --load_format safetensors \
+    --trust_remote_code \
+    --guided_decoding_backend guidance --guided-decoding-disable-fallback \
+    --enable_auto_tool_choice --tool_call_parser hermes \
+    --scheduling_policy priority \
+    --enable_chunked_prefill --max_num_batched_tokens 2048 \
+    --max_log_len 0 --max_num_seqs 128 \
+    --enable_prefix_caching --prefix-caching-hash-algo builtin \
+    --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
+    --return-tokens-as-token-ids
+
+
+vllm-qwen3-32b-devserver_d:
+	${VLLM_SETTING} CUDA_VISIBLE_DEVICES=4,5,6,7 python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen3-32B \
+    --port 8002 --host :: \
+    --api-key dummy \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 4 \
+    --pipeline-parallel-size 1 \
+    --enable-lora --max-lora-rank 128 --max-loras 6 \
+	--lora-modules  \
+		cudacoder_gspo_qwen32b_t03_ckpt1200=shared/.trainer/cudacoder_gspo_qwen32b.t03/checkpoint-1200  \
+		cudacoder_gspo_qwen32b_t03_ckpt2400=shared/.trainer/cudacoder_gspo_qwen32b.t03/checkpoint-2400  \
+    --gpu-memory-utilization 0.90 --max_model_len 24576 \
+    --load_format safetensors \
+    --trust_remote_code \
+    --guided_decoding_backend guidance --guided-decoding-disable-fallback \
+    --enable_auto_tool_choice --tool_call_parser hermes \
+    --scheduling_policy priority \
+    --enable_chunked_prefill --max_num_batched_tokens 2048 \
+    --max_log_len 0 --max_num_seqs 128 \
+    --enable_prefix_caching --prefix-caching-hash-algo builtin \
+    --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
+    --return-tokens-as-token-ids
 
 
 vllm-qwen3-32b-sft-devserver:
@@ -538,7 +650,7 @@ vllm_gptoss_b:
 		-v ~/.netrc:/root/.netrc \
 		-v ~/.gitconfig:/root/.gitconfig \
 		-v ~/.keys/:/root/.keys/ \
-		-e CUDA_VISIBLE_DEVICES=2,3 \
+		-e CUDA_VISIBLE_DEVICES=0 \
 		-e HF_HOME=/root/.cache/huggingface \
 		-e HTTP_PROXY="http://fwdproxy:8080" \
 		-e HTTPS_PROXY="http://fwdproxy:8080" \
@@ -548,22 +660,48 @@ vllm_gptoss_b:
 		--device /dev/fuse \
 		--security-opt apparmor:unconfined \
 		--privileged \
-		vllm/vllm-openai:latest \
+		vllm/vllm-openai:v0.10.2 \
 		--model openai/gpt-oss-120b \
 		--port 8002 --host :: \
 		--api-key dummy \
 		--data-parallel-size 1 \
-		--tensor-parallel-size 2 \
+		--tensor-parallel-size 1 \
 		--pipeline-parallel-size 1 \
 		--gpu-memory-utilization 0.9 --max_model_len 24576 \
 		--load_format safetensors \
 		--trust_remote_code \
 		--guided_decoding_backend guidance --guided-decoding-disable-fallback \
-		--enable_auto_tool_choice --tool_call_parser hermes \
 		--scheduling_policy priority \
 		--enable_chunked_prefill --max_num_batched_tokens 2048 \
 		--max_log_len 0 --max_num_seqs 144 \
-		--enable_prefix_caching --prefix-caching-hash-algo builtin \
+		--enable_prefix_caching --prefix-caching-hash-algo sha256 \
 		--generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
-		--return-tokens-as-token-ids \
 		--async-scheduling
+
+env_gepa_start:
+	${ENV_VARS} $(META_PROXY) docker run -d \
+		--name gepa \
+		--replace \
+		--gpus all \
+		--cap-add SYS_ADMIN \
+		--net=host \
+		--shm-size=128g \
+		--pids-limit -1 \
+		--ulimit nofile=65536:65536 \
+		--ulimit nproc=-1:-1\
+		--ulimit memlock=-1:-1 \
+		-v ~/.ssh/:/root/.ssh \
+		-v ~/.bashrc:/root/.bashrc \
+		-v ~/.netrc:/root/.netrc \
+		-v ~/.gitconfig:/root/.gitconfig \
+		-v ~/.keys/:/root/.keys/ \
+		-v /data/users/${USER}/:/root/.cache/ \
+		-v ${PWD}:/workspace/ \
+		--cap-add SYS_ADMIN --device /dev/fuse \
+		--security-opt apparmor:unconfined \
+		--privileged \
+		localhost/gepa \
+		/bin/bash -c "make mount_shared_drive && make wandb_login && tail -f /dev/null"
+
+env_gepa:
+	docker exec -it -e PYTHONNOUSERSITE=1 gepa /bin/bash

@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from util import KB_EVAL_DIR
 
 KB_EVAL_TOKEN = None
+LOG_WITH_WANDB = False
 
 TOTAL_REQUEST_COUNTER = 0
 TOTAL_ERROR_COUNTER = 0
@@ -42,7 +43,7 @@ parallel_request_counter_lock = asyncio.Lock()
 
 DEVICES = []
 
-MAX_TIMEOUT_SECONDS = 270  # 4.5 minutes
+MAX_TIMEOUT_SECONDS = 600  # 10 minutes
 
 # Cache hit/miss tracking
 CACHE_HIT_THRESHOLD = 20  # seconds - if command completes within this, it's a cache hit
@@ -241,7 +242,10 @@ async def kb_eval_ref(
 
         # get prefix_tag from run_tag by removing regex pattern [_ddd_dd] (ddd is 3 digits, dd is 2 digits) at the end if exists
         prefix_tag = re.sub(r"_\d*_\d*$", "", run_tag)
-        wandb_run = _setup_wandb_logging(prefix_tag, model_tag)
+        if LOG_WITH_WANDB:
+            wandb_run = _setup_wandb_logging(prefix_tag, model_tag)
+        else:
+            wandb_run = None
 
         # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}/{eval_tag}/{time_tag}
         temp_dir = os.path.join(KB_EVAL_DIR, run_tag, model_tag, task_tag)
@@ -325,7 +329,7 @@ async def kb_eval_ref(
             ),  # milliseconds
             f"{task_tag}/elapsed_time": time.time() - start_time,  # seconds
         }
-        if wandb_run:
+        if LOG_WITH_WANDB and wandb_run:
             wandb_run.log(metrics)
 
         return result
@@ -357,7 +361,7 @@ async def kb_eval_ref(
             ),  # milliseconds
             f"{task_tag}/elapsed_time": time.time() - start_time,  # seconds
         }
-        if wandb_run:
+        if LOG_WITH_WANDB and wandb_run:
             wandb_run.log(metrics)
         return result
 
@@ -388,7 +392,7 @@ async def kb_eval_ref(
             ),  # milliseconds
             f"{task_tag}/elapsed_time": time.time() - start_time,  # seconds
         }
-        if wandb_run:
+        if LOG_WITH_WANDB and wandb_run:
             wandb_run.log(metrics)
         return result
 
@@ -425,7 +429,10 @@ async def kb_eval(
 
         # get prefix_tag from run_tag by removing regex pattern [_ddd_dd] (ddd is 3 digits, dd is 2 digits) at the end if exists
         prefix_tag = re.sub(r"_\d*_\d*$", "", run_tag)
-        wandb_run = _setup_wandb_logging(prefix_tag, model_tag)
+        if LOG_WITH_WANDB:
+            wandb_run = _setup_wandb_logging(prefix_tag, model_tag)
+        else:
+            wandb_run = None
 
         # temp_dir is {HOME}/.kbeval/{run_tag}/{model_tag}/{task_tag}/{eval_tag}
         temp_dir = os.path.join(KB_EVAL_DIR, run_tag, model_tag, task_tag, eval_tag)
@@ -577,7 +584,7 @@ async def kb_eval(
             f"{task_tag}/cache_hit_rate": cache_hit_rate,
             f"{task_tag}/cache_status": cache_status,
         }
-        if wandb_run:
+        if LOG_WITH_WANDB and wandb_run:
             wandb_run.log(metrics)
 
         return result
@@ -615,7 +622,7 @@ async def kb_eval(
             ),  # milliseconds
             f"{task_tag}/elapsed_time": time.time() - start_time,  # seconds
         }
-        if wandb_run:
+        if LOG_WITH_WANDB and wandb_run:
             wandb_run.log(metrics)
 
         return result
@@ -653,7 +660,7 @@ async def kb_eval(
             ),  # milliseconds
             f"{task_tag}/elapsed_time": time.time() - start_time,  # seconds
         }
-        if wandb_run:
+        if LOG_WITH_WANDB and wandb_run:
             wandb_run.log(metrics)
 
         return result
@@ -811,7 +818,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_host", action="store_true")
     parser.add_argument("--port", type=int, default=8456)
-    parser.add_argument("--workers", type=int, default=(os.cpu_count()-10)) #
+    parser.add_argument("--workers", type=int, default=100) #
     parser.add_argument("--device", type=str, default="4")
     parser.add_argument("--max_timeout_seconds", type=int, default=240)
     args = parser.parse_args()

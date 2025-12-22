@@ -9,6 +9,7 @@ from workflowClient import WorkflowClient
 from workflowUtil import TrainerBlock, WorkflowSyncBlock
 from configInterpreter import ConfigInterpreter
 from trainerUtil import make_checkpoint_callback
+from util import INFERENCE_DIR, TRAINER_DIR
 
 LAST_MODIFIED_WITHIN = 7200
 
@@ -88,7 +89,7 @@ async def main():
     parser.add_argument("--module_file", type=str, default="workflow/sync.module.vllm+logp.yaml")
     parser.add_argument("--queue_name", type=str, default="sync.sync.1")
     parser.add_argument("--test_callback", action="store_true")
-    parser.add_argument("--checkpoint_path", type=str, default="~/.trainer/TC_0.1.0_32B.c/checkpoint-100")
+    parser.add_argument("--checkpoint_path", type=str, default=TRAINER_DIR + "/TC_0.1.0_32B.c/checkpoint-100")
     parser.add_argument("--test_manual_sync", action="store_true")
     parser.add_argument("--manual_sync_context", type=str, default="""{
         "vllm_providers": ["h8_3"],

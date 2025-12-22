@@ -268,12 +268,14 @@ class EngineUnsloth(EngineBase):
             )
 
         # Load optimizer and scheduler state
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "optimizer_state_dict" in checkpoint:
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         if "scheduler_state_dict" in checkpoint:
             self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
 
         # Load training state
-        self.status.global_step = checkpoint.get("global_step", 0)
+        if "global_step" in checkpoint:
+            self.status.global_step = checkpoint["global_step"]
 
         logger.info(
             f"📜 [{self.__class__.__name__}] Checkpoint loaded - Step: [{self.status.global_step}]"

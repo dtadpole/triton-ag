@@ -7,8 +7,8 @@ import yaml
 import asyncio
 import argparse
 from pydantic import BaseModel
-from trainerBase import BaseTrainer, TrainerConfig, TrainerStatus, train_async
-from trainerUtil import format_conversation
+from engineBase import EngineBase, EngineConfig, TrainerStatus
+from trainerUtil import format_conversation, make_checkpoint_callback
 from logger import logger
 import torch
 from workflowUtil import TrainerBlock
@@ -101,12 +101,14 @@ class MessageDataset(Dataset):
     def __getitem__(self, idx):
         return self.messages_list[idx]
 
-class SFTTrainer(BaseTrainer):
+class SFTTrainer():
     """Supervised Fine-Tuning trainer for conversational datasets"""
 
-    def __init__(self, prefix_tag: str, sft_config: SFTConfig, base_config: TrainerConfig, status: Optional[TrainerStatus] = None, base_trainer: BaseTrainer = None):
+    def __init__(self, engine: EngineBase, prefix_tag: str, sft_config: SFTConfig):
         """Initialize SFT trainer"""
-        super().__init__(prefix_tag, base_config, status, base_trainer)
+        self.engine = engine
+        self.tokenizer = self.engine.tokenizer
+        self.status = self.engine.status
         self.sft_config = sft_config
         logger.info(f"📜 [SFTTrainer] Initialized for conversational fine-tuning with SFTConfig: {sft_config}")
 
@@ -117,13 +119,13 @@ class SFTTrainer(BaseTrainer):
         """Update SFT config"""
         self.sft_config = sft_config
 
-def sft_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_file: str = "trainerBase.yaml", sft_config_file: str = "trainerSFT.yaml"):
+def sft_get_trainer(engine: EngineBase, prefix_tag: str, engine_config_file: str = "engineBase.yaml", sft_config_file: str = "trainerSFT.yaml"):
     """Get a SFT trainer"""
     try:
-        base_config = TrainerConfig.from_yaml(base_config_file, override_yaml_path=sft_config_file)
-        logger.info(f"⚙️ [SFTTrainer] [{prefix_tag}] Base configuration loaded from [{base_config_file}]")
+        engine._update_config(EngineConfig.from_yaml(engine_config_file, override_yaml_path=sft_config_file))
+        logger.info(f"⚙️ [SFTTrainer] [{prefix_tag}] Engine config [{engine.__class__.__name__}] loaded from [{engine_config_file}]")
     except Exception as e:
-        logger.error(f"❌ [SFTTrainer] [{prefix_tag}] Failed to load base configuration: {e}")
+        logger.error(f"❌ [SFTTrainer] [{prefix_tag}] Engine config [{engine.__class__.__name__}] failed to load: [{type(e)}] {e}")
         raise e
 
     try:
@@ -134,7 +136,7 @@ def sft_get_trainer(base_trainer: BaseTrainer, prefix_tag: str, base_config_file
         raise e
 
     try:
-        trainer = SFTTrainer(prefix_tag, sft_config, base_config, base_trainer=base_trainer)
+        trainer = SFTTrainer(engine=engine, prefix_tag=prefix_tag, sft_config=sft_config)
         logger.info(f"⭐ [SFTTrainer] [{prefix_tag}] Trainer initialized")
     except Exception as e:
         logger.error(f"❌ [SFTTrainer] [{prefix_tag}] Initialization failed: {e}")
@@ -155,12 +157,29 @@ async def sft_train_block(block: TrainerBlock, trainer: SFTTrainer, callback: Op
             raise FileNotFoundError(error_msg)
 
         # query from search_path folder, find all the conversation_*.json files, and load them into a dataframe
-        result = duckdb.sql(f"""SELECT filename, messages, metadata
-                            FROM read_json_auto('{search_path}/**/*_conversation.json', sample_size=-1, ignore_errors=true)
-                            WHERE messages[3]['content'] IS NOT NULL
-                        """)
-
+        result = duckdb.sql(f"""
+        WITH convs AS (
+            SELECT regexp_replace(filename, '_conversation\.json$', '') AS stem,
+                messages,
+                metadata
+            FROM read_json_auto('{search_path}/**/*_conversation.json', sample_size=-1, ignore_errors=true)
+            WHERE messages[3]['content'] IS NOT NULL
+        ),
+        evals AS(
+            SELECT
+                filename AS eval_file,
+                regexp_replace(filename, '_generated_eval\.json$', '') AS stem,
+                regexp_replace(filename, '/[^/]*$', '') AS task_id,
+                compiled, correctness, runtime
+            FROM read_json_auto('{search_path}/**/*_generated_eval.json', filename = true)
+        )
+        SELECT convs.messages, convs.metadata, convs.stem, evals.*
+        FROM convs
+        LEFT JOIN evals  USING(stem)
+        ORDER BY convs.stem;
+        """)
         result_df = result.df()
+        result_df = result_df[result_df["correctness"] == True] # only keep the correct ones
         # create a dataset from result_df['messages']
         message_dataset = MessageDataset(result_df['messages'].tolist(), trainer.tokenizer, trainer.sft_config)
 
@@ -173,7 +192,8 @@ async def sft_train_block(block: TrainerBlock, trainer: SFTTrainer, callback: Op
 
     # train the block
     try:
-        trainer.train_block(block.input_tag, message_dataset, callback=callback)
+        await trainer.engine.train_block(block.input_tag, message_dataset, callback=callback, save_at_end=True)
+        await asyncio.sleep(1)
         logger.info(f"🎉 [SFTTrainer] [{block.input_tag}] Training completed successfully!")
     except Exception as e:
         error_msg = f"❌ [SFTTrainer] [{block.input_tag}] Training failed: {e}"
@@ -184,18 +204,27 @@ async def sft_train_block(block: TrainerBlock, trainer: SFTTrainer, callback: Op
 async def main():
     """Main function for SFT training"""
     parser = argparse.ArgumentParser(description="Train a model using SFTTrainer")
+    parser.add_argument("--queue_name", type=str, default="sft.1")
+    parser.add_argument("--engine", type=str, default="unsloth")
+    parser.add_argument("--engine_config", type=str, default="engineBase.yaml")
     parser.add_argument("--prefix_tag", type=str, default="TC_0.1.0_0.6B.a")
     parser.add_argument("--epoch_id", type=int, default=0)
     parser.add_argument("--block_id", type=int, default=0)
-    parser.add_argument("--input_dir", type=str, default=INFERENCE_DIR + "/.codeGenEval")
-    parser.add_argument("--output_dir", type=str, default=TRAINER_DIR)
-    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B_20250801_211407") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
-    parser.add_argument("--base_config", type=str, default="trainerBase.yaml")
+    parser.add_argument("--input_dir", type=str, default=INFERENCE_DIR + "/codeGenEval")
+    parser.add_argument("--output_dir", type=str, default=TRAINER_DIR + "/sft")
+    parser.add_argument("--input_tag", type=str, default="TC_0.1.0_14B.n_000_00") # {prefix}_{timestamp} or {prefix}_{epoch_id}_{block_id}
     parser.add_argument("--sft_config", type=str, default="trainerSFT.yaml")
     args = parser.parse_args()
 
-    trainer = sft_get_trainer(None, args.prefix_tag, args.base_config, args.sft_config)
+    if args.engine == "unsloth":
+        import unsloth
+
+    engine_config = EngineConfig.from_yaml(args.engine_config)
+    engine_config.model.engine = args.engine
+    engine = EngineBase.create_engine(args.prefix_tag, engine_config) # no status for testing
+    trainer = sft_get_trainer(engine, args.prefix_tag, args.engine_config, args.sft_config)
     sft_block = TrainerBlock(
+        queue_name=args.queue_name,
         prefix_tag=args.prefix_tag,
         epoch_id=args.epoch_id,
         block_id=args.block_id,
@@ -203,7 +232,17 @@ async def main():
         input_dir=args.input_dir,
         output_dir=args.output_dir,
     )
-    await sft_train_block(sft_block, trainer)
+    sft_block.input_dir = os.path.expanduser(sft_block.input_dir)
+    sft_block.output_dir = os.path.expanduser(sft_block.output_dir)
+
+    callback_func = make_checkpoint_callback(
+        prefix_tag=args.prefix_tag,
+        trainer_block=sft_block,
+        workflow_provider="default",
+    )
+
+    await sft_train_block(sft_block, trainer, callback_func)
+    await asyncio.sleep(1)
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -1,0 +1,119 @@
+module:
+  name: grpo
+  # built-in context like `self` has already been set
+  # here we add addotional context variables for easier access by the program
+  # variables will be evaluated sequentially, so that later variables can use earlier variables
+
+  # input processor
+  input_processor:
+    # prepare the input data for grpo training
+    steps:
+      - type: endpoint
+        endpoint: duckdbClient.sql
+        context_vars:
+          input_dir: '`block.input_dir`'
+          input_tag: '`block.input_tag`'
+        args:
+          query: |
+            WITH refs AS(
+                SELECT
+                    regexp_replace(filename, '/[^/]*$', '') AS task_id,
+                    runtime_stats
+                FROM read_json_auto('{input_dir}/{input_tag}/**/reference_eval.json', filename = true)
+            ),
+            evals AS (
+                SELECT
+                    filename AS eval_file,
+                    regexp_replace(filename, '_generated_eval\.json$', '') AS stem,
+                    regexp_replace(filename, '/[^/]*$', '') AS task_id,
+                    compiled, correctness, runtime, reference_runtime as ref_runtime, runtime_stats
+                FROM read_json_auto('{input_dir}/{input_tag}/**/*_generated_eval.json', filename = true)
+            ),
+            evals_join AS (
+                SELECT e.*, r.runtime_stats as ref_runtime_stats
+                FROM evals e
+                LEFT JOIN refs r USING (task_id)
+            ),
+            comps AS (
+                SELECT
+                    filename AS completion_file,
+                    regexp_replace(filename, '_completion\.json$', '') AS stem,
+                    prompt, completion, logprobs, metadata,
+                    metadata->>'task_tag' AS task_tag, metadata->>'gen_tag' AS gen_tag, metadata->>'turn_tag' AS turn_tag
+                FROM read_json_auto('{input_dir}/{input_tag}/**/*_completion.json', filename = true)
+            ),
+            logps AS (
+                SELECT
+                    filename AS logps_file,
+                    regexp_replace(filename, '_logps\.json$', '') AS stem,
+                    prompt_ids, completion_ids, input_ids, logps
+                FROM read_json_auto('{input_dir}/{input_tag}/**/*_logps.json', filename = true)
+            ),
+            selections AS (
+                SELECT
+                    regexp_replace(filename, '/[^/]*$', '') AS task_id,
+                    regexp_extract(filename, '.*/t(\d+)_selected_from_t(\d+)\.json$', 1) AS current_turn,
+                    turn_tag AS selected_turn_tag,
+                    generated_eval_path
+                FROM read_json_auto('{input_dir}/{input_tag}/**/*_selected_from_*.json', filename = true)
+            ),
+            selected_evals AS (
+                SELECT
+                    s.task_id,
+                    s.current_turn,
+                    s.selected_turn_tag,
+                    e.runtime AS selected_runtime,
+                    e.runtime_stats AS selected_runtime_stats,
+                    e.correctness AS selected_correctness
+                FROM selections s
+                LEFT JOIN evals e
+                ON regexp_extract(s.generated_eval_path, 'shared(.*)$', 1)  = regexp_extract(e.eval_file, 'shared(.*)$', 1)
+            )
+            SELECT
+                e.compiled, e.correctness, e.runtime, e.ref_runtime, e.runtime_stats, e.ref_runtime_stats,
+                c.prompt, c.completion, c.logprobs, c.metadata,
+                e.eval_file, c.completion_file,
+                l.prompt_ids, l.completion_ids, l.input_ids, l.logps,
+                c.task_tag, c.gen_tag, c.turn_tag,
+                se.selected_turn_tag, se.selected_runtime, se.selected_runtime_stats, se.selected_correctness
+            FROM evals_join e
+            JOIN comps c USING (stem)
+            JOIN logps l USING (stem)
+            LEFT JOIN selected_evals se
+            ON (e.task_id = se.task_id AND SUBSTRING(c.turn_tag, LENGTH(c.turn_tag) - 1, 2) = se.current_turn)
+            ORDER BY task_tag, gen_tag, turn_tag
+        returns:
+          error_if: '`__result__ is None`'
+          context_vars:
+            query_result: '`__result__.df().to_dict(orient="records")`'
+          logging:
+            method: 'log_raw_data'
+      # compute rewards and advantages
+      - type: code
+        context_vars:
+          tokenizer: '`__runtime__.tokenizer`'
+        code_snippet_path: 'trainer/grpo_reward_kb_treeturns.py'
+        code_snippet_block: |
+          # compute rewards and advantages
+          groups = grpo_compute_rewards_v6_treeturns(
+              query_result,
+              correctness_reward_=grpo_config.correctness_reward,
+              speedup_reward_=grpo_config.speedup_reward,
+              improvement_bonus_=grpo_config.improvement_bonus,
+          )
+          groups = grpo_compute_advantages(
+              groups,
+              reward_scale=grpo_config.reward_scale,
+              reward_scale_value=grpo_config.reward_scale_value,
+              reward_epsilon=grpo_config.reward_epsilon,
+              reward_noise=grpo_config.reward_noise,
+              k=grpo_config.pkpo_advantages_k,
+              good_reward_threshold=grpo_config.good_reward_threshold,
+              bad_reward_threshold=grpo_config.bad_reward_threshold,
+          )
+          # create group datasets
+          group_datasets = {key: grpo_group_to_dataset(value, tokenizer) for key, value in groups.items()}
+          __result__ = group_datasets
+          # TODO: save the groups to the .trainer directory
+        returns:
+          error_if: '`__result__ is None`'

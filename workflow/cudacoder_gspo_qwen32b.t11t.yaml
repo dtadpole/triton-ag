@@ -1,0 +1,57 @@
+# built in queues
+queues:
+  - name: trainer.sft.1
+  - name: trainer.rft.1
+  - name: trainer.grpo.1
+  - name: sync.sync.1
+  - name: test.test.1
+
+# global variables
+global:
+  prefix_tag: "cudacoder_gspo_qwen32b.t11t"
+  start_epoch: 0
+  start_block: 0
+  end_epoch: 1
+  end_block: 1
+
+init:
+  codeGenEval.base:
+    - queue_type: inference
+      queue_name: codeGenEval.base
+      prefix_tag: "{prefix_tag}"
+      epoch_id: "{epoch_id}"
+      block_id: "{block_id}"
+      input_tag: "{input_tag}"
+      num_samples: 8
+      num_generations: 8
+      num_turns_per_generation: 4
+      parallel_workers: 32
+      model_name: qwen3-32b
+      vllm_providers: ["h100_8_5_a"]
+      logp_providers: ["h100_8_5_b", "h100_8_5_c"]
+      kbeval_providers: ["h8_4", "h8_2"]
+      module_file: inference/codeGenEval.module.vllm+logp.rewardsampling.yaml
+      prompt_file: inference/cuda.prompt.yaml
+      example_file: inference/cuda.example.yaml
+      input_dir: /workspace/kernel_bench/level?
+      output_dir: shared/.inference/codeGenEval
+
+inference:
+  codeGenEval.base:
+    default:
+      module_file: inference/codeGenEval.module.vllm+logp.rewardsampling.yaml
+      prompt_file: inference/cuda.prompt.yaml
+      example_file: inference/cuda.example.yaml
+      input_dir: /workspace/kernel_bench/level?
+      output_dir: shared/.inference/codeGenEval
+      vllm_providers: ["local"]
+      logp_providers: ["local"]
+      kbeval_providers: ["local"]
+      model_name: qwen3-14b
+      num_generations: 8
+      num_turns_per_generation: 4
+      parallel_workers: 32
+      logprobs: true
+      input_tag: kernel_bench
+      custom_provider: local
+      model_override: null
