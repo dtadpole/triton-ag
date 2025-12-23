@@ -32,6 +32,7 @@ START_TIME = time.time()
 MAX_RUN_TIME = 4 * 3600  # restart periods in seconds
 COMPILE_CACHE = False
 COMPILE_PYTORCH = False
+COMPILE_PYTORCH_REF = False
 CHECK_GET_INPUTS = True
 
 # Create app
@@ -259,8 +260,14 @@ async def kb_eval_ref(
         # logger.info(f"[KB Eval] [reference] reference_file_path: [{reference_file_path}]")
 
         eval_tag = "reference"
+
+        if COMPILE_PYTORCH_REF is True:
+            compile_pytorch_ref_tag = "--compile_pytorch"
+        else:
+            compile_pytorch_ref_tag = ""
+
         # pre-compile the reference code
-        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code reference_code.py --measure_reference --device-list {','.join([str(device) for device in DEVICES])} --code_type pytorch --quiet"
+        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code reference_code.py --measure_reference --device-list {','.join([str(device) for device in DEVICES])} --code_type pytorch --quiet {compile_pytorch_ref_tag}"
         process = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
@@ -734,7 +741,7 @@ async def _check_total_error_count():
 
 async def main(args):
 
-    global MAX_TIMEOUT_SECONDS, COMPILE_CACHE, COMPILE_PYTORCH, CHECK_GET_INPUTS
+    global MAX_TIMEOUT_SECONDS, COMPILE_CACHE, COMPILE_PYTORCH, COMPILE_PYTORCH_REF, CHECK_GET_INPUTS
     MAX_TIMEOUT_SECONDS = args.max_timeout_seconds
 
     # read kbEval.yaml
@@ -773,6 +780,9 @@ async def main(args):
 
     COMPILE_PYTORCH = bool(kbEval_config["servers"][hostname].get("compile_pytorch", False))
     logger.info(f"Compile pytorch (AOTI) is {COMPILE_PYTORCH}")
+
+    COMPILE_PYTORCH_REF = bool(kbEval_config["servers"][hostname].get("compile_pytorch_ref", False))
+    logger.info(f"Compile pytorch ref (AOTI) is {COMPILE_PYTORCH_REF}")
 
     CHECK_GET_INPUTS = bool(kbEval_config["servers"][hostname].get("check_get_inputs", True))
     logger.info(f"Check get_inputs is {CHECK_GET_INPUTS}")
