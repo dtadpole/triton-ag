@@ -34,6 +34,7 @@ COMPILE_CACHE = False
 COMPILE_PYTORCH = False
 COMPILE_PYTORCH_REF = False
 CHECK_GET_INPUTS = True
+CODE_TYPE = "cuda"
 
 # Create app
 app = FastAPI()
@@ -423,10 +424,14 @@ async def kb_eval(
     eval_tag: str = Body(...),
     reference_code: str = Body(...),
     generated_code: str = Body(...),
-    code_type: str = Body(default="cuda"),
+    code_type: str = Body(default=None),
     authenticated: bool = Depends(verify_token),
 ) -> KernelExecResult:
-    global TOTAL_REQUEST_COUNTER, TOTAL_ERROR_COUNTER, parallel_request_counter, parallel_request_counter_lock, DEVICES
+    global TOTAL_REQUEST_COUNTER, TOTAL_ERROR_COUNTER, parallel_request_counter, parallel_request_counter_lock, DEVICES, CODE_TYPE
+
+    # Use configured CODE_TYPE if not provided in the request
+    if code_type is None:
+        code_type = CODE_TYPE
 
     try:
         async with parallel_request_counter_lock:
@@ -741,7 +746,7 @@ async def _check_total_error_count():
 
 async def main(args):
 
-    global MAX_TIMEOUT_SECONDS, COMPILE_CACHE, COMPILE_PYTORCH, COMPILE_PYTORCH_REF, CHECK_GET_INPUTS
+    global MAX_TIMEOUT_SECONDS, COMPILE_CACHE, COMPILE_PYTORCH, COMPILE_PYTORCH_REF, CHECK_GET_INPUTS, CODE_TYPE
     MAX_TIMEOUT_SECONDS = args.max_timeout_seconds
 
     # read kbEval.yaml
@@ -786,6 +791,9 @@ async def main(args):
 
     CHECK_GET_INPUTS = bool(kbEval_config["servers"][hostname].get("check_get_inputs", True))
     logger.info(f"Check get_inputs is {CHECK_GET_INPUTS}")
+
+    CODE_TYPE = str(kbEval_config["servers"][hostname].get("code_type", "cuda"))
+    logger.info(f"Code type is {CODE_TYPE}")
 
     #########################################################
     # get api_key from kbEval_config["kbEvalRemoteServer"]["common"]["api_key"]
