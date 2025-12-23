@@ -70,10 +70,18 @@ def verify_correctness(
             ]
 
             set_seed(trial_seed)
-            model = original_model_instance.cuda(device=device)
+            # AOTICompiledModel doesn't have .cuda() method - it's already bound to device
+            if hasattr(original_model_instance, 'cuda') and callable(getattr(original_model_instance, 'cuda')):
+                model = original_model_instance.cuda(device=device)
+            else:
+                model = original_model_instance
 
             set_seed(trial_seed)
-            model_new = new_model_instance.cuda(device=device)
+            # AOTICompiledModel doesn't have .cuda() method - it's already bound to device
+            if hasattr(new_model_instance, 'cuda') and callable(getattr(new_model_instance, 'cuda')):
+                model_new = new_model_instance.cuda(device=device)
+            else:
+                model_new = new_model_instance
 
             try:
                 output_new = model_new(*inputs)
