@@ -464,6 +464,108 @@ def resolve_custom_cuda_kernel(code: str):
     logger.info(f"Custom CUDA kernel validation passed")
     return True
 
+def check_triton_disallowed_nn_modules(code: str) -> list[str]:
+    """
+    Check for disallowed torch.nn module usage in Triton code.
+
+    Allowed exceptions:
+    - nn.Parameter / Parameter
+    - Containers: nn.Module, nn.ModuleList, nn.ModuleDict, nn.Sequential, nn.ParameterList, nn.ParameterDict
+    - Initialization: nn.init.*
+
+    Returns:
+        List of found disallowed nn module usages
+    """
+    # Disallowed nn modules (heavy PyTorch operations)
+    disallowed_nn_modules = [
+        # Convolution Operations
+        'nn.Conv1d', 'nn.Conv2d', 'nn.Conv3d',
+        'nn.ConvTranspose1d', 'nn.ConvTranspose2d', 'nn.ConvTranspose3d',
+        'nn.LazyConv1d', 'nn.LazyConv2d', 'nn.LazyConv3d',
+        'nn.LazyConvTranspose1d', 'nn.LazyConvTranspose2d', 'nn.LazyConvTranspose3d',
+
+        # Pooling Operations
+        'nn.MaxPool1d', 'nn.MaxPool2d', 'nn.MaxPool3d',
+        'nn.AvgPool1d', 'nn.AvgPool2d', 'nn.AvgPool3d',
+        'nn.AdaptiveAvgPool1d', 'nn.AdaptiveAvgPool2d', 'nn.AdaptiveAvgPool3d',
+        'nn.AdaptiveMaxPool1d', 'nn.AdaptiveMaxPool2d', 'nn.AdaptiveMaxPool3d',
+        'nn.MaxUnpool1d', 'nn.MaxUnpool2d', 'nn.MaxUnpool3d',
+        'nn.FractionalMaxPool2d', 'nn.FractionalMaxPool3d',
+        'nn.LPPool1d', 'nn.LPPool2d',
+
+        # Activation Functions
+        'nn.ReLU', 'nn.LeakyReLU', 'nn.GELU', 'nn.SiLU', 'nn.Mish',
+        'nn.Sigmoid', 'nn.Tanh', 'nn.Softmax', 'nn.LogSoftmax',
+        'nn.ELU', 'nn.SELU', 'nn.PReLU', 'nn.Softplus', 'nn.Softsign',
+        'nn.Hardtanh', 'nn.HardSigmoid', 'nn.Hardswish',
+        'nn.ReLU6', 'nn.RReLU', 'nn.CELU', 'nn.GLU',
+        'nn.Softmax2d', 'nn.Softmin', 'nn.Tanhshrink', 'nn.Softshrink', 'nn.Hardshrink',
+        'nn.Threshold', 'nn.MultiheadAttention',
+
+        # Normalization Operations
+        'nn.BatchNorm1d', 'nn.BatchNorm2d', 'nn.BatchNorm3d',
+        'nn.LayerNorm', 'nn.GroupNorm',
+        'nn.InstanceNorm1d', 'nn.InstanceNorm2d', 'nn.InstanceNorm3d',
+        'nn.LocalResponseNorm', 'nn.SyncBatchNorm',
+        'nn.LazyBatchNorm1d', 'nn.LazyBatchNorm2d', 'nn.LazyBatchNorm3d',
+        'nn.LazyInstanceNorm1d', 'nn.LazyInstanceNorm2d', 'nn.LazyInstanceNorm3d',
+        'nn.RMSNorm',
+
+        # Linear/Recurrent Operations
+        'nn.Linear', 'nn.LazyLinear', 'nn.Bilinear',
+        'nn.LSTM', 'nn.GRU', 'nn.RNN',
+        'nn.LSTMCell', 'nn.GRUCell', 'nn.RNNCell',
+
+        # Transformer Operations
+        'nn.Transformer', 'nn.TransformerEncoder', 'nn.TransformerDecoder',
+        'nn.TransformerEncoderLayer', 'nn.TransformerDecoderLayer',
+
+        # Embedding Operations
+        'nn.Embedding', 'nn.EmbeddingBag',
+
+        # Dropout
+        'nn.Dropout', 'nn.Dropout1d', 'nn.Dropout2d', 'nn.Dropout3d',
+        'nn.AlphaDropout', 'nn.FeatureAlphaDropout',
+
+        # Upsampling/Interpolation
+        'nn.Upsample', 'nn.UpsamplingNearest2d', 'nn.UpsamplingBilinear2d',
+
+        # Padding
+        'nn.ReflectionPad1d', 'nn.ReflectionPad2d', 'nn.ReflectionPad3d',
+        'nn.ReplicationPad1d', 'nn.ReplicationPad2d', 'nn.ReplicationPad3d',
+        'nn.ZeroPad1d', 'nn.ZeroPad2d', 'nn.ZeroPad3d',
+        'nn.ConstantPad1d', 'nn.ConstantPad2d', 'nn.ConstantPad3d',
+        'nn.CircularPad1d', 'nn.CircularPad2d', 'nn.CircularPad3d',
+
+        # Loss Functions
+        'nn.CrossEntropyLoss', 'nn.NLLLoss', 'nn.MSELoss', 'nn.L1Loss',
+        'nn.SmoothL1Loss', 'nn.BCELoss', 'nn.BCEWithLogitsLoss',
+        'nn.KLDivLoss', 'nn.CosineEmbeddingLoss', 'nn.CTCLoss',
+        'nn.HuberLoss', 'nn.PoissonNLLLoss', 'nn.GaussianNLLLoss',
+        'nn.HingeEmbeddingLoss', 'nn.MarginRankingLoss', 'nn.MultiLabelMarginLoss',
+        'nn.MultiLabelSoftMarginLoss', 'nn.MultiMarginLoss', 'nn.SoftMarginLoss',
+        'nn.TripletMarginLoss', 'nn.TripletMarginWithDistanceLoss',
+
+        # Fold/Unfold
+        'nn.Fold', 'nn.Unfold',
+
+        # Distance/Similarity
+        'nn.CosineSimilarity', 'nn.PairwiseDistance',
+
+        # Utility
+        'nn.Flatten', 'nn.Unflatten',
+        'nn.PixelShuffle', 'nn.PixelUnshuffle',
+        'nn.ChannelShuffle',
+    ]
+
+    found_disallowed = []
+    for module in disallowed_nn_modules:
+        if module in code:
+            found_disallowed.append(module)
+
+    return found_disallowed
+
+
 def resolve_triton_code(code: str):
     """
     Resolve the triton code, check there is function call from ModelNew.forward to @triton.jit function(s)
@@ -494,6 +596,19 @@ def resolve_triton_code(code: str):
     if mapper.model_new_forward_count != 1:
         raise CompileResolveComponentError(f"ModelNew has multiple forward methods: [{mapper.model_new_forward_count}]")
     logger.info(f"Method [ModelNew.forward] is defined [{mapper.model_new_forward_count}] time(s)")
+
+    # Check for disallowed nn module usage (heavy PyTorch operations)
+    # Allowed: nn.Parameter, nn.Module containers (ModuleList, ModuleDict, Sequential, ParameterList, ParameterDict), nn.init
+    disallowed_modules = check_triton_disallowed_nn_modules(code)
+    if disallowed_modules:
+        modules_str = ", ".join(disallowed_modules[:5])
+        if len(disallowed_modules) > 5:
+            modules_str += f" (and {len(disallowed_modules) - 5} more)"
+        raise CompileResolveComponentError(
+            f"Triton code uses disallowed torch.nn modules: {modules_str}. "
+            "Only nn.Parameter, nn.Module containers, and nn.init are allowed."
+        )
+    logger.info(f"No disallowed torch.nn modules found in Triton code")
 
     # check ModelNew.forward calls at least one triton.jit function, using call_graph
     forward_method = "__global__.ModelNew.forward"
