@@ -17,6 +17,7 @@ from torch import nn
 from kbEvalUtil import KernelExecResult, from_kbEval_yaml, format_exception, CorrectnessResult, CorrectnessError, CorrectnessProcessingError, CompileError, CompileInstantiationError, CompileRuntimeError
 from kbEvalUtil import CorrectnessShapeMismatchError, CorrectnessValueMismatchError, set_seed, get_timing_stats, time_execution_with_cuda_event, load_model_and_inputs, load_custom_model, graceful_eval_cleanup, on_critical_alarm, on_critical_timeout, on_process_timeout, resolve_triton_code
 from kbEvalUtil import get_cache_build_directory, generate_cache_hash, resolve_custom_cuda_kernel
+from kbEvalUtil import get_or_compile_aoti_model, compile_model_torch_compile
 import torch
 import asyncio
 import os
@@ -134,6 +135,8 @@ def eval_kernel_custom(
     max_critical_time: int = 20,
     use_cuda_cache: bool = False,
     check_get_inputs: bool = True,
+    compile_pytorch: bool = False,
+    aoti_cache_parent: str = "/tmp/aoti_shared_cache",
 ) -> KernelExecResult:
     """
     Evaluate the reference code against the original model
@@ -253,6 +256,25 @@ def eval_kernel_custom(
                             assert hasattr(original_model, "forward")
                         except Exception as e:
                             raise CompileInstantiationError(f"Error in instantiating original model: [{type(e)}] [{e}]") from e
+
+                        # Apply AOTI compilation to the reference model if requested
+                        if compile_pytorch:
+                            try:
+                                # Compile using AOTI with caching
+                                logger.info(f"🔨 Compiling reference model with AOTI...")
+                                original_model = get_or_compile_aoti_model(
+                                    model=original_model,
+                                    example_inputs=tuple(inputs),
+                                    model_code=reference_code,
+                                    device=device,
+                                    shared_cache_parent=aoti_cache_parent,
+                                )
+                                metadata["aoti_compiled"] = True
+                                logger.info(f"✅ Reference model compiled with AOTI")
+                            except Exception as e:
+                                logger.warning(f"⚠️ AOTI compilation failed, using original model: {e}")
+                                metadata["aoti_compiled"] = False
+                                metadata["aoti_error"] = str(e)
 
                         if measure_reference:
                             elapsed_times_ref = time_execution_with_cuda_event(
@@ -382,6 +404,10 @@ def main():
     parser.add_argument("--use_param_opt", action="store_false")
     parser.add_argument("--use_cuda_cache", action="store_true")
     parser.add_argument("--not_check_get_inputs", action="store_true")
+    parser.add_argument("--compile_pytorch", action="store_true",
+                        help="Compile the reference PyTorch model using AOTI for performance comparison")
+    parser.add_argument("--aoti_cache_parent", type=str, default="shared/.kbeval/reference_cache",
+                        help="Parent directory for AOTI compilation cache")
     args = parser.parse_args()
 
     # cli_config = from_kbEval_yaml()
@@ -463,6 +489,8 @@ def main():
                 max_critical_time=args.max_critical_time,
                 use_cuda_cache=args.use_cuda_cache,
                 check_get_inputs=check_get_inputs,
+                compile_pytorch=args.compile_pytorch,
+                aoti_cache_parent=args.aoti_cache_parent,
             )
         else:
             result = eval_kernel_custom(
@@ -480,6 +508,8 @@ def main():
                 max_critical_time=args.max_critical_time,
                 use_cuda_cache=args.use_cuda_cache,
                 check_get_inputs=check_get_inputs,
+                compile_pytorch=args.compile_pytorch,
+                aoti_cache_parent=args.aoti_cache_parent,
             )
     except Exception as exception:
         exit_code = 1
