@@ -70,18 +70,10 @@ def verify_correctness(
             ]
 
             set_seed(trial_seed)
-            # AOTICompiledModel doesn't have .cuda() method - it's already bound to device
-            if hasattr(original_model_instance, 'cuda') and callable(getattr(original_model_instance, 'cuda')):
-                model = original_model_instance.cuda(device=device)
-            else:
-                model = original_model_instance
+            model = original_model_instance.cuda(device=device)
 
             set_seed(trial_seed)
-            # AOTICompiledModel doesn't have .cuda() method - it's already bound to device
-            if hasattr(new_model_instance, 'cuda') and callable(getattr(new_model_instance, 'cuda')):
-                model_new = new_model_instance.cuda(device=device)
-            else:
-                model_new = new_model_instance
+            model_new = new_model_instance.cuda(device=device)
 
             try:
                 output_new = model_new(*inputs)
@@ -93,7 +85,6 @@ def verify_correctness(
                 output = model(*inputs)
                 torch.cuda.synchronize(device=device)
             except Exception as e:
-                # ensure all GPU operations are completed before checking results
                 raise CompileRuntimeError(f"Error in running original model: [{type(e)}] [{e}]") from e
 
             try:
@@ -137,14 +128,13 @@ def eval_kernel_custom(
     seed_num: int = 42,
     num_verify_trials: int = 3,
     num_perf_trials: int = 10,
-    num_warmups: int = 3,
+    num_warmups: int = 5,
     measure_reference: bool = False,
     code_type: str = "triton",
     max_critical_time: int = 20,
     use_cuda_cache: bool = False,
     check_get_inputs: bool = True,
-    compile_pytorch: bool = False,
-    aoti_cache_parent: str = "/tmp/aoti_shared_cache",
+    compile_pytorch: bool = False
 ) -> KernelExecResult:
     """
     Evaluate the reference code against the original model
@@ -154,6 +144,7 @@ def eval_kernel_custom(
     # signal.alarm(max_run_time)  # exit after max_run_time seconds
 
     context = {}
+
     if measure_reference:
         metadata = {
             "is_reference": True,
@@ -200,6 +191,7 @@ def eval_kernel_custom(
             elif code_type == "cuda":
                 # check if the generated cuda code is a valid cuda kernel
                 resolve_custom_cuda_kernel(generated_code)
+
 
     except CompileError as e:
         formatted_error = format_exception(e)
@@ -265,22 +257,18 @@ def eval_kernel_custom(
                         except Exception as e:
                             raise CompileInstantiationError(f"Error in instantiating original model: [{type(e)}] [{e}]") from e
 
-                        # Apply AOTI compilation to the reference model if requested
                         if compile_pytorch:
                             try:
-                                # Compile using AOTI with caching
-                                logger.info(f"🔨 Compiling reference model with AOTI...")
-                                original_model = get_or_compile_aoti_model(
-                                    model=original_model,
-                                    example_inputs=tuple(inputs),
-                                    model_code=reference_code,
-                                    device=device,
-                                    shared_cache_parent=aoti_cache_parent,
-                                )
+                                original_model = torch.compile(original_model, backend="inductor", mode="default") # this step may take some time
+                                # Force complete compilation
+                                for _ in range(3):
+                                    _ = original_model(*inputs)  # Compilation happens on iteration 0-1
+                                torch.cuda.synchronize(device=device)
+                                torch.cuda.empty_cache()
                                 metadata["aoti_compiled"] = True
-                                logger.info(f"✅ Reference model compiled with AOTI")
+                                logger.info(f"✅ AOTI model compiled")
                             except Exception as e:
-                                logger.warning(f"⚠️ AOTI compilation failed, using original model: {e}")
+                                logger.warning(f"⚠️ AOTI loading failed, using original model: {e}")
                                 metadata["aoti_compiled"] = False
                                 metadata["aoti_error"] = str(e)
 
@@ -319,7 +307,6 @@ def eval_kernel_custom(
                                 seed=seed_num,
                                 device=device,
                             )
-
                             if correctness_result.passed_trials == num_verify_trials:
                                 correctness = True
                             else:
@@ -497,8 +484,7 @@ def main():
                 max_critical_time=args.max_critical_time,
                 use_cuda_cache=args.use_cuda_cache,
                 check_get_inputs=check_get_inputs,
-                compile_pytorch=args.compile_pytorch,
-                aoti_cache_parent=args.aoti_cache_parent,
+                compile_pytorch=args.compile_pytorch
             )
         else:
             result = eval_kernel_custom(
@@ -516,8 +502,7 @@ def main():
                 max_critical_time=args.max_critical_time,
                 use_cuda_cache=args.use_cuda_cache,
                 check_get_inputs=check_get_inputs,
-                compile_pytorch=args.compile_pytorch,
-                aoti_cache_parent=args.aoti_cache_parent,
+                compile_pytorch=args.compile_pytorch
             )
     except Exception as exception:
         exit_code = 1

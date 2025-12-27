@@ -47,6 +47,7 @@ parallel_request_counter_lock = asyncio.Lock()
 DEVICES = []
 
 MAX_TIMEOUT_SECONDS = 600  # 10 minutes
+MAX_CRITICAL_TIME = 120 # 120 seconds for critical section (inside the lock)
 
 # Cache hit/miss tracking
 CACHE_HIT_THRESHOLD = 20  # seconds - if command completes within this, it's a cache hit
@@ -268,7 +269,7 @@ async def kb_eval_ref(
             compile_pytorch_ref_tag = ""
 
         # pre-compile the reference code
-        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code reference_code.py --measure_reference --device-list {','.join([str(device) for device in DEVICES])} --code_type pytorch --quiet {compile_pytorch_ref_tag}"
+        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code reference_code.py --measure_reference --device-list {','.join([str(device) for device in DEVICES])} --code_type pytorch --max_critical_time {MAX_CRITICAL_TIME} --quiet {compile_pytorch_ref_tag}"
         process = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
@@ -479,7 +480,7 @@ async def kb_eval(
             f"[KB Eval] [{eval_tag}] COMPILE_CACHE: [{COMPILE_CACHE}], COMPILE_PYTORCH: [{COMPILE_PYTORCH}]"
         )
         # pre-compile the generated code
-        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code reference_code.py --generated_code generated_code.py --device-list {','.join([str(device) for device in DEVICES])} --code_type {code_type} --quiet {cache_tag} {compile_pytorch_tag} {check_get_inputs_tag}"
+        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code reference_code.py --generated_code generated_code.py --device-list {','.join([str(device) for device in DEVICES])} --code_type {code_type} --max_critical_time {MAX_CRITICAL_TIME} --quiet {cache_tag} {compile_pytorch_tag} {check_get_inputs_tag}"
         process = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
@@ -746,8 +747,9 @@ async def _check_total_error_count():
 
 async def main(args):
 
-    global MAX_TIMEOUT_SECONDS, COMPILE_CACHE, COMPILE_PYTORCH, COMPILE_PYTORCH_REF, CHECK_GET_INPUTS, CODE_TYPE
+    global MAX_TIMEOUT_SECONDS, MAX_CRITICAL_TIME, COMPILE_CACHE, COMPILE_PYTORCH, COMPILE_PYTORCH_REF, CHECK_GET_INPUTS, CODE_TYPE
     MAX_TIMEOUT_SECONDS = args.max_timeout_seconds
+    MAX_CRITICAL_TIME = args.max_critical_time
 
     # read kbEval.yaml
     with open("kbEval.yaml", "r") as f:
@@ -847,6 +849,7 @@ if __name__ == "__main__":
     parser.add_argument("--workers", type=int, default=100) #
     parser.add_argument("--device", type=str, default="4")
     parser.add_argument("--max_timeout_seconds", type=int, default=240)
+    parser.add_argument("--max_critical_time", type=int, default=60, help="Maximum time in seconds for critical section (inside the lock)")
     args = parser.parse_args()
 
     asyncio.run(main(args))

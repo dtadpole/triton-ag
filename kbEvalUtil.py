@@ -819,7 +819,7 @@ def generate_aoti_cache_hash(
     """
     components = {
         'model_code': apply_black_formatter(model_code),
-        'gpu_card_type': get_gpu_card_type(),
+        'hostname': get_hostname(),
         'pytorch_version': get_pytorch_version(),
         'compute_capability': get_compute_capability(),
     }
@@ -902,7 +902,9 @@ def compile_model_aoti(
     if os.path.exists(pt2_file_path):
         logger.info(f"🎯 Loading cached AOTI model from [{pt2_file_path}]")
         try:
-            compiled_model = torch._inductor.aoti_load_package(pt2_file_path)
+            # Load AOTI model within the correct CUDA device context
+            with torch.cuda.device(device):
+                compiled_model = torch._inductor.aoti_load_package(pt2_file_path)
             return compiled_model
         except Exception as e:
             logger.warning(
@@ -920,20 +922,22 @@ def compile_model_aoti(
     model.eval()
 
     try:
-        # Export the model with static shapes
-        with torch.no_grad():
-            exported_model = export(model, example_inputs)
+        # Export and compile within the correct CUDA device context
+        with torch.cuda.device(device):
+            # Export the model with static shapes
+            with torch.no_grad():
+                exported_model = export(model, example_inputs)
 
-        # AOT compile and package to .pt2 file
-        pt2_path = torch._inductor.aoti_compile_and_package(
-            exported_model,
-            package_path=pt2_file_path,
-        )
+            # AOT compile and package to .pt2 file
+            pt2_path = torch._inductor.aoti_compile_and_package(
+                exported_model,
+                package_path=pt2_file_path,
+            )
 
-        logger.info(f"✅ AOTI compilation successful: [{pt2_path}]")
+            logger.info(f"✅ AOTI compilation successful: [{pt2_path}]")
 
-        # Load the compiled model from .pt2 package
-        compiled_model = torch._inductor.aoti_load_package(pt2_path)
+            # Load the compiled model from .pt2 package within the same device context
+            compiled_model = torch._inductor.aoti_load_package(pt2_path)
 
         return compiled_model
 
