@@ -126,6 +126,9 @@ env_vllm_start:
 wandb_login:
 	wandb login --host=https://api.wandb.ai
 
+wandb_sync:
+	find wandb -maxdepth 1 -name "run-*" -o -name "offline-run-*" | while read run; do     wandb sync "$run" --project codegen --entity jingbo25; done
+
 mount_shared_drive:
 	echo 'dummy' | sshfs -o password_stdin -p 8081 codegen@devvm8492.cco0.facebook.com:/shared/ shared/
 
