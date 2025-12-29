@@ -124,7 +124,7 @@ env_vllm_start:
 		/bin/bash -c "make mount_shared_drive && tail -f /dev/null"
 
 wandb_login:
-	wandb login --host=http://devgpu139.cco2.facebook.com:8010
+	wandb login --host=http://devgpu139.cco2.facebook.com:8010/
 
 wandb_sync:
 	find wandb -maxdepth 1 -name "run-*" -o -name "offline-run-*" | while read run; do     wandb sync "$run" --project codegen --entity jingbo25; done
@@ -704,7 +704,7 @@ env_gepa_start:
 		--security-opt apparmor:unconfined \
 		--privileged \
 		localhost/gepa \
-		/bin/bash -c "make mount_shared_drive && make wandb_login && tail -f /dev/null"
+		/bin/bash -c "make mount_shared_drive && tail -f /dev/null"
 
 env_gepa:
 	docker exec -it -e PYTHONNOUSERSITE=1 gepa /bin/bash
