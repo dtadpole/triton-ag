@@ -124,7 +124,7 @@ env_vllm_start:
 		/bin/bash -c "make mount_shared_drive && tail -f /dev/null"
 
 wandb_login:
-	wandb login --host=https://api.wandb.ai
+	wandb login --host=http://devgpu139.cco2.facebook.com:8010
 
 wandb_sync:
 	find wandb -maxdepth 1 -name "run-*" -o -name "offline-run-*" | while read run; do     wandb sync "$run" --project codegen --entity jingbo25; done
