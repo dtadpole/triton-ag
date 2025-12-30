@@ -24,16 +24,16 @@ docker run -it --rm \
 
 ```bash
 # Using default config
-python examples/optimize_cuda_kernel.py
+python scripts/optimize_cuda_kernel.py
 
 # With specific provider and model
-python examples/optimize_cuda_kernel.py \
+python scripts/optimize_cuda_kernel.py \
     --provider h100_8_5_a \
     --model qwen3-32b \
     --max-metric-calls 100
 
 # With custom config
-python examples/optimize_cuda_kernel.py --config configs/cuda_kernel.yaml
+python scripts/optimize_cuda_kernel.py --config configs/cuda_kernel.yaml
 ```
 
 ## Project Structure
@@ -47,10 +47,10 @@ gepa/
 ├── adapters/
 │   ├── __init__.py
 │   └── cuda_kernel_adapter.py    # CUDA kernel generation adapter
-├── examples/
+├── scripts/
 │   ├── __init__.py
 │   ├── test_dependencies.py      # Dependency verification
-│   ├── vllm_integration.py       # vLLM integration examples
+│   ├── vllm_integration.py       # vLLM integration scripts
 │   └── optimize_cuda_kernel.py   # Main optimization script
 └── configs/
     └── cuda_kernel.yaml          # CUDA optimization config
