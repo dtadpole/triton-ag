@@ -5,23 +5,58 @@
 defaults:
   task_model: "qwen3-32b"
   reflection_model: "qwen3-32b"
-  task_provider: "h8_4a"
-  reflection_provider: "h8_4a"
+  task_provider: "h8_4b"
+  reflection_provider: "h8_4b"
+
+# Dataset configuration
+dataset:
+  # Path to kernel_bench directory (relative to project root or absolute)
+  kernel_bench_path: "kernel_bench"
+  # Levels to load: list of integers [1, 2, 3, 4]
+  # level1: basic ops, level2: fused ops, level3: complex patterns, level4: advanced
+  levels: [1]
+  # Total number of tasks to sample from all available tasks
+  # If null or 0, use all tasks from the specified levels
+  # Tasks are randomly sampled using dataset_seed
+  total_tasks: 30
+  # Number of samples for training set
+  # Remaining samples go to validation set
+  # If train_size >= total_tasks, val set = train set (same data for both)
+  train_size: 16
+  # Random seed for dataset sampling and shuffling
+  # Controls: 1) which tasks are selected from kernel_bench (if total_tasks < available)
+  #           2) shuffling order before train/val split
+  dataset_seed: 42
+  # Optional: shuffle the dataset before splitting
+  shuffle: true
+  # Optional: specific task IDs to include (if empty, all tasks from levels are used)
+  # Example: ["level1_94_MSELoss", "level2_1_Conv2D_ReLU_BiasAdd"]
+  include_tasks: []
+  # Optional: specific task IDs to exclude
+  exclude_tasks: []
 
 # KbEvalClient settings for code evaluation
 evaluation:
-  eval_provider: "local"
+  eval_provider: "h8_4a"
   eval_config_file: "kbEval.yaml"
   use_kb_eval: true
-  # Scoring weights
-  failure_score: 0.0
-  compile_only_score: 0.3
-  correct_score: 0.7
-  speedup_bonus_weight: 0.3
+  # Reward function parameters
+  compile_score: 0.15
+  correct_score: 0.3
+  speedup_threshold: 1.0
+  speedup_score: 0.3
 
 # GEPA optimization parameters
 optimization:
-  max_metric_calls: 5
+  # You can specify either max_iterations OR max_metric_calls (not both)
+  # max_iterations is more intuitive: number of GEPA optimization loops
+  # max_metric_calls is the raw evaluation budget (total task evaluations)
+  #
+  # Relationship: max_metric_calls ≈ max_iterations × (trainset_size + valset_size)
+  #
+  # If both are specified, max_iterations takes precedence
+  max_iterations: 20  # Number of optimization iterations (more intuitive)
+  # max_metric_calls: 20  # Alternative: raw evaluation budget
   reflection_minibatch_size: 3
   candidate_selection_strategy: "pareto"  # pareto, current_best, epsilon_greedy
   use_merge: true
@@ -29,6 +64,21 @@ optimization:
   skip_perfect_score: true
   perfect_score: 1.0
   seed: 42
+  # Module selector controls how GEPA updates prompt components:
+  # - "round_robin": Updates ONE component per iteration, rotating through them
+  #                  Good for independent components or to reduce compute cost
+  # - "all": Updates ALL optimizable components simultaneously in each iteration
+  #          Recommended when components are interdependent (default)
+  module_selector: "round_robin"
+
+# Concurrency settings for parallel execution
+concurrency:
+  # Maximum concurrent LLM generation requests
+  # Higher values = faster but may overwhelm the inference server
+  max_concurrent_llm: 32
+  # Maximum concurrent KbEval evaluation requests
+  # Keep lower than LLM since eval is more resource-intensive
+  max_concurrent_eval: 32
 
 # Logging and tracking
 logging:
@@ -37,18 +87,268 @@ logging:
   display_progress_bar: true
   run_dir: "shared/gepa_runs/cuda_kernel"
 
-# Seed prompt for CUDA kernel generation
-seed_candidate:
-  system_prompt: |
-    You are an experienced CUDA developer specializing in GPU performance optimization and parallel programming.
+# =============================================================================
+# Reflection Prompt Configuration (Modular Template)
+# =============================================================================
+# The reflection prompt is used by GEPA to improve prompt components based on
+# evaluation feedback. This section allows you to customize the reflection
+# prompt template and its sections.
+#
+# Template placeholders:
+#   {component_name}     - The name of the component being optimized (e.g., "role_description")
+#   {component_label}    - Human-readable label (e.g., "ROLE DESCRIPTION")
+#   {component_purpose}  - Description of what this component should contain
+#   {current_content}    - The current text of the component
+#   {evaluation_results} - Formatted evaluation feedback
+#   {components_overview}- Overview of all system prompt components
 
-    You are provided with PyTorch reference code and shall examine the code to understand how it works, then generate high-performance CUDA code that matches the reference code for correctness.
+reflection:
+  # Main template that assembles all sections
+  # Use section placeholders like {section:intro}, {section:component_context}, etc.
+  template: |
+    {section:intro}
 
-    When generating code, always follow these instructions:
-    - Replace pytorch operators in the reference code with raw CUDA kernels, optimizing for performance on NVIDIA architecture.
-    - Use torch.utils.cpp_extension.load_inline and name your optimized output module ModelNew.
-    - You're NOT allowed to use torch.nn (except for Parameter, containers, and init).
-    - The input and output must be on CUDA device. Your answer must be the complete new module (no testing code, no other code): it will be evaluated and you will be given feedback on its correctness and speedup so you can iterate to maximize the speedup.
+    {section:component_context}
+
+    {section:current_content}
+
+    {section:evaluation_results}
+
+    {section:task}
+
+    {section:output_format}
+
+  # Individual sections that can be customized
+  sections:
+    intro: |
+      You are a prompt engineering expert helping to improve a system prompt for CUDA kernel generation.
+
+    component_context: |
+      ## Component Being Optimized
+
+      **Component Label:** {component_label}
+      **Component Purpose:** {component_purpose}
+
+      {components_overview}
+
+      You are ONLY optimizing the "{component_label}" component. Do NOT include content that belongs to other components.
+
+    current_content: |
+      ## Current {component_label}
+
+      ```
+      {current_content}
+      ```
+
+    evaluation_results: |
+      ## Recent Evaluation Results
+
+      The following are results from recent CUDA kernel generation attempts using the current prompt:
+
+      {evaluation_results}
+
+    task: |
+      ## Your Task
+
+      Based on the evaluation results above, write an IMPROVED version of the "{component_label}" component that:
+      1. Addresses the failures and issues shown in the feedback
+      2. Maintains the purpose of this component (see "Component Purpose" above)
+      3. Does NOT include content that belongs to other components
+      4. Is clear, specific, and actionable
+
+    output_format: |
+      ## Output Format
+
+      Please provide your improved version in the following format after a "### Improved {component_label}:" header.
+
+  # Overview of system prompt components (shown in component_context)
+  components_overview: |
+    This component is ONE PART of a larger system prompt. The full system prompt is assembled from multiple components:
+    1. ROLE DESCRIPTION - Defines the AI's persona and expertise
+    2. TASK DESCRIPTION - Describes the overall task and objective
+    3. TASK INSTRUCTIONS - Provides specific guidelines and constraints
+    4. EXAMPLES - Shows example input/output pairs (not being optimized)
+
+  # Template for formatting each evaluation example in the feedback
+  # Placeholders: {index}, {score}, {inputs}, {outputs}, {feedback}
+  example_template: |
+    ### Example {index} (Score: {score})
+
+    **Input:**
+    {inputs}
+
+    **Generated Output:**
+    {outputs}
+
+    **Feedback:**
+    {feedback}
+
+  # Separator between examples
+  example_separator: "\n---\n"
+
+  # Maximum length for truncating inputs/outputs in examples
+  max_content_length: 800
+
+  # Message when no evaluation results are available
+  no_results_message: "No evaluation results available."
+
+# =============================================================================
+# Prompt Configuration (Modular Interface)
+# =============================================================================
+# The system prompt is built from multiple components that can be individually
+# marked as "optimizable". Only optimizable components are included in the
+# seed_candidate that GEPA evolves.
+#
+# Components:
+#   - role_description: Defines who the AI is (e.g., "You are an experienced CUDA developer...")
+#   - task_description: Describes what the task is (e.g., "You are provided with PyTorch code...")
+#   - task_instruction: Specific instructions for completing the task
+#   - examples: Example input/output pairs to demonstrate the expected format
+#
+# The final system_prompt is assembled in order:
+#   system_prompt = role_description + task_description + task_instruction + examples
+#
+# Each component has:
+#   - content: The actual text content
+#   - optimizable: If true, this component is included in seed_candidate for GEPA to optimize
+#                  If false, this component is fixed and not evolved by GEPA
+
+prompts:
+  # Component 1: Role Description
+  # Defines who the AI is and their expertise
+  role_description:
+    optimizable: true
+    label: "ROLE DESCRIPTION"
+    description: "This component defines the AI's persona/role and expertise. It should establish credibility and context for the task."
+    content: |
+      You are an experienced CUDA developer specializing in GPU performance optimization and parallel programming.
+
+  # Component 2: Task Description
+  # Describes the task and what's expected
+  task_description:
+    optimizable: true
+    label: "TASK DESCRIPTION"
+    description: "This component describes the overall task and objective. It should explain what input the AI receives and what output is expected."
+    content: |
+      You are provided with PyTorch reference code and shall examine the code to understand how it works, then generate high-performance CUDA code that matches the reference code for correctness.
+
+  # Component 3: Task Instructions
+  # Specific guidelines and constraints for completing the task
+  task_instruction:
+    optimizable: true
+    label: "TASK INSTRUCTIONS"
+    description: "This component provides specific guidelines, constraints, and step-by-step instructions for completing the task correctly."
+    content: |
+      When generating code, always follow these instructions:
+      - Replace pytorch operators in the reference code with raw CUDA kernels, optimizing for performance on NVIDIA architecture.
+      - Use torch.utils.cpp_extension.load_inline and name your optimized output module ModelNew.
+      - You're NOT allowed to use torch.nn (except for Parameter, containers, and init).
+      - The input and output must be on CUDA device. Your answer must be the complete new module (no testing code, no other code): it will be evaluated and you will be given feedback on its correctness and speedup so you can iterate to maximize the speedup.
+
+  # Component 4: Examples
+  # Example reference code and generated code to show expected format
+  # Uses {example_reference_code} and {example_generated_code} placeholders
+  examples:
+    optimizable: false
+    label: "EXAMPLES"
+    description: "This component provides example input/output pairs to demonstrate the expected format and coding style."
+    content: |
+      Example reference code:
+      ```python
+      {example_reference_code}
+      ```
+
+      Example generated code:
+      ```python
+      {example_generated_code}
+      ```
+
+    # The actual example code snippets that get substituted into the content above
+    reference_code: |
+      import torch
+      import torch.nn as nn
+
+      class Model(nn.Module):
+          def __init__(self) -> None:
+              super().__init__()
+
+          def forward(self, a, b):
+              return a+b
+
+      batch_size = 16
+      dim = 16384 * 2
+
+      def get_inputs():
+          x = torch.randn(batch_size, dim)
+          y = torch.randn(batch_size, dim)
+          return [x, y]
+
+      def get_init_inputs():
+          return []  # No special initialization inputs needed
+
+    generated_code: |
+      import torch.nn as nn
+      from torch.utils.cpp_extension import load_inline
+
+      # Define the custom CUDA kernel for element-wise addition
+      elementwise_add_source = '''
+      #include <torch/extension.h>
+      #include <cuda_runtime.h>
+
+      __global__ void elementwise_add_kernel(const float* a, const float* b, float* out, int size) {
+          int idx = blockIdx.x * blockDim.x + threadIdx.x;
+          if (idx < size) {
+              out[idx] = a[idx] + b[idx];
+          }
+      }
+
+      torch::Tensor elementwise_add_cuda(torch::Tensor a, torch::Tensor b) {
+          auto size = a.numel();
+          auto out = torch::zeros_like(a);
+
+          const int block_size = 256;
+          const int num_blocks = (size + block_size - 1) / block_size;
+
+          elementwise_add_kernel<<<num_blocks, block_size>>>(a.data_ptr<float>(), b.data_ptr<float>(), out.data_ptr<float>(), size);
+
+          return out;
+      }
+      '''
+
+      elementwise_add_cpp_source = (
+          "torch::Tensor elementwise_add_cuda(torch::Tensor a, torch::Tensor b);"
+      )
+
+      # Compile the inline CUDA code for element-wise addition
+      elementwise_add = load_inline(
+          name="elementwise_add",
+          cpp_sources=elementwise_add_cpp_source,
+          cuda_sources=elementwise_add_source,
+          functions=["elementwise_add_cuda"],
+          verbose=True,
+          extra_cflags=[""],
+          extra_ldflags=[""],
+      )
+
+      class ModelNew(nn.Module):
+          def __init__(self) -> None:
+              super().__init__()
+              self.elementwise_add = elementwise_add
+
+          def forward(self, a, b):
+              return self.elementwise_add.elementwise_add_cuda(a, b)
+
+  # User prompt template with {reference_code} placeholder for the actual task
+  # This is NOT part of the system_prompt and is NOT optimizable by GEPA
+  user_prompt_template: |
+    Following is the reference PyTorch code, implement the complete new module with CUDA (no testing code, no other code).
+
+    Reference code:
+    ```python
+    {reference_code}
+    ```
+
+    Be concise with your thinking. Please limit your reasoning and thinking within 600 words for each complete code writing.
 
 # Available providers (from inferenceClient.yaml)
 providers:
