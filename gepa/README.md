@@ -5,7 +5,10 @@
 This module integrates GEPA into the triton-ag project for **CUDA kernel generation prompt optimization**.
 
 ## Quick Start
-
+```
+# example to run the gepa code
+python gepa/scripts/optimize_cuda_kernel.py --generate-reference-runtimes --run-dir shared/gepa_runs/t20/
+```
 ### 1. Build and Run with Docker
 
 ```bash
