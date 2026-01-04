@@ -876,8 +876,8 @@ def main():
     parser.add_argument(
         "--eval-provider",
         type=str,
-        default="h8_4",
-        help="Provider for KbEvalClient (e.g., h8_4, h8_2)",
+        default=None,
+        help="Provider for KbEvalClient (e.g., h8_4, h8_2). If not specified, uses config file value.",
     )
     parser.add_argument(
         "--eval-config",
@@ -1093,6 +1093,14 @@ def main():
             exclude_tasks=exclude_tasks,
         )
 
+    # Get eval_provider from args or config
+    eval_provider = (
+        args.eval_provider
+        if args.eval_provider is not None
+        else evaluation_config.get("eval_provider", "h8_4")
+    )
+    print(f"Eval Provider: {eval_provider}")
+
     # Generate reference runtimes if requested
     if args.generate_reference_runtimes or args.reference_runtimes_only:
         print("\n" + "=" * 60)
@@ -1104,7 +1112,7 @@ def main():
         train_ref_runtimes = generate_reference_runtimes(
             dataset=trainset,
             eval_config_file=args.eval_config,
-            eval_provider=args.eval_provider,
+            eval_provider=eval_provider,
             run_tag="reference_runtime_train",
             force_refresh=args.force_refresh_reference,
         )
@@ -1114,7 +1122,7 @@ def main():
         val_ref_runtimes = generate_reference_runtimes(
             dataset=valset,
             eval_config_file=args.eval_config,
-            eval_provider=args.eval_provider,
+            eval_provider=eval_provider,
             run_tag="reference_runtime_val",
             force_refresh=args.force_refresh_reference,
         )
@@ -1131,7 +1139,7 @@ def main():
     # Get hostname from eval provider config
     from kbEvalClient import KbEvalClient
     eval_client_for_config = KbEvalClient(config_file=args.eval_config)
-    provider_config = eval_client_for_config._provider_config_from_yaml(args.eval_provider)
+    provider_config = eval_client_for_config._provider_config_from_yaml(eval_provider)
     hostname = provider_config.get("hostname", "unknown")
 
     # Load cached reference runtimes for all tasks
@@ -1147,7 +1155,6 @@ def main():
     use_kb_eval = not args.no_kb_eval
     print(f"KbEvalClient enabled: {use_kb_eval}")
     if use_kb_eval:
-        print(f"Eval Provider: {args.eval_provider}")
         print(f"Eval Config: {args.eval_config}")
 
     # Get reward function parameters from args or config
@@ -1192,7 +1199,7 @@ def main():
         model_name=model_name,
         provider_name=provider_name,
         config_file=args.inference_config,
-        eval_provider_name=args.eval_provider,
+        eval_provider_name=eval_provider,
         eval_config_file=args.eval_config,
         use_kb_eval=use_kb_eval,
         compile_score=compile_score,
