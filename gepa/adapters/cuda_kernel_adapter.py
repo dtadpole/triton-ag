@@ -29,6 +29,71 @@ if "/workspace" not in sys.path:
 from gepa.core.adapter import EvaluationBatch, GEPAAdapter
 
 
+def calculate_reward(
+    compiled: bool,
+    correctness: bool,
+    speedup: float,
+    speedup_threshold: float,
+    compile_score: float = 0.15,
+    correct_score: float = 0.3,
+    speedup_score: float = 0.3,
+) -> float:
+    """
+    Calculate a configurable reward score for CUDA kernel evaluation.
+
+    The reward is calculated in a tiered manner:
+    1. If compilation fails: return 0
+    2. If compilation succeeds but correctness fails: return compile_score
+    3. If both compile and correctness pass: return correct_score + speedup bonus
+
+    The speedup bonus is calculated as:
+    - If speedup >= speedup_threshold: add speedup_score to the base correct_score
+
+    Args:
+        compiled: Whether the code compiled successfully
+        correctness: Whether the code passed correctness tests
+        speedup: The actual speedup achieved (reference_runtime / runtime)
+        speedup_threshold: Minimum speedup required to earn the speedup bonus
+        compile_score: Score for code that compiles but fails correctness (default: 0.15)
+        correct_score: Base score for correct code (default: 0.3)
+        speedup_score: Bonus score when speedup >= threshold (default: 0.3)
+
+    Returns:
+        Calculated reward score
+
+    Example:
+        >>> # Failed compilation
+        >>> calculate_reward(False, False, 0.0, 1.0)
+        0
+
+        >>> # Compiled but incorrect
+        >>> calculate_reward(True, False, 0.0, 1.0)
+        0.15
+
+        >>> # Correct but no speedup bonus (speedup < threshold)
+        >>> calculate_reward(True, True, 0.8, 1.0)
+        0.3
+
+        >>> # Correct with speedup bonus (speedup >= threshold)
+        >>> calculate_reward(True, True, 1.5, 1.0)
+        0.6
+    """
+    if not compiled:
+        return 0
+
+    if not correctness:
+        return compile_score
+
+    # Base score for correct code
+    score = correct_score
+
+    # Add speedup bonus if threshold is met
+    if speedup >= speedup_threshold:
+        score += speedup_score
+
+    return score
+
+
 @dataclass
 class CudaKernelDataInst:
     """Data instance for CUDA kernel generation task."""
@@ -67,26 +132,70 @@ class CudaKernelOutput:
 
 
 class TraceLogger:
-    """Logger for tracking LLM responses, KbEval results, and execution traces."""
+    """Logger for tracking LLM responses, KbEval results, and execution traces.
+
+    Directory structure:
+    traces/
+    ├── code_generation/
+    │   ├── train/
+    │   │   └── {task_id}/
+    │   │       ├── iter_{iter}_candidate_{idx}_request.json
+    │   │       ├── iter_{iter}_candidate_{idx}_response.json
+    │   │       └── iter_{iter}_candidate_{idx}_code.py
+    │   └── val/
+    │       └── {task_id}/
+    │           └── ...
+    ├── reflection/
+    │   ├── iter_{iter}_reflection_input.json
+    │   ├── iter_{iter}_reflection_response.json
+    │   └── iter_{iter}_new_prompt.txt
+    ├── kbeval_results/
+    │   ├── train/
+    │   │   └── {task_id}/
+    │   │       └── iter_{iter}_candidate_{idx}_kbeval.json
+    │   └── val/
+    │       └── {task_id}/
+    │           └── iter_{iter}_candidate_{idx}_kbeval.json
+    ├── candidates/
+    │   └── candidate_{idx}.txt
+    └── summary.log
+    """
 
     def __init__(self, run_dir: Optional[str] = None, enabled: bool = True):
         self.enabled = enabled and run_dir is not None
         self.run_dir = Path(run_dir) if run_dir else None
-        self.step_count = 0
-        self.eval_count = 0
+        self.iteration = 0
+        self.candidate_idx = 0
+        self.eval_mode = "val"  # "train" or "val"
 
         if self.enabled and self.run_dir:
             # Create log directories
             self.traces_dir = self.run_dir / "traces"
-            self.llm_responses_dir = self.traces_dir / "llm_responses"
-            self.kbeval_results_dir = self.traces_dir / "kbeval_results"
-            self.evaluations_dir = self.traces_dir / "evaluations"
+
+            # Code generation directories
+            self.code_gen_dir = self.traces_dir / "code_generation"
+            self.code_gen_train_dir = self.code_gen_dir / "train"
+            self.code_gen_val_dir = self.code_gen_dir / "val"
+
+            # Reflection directories
+            self.reflection_dir = self.traces_dir / "reflection"
+
+            # KbEval results directories
+            self.kbeval_dir = self.traces_dir / "kbeval_results"
+            self.kbeval_train_dir = self.kbeval_dir / "train"
+            self.kbeval_val_dir = self.kbeval_dir / "val"
+
+            # Candidates directory
+            self.candidates_dir = self.traces_dir / "candidates"
 
             for d in [
                 self.traces_dir,
-                self.llm_responses_dir,
-                self.kbeval_results_dir,
-                self.evaluations_dir,
+                self.code_gen_train_dir,
+                self.code_gen_val_dir,
+                self.reflection_dir,
+                self.kbeval_train_dir,
+                self.kbeval_val_dir,
+                self.candidates_dir,
             ]:
                 d.mkdir(parents=True, exist_ok=True)
 
@@ -104,6 +213,33 @@ class TraceLogger:
         with open(self.summary_log, "a") as f:
             f.write(f"[{datetime.now().strftime('%H:%M:%S')}] {message}\n")
 
+    def set_iteration(self, iteration: int):
+        """Set current iteration number."""
+        self.iteration = iteration
+
+    def set_candidate_idx(self, candidate_idx: int):
+        """Set current candidate index."""
+        self.candidate_idx = candidate_idx
+
+    def set_eval_mode(self, mode: str):
+        """Set evaluation mode: 'train' or 'val'."""
+        assert mode in ("train", "val"), f"Invalid eval mode: {mode}"
+        self.eval_mode = mode
+
+    def _get_code_gen_task_dir(self, task_id: str) -> Path:
+        """Get code generation directory for a task."""
+        base_dir = self.code_gen_train_dir if self.eval_mode == "train" else self.code_gen_val_dir
+        task_dir = base_dir / task_id
+        task_dir.mkdir(parents=True, exist_ok=True)
+        return task_dir
+
+    def _get_kbeval_task_dir(self, task_id: str) -> Path:
+        """Get kbeval results directory for a task."""
+        base_dir = self.kbeval_train_dir if self.eval_mode == "train" else self.kbeval_val_dir
+        task_dir = base_dir / task_id
+        task_dir.mkdir(parents=True, exist_ok=True)
+        return task_dir
+
     def log_llm_request(
         self,
         task_id: str,
@@ -111,18 +247,20 @@ class TraceLogger:
         user_prompt: str,
         candidate_idx: Optional[int] = None,
     ):
-        """Log LLM request (prompts)."""
+        """Log LLM code generation request (prompts)."""
         if not self.enabled:
             return
 
-        self.step_count += 1
-        filename = f"{self.step_count:04d}_{task_id}_request.json"
-        filepath = self.llm_responses_dir / filename
+        idx = candidate_idx if candidate_idx is not None else self.candidate_idx
+        task_dir = self._get_code_gen_task_dir(task_id)
+        filename = f"iter_{self.iteration:03d}_candidate_{idx:03d}_request.json"
+        filepath = task_dir / filename
 
         data = {
-            "step": self.step_count,
+            "iteration": self.iteration,
+            "candidate_idx": idx,
             "task_id": task_id,
-            "candidate_idx": candidate_idx,
+            "eval_mode": self.eval_mode,
             "timestamp": datetime.now().isoformat(),
             "system_prompt": system_prompt,
             "user_prompt": user_prompt,
@@ -131,7 +269,7 @@ class TraceLogger:
         with open(filepath, "w") as f:
             json.dump(data, f, indent=2)
 
-        self._write_summary(f"LLM Request: {task_id} (step {self.step_count})")
+        self._write_summary(f"[{self.eval_mode}] LLM Request: {task_id} (iter={self.iteration}, candidate={idx})")
 
     def log_llm_response(
         self,
@@ -140,17 +278,22 @@ class TraceLogger:
         extracted_code: str,
         candidate_idx: Optional[int] = None,
     ):
-        """Log LLM response (generated code)."""
+        """Log LLM code generation response."""
         if not self.enabled:
             return
 
-        filename = f"{self.step_count:04d}_{task_id}_response.json"
-        filepath = self.llm_responses_dir / filename
+        idx = candidate_idx if candidate_idx is not None else self.candidate_idx
+        task_dir = self._get_code_gen_task_dir(task_id)
+
+        # Save response JSON
+        filename = f"iter_{self.iteration:03d}_candidate_{idx:03d}_response.json"
+        filepath = task_dir / filename
 
         data = {
-            "step": self.step_count,
+            "iteration": self.iteration,
+            "candidate_idx": idx,
             "task_id": task_id,
-            "candidate_idx": candidate_idx,
+            "eval_mode": self.eval_mode,
             "timestamp": datetime.now().isoformat(),
             "raw_response": raw_response,
             "extracted_code": extracted_code,
@@ -161,16 +304,18 @@ class TraceLogger:
             json.dump(data, f, indent=2)
 
         # Also save the raw code as a .py file for easy viewing
-        code_filename = f"{self.step_count:04d}_{task_id}_code.py"
-        code_filepath = self.llm_responses_dir / code_filename
+        code_filename = f"iter_{self.iteration:03d}_candidate_{idx:03d}_code.py"
+        code_filepath = task_dir / code_filename
         with open(code_filepath, "w") as f:
             f.write(f"# Task: {task_id}\n")
-            f.write(f"# Step: {self.step_count}\n")
+            f.write(f"# Iteration: {self.iteration}\n")
+            f.write(f"# Candidate: {idx}\n")
+            f.write(f"# Eval Mode: {self.eval_mode}\n")
             f.write(f"# Timestamp: {datetime.now().isoformat()}\n\n")
             f.write(extracted_code)
 
         self._write_summary(
-            f"LLM Response: {task_id} (code length: {len(extracted_code)})"
+            f"[{self.eval_mode}] LLM Response: {task_id} (code length: {len(extracted_code)})"
         )
 
     def log_kbeval_result(
@@ -185,14 +330,15 @@ class TraceLogger:
         if not self.enabled:
             return
 
-        self.eval_count += 1
-        filename = f"{self.eval_count:04d}_{task_id}_kbeval.json"
-        filepath = self.kbeval_results_dir / filename
+        task_dir = self._get_kbeval_task_dir(task_id)
+        filename = f"iter_{self.iteration:03d}_candidate_{self.candidate_idx:03d}_kbeval.json"
+        filepath = task_dir / filename
 
         data = {
-            "eval_count": self.eval_count,
-            "step": self.step_count,
+            "iteration": self.iteration,
+            "candidate_idx": self.candidate_idx,
             "task_id": task_id,
+            "eval_mode": self.eval_mode,
             "timestamp": datetime.now().isoformat(),
             "score": score,
             "feedback": feedback,
@@ -214,7 +360,67 @@ class TraceLogger:
         else:
             status = "❌ FAILED"
 
-        self._write_summary(f"KbEval: {task_id} - {status} (score: {score:.3f})")
+        self._write_summary(f"[{self.eval_mode}] KbEval: {task_id} - {status} (score: {score:.3f})")
+
+    def log_reflection_input(
+        self,
+        iteration: int,
+        candidate: Dict[str, str],
+        feedback_data: Dict[str, Any],
+    ):
+        """Log reflection LLM input."""
+        if not self.enabled:
+            return
+
+        filename = f"iter_{iteration:03d}_reflection_input.json"
+        filepath = self.reflection_dir / filename
+
+        data = {
+            "iteration": iteration,
+            "timestamp": datetime.now().isoformat(),
+            "current_prompt": candidate.get("system_prompt", ""),
+            "feedback_data": feedback_data,
+        }
+
+        with open(filepath, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+
+        self._write_summary(f"Reflection Input: iter={iteration}")
+
+    def log_reflection_response(
+        self,
+        iteration: int,
+        raw_response: str,
+        new_prompt: str,
+    ):
+        """Log reflection LLM response and new prompt."""
+        if not self.enabled:
+            return
+
+        # Save response JSON
+        filename = f"iter_{iteration:03d}_reflection_response.json"
+        filepath = self.reflection_dir / filename
+
+        data = {
+            "iteration": iteration,
+            "timestamp": datetime.now().isoformat(),
+            "raw_response": raw_response,
+            "new_prompt": new_prompt,
+        }
+
+        with open(filepath, "w") as f:
+            json.dump(data, f, indent=2)
+
+        # Also save the new prompt as a text file
+        prompt_filename = f"iter_{iteration:03d}_new_prompt.txt"
+        prompt_filepath = self.reflection_dir / prompt_filename
+        with open(prompt_filepath, "w") as f:
+            f.write(f"# Iteration: {iteration}\n")
+            f.write(f"# Timestamp: {datetime.now().isoformat()}\n")
+            f.write("=" * 60 + "\n\n")
+            f.write(new_prompt)
+
+        self._write_summary(f"Reflection Response: iter={iteration} (prompt length: {len(new_prompt)})")
 
     def log_evaluation_batch(
         self,
@@ -223,35 +429,17 @@ class TraceLogger:
         scores: List[float],
         outputs: List[Any],
     ):
-        """Log a complete evaluation batch."""
+        """Log a complete evaluation batch summary."""
         if not self.enabled:
             return
-
-        filename = f"batch_{self.eval_count:04d}.json"
-        filepath = self.evaluations_dir / filename
 
         avg_score = sum(scores) / len(scores) if scores else 0.0
         success_count = sum(
             1 for o in outputs if getattr(o, "correctness_success", False)
         )
 
-        data = {
-            "eval_count": self.eval_count,
-            "timestamp": datetime.now().isoformat(),
-            "candidate_prompt_preview": candidate.get("system_prompt", "")[:200],
-            "batch_size": batch_size,
-            "avg_score": avg_score,
-            "min_score": min(scores) if scores else 0.0,
-            "max_score": max(scores) if scores else 0.0,
-            "success_count": success_count,
-            "scores": scores,
-        }
-
-        with open(filepath, "w") as f:
-            json.dump(data, f, indent=2)
-
         self._write_summary(
-            f"Batch Eval: {batch_size} tasks, avg={avg_score:.3f}, "
+            f"[{self.eval_mode}] Batch Eval: {batch_size} tasks, avg={avg_score:.3f}, "
             f"success={success_count}/{batch_size}"
         )
 
@@ -260,8 +448,8 @@ class TraceLogger:
         if not self.enabled:
             return
 
-        filename = f"candidate_{candidate_idx:04d}.txt"
-        filepath = self.evaluations_dir / filename
+        filename = f"candidate_{candidate_idx:03d}.txt"
+        filepath = self.candidates_dir / filename
 
         with open(filepath, "w") as f:
             f.write(f"Candidate Index: {candidate_idx}\n")
@@ -280,16 +468,26 @@ class TraceLogger:
         self._write_summary("\n" + "=" * 60)
         self._write_summary("OPTIMIZATION COMPLETE")
         self._write_summary("=" * 60)
-        self._write_summary(f"Total LLM calls: {self.step_count}")
-        self._write_summary(f"Total evaluations: {self.eval_count}")
+        self._write_summary(f"Total iterations: {self.iteration}")
         self._write_summary(f"Best score: {best_score:.4f}")
 
         # Save best prompt
+        # Note: best_candidate may contain modular components instead of system_prompt
+        # The main script now handles assembling the system_prompt, so we just save
+        # whatever is in the candidate (either system_prompt or components)
         best_prompt_file = self.traces_dir / "best_prompt.txt"
         with open(best_prompt_file, "w") as f:
             f.write("Best System Prompt\n")
             f.write("=" * 60 + "\n\n")
-            f.write(best_candidate.get("system_prompt", ""))
+            # If system_prompt key exists, use it; otherwise write all components
+            if "system_prompt" in best_candidate:
+                f.write(best_candidate.get("system_prompt", ""))
+            else:
+                # Write all components
+                for key, value in best_candidate.items():
+                    f.write(f"[{key}]\n")
+                    f.write("-" * 40 + "\n")
+                    f.write(value + "\n\n")
 
 
 class CudaKernelAdapter(GEPAAdapter):
@@ -301,6 +499,8 @@ class CudaKernelAdapter(GEPAAdapter):
     2. Uses KbEvalClient to evaluate generated CUDA kernels
     3. Provides rich feedback for prompt evolution
     4. Logs all traces to run_dir for examination
+    5. Supports modular prompt components (role_description, task_description, etc.)
+       where only optimizable components are evolved by GEPA
     """
 
     def __init__(
@@ -313,17 +513,29 @@ class CudaKernelAdapter(GEPAAdapter):
         eval_provider_name: str = "h8_4",
         eval_config_file: str = "kbEval.yaml",
         use_kb_eval: bool = True,
-        # Scoring settings
-        failure_score: float = 0.0,
-        compile_only_score: float = 0.3,
-        correct_score: float = 0.7,
-        speedup_bonus_weight: float = 0.3,
+        # Reward function parameters (read from config)
+        compile_score: float = 0.15,
+        correct_score: float = 0.3,
+        speedup_threshold: float = 1.0,
+        speedup_score: float = 0.3,
+        # Reference runtimes (pre-generated)
+        reference_runtimes: Optional[Dict[str, Dict[str, Any]]] = None,
         # Tags for tracking
         run_tag: str = "gepa_optimization",
         model_tag: str = "gepa",
         # Logging settings
         run_dir: Optional[str] = None,
         enable_tracing: bool = True,
+        # User prompt template (from cuda.prompt.yaml)
+        user_prompt_template: Optional[str] = None,
+        # Concurrency settings
+        max_concurrent_llm: int = 8,
+        max_concurrent_eval: int = 4,
+        # Modular prompt settings
+        fixed_components: Optional[Dict[str, str]] = None,
+        component_order: Optional[List[str]] = None,
+        component_metadata: Optional[Dict[str, Dict[str, str]]] = None,
+        reflection_config: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialize the CUDA Kernel Adapter.
@@ -336,14 +548,26 @@ class CudaKernelAdapter(GEPAAdapter):
             eval_provider_name: Provider for KbEvalClient
             eval_config_file: Path to kbEval.yaml
             use_kb_eval: Whether to use KbEvalClient for evaluation
-            failure_score: Score for failed generation
-            compile_only_score: Score for code that compiles but fails tests
-            correct_score: Base score for correct code
-            speedup_bonus_weight: Weight for speedup bonus (0-1)
+            compile_score: Score for code that compiles but fails correctness (default: 0.15)
+            correct_score: Base score for correct code (default: 0.3)
+            speedup_threshold: Minimum speedup required to earn bonus (default: 1.0)
+            speedup_score: Bonus score when speedup >= threshold (default: 0.3)
+            reference_runtimes: Dict mapping task_id to pre-generated reference runtime results.
+                                Each entry should have 'runtime' key with the reference runtime in μs.
+                                Example: {"task_id": {"runtime": 45.23, "compiled": True, ...}}
             run_tag: Tag for tracking evaluation runs
             model_tag: Tag for tracking model
             run_dir: Directory to save traces (LLM responses, KbEval results, etc.)
             enable_tracing: Whether to enable trace logging
+            user_prompt_template: Optional user prompt template with {reference_code} placeholder.
+                                  If provided, uses this template instead of the default.
+                                  Example: "Following is the reference code:\n```python\n{reference_code}\n```"
+            max_concurrent_llm: Maximum concurrent LLM generation requests (default: 8)
+            max_concurrent_eval: Maximum concurrent KbEval evaluation requests (default: 4)
+            fixed_components: Dict of non-optimizable prompt components that are kept constant.
+                              Example: {"examples": "Example code..."}
+            component_order: List of component names in the order they should be assembled.
+                             Example: ["role_description", "task_description", "task_instruction", "examples"]
         """
         self.model_name = model_name
         self.provider_name = provider_name
@@ -355,11 +579,14 @@ class CudaKernelAdapter(GEPAAdapter):
         self.eval_config_file = eval_config_file
         self.use_kb_eval = use_kb_eval
 
-        # Scoring settings
-        self.failure_score = failure_score
-        self.compile_only_score = compile_only_score
+        # Reward function parameters
+        self.compile_score = compile_score
         self.correct_score = correct_score
-        self.speedup_bonus_weight = speedup_bonus_weight
+        self.speedup_threshold = speedup_threshold
+        self.speedup_score = speedup_score
+
+        # Reference runtimes (pre-generated)
+        self.reference_runtimes = reference_runtimes or {}
 
         # Tags
         self.run_tag = run_tag
@@ -371,9 +598,58 @@ class CudaKernelAdapter(GEPAAdapter):
         self.trace_logger = TraceLogger(run_dir=run_dir, enabled=enable_tracing)
         self._candidate_idx = 0
 
+        # User prompt template (from cuda.prompt.yaml user_prompt.init)
+        self.user_prompt_template = user_prompt_template
+
+        # Concurrency settings
+        self.max_concurrent_llm = max_concurrent_llm
+        self.max_concurrent_eval = max_concurrent_eval
+
+        # Modular prompt settings
+        # fixed_components: components that are NOT evolved by GEPA
+        # component_order: order to assemble the full system_prompt
+        self.fixed_components = fixed_components or {}
+        self.component_order = component_order or ["role_description", "task_description", "task_instruction", "examples"]
+        self.component_metadata = component_metadata or {}
+        self.reflection_config = reflection_config or {}
+
+        # Reflection LM (set via set_reflection_lm)
+        self._reflection_lm = None
+
         # Lazy load clients
         self._inference_client = None
         self._eval_client = None
+
+    def _assemble_system_prompt(self, candidate: Dict[str, str]) -> str:
+        """
+        Assemble the full system_prompt from modular components.
+
+        The candidate dict contains the optimizable components from GEPA.
+        The fixed_components dict contains the non-optimizable components.
+        Components are assembled in the order specified by component_order.
+
+        Args:
+            candidate: Dict of optimizable components from GEPA.
+                       Can have individual keys like "role_description", "task_description", etc.
+                       Or a single "system_prompt" key for backward compatibility.
+
+        Returns:
+            The assembled system_prompt string.
+        """
+        # Check if candidate has a single "system_prompt" key (backward compatibility)
+        if "system_prompt" in candidate and len(candidate) == 1:
+            return candidate["system_prompt"]
+
+        # Assemble from modular components
+        parts = []
+        for component_name in self.component_order:
+            # Try optimizable components first, then fixed components
+            if component_name in candidate:
+                parts.append(candidate[component_name])
+            elif component_name in self.fixed_components:
+                parts.append(self.fixed_components[component_name])
+
+        return "\n".join(parts)
 
     @property
     def inference_client(self):
@@ -399,8 +675,19 @@ class CudaKernelAdapter(GEPAAdapter):
         return self._eval_client
 
     def _build_user_prompt(self, data: CudaKernelDataInst) -> str:
-        """Build user prompt from data instance."""
-        prompt = f"""Following is the reference PyTorch code, implement the complete new module with CUDA (no testing code, no other code).
+        """Build user prompt from data instance.
+
+        Uses the custom user_prompt_template if provided (from cuda.prompt.yaml user_prompt.init),
+        otherwise falls back to the default template.
+        """
+        if self.user_prompt_template:
+            # Use custom template from config
+            prompt = self.user_prompt_template.format(
+                reference_code=data.reference_code,
+            )
+        else:
+            # Default template
+            prompt = f"""Following is the reference PyTorch code, implement the complete new module with CUDA (no testing code, no other code).
 
 Reference code:
 ```python
@@ -523,7 +810,7 @@ Be concise with your thinking. Please limit your reasoning and thinking within 6
         """
         if not generated_code:
             return (
-                self.failure_score,
+                0,
                 CudaKernelOutput(
                     generated_code="",
                     compilation_success=False,
@@ -547,7 +834,7 @@ Be concise with your thinking. Please limit your reasoning and thinking within 6
 
         if result is None:
             return (
-                self.failure_score,
+                0,
                 CudaKernelOutput(
                     generated_code=generated_code,
                     compilation_success=False,
@@ -564,22 +851,37 @@ Be concise with your thinking. Please limit your reasoning and thinking within 6
         metadata = result.get("metadata", {})
         runtime_stats = result.get("runtime_stats", {})
 
-        # Calculate score and build feedback from full kbeval result
-        if not compiled:
-            score = self.failure_score
-        elif not correctness:
-            score = self.compile_only_score
-        else:
-            # Success! Calculate score with speedup bonus
-            score = self.correct_score
-            # Add speedup bonus if runtime is valid
-            if runtime > 0:
-                ref_runtime = result.get("reference_runtime", runtime)
-                if ref_runtime > 0:
-                    speedup = ref_runtime / runtime
-                    if speedup > 1.0:
-                        bonus = min(speedup - 1.0, 1.0) * self.speedup_bonus_weight
-                        score = min(score + bonus, 1.0)
+        # Get reference runtime from pre-loaded data or fallback to result
+        ref_runtime = None
+        if data.task_id in self.reference_runtimes:
+            ref_data = self.reference_runtimes[data.task_id]
+            ref_runtime = ref_data.get("runtime", -1.0)
+            if ref_runtime <= 0:
+                ref_runtime = None
+
+        # Fallback to result's reference_runtime if pre-loaded not available
+        if ref_runtime is None:
+            ref_runtime = result.get("reference_runtime")
+
+        # Calculate speedup
+        speedup = 0.0
+        if runtime > 0 and ref_runtime is not None and ref_runtime > 0:
+            speedup = ref_runtime / runtime
+
+        # Add reference_runtime and speedup to result for feedback
+        result["reference_runtime"] = ref_runtime
+        result["speedup"] = speedup
+
+        # Calculate score using the configurable reward function
+        score = calculate_reward(
+            compiled=compiled,
+            correctness=correctness,
+            speedup=speedup,
+            speedup_threshold=self.speedup_threshold,
+            compile_score=self.compile_score,
+            correct_score=self.correct_score,
+            speedup_score=self.speedup_score,
+        )
 
         # Build feedback directly from kbeval result
         feedback = self._format_kbeval_feedback(result)
@@ -588,7 +890,7 @@ Be concise with your thinking. Please limit your reasoning and thinking within 6
             generated_code=generated_code,
             compilation_success=compiled,
             correctness_success=correctness,
-            speedup=runtime_stats.get("speedup") if runtime_stats else None,
+            speedup=speedup if speedup > 0 else None,
             runtime=runtime if runtime > 0 else None,
             error_message=metadata.get("error") if not correctness else None,
             eval_metadata=result,  # Store the full KB eval result including metadata
@@ -676,22 +978,37 @@ Be concise with your thinking. Please limit your reasoning and thinking within 6
         batch: List[CudaKernelDataInst],
         candidate: Dict[str, str],
         capture_traces: bool = False,
+        eval_mode: Optional[str] = None,
     ) -> EvaluationBatch:
         """
         Evaluate a batch of inputs with the given prompt candidate.
 
         Args:
             batch: List of CudaKernelDataInst
-            candidate: Dict with 'system_prompt' key
+            candidate: Dict with prompt components (either modular components like
+                       'role_description', 'task_description', etc. or a single
+                       'system_prompt' key for backward compatibility)
             capture_traces: Whether to capture execution traces
+            eval_mode: Evaluation mode - "train" or "val". If None, auto-detect
+                       based on whether capture_traces is True (train) or False (val).
 
         Returns:
             EvaluationBatch with outputs, scores, and optionally traces
         """
-        system_prompt = candidate.get("system_prompt", "")
+        # Assemble the full system_prompt from modular components
+        system_prompt = self._assemble_system_prompt(candidate)
+
+        # Auto-detect eval_mode if not provided
+        # GEPA calls with capture_traces=True for train, False for val
+        if eval_mode is None:
+            eval_mode = "train" if capture_traces else "val"
+
+        # Set eval mode for trace logger
+        self.trace_logger.set_eval_mode(eval_mode)
 
         # Log candidate prompt
         self._candidate_idx += 1
+        self.trace_logger.set_candidate_idx(self._candidate_idx)
         self.trace_logger.log_candidate_prompt(self._candidate_idx, candidate)
 
         outputs: List[CudaKernelOutput] = []
@@ -699,9 +1016,29 @@ Be concise with your thinking. Please limit your reasoning and thinking within 6
         trajectories: List[CudaKernelTrajectory] = [] if capture_traces else None
 
         async def process_batch():
-            # Step 1: Generate code for all inputs
-            gen_tasks = []
-            for data in batch:
+            """
+            Process batch with pipeline parallelism and semaphore-based rate limiting.
+
+            Instead of running all LLM calls first, then all evals:
+            - Each task runs LLM generation -> evaluation as a pipeline
+            - All task pipelines run concurrently
+            - Semaphores limit concurrent LLM and eval requests separately
+
+            Timeline visualization:
+                Task 1: [LLM ----] [Eval ----]
+                Task 2:   [LLM ----] [Eval ----]
+                Task 3:     [LLM ----] [Eval ----]
+                              ↑ Eval starts immediately when LLM finishes
+            """
+            # Create semaphores for rate limiting
+            llm_semaphore = asyncio.Semaphore(self.max_concurrent_llm)
+            eval_semaphore = asyncio.Semaphore(self.max_concurrent_eval)
+
+            async def process_single_task(data: CudaKernelDataInst):
+                """
+                Process a single task through the full pipeline:
+                LLM generation -> code extraction -> KbEval evaluation
+                """
                 user_prompt = self._build_user_prompt(data)
 
                 # Log LLM request
@@ -712,37 +1049,49 @@ Be concise with your thinking. Please limit your reasoning and thinking within 6
                     candidate_idx=self._candidate_idx,
                 )
 
-                task = self._generate_async(system_prompt, user_prompt)
-                gen_tasks.append((data, user_prompt, task))
+                # Step 1: LLM Generation (with concurrency limit)
+                async with llm_semaphore:
+                    try:
+                        response = await self._generate_async(system_prompt, user_prompt)
+                    except Exception as e:
+                        print(f"Error generating code for {data.task_id}: {e}")
+                        response = ""
 
-            gen_results = []
-            for data, user_prompt, task in gen_tasks:
-                response = await task
+                # Extract code from response
                 generated_code = self._extract_code(response)
 
                 # Log LLM response
                 self.trace_logger.log_llm_response(
                     task_id=data.task_id,
-                    raw_response=response,
+                    raw_response=response if isinstance(response, str) else "",
                     extracted_code=generated_code,
                     candidate_idx=self._candidate_idx,
                 )
 
-                gen_results.append((data, user_prompt, response, generated_code))
+                # Step 2: KbEval Evaluation (with separate concurrency limit)
+                # This starts immediately after LLM generation completes for this task
+                async with eval_semaphore:
+                    try:
+                        if self.use_kb_eval and self.eval_client is not None:
+                            score, output, feedback = await self._evaluate_with_kb_eval(
+                                data, generated_code
+                            )
+                        else:
+                            score, output, feedback = self._evaluate_code_simple(
+                                data, generated_code
+                            )
+                    except Exception as e:
+                        print(f"Error evaluating code for {data.task_id}: {e}")
+                        score = 0
+                        output = CudaKernelOutput(
+                            generated_code=generated_code,
+                            compilation_success=False,
+                            correctness_success=False,
+                            error_message=str(e),
+                        )
+                        feedback = f"FAILED: Evaluation error - {e}"
 
-            # Step 2: Evaluate all generated code
-            eval_results = []
-            for data, user_prompt, response, generated_code in gen_results:
-                if self.use_kb_eval and self.eval_client is not None:
-                    score, output, feedback = await self._evaluate_with_kb_eval(
-                        data, generated_code
-                    )
-                else:
-                    score, output, feedback = self._evaluate_code_simple(
-                        data, generated_code
-                    )
-
-                # Log KbEval result - use full result if available from KB eval
+                # Log KbEval result
                 kbeval_result = (
                     output.eval_metadata
                     if output.eval_metadata
@@ -762,11 +1111,21 @@ Be concise with your thinking. Please limit your reasoning and thinking within 6
                     feedback=feedback,
                 )
 
-                eval_results.append(
-                    (data, user_prompt, generated_code, score, output, feedback)
-                )
+                return (data, user_prompt, generated_code, score, output, feedback)
 
-            return eval_results
+            # Run all task pipelines concurrently
+            tasks = [process_single_task(data) for data in batch]
+            results_raw = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Filter out exceptions and collect results
+            results = []
+            for result in results_raw:
+                if isinstance(result, Exception):
+                    print(f"Task pipeline error: {result}")
+                    continue
+                results.append(result)
+
+            return results
 
         # Run the async batch
         loop = asyncio.new_event_loop()
@@ -832,41 +1191,36 @@ Be concise with your thinking. Please limit your reasoning and thinking within 6
                 eval_batch.scores,
                 eval_batch.outputs,
             ):
-                # Build detailed feedback
-                if output.compilation_success and output.correctness_success:
-                    if output.speedup and output.speedup > 1.0:
-                        feedback = (
-                            f"SUCCESS with speedup {output.speedup:.2f}x! "
-                            f"The code compiles, produces correct results, "
-                            f"and runs faster than the reference. "
-                            f"Runtime: {output.runtime:.2f}μs."
-                        )
-                    else:
-                        feedback = (
-                            "SUCCESS: Code compiles and passes all correctness tests. "
-                            "Consider optimizing for better performance."
-                        )
-                elif output.compilation_success:
-                    feedback = (
-                        f"CORRECTNESS FAILED: Code compiles but fails correctness.\n"
-                        f"Error: {output.error_message or 'Unknown error'}\n\n"
-                        "Tips:\n"
-                        "- Check tensor dimensions and shapes\n"
-                        "- Verify data types (float32, etc.)\n"
-                        "- Ensure thread/block indexing is correct\n"
-                        "- Check for race conditions in parallel code"
-                    )
+                # Use kbeval result directly as feedback (cleaner and more informative)
+                if output.eval_metadata:
+                    feedback = json.dumps(output.eval_metadata, indent=2, default=str)
+                    # Highlight speedup with different levels
+                    speedup = output.eval_metadata.get("speedup", 0)
+                    if speedup and speedup > 0:
+                        if speedup >= 1.5:
+                            feedback = f"🚀🚀 SUPER SPEEDUP: {speedup:.2f}x\n\n{feedback}"
+                        elif speedup >= 1.0:
+                            feedback = f"🚀 SPEEDUP: {speedup:.2f}x\n\n{feedback}"
+                        else:
+                            feedback = f"🐢 SLOWER THAN REFERENCE: {speedup:.2f}x \n\n{feedback}"
                 else:
-                    feedback = (
-                        f"COMPILATION FAILED:\n"
-                        f"Error: {output.error_message or 'Unknown error'}\n\n"
-                        "Common issues:\n"
-                        "- Missing includes or headers\n"
-                        "- Syntax errors in CUDA code\n"
-                        "- Type mismatches\n"
-                        "- Missing ModelNew class definition\n"
-                        "- Incorrect load_inline usage"
-                    )
+                    # Fallback if no eval_metadata
+                    fallback_data = {
+                        "compiled": output.compilation_success,
+                        "correctness": output.correctness_success,
+                        "runtime": output.runtime,
+                        "speedup": output.speedup,
+                        "error": output.error_message,
+                    }
+                    feedback = json.dumps(fallback_data, indent=2, default=str)
+                    # Highlight speedup with different levels
+                    if output.speedup and output.speedup > 0:
+                        if output.speedup >= 1.5:
+                            feedback = f"🚀🚀 SUPER SPEEDUP: {output.speedup:.2f}x\n\n{feedback}"
+                        elif output.speedup >= 1.0:
+                            feedback = f"🚀 SPEEDUP: {output.speedup:.2f}x\n\n{feedback}"
+                        else:
+                            feedback = f"🐢 SLOWER THAN REFERENCE: {output.speedup:.2f}x \n\n{feedback}"
 
                 # Truncate code for reflection
                 ref_code = traj.data.reference_code
@@ -889,6 +1243,203 @@ Be concise with your thinking. Please limit your reasoning and thinking within 6
             result[component] = items
 
         return result
+
+    def set_reflection_lm(self, reflection_lm):
+        """Set the reflection LM callable for custom propose_new_texts."""
+        self._reflection_lm = reflection_lm
+
+    def propose_new_texts(
+        self,
+        candidate: Dict[str, str],
+        reflective_dataset: Dict[str, List[Dict[str, Any]]],
+        components_to_update: List[str],
+    ) -> Dict[str, str]:
+        """
+        Override GEPA's default propose_new_texts with custom component-aware reflection.
+
+        Uses the configurable reflection prompt template from the yaml config.
+        """
+        if self._reflection_lm is None:
+            raise ValueError("Reflection LM not set. Call set_reflection_lm() first.")
+
+        new_texts = {}
+
+        for component_name in components_to_update:
+            if component_name not in candidate:
+                continue
+
+            current_text = candidate[component_name]
+
+            # Get component metadata
+            metadata = self.component_metadata.get(component_name, {})
+            label = metadata.get("label", component_name.upper().replace("_", " "))
+            description = metadata.get("description", "")
+
+            # Get feedback items for this component
+            feedback_items = reflective_dataset.get(component_name, [])
+            formatted_feedback = self._format_reflection_feedback(feedback_items)
+
+            # Build the reflection prompt using configurable template
+            reflection_prompt = self._build_reflection_prompt(
+                component_name=component_name,
+                label=label,
+                description=description,
+                current_text=current_text,
+                formatted_feedback=formatted_feedback,
+            )
+
+            # Call reflection LM
+            response = self._reflection_lm(reflection_prompt)
+
+            # Extract improved text from response
+            improved_text = self._extract_component_from_response(response, label)
+            new_texts[component_name] = improved_text
+
+        return new_texts
+
+    def _build_reflection_prompt(
+        self,
+        component_name: str,
+        label: str,
+        description: str,
+        current_text: str,
+        formatted_feedback: str,
+    ) -> str:
+        """Build the reflection prompt using configurable template from yaml."""
+        config = self.reflection_config
+        template = config.get("template", self._get_default_template())
+        sections = config.get("sections", {})
+        components_overview = config.get("components_overview", self._get_default_components_overview())
+
+        # Variable substitutions for all sections
+        variables = {
+            "component_name": component_name,
+            "component_label": label,
+            "component_purpose": description,
+            "current_content": current_text,
+            "evaluation_results": formatted_feedback,
+            "components_overview": components_overview,
+        }
+
+        # First, substitute variables in each section
+        processed_sections = {}
+        for section_name, section_content in sections.items():
+            processed_sections[section_name] = self._substitute_variables(section_content, variables)
+
+        # Then, substitute sections in template
+        result = template
+        for section_name, section_content in processed_sections.items():
+            placeholder = "{section:" + section_name + "}"
+            result = result.replace(placeholder, section_content)
+
+        # Substitute any remaining variables in the template
+        result = self._substitute_variables(result, variables)
+
+        return result
+
+    def _substitute_variables(self, text: str, variables: Dict[str, str]) -> str:
+        """Substitute {variable} placeholders with values."""
+        result = text
+        for var_name, var_value in variables.items():
+            placeholder = "{" + var_name + "}"
+            result = result.replace(placeholder, str(var_value))
+        return result
+
+    def _format_reflection_feedback(self, feedback_items: List[Dict[str, Any]]) -> str:
+        """Format feedback items using configurable template."""
+        if not feedback_items:
+            return self.reflection_config.get("no_results_message", "No evaluation results available.")
+
+        config = self.reflection_config
+        example_template = config.get("example_template", self._get_default_example_template())
+        separator = config.get("example_separator", "\n---\n")
+        max_content_length = config.get("max_content_length", 800)
+
+        formatted_examples = []
+        for idx, item in enumerate(feedback_items, 1):
+            inputs = item.get("Inputs", "")
+            outputs = item.get("Generated Outputs", "")
+            feedback = item.get("Feedback", "")
+            score = item.get("Score", 0.0)
+
+            # Truncate if needed
+            if len(inputs) > max_content_length:
+                inputs = inputs[:max_content_length] + "... (truncated)"
+            if len(outputs) > max_content_length:
+                outputs = outputs[:max_content_length] + "... (truncated)"
+
+            # Format using template
+            example = example_template
+            example = example.replace("{index}", str(idx))
+            example = example.replace("{score}", f"{score:.3f}")
+            example = example.replace("{inputs}", inputs)
+            example = example.replace("{outputs}", outputs)
+            example = example.replace("{feedback}", feedback)
+
+            formatted_examples.append(example)
+
+        return separator.join(formatted_examples)
+
+    def _extract_component_from_response(self, response: str, label: str) -> str:
+        """Extract improved component text from reflection LM response."""
+        # First, strip <think>...</think> tags (used by some LLMs for reasoning)
+        cleaned_response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL).strip()
+
+        # Try to find content after specific markers
+        markers = [
+            f"## Improved {label}:",
+            f"## {label}:",
+            f"**{label}:**",
+            "```",
+        ]
+
+        for marker in markers:
+            if marker in cleaned_response:
+                parts = cleaned_response.split(marker, 1)
+                if len(parts) > 1:
+                    extracted = parts[1].strip()
+                    # If it's a code block, extract content
+                    if marker == "```" and "```" in extracted:
+                        extracted = extracted.split("```")[0].strip()
+                    return extracted
+
+        # No marker found, return trimmed response
+        return cleaned_response
+
+    def _get_default_template(self) -> str:
+        """Default reflection prompt template."""
+        return """{section:intro}
+
+{section:component_context}
+
+{section:current_content}
+
+{section:evaluation_results}
+
+{section:task}
+
+{section:output_format}"""
+
+    def _get_default_example_template(self) -> str:
+        """Default template for formatting feedback examples."""
+        return """### Example {index} (Score: {score})
+
+**Input:**
+{inputs}
+
+**Generated Output:**
+{outputs}
+
+**Feedback:**
+{feedback}"""
+
+    def _get_default_components_overview(self) -> str:
+        """Default overview of system prompt components."""
+        return """This component is ONE PART of a larger system prompt. The full system prompt is assembled from multiple components:
+1. ROLE DESCRIPTION - Defines the AI's persona and expertise
+2. TASK DESCRIPTION - Describes the overall task and objective
+3. TASK INSTRUCTIONS - Provides specific guidelines and constraints
+4. EXAMPLES - Shows example input/output pairs (not being optimized)"""
 
 
 def create_cuda_kernel_adapter(

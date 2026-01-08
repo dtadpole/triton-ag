@@ -124,7 +124,7 @@ env_vllm_start:
 		/bin/bash -c "make mount_shared_drive && tail -f /dev/null"
 
 wandb_login:
-	wandb login --host=https://api.wandb.ai
+	wandb login --host=http://devgpu139.cco2.facebook.com:8010/
 
 mount_shared_drive:
 	echo 'dummy' | sshfs -o password_stdin -p 8081 codegen@devvm8492.cco0.facebook.com:/shared/ shared/
@@ -331,7 +331,7 @@ vllm-qwen3-32b-devserver_b:
     --tensor-parallel-size 4 \
     --pipeline-parallel-size 1 \
     --enable-lora --max-lora-rank 128 --max-loras 6 \
-    --gpu-memory-utilization 0.90 --max_model_len 24576 \
+    --gpu-memory-utilization 0.90 --max_model_len 32768 \
     --load_format safetensors \
     --trust_remote_code \
     --guided_decoding_backend guidance --guided-decoding-disable-fallback \

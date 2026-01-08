@@ -172,7 +172,7 @@ def _compile_and_load_model(model_src: str, context: dict, filename: str = "<str
     return context
 
 def load_model_and_inputs(
-    model_src: str, context: dict, filename: str = "<string>", compile_pytorch: bool = False
+    model_src: str, context: dict, filename: str = "<string>"
 ) -> tuple[nn.Module, callable, callable]:
     """
     Load class from original NN.module pytorch code
@@ -182,8 +182,6 @@ def load_model_and_inputs(
 
     # check "Model" exists in the context
     Model = context.get("Model")
-    if compile_pytorch:
-        Model = Model.compile(mode="inductor")
     if not Model:
         raise CompileMissingComponentError("class [Model] not found")
     elif not isinstance(Model, type):
@@ -466,6 +464,108 @@ def resolve_custom_cuda_kernel(code: str):
     logger.info(f"Custom CUDA kernel validation passed")
     return True
 
+def check_triton_disallowed_nn_modules(code: str) -> list[str]:
+    """
+    Check for disallowed torch.nn module usage in Triton code.
+
+    Allowed exceptions:
+    - nn.Parameter / Parameter
+    - Containers: nn.Module, nn.ModuleList, nn.ModuleDict, nn.Sequential, nn.ParameterList, nn.ParameterDict
+    - Initialization: nn.init.*
+
+    Returns:
+        List of found disallowed nn module usages
+    """
+    # Disallowed nn modules (heavy PyTorch operations)
+    disallowed_nn_modules = [
+        # Convolution Operations
+        'nn.Conv1d', 'nn.Conv2d', 'nn.Conv3d',
+        'nn.ConvTranspose1d', 'nn.ConvTranspose2d', 'nn.ConvTranspose3d',
+        'nn.LazyConv1d', 'nn.LazyConv2d', 'nn.LazyConv3d',
+        'nn.LazyConvTranspose1d', 'nn.LazyConvTranspose2d', 'nn.LazyConvTranspose3d',
+
+        # Pooling Operations
+        'nn.MaxPool1d', 'nn.MaxPool2d', 'nn.MaxPool3d',
+        'nn.AvgPool1d', 'nn.AvgPool2d', 'nn.AvgPool3d',
+        'nn.AdaptiveAvgPool1d', 'nn.AdaptiveAvgPool2d', 'nn.AdaptiveAvgPool3d',
+        'nn.AdaptiveMaxPool1d', 'nn.AdaptiveMaxPool2d', 'nn.AdaptiveMaxPool3d',
+        'nn.MaxUnpool1d', 'nn.MaxUnpool2d', 'nn.MaxUnpool3d',
+        'nn.FractionalMaxPool2d', 'nn.FractionalMaxPool3d',
+        'nn.LPPool1d', 'nn.LPPool2d',
+
+        # Activation Functions
+        'nn.ReLU', 'nn.LeakyReLU', 'nn.GELU', 'nn.SiLU', 'nn.Mish',
+        'nn.Sigmoid', 'nn.Tanh', 'nn.Softmax', 'nn.LogSoftmax',
+        'nn.ELU', 'nn.SELU', 'nn.PReLU', 'nn.Softplus', 'nn.Softsign',
+        'nn.Hardtanh', 'nn.HardSigmoid', 'nn.Hardswish',
+        'nn.ReLU6', 'nn.RReLU', 'nn.CELU', 'nn.GLU',
+        'nn.Softmax2d', 'nn.Softmin', 'nn.Tanhshrink', 'nn.Softshrink', 'nn.Hardshrink',
+        'nn.Threshold', 'nn.MultiheadAttention',
+
+        # Normalization Operations
+        'nn.BatchNorm1d', 'nn.BatchNorm2d', 'nn.BatchNorm3d',
+        'nn.LayerNorm', 'nn.GroupNorm',
+        'nn.InstanceNorm1d', 'nn.InstanceNorm2d', 'nn.InstanceNorm3d',
+        'nn.LocalResponseNorm', 'nn.SyncBatchNorm',
+        'nn.LazyBatchNorm1d', 'nn.LazyBatchNorm2d', 'nn.LazyBatchNorm3d',
+        'nn.LazyInstanceNorm1d', 'nn.LazyInstanceNorm2d', 'nn.LazyInstanceNorm3d',
+        'nn.RMSNorm',
+
+        # Linear/Recurrent Operations
+        'nn.Linear', 'nn.LazyLinear', 'nn.Bilinear',
+        'nn.LSTM', 'nn.GRU', 'nn.RNN',
+        'nn.LSTMCell', 'nn.GRUCell', 'nn.RNNCell',
+
+        # Transformer Operations
+        'nn.Transformer', 'nn.TransformerEncoder', 'nn.TransformerDecoder',
+        'nn.TransformerEncoderLayer', 'nn.TransformerDecoderLayer',
+
+        # Embedding Operations
+        'nn.Embedding', 'nn.EmbeddingBag',
+
+        # Dropout
+        'nn.Dropout', 'nn.Dropout1d', 'nn.Dropout2d', 'nn.Dropout3d',
+        'nn.AlphaDropout', 'nn.FeatureAlphaDropout',
+
+        # Upsampling/Interpolation
+        'nn.Upsample', 'nn.UpsamplingNearest2d', 'nn.UpsamplingBilinear2d',
+
+        # Padding
+        'nn.ReflectionPad1d', 'nn.ReflectionPad2d', 'nn.ReflectionPad3d',
+        'nn.ReplicationPad1d', 'nn.ReplicationPad2d', 'nn.ReplicationPad3d',
+        'nn.ZeroPad1d', 'nn.ZeroPad2d', 'nn.ZeroPad3d',
+        'nn.ConstantPad1d', 'nn.ConstantPad2d', 'nn.ConstantPad3d',
+        'nn.CircularPad1d', 'nn.CircularPad2d', 'nn.CircularPad3d',
+
+        # Loss Functions
+        'nn.CrossEntropyLoss', 'nn.NLLLoss', 'nn.MSELoss', 'nn.L1Loss',
+        'nn.SmoothL1Loss', 'nn.BCELoss', 'nn.BCEWithLogitsLoss',
+        'nn.KLDivLoss', 'nn.CosineEmbeddingLoss', 'nn.CTCLoss',
+        'nn.HuberLoss', 'nn.PoissonNLLLoss', 'nn.GaussianNLLLoss',
+        'nn.HingeEmbeddingLoss', 'nn.MarginRankingLoss', 'nn.MultiLabelMarginLoss',
+        'nn.MultiLabelSoftMarginLoss', 'nn.MultiMarginLoss', 'nn.SoftMarginLoss',
+        'nn.TripletMarginLoss', 'nn.TripletMarginWithDistanceLoss',
+
+        # Fold/Unfold
+        'nn.Fold', 'nn.Unfold',
+
+        # Distance/Similarity
+        'nn.CosineSimilarity', 'nn.PairwiseDistance',
+
+        # Utility
+        'nn.Flatten', 'nn.Unflatten',
+        'nn.PixelShuffle', 'nn.PixelUnshuffle',
+        'nn.ChannelShuffle',
+    ]
+
+    found_disallowed = []
+    for module in disallowed_nn_modules:
+        if module in code:
+            found_disallowed.append(module)
+
+    return found_disallowed
+
+
 def resolve_triton_code(code: str):
     """
     Resolve the triton code, check there is function call from ModelNew.forward to @triton.jit function(s)
@@ -496,6 +596,19 @@ def resolve_triton_code(code: str):
     if mapper.model_new_forward_count != 1:
         raise CompileResolveComponentError(f"ModelNew has multiple forward methods: [{mapper.model_new_forward_count}]")
     logger.info(f"Method [ModelNew.forward] is defined [{mapper.model_new_forward_count}] time(s)")
+
+    # Check for disallowed nn module usage (heavy PyTorch operations)
+    # Allowed: nn.Parameter, nn.Module containers (ModuleList, ModuleDict, Sequential, ParameterList, ParameterDict), nn.init
+    disallowed_modules = check_triton_disallowed_nn_modules(code)
+    if disallowed_modules:
+        modules_str = ", ".join(disallowed_modules[:5])
+        if len(disallowed_modules) > 5:
+            modules_str += f" (and {len(disallowed_modules) - 5} more)"
+        raise CompileResolveComponentError(
+            f"Triton code uses disallowed torch.nn modules: {modules_str}. "
+            "Only nn.Parameter, nn.Module containers, and nn.init are allowed."
+        )
+    logger.info(f"No disallowed torch.nn modules found in Triton code")
 
     # check ModelNew.forward calls at least one triton.jit function, using call_graph
     forward_method = "__global__.ModelNew.forward"
@@ -677,6 +790,231 @@ def get_cache_build_directory(generated_code: str, file_path: str,
     os.makedirs(build_dir, exist_ok=True)
 
     return build_dir
+
+
+# ===== AOTI (Ahead-Of-Time Inductor) Compilation =====
+
+def generate_aoti_cache_hash(
+    model_code: str,
+    hash_length: int = 50
+) -> str:
+    """
+    Generate a deterministic cache hash for AOTI compilation.
+
+    The cache key is based on:
+    - Model source code (which includes get_inputs/get_init_inputs definitions)
+    - GPU card type
+    - PyTorch version
+    - CUDA compute capability
+
+    Note: Input shapes are NOT included because they are deterministic
+    based on the get_inputs() function defined in the model code.
+
+    Args:
+        model_code: The model source code
+        hash_length: Length of the hash string
+
+    Returns:
+        A deterministic hash string suitable for use as a directory/file name
+    """
+    components = {
+        'model_code': apply_black_formatter(model_code),
+        'hostname': get_hostname(),
+        'pytorch_version': get_pytorch_version(),
+        'compute_capability': get_compute_capability(),
+    }
+
+    hash_input_parts = []
+    for key in sorted(components.keys()):
+        value = str(components[key])
+        hash_input_parts.append(f"{key}:{value}")
+
+    hash_input = '\n'.join(hash_input_parts)
+
+    hash_obj = hashlib.sha256(hash_input.encode('utf-8'))
+    hash_hex = hash_obj.hexdigest()[:hash_length]
+
+    return hash_hex
+
+
+def get_aoti_cache_path(
+    model_code: str,
+    shared_cache_parent: str = "shared/.kbeval/reference_cache"
+) -> tuple[str, str]:
+    """
+    Get the AOTI cache directory and .pt2 file path.
+
+    Args:
+        model_code: The model source code
+        shared_cache_parent: Parent directory for all AOTI cache folders
+
+    Returns:
+        Tuple of (cache_directory, pt2_file_path)
+    """
+    cache_hash = generate_aoti_cache_hash(model_code)
+
+    # Convert to absolute path to ensure it works from any working directory
+    # (PyTorch's aot_compile uses /tmp/torchinductor_root/ as working dir)
+    cache_dir = os.path.abspath(os.path.join(shared_cache_parent, cache_hash))
+    pt2_file_path = os.path.join(cache_dir, "model.pt2")
+
+    os.makedirs(cache_dir, exist_ok=True)
+
+    return cache_dir, pt2_file_path
+
+
+def compile_model_aoti(
+    model: nn.Module,
+    example_inputs: tuple,
+    cache_dir: str,
+    pt2_file_path: str,
+    device: torch.device = None,
+) -> nn.Module:
+    """
+    Compile a PyTorch model using AOTI (Ahead-Of-Time Inductor).
+
+    This function exports the model and compiles it to a .pt2 package file,
+    then loads and returns the compiled model.
+
+    Args:
+        model: The PyTorch model instance to compile
+        example_inputs: Example inputs for tracing (tuple of tensors)
+        cache_dir: Directory to store compilation artifacts
+        pt2_file_path: Path where the .pt2 package file will be saved
+        device: CUDA device to use
+
+    Returns:
+        The AOTI-compiled model callable
+
+    Note:
+        This uses static shapes for compilation. The compiled model will
+        only work with inputs of the exact same shape. This is appropriate
+        for KernelBench where get_inputs() returns deterministic shapes
+        for each model.
+    """
+    import torch._inductor
+    from torch.export import export
+
+    if device is None:
+        device = torch.cuda.current_device()
+
+    # Check if cached .pt2 file exists
+    if os.path.exists(pt2_file_path):
+        logger.info(f"🎯 Loading cached AOTI model from [{pt2_file_path}]")
+        try:
+            # Load AOTI model within the correct CUDA device context
+            with torch.cuda.device(device):
+                compiled_model = torch._inductor.aoti_load_package(pt2_file_path)
+            return compiled_model
+        except Exception as e:
+            logger.warning(
+                f"⚠️ Failed to load cached AOTI model: {e}. Recompiling..."
+            )
+            # Remove corrupted cache and recompile
+            try:
+                os.remove(pt2_file_path)
+            except OSError:
+                pass
+
+    logger.info(f"🔨 Compiling model with AOTI to [{pt2_file_path}]")
+
+    # Ensure model is in eval mode for export
+    model.eval()
+
+    try:
+        # Export and compile within the correct CUDA device context
+        with torch.cuda.device(device):
+            # Export the model with static shapes
+            with torch.no_grad():
+                exported_model = export(model, example_inputs)
+
+            # AOT compile and package to .pt2 file
+            pt2_path = torch._inductor.aoti_compile_and_package(
+                exported_model,
+                package_path=pt2_file_path,
+            )
+
+            logger.info(f"✅ AOTI compilation successful: [{pt2_path}]")
+
+            # Load the compiled model from .pt2 package within the same device context
+            compiled_model = torch._inductor.aoti_load_package(pt2_path)
+
+        return compiled_model
+
+    except Exception as e:
+        logger.error(f"❌ AOTI compilation failed: {e}")
+        raise CompileError(f"AOTI compilation failed: {e}") from e
+
+
+def get_or_compile_aoti_model(
+    model: nn.Module,
+    example_inputs: tuple,
+    model_code: str,
+    device: torch.device = None,
+    shared_cache_parent: str = "shared/.kbeval/reference_cache",
+) -> nn.Module:
+    """
+    Get a cached AOTI model or compile and cache it.
+
+    This is the main entry point for AOTI compilation with caching.
+
+    Args:
+        model: The PyTorch model instance to compile
+        example_inputs: Example inputs for tracing (tuple of tensors)
+        model_code: The model source code (for cache key generation)
+        device: CUDA device to use
+        shared_cache_parent: Parent directory for AOTI cache
+
+    Returns:
+        The AOTI-compiled model callable
+    """
+    cache_dir, pt2_file_path = get_aoti_cache_path(
+        model_code,
+        shared_cache_parent,
+    )
+
+    logger.info(f"🔍 AOTI cache directory: [{cache_dir}]")
+
+    return compile_model_aoti(
+        model,
+        example_inputs,
+        cache_dir,
+        pt2_file_path,
+        device,
+    )
+
+
+def compile_model_torch_compile(
+    model: nn.Module,
+    mode: str = "reduce-overhead",
+    backend: str = "inductor",
+) -> nn.Module:
+    """
+    Compile a PyTorch model using torch.compile (JIT compilation).
+
+    This is a simpler alternative to AOTI that doesn't cache to disk.
+
+    Args:
+        model: The PyTorch model instance to compile
+        mode: Compilation mode. Options:
+            - "default": Default mode
+            - "reduce-overhead": Reduces overhead, good for small models
+            - "max-autotune": Maximum autotuning (slower compile, faster run)
+            - "max-autotune-no-cudagraphs": Max autotune without CUDA graphs
+        backend: Backend to use (default: "inductor")
+
+    Returns:
+        The torch.compile'd model
+    """
+    logger.info(f"🔨 Compiling model with torch.compile (mode={mode})")
+
+    try:
+        compiled_model = torch.compile(model, mode=mode, backend=backend)
+        logger.info(f"✅ torch.compile successful")
+        return compiled_model
+    except Exception as e:
+        logger.error(f"❌ torch.compile failed: {e}")
+        raise CompileError(f"torch.compile failed: {e}") from e
 
 
 def print_cache_info(generated_code: str, file_path: str) -> None:

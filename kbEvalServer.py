@@ -31,7 +31,10 @@ MAX_ERROR_COUNT = 50
 START_TIME = time.time()
 MAX_RUN_TIME = 4 * 3600  # restart periods in seconds
 COMPILE_CACHE = False
+COMPILE_PYTORCH = False
+COMPILE_PYTORCH_REF = False
 CHECK_GET_INPUTS = True
+CODE_TYPE = "cuda"
 
 # Create app
 app = FastAPI()
@@ -44,6 +47,7 @@ parallel_request_counter_lock = asyncio.Lock()
 DEVICES = []
 
 MAX_TIMEOUT_SECONDS = 600  # 10 minutes
+MAX_CRITICAL_TIME = 120 # 120 seconds for critical section (inside the lock)
 
 # Cache hit/miss tracking
 CACHE_HIT_THRESHOLD = 20  # seconds - if command completes within this, it's a cache hit
@@ -258,8 +262,14 @@ async def kb_eval_ref(
         # logger.info(f"[KB Eval] [reference] reference_file_path: [{reference_file_path}]")
 
         eval_tag = "reference"
+
+        if COMPILE_PYTORCH_REF is True:
+            compile_pytorch_ref_tag = "--compile_pytorch"
+        else:
+            compile_pytorch_ref_tag = ""
+
         # pre-compile the reference code
-        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code reference_code.py --measure_reference --device-list {','.join([str(device) for device in DEVICES])} --code_type pytorch --quiet"
+        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code reference_code.py --measure_reference --device-list {','.join([str(device) for device in DEVICES])} --code_type pytorch --max_critical_time {MAX_CRITICAL_TIME} --quiet {compile_pytorch_ref_tag}"
         process = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
@@ -415,10 +425,14 @@ async def kb_eval(
     eval_tag: str = Body(...),
     reference_code: str = Body(...),
     generated_code: str = Body(...),
-    code_type: str = Body(default="cuda"),
+    code_type: str = Body(default=None),
     authenticated: bool = Depends(verify_token),
 ) -> KernelExecResult:
-    global TOTAL_REQUEST_COUNTER, TOTAL_ERROR_COUNTER, parallel_request_counter, parallel_request_counter_lock, DEVICES
+    global TOTAL_REQUEST_COUNTER, TOTAL_ERROR_COUNTER, parallel_request_counter, parallel_request_counter_lock, DEVICES, CODE_TYPE
+
+    # Use configured CODE_TYPE if not provided in the request
+    if code_type is None:
+        code_type = CODE_TYPE
 
     try:
         async with parallel_request_counter_lock:
@@ -453,16 +467,20 @@ async def kb_eval(
             cache_tag = "--use_cuda_cache"
         else:
             cache_tag = ""
+        if COMPILE_PYTORCH is True:
+            compile_pytorch_tag = "--compile_pytorch"
+        else:
+            compile_pytorch_tag = ""
         if CHECK_GET_INPUTS is False:
             check_get_inputs_tag = "--not_check_get_inputs"
         else:
             check_get_inputs_tag = ""
 
         logger.info(
-            f"[KB Eval] [{eval_tag}] COMPILE_CACHE: [{COMPILE_CACHE}], cache_tag: [{cache_tag}]"
+            f"[KB Eval] [{eval_tag}] COMPILE_CACHE: [{COMPILE_CACHE}], COMPILE_PYTORCH: [{COMPILE_PYTORCH}]"
         )
         # pre-compile the generated code
-        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code reference_code.py --generated_code generated_code.py --device-list {','.join([str(device) for device in DEVICES])} --code_type {code_type} --quiet {cache_tag} {check_get_inputs_tag}"
+        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code reference_code.py --generated_code generated_code.py --device-list {','.join([str(device) for device in DEVICES])} --code_type {code_type} --max_critical_time {MAX_CRITICAL_TIME} --quiet {cache_tag} {compile_pytorch_tag} {check_get_inputs_tag}"
         process = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
@@ -729,8 +747,9 @@ async def _check_total_error_count():
 
 async def main(args):
 
-    global MAX_TIMEOUT_SECONDS, COMPILE_CACHE, CHECK_GET_INPUTS
+    global MAX_TIMEOUT_SECONDS, MAX_CRITICAL_TIME, COMPILE_CACHE, COMPILE_PYTORCH, COMPILE_PYTORCH_REF, CHECK_GET_INPUTS, CODE_TYPE
     MAX_TIMEOUT_SECONDS = args.max_timeout_seconds
+    MAX_CRITICAL_TIME = args.max_critical_time
 
     # read kbEval.yaml
     with open("kbEval.yaml", "r") as f:
@@ -766,8 +785,17 @@ async def main(args):
     COMPILE_CACHE = bool(kbEval_config["servers"][hostname].get("compile_cache", False))
     logger.info(f"Compile cache is {COMPILE_CACHE}")
 
+    COMPILE_PYTORCH = bool(kbEval_config["servers"][hostname].get("compile_pytorch", False))
+    logger.info(f"Compile pytorch (AOTI) is {COMPILE_PYTORCH}")
+
+    COMPILE_PYTORCH_REF = bool(kbEval_config["servers"][hostname].get("compile_pytorch_ref", False))
+    logger.info(f"Compile pytorch ref (AOTI) is {COMPILE_PYTORCH_REF}")
+
     CHECK_GET_INPUTS = bool(kbEval_config["servers"][hostname].get("check_get_inputs", True))
     logger.info(f"Check get_inputs is {CHECK_GET_INPUTS}")
+
+    CODE_TYPE = str(kbEval_config["servers"][hostname].get("code_type", "cuda"))
+    logger.info(f"Code type is {CODE_TYPE}")
 
     #########################################################
     # get api_key from kbEval_config["kbEvalRemoteServer"]["common"]["api_key"]
@@ -821,6 +849,7 @@ if __name__ == "__main__":
     parser.add_argument("--workers", type=int, default=100) #
     parser.add_argument("--device", type=str, default="4")
     parser.add_argument("--max_timeout_seconds", type=int, default=240)
+    parser.add_argument("--max_critical_time", type=int, default=60, help="Maximum time in seconds for critical section (inside the lock)")
     args = parser.parse_args()
 
     asyncio.run(main(args))
