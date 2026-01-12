@@ -249,20 +249,20 @@ if __name__ == "__main__":
             "shared/.inference/codeGenEval/triton_eval.qwen32b.v0_000_%02d"
             % (i)
         )
-        foler_level1 = [
+        folder_level1 = [
             os.path.join(test_folders, f_) for f_ in os.listdir(test_folders) if "qwen3-32b" in f_
         ]
-        for folder_ in foler_level1:
+        for folder_ in folder_level1:
             folder_level2 = [os.path.join(folder_, f_) for f_ in os.listdir(folder_)]
             for folder_2 in folder_level2:
                 reference_file, generated_files = get_reference_and_generated(folder_2)
-                current_paris = [
+                current_pairs = [
                         [reference_file, generated_file, True]
                         for generated_file in generated_files
                     ]
-                current_paris[0][2] = False
+                current_pairs[0][2] = False
                 file_pairs.extend(
-                    current_paris
+                    current_pairs
                 )
 
     for i in range(0, 13):
@@ -270,20 +270,20 @@ if __name__ == "__main__":
             "shared/.inference/codeGenEval/triton_eval.qwen32b.v0_000_%02d"
             % (i)
         )
-        foler_level1 = [
+        folder_level1 = [
             os.path.join(test_folders, f_) for f_ in os.listdir(test_folders) if "deepseek-reasoner" in f_
         ]
-        for folder_ in foler_level1:
+        for folder_ in folder_level1:
             folder_level2 = [os.path.join(folder_, f_) for f_ in os.listdir(folder_)]
             for folder_2 in folder_level2:
                 reference_file, generated_files = get_reference_and_generated(folder_2)
-                current_paris = [
+                current_pairs = [
                         [reference_file, generated_file, True]
                         for generated_file in generated_files
                     ]
-                current_paris[0][2] = False
+                current_pairs[0][2] = False
                 file_pairs.extend(
-                    current_paris
+                    current_pairs
                 )
 
     # for i in range(0, 13):
@@ -291,60 +291,60 @@ if __name__ == "__main__":
     #         "shared/.inference/codeGenEval/cudacoder_eval_4_turn.qwen32b_repeat_000_%02d"
     #         % (i)
     #     )
-    #     foler_level1 = [
+    #     folder_level1 = [
     #         os.path.join(test_folders, f_) for f_ in os.listdir(test_folders) if "qwen3-32b" in f_
     #     ]
-    #     for folder_ in foler_level1:
+    #     for folder_ in folder_level1:
     #         folder_level2 = [os.path.join(folder_, f_) for f_ in os.listdir(folder_)]
     #         for folder_2 in folder_level2:
     #             reference_file, generated_files = get_reference_and_generated(folder_2)
-    #             current_paris = [
+    #             current_pairs = [
     #                     [reference_file, generated_file, True]
     #                     for generated_file in generated_files
     #                 ]
-    #             current_paris[0][2] = False
+    #             current_pairs[0][2] = False
     #             file_pairs.extend(
-    #                 current_paris
+    #                 current_pairs
     #             )
     # for i in range(0, 13):
     #     test_folders = (
     #         "shared/.inference/codeGenEval/cudacoder_eval_4_turn.qwen32b_000_%02d"
     #         % (i)
     #     )
-    #     foler_level1 = [
+    #     folder_level1 = [
     #         os.path.join(test_folders, f_) for f_ in os.listdir(test_folders) if "gpt-oss-120b" in f_
     #     ]
-    #     for folder_ in foler_level1:
+    #     for folder_ in folder_level1:
     #         folder_level2 = [os.path.join(folder_, f_) for f_ in os.listdir(folder_)]
     #         for folder_2 in folder_level2:
     #             reference_file, generated_files = get_reference_and_generated(folder_2)
-    #             current_paris = [
+    #             current_pairs = [
     #                     [reference_file, generated_file, True]
     #                     for generated_file in generated_files
     #                 ]
-    #             current_paris[0][2] = False
+    #             current_pairs[0][2] = False
     #             file_pairs.extend(
-    #                 current_paris
+    #                 current_pairs
     #             )
     # for i in range(0, 13):
     #     test_folders = (
     #         "shared/.inference/codeGenEval/cudacoder_eval_4_turn.qwen32b_repeat_000_%02d"
     #         % (i)
     #     )
-    #     foler_level1 = [
+    #     folder_level1 = [
     #         os.path.join(test_folders, f_) for f_ in os.listdir(test_folders) if "cudacoder_gspo_qwen32b_t03_ckpt2400" in f_
     #     ]
-    #     for folder_ in foler_level1:
+    #     for folder_ in folder_level1:
     #         folder_level2 = [os.path.join(folder_, f_) for f_ in os.listdir(folder_)]
     #         for folder_2 in folder_level2:
     #             reference_file, generated_files = get_reference_and_generated(folder_2)
-    #             current_paris = [
+    #             current_pairs = [
     #                     [reference_file, generated_file, True]
     #                     for generated_file in generated_files
     #                 ]
-    #             current_paris[0][2] = False
+    #             current_pairs[0][2] = False
     #             file_pairs.extend(
-    #                 current_paris
+    #                 current_pairs
     #             )
 
     # r1_folder1 = "shared/deepseek/deepseek-reasoner_2025_07_21_h03"
