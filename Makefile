@@ -126,6 +126,7 @@ env_vllm_start:
 wandb_login:
 	wandb login --host=http://devgpu139.cco2.facebook.com:8010/
 
+
 mount_shared_drive:
 	echo 'dummy' | sshfs -o password_stdin -p 8081 codegen@devvm8492.cco0.facebook.com:/shared/ shared/
 
@@ -295,7 +296,7 @@ vllm-qwen3-32b-devserver_a:
     --enable_auto_tool_choice --tool_call_parser hermes \
     --scheduling_policy priority \
     --enable_chunked_prefill --max_num_batched_tokens 2048 \
-    --max_log_len 0 --max_num_seqs 64 \
+    --max_log_len 0 --max_num_seqs 128 \
     --enable_prefix_caching --prefix-caching-hash-algo builtin \
     --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
     --return-tokens-as-token-ids
@@ -701,7 +702,28 @@ env_gepa_start:
 		--security-opt apparmor:unconfined \
 		--privileged \
 		localhost/gepa \
-		/bin/bash -c "make mount_shared_drive && make wandb_login && tail -f /dev/null"
+		/bin/bash -c "make mount_shared_drive && tail -f /dev/null"
 
 env_gepa:
 	docker exec -it -e PYTHONNOUSERSITE=1 gepa /bin/bash
+
+
+vllm-deepseek-r1-awq:
+	${VLLM_SETTING} VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python -m vllm.entrypoints.openai.api_server \
+    --model adamo1139/DeepSeek-R1-0528-AWQ \
+    --port 8001 --host :: \
+    --api-key dummy \
+    --tensor-parallel-size 8 \
+    --quantization awq_marlin \
+	--dtype float16 \
+    --gpu-memory-utilization 0.95 --max_model_len 24576 \
+    --load_format safetensors \
+    --trust_remote_code \
+    --guided_decoding_backend guidance --guided-decoding-disable-fallback \
+    --enable_auto_tool_choice --tool_call_parser hermes \
+    --scheduling_policy priority \
+    --enable_chunked_prefill --max_num_batched_tokens 2048 \
+    --max_log_len 0 --max_num_seqs 128 \
+    --enable_prefix_caching --prefix-caching-hash-algo builtin \
+    --generation-config vllm --override-generation-config '{"temperature":0.6,"top_p":1.0,"top_k":0,"repetition_penalty":1.0}' \
+    --return-tokens-as-token-ids
