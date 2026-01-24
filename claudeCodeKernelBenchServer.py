@@ -29,41 +29,81 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any
-import yaml
+import logging
 
-from mcp.server.fastmcp import FastMCP
-from kbEvalClient import KbEvalClient
-from workflowClient import WorkflowClient
-from logger import logger
+# Optional yaml import - fall back to defaults if not available
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
+
+# Optional project logger - fall back to standard logging
+try:
+    from logger import logger
+except ImportError:
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+    logger = logging.getLogger(__name__)
+
+# These imports are optional for standalone testing
+try:
+    from mcp.server.fastmcp import FastMCP
+    MCP_AVAILABLE = True
+except ImportError:
+    MCP_AVAILABLE = False
+    FastMCP = None
+
+try:
+    from kbEvalClient import KbEvalClient
+    KBEVAL_AVAILABLE = True
+except ImportError:
+    KBEVAL_AVAILABLE = False
+    KbEvalClient = None
+
+try:
+    from workflowClient import WorkflowClient
+    WORKFLOW_AVAILABLE = True
+except ImportError:
+    WORKFLOW_AVAILABLE = False
+    WorkflowClient = None
+
+
+def get_default_config() -> dict:
+    """Return default configuration."""
+    return {
+        "kernel_bench": {
+            "base_dir": "./kernel_bench",
+            "levels": ["level1", "level2", "level3", "level4"]
+        },
+        "kbeval": {
+            "default_provider": "local",
+            "config_file": "kbEval.yaml"
+        },
+        "workflow": {
+            "prefix_tag": "claude_code",
+            "eval_queue": "kbEval.pending",
+            "config_file": "workflow.yaml",
+            "provider_name": "local"
+        },
+        "output": {
+            "base_dir": os.path.expanduser("~/.inference/claude_code_output")
+        },
+        "iteration": {
+            "max_turns": 4,
+            "early_stop_speedup": 1.3
+        }
+    }
 
 
 def load_config(config_path: str = "claudeCodeKernelBench.yaml") -> dict:
     """Load MCP server configuration."""
     config_path = Path(config_path)
-    if not config_path.exists():
-        # Return defaults if config doesn't exist
-        return {
-            "kernel_bench": {
-                "base_dir": os.path.expanduser("~/KernelBench/KernelBench"),
-                "levels": ["level1", "level2", "level3"]
-            },
-            "kbeval": {
-                "default_provider": "local",
-                "config_file": "kbEval.yaml"
-            },
-            "workflow": {
-                "prefix_tag": "claude_code",
-                "eval_queue": "kbEval.pending",
-                "config_file": "workflow.yaml"
-            },
-            "output": {
-                "base_dir": os.path.expanduser("~/.inference/claude_code_output")
-            },
-            "iteration": {
-                "max_turns": 4,
-                "early_stop_speedup": 1.3
-            }
-        }
+
+    # Return defaults if config doesn't exist or yaml not available
+    if not config_path.exists() or not YAML_AVAILABLE:
+        if config_path.exists() and not YAML_AVAILABLE:
+            logger.warning(f"YAML not available, using default config (install PyYAML to use {config_path})")
+        return get_default_config()
 
     with open(config_path) as f:
         config = yaml.safe_load(f)
@@ -81,12 +121,26 @@ def load_config(config_path: str = "claudeCodeKernelBench.yaml") -> dict:
     return config
 
 
-# Initialize MCP server
-mcp = FastMCP("kernel-bench")
+# Initialize config first (always works)
 config = load_config()
 
+# Initialize MCP server only if available
+if MCP_AVAILABLE:
+    mcp = FastMCP("kernel-bench")
+    # Use the actual decorator
+    def mcp_tool():
+        return mcp.tool()
+else:
+    mcp = None
+    logger.warning("MCP not available - install 'mcp' package for MCP server functionality")
+    # No-op decorator for when MCP is not available
+    def mcp_tool():
+        def decorator(func):
+            return func
+        return decorator
 
-@mcp.tool()
+
+@mcp_tool()
 async def list_kernel_bench_tasks(level: str = None) -> list[dict]:
     """
     List available kernel benchmark tasks.
@@ -123,7 +177,7 @@ async def list_kernel_bench_tasks(level: str = None) -> list[dict]:
     return tasks
 
 
-@mcp.tool()
+@mcp_tool()
 async def get_task_details(task_path: str) -> dict:
     """
     Get PyTorch model code and specifications for a benchmark task.
@@ -179,7 +233,7 @@ async def get_task_details(task_path: str) -> dict:
     }
 
 
-@mcp.tool()
+@mcp_tool()
 async def eval_kernel(
     task_path: str,
     kernel_code: str,
@@ -246,10 +300,18 @@ async def eval_kernel(
             "status": "pending"
         }
 
+        if not WORKFLOW_AVAILABLE:
+            logger.warning(f"[kernel-bench] WorkflowClient not available - cannot queue work item")
+            return {
+                "status": "queue_error",
+                "error": "WorkflowClient not available - install workflowClient module",
+                "work_item": work_item
+            }
+
         try:
             workflow_client = WorkflowClient(
                 prefix_tag=prefix_tag,
-                provider_name="default"
+                provider_name=config.get("workflow", {}).get("provider_name", "local")
             )
             await workflow_client.enqueue(queue_name, work_item, create_queue=True)
             logger.info(f"[kernel-bench] Queued {task_name} iteration {iteration} to {queue_name}")
@@ -263,6 +325,15 @@ async def eval_kernel(
             }
 
     # Normal mode: call kbEval and wait for result
+    if not KBEVAL_AVAILABLE:
+        return {
+            "compiled": False,
+            "correctness": False,
+            "error": "KbEvalClient not available - install kbEvalClient module",
+            "runtime": 0,
+            "speedup": 0
+        }
+
     try:
         # Read reference code
         if not task_path_obj.exists():
@@ -315,7 +386,7 @@ async def eval_kernel(
         }
 
 
-@mcp.tool()
+@mcp_tool()
 async def save_benchmark_result(
     task_path: str,
     kernel_code: str,
@@ -409,7 +480,7 @@ async def save_benchmark_result(
     return str(session_dir)
 
 
-@mcp.tool()
+@mcp_tool()
 async def get_session_summary(session_id: str) -> dict:
     """
     Get summary statistics for a benchmark session.
@@ -434,4 +505,9 @@ async def get_session_summary(session_id: str) -> dict:
 
 
 if __name__ == "__main__":
-    mcp.run()
+    if MCP_AVAILABLE and mcp is not None:
+        mcp.run()
+    else:
+        print("ERROR: MCP package not available. Install with: pip install mcp")
+        print("For standalone testing, import this module and call functions directly.")
+        exit(1)

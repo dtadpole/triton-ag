@@ -918,76 +918,33 @@ Follow these steps to manually verify Test 0 is passing:
 
 **Step 1: Verify Python syntax is valid**
 ```bash
-cd /path/to/triton-ag
-
-# Check MCP server syntax
-python3 -m py_compile claudeCodeKernelBenchServer.py
-echo "MCP server syntax: $?"
-
-# Check comparison tool syntax
-python3 -m py_compile benchmarkCompare.py
-echo "Comparison tool syntax: $?"
-
-# Both should return 0 (no errors)
+python3 -m py_compile claudeCodeKernelBenchServer.py && python3 -m py_compile benchmarkCompare.py && echo "Syntax OK"
 ```
 
 **Step 2: Create mock test data**
 ```bash
-# Create Claude Code test results directory
-mkdir -p /tmp/test_claude_code/1_relu
-mkdir -p /tmp/test_claude_code/2_matmul
+mkdir -p /tmp/test_claude_code/1_relu /tmp/test_claude_code/2_matmul /tmp/test_rl/1_relu /tmp/test_rl/2_matmul
+```
 
-# Create RL test results directory
-mkdir -p /tmp/test_rl/1_relu
-mkdir -p /tmp/test_rl/2_matmul
+```bash
+echo '{"compiled": true, "correctness": true, "runtime": 0.234, "speedup": 1.45, "model": "claude-code"}' > /tmp/test_claude_code/1_relu/iteration_00_eval.json
+```
 
-# Create mock eval results for Claude Code
-cat > /tmp/test_claude_code/1_relu/iteration_00_eval.json << 'EOF'
-{
-  "compiled": true,
-  "correctness": true,
-  "runtime": 0.234,
-  "speedup": 1.45,
-  "model": "claude-code"
-}
-EOF
+```bash
+echo '{"compiled": true, "correctness": true, "runtime": 0.5, "speedup": 1.2, "model": "claude-code"}' > /tmp/test_claude_code/2_matmul/iteration_00_eval.json
+```
 
-cat > /tmp/test_claude_code/2_matmul/iteration_00_eval.json << 'EOF'
-{
-  "compiled": true,
-  "correctness": true,
-  "runtime": 0.5,
-  "speedup": 1.2,
-  "model": "claude-code"
-}
-EOF
+```bash
+echo '{"compiled": true, "correctness": true, "runtime": 0.3, "speedup": 1.3}' > /tmp/test_rl/1_relu/iteration_00_eval.json
+```
 
-# Create mock eval results for RL model
-cat > /tmp/test_rl/1_relu/iteration_00_eval.json << 'EOF'
-{
-  "compiled": true,
-  "correctness": true,
-  "runtime": 0.3,
-  "speedup": 1.3
-}
-EOF
-
-cat > /tmp/test_rl/2_matmul/iteration_00_eval.json << 'EOF'
-{
-  "compiled": true,
-  "correctness": true,
-  "runtime": 0.4,
-  "speedup": 1.5
-}
-EOF
+```bash
+echo '{"compiled": true, "correctness": true, "runtime": 0.4, "speedup": 1.5}' > /tmp/test_rl/2_matmul/iteration_00_eval.json
 ```
 
 **Step 3: Run comparison tool**
 ```bash
-python3 benchmarkCompare.py \
-  --claude-dir /tmp/test_claude_code \
-  --rl-dir /tmp/test_rl \
-  --output /tmp/test_comparison.json
+python3 benchmarkCompare.py --claude-dir /tmp/test_claude_code --rl-dir /tmp/test_rl --output /tmp/test_comparison.json
 ```
 
 **Step 4: Verify output**
@@ -1088,34 +1045,649 @@ rm -rf /tmp/test_claude_code /tmp/test_rl /tmp/test_comparison.json
 - [x] JSON output contains all expected fields
 - [x] Task comparison correctly identifies winner per task
 
-### Test 1: Unit Test MCP Tools
-```bash
-# Start MCP server
-python claudeCodeKernelBenchServer.py
+### Test 1: Unit Test MCP Server
 
-# Test via MCP client or direct HTTP
+This test verifies the MCP server can be loaded and its configuration is valid.
+All dependencies (yaml, mcp, kbEvalClient, workflowClient) are optional - the server gracefully falls back to defaults.
+
+**Step 1: Verify MCP server syntax**
+```bash
+python3 -m py_compile claudeCodeKernelBenchServer.py && echo "MCP server syntax OK"
 ```
 
-### Test 2: Integration Test via Claude Code
-- Add MCP server to Claude Code config
-- Use Claude Code to generate and evaluate a simple kernel (level1/1_relu.py)
-- Verify results saved correctly
+**Step 2: Verify configuration YAML exists (optional)**
+```bash
+ls -la claudeCodeKernelBench.yaml && echo "Config YAML exists"
+```
+Note: If PyYAML is not installed, the server falls back to default config. This is expected outside Docker.
 
-### Test 3: Comparison Test
-- Run Claude Code on level1 tasks
+**Step 3: Verify MCP registration file exists and is valid JSON**
+```bash
+python3 -c "import json; json.load(open('.mcp.json')); print('MCP registration OK')"
+```
+
+**Step 4: Verify MCP server imports work (graceful with warnings)**
+```bash
+python3 -c "from claudeCodeKernelBenchServer import config, get_default_config; print('MCP imports OK'); print('Config loaded with', len(config), 'sections')"
+```
+
+Expected output (with warnings, which is OK):
+```
+WARNING: YAML not available, using default config (install PyYAML to use claudeCodeKernelBench.yaml)
+WARNING: MCP not available - install 'mcp' package for MCP server functionality
+MCP imports OK
+Config loaded with 5 sections
+```
+
+Note: Warnings about missing yaml/mcp packages are expected outside Docker. The server handles this gracefully.
+
+**Pass Criteria:**
+- [x] MCP server syntax is valid (Step 1)
+- [x] MCP registration JSON is valid (Step 3)
+- [x] MCP imports work and config loads (Step 4 - warnings are OK)
+
+### Test 2: Single Task Integration via Claude Code
+
+This test verifies the MCP tools work correctly. It can be run programmatically first, then optionally verified via Claude Code.
+
+**Prerequisites:**
+- MCP server code passes Test 1
+- kernel_bench tasks available at `./kernel_bench/` (configured in `claudeCodeKernelBench.yaml`)
+
+#### Part A: Programmatic Verification (Required)
+
+**Step 1: Verify MCP server is registered**
+```bash
+cat .mcp.json
+```
+
+Expected output:
+```json
+{
+  "mcpServers": {
+    "kernel-bench": {
+      "command": "python3",
+      "args": ["claudeCodeKernelBenchServer.py"],
+      "cwd": "."
+    }
+  }
+}
+```
+
+**Step 2: Run the MCP functions test script**
+```bash
+python3 test_mcp_functions.py
+```
+
+Expected output (ends with "Test 2 Part A: PASS"):
+```
+Config base_dir: ./kernel_bench
+
+=== Test list_kernel_bench_tasks ===
+Found 100 tasks in level1
+First 5 tasks:
+  - 100_HingeLoss
+  - 10_3D_tensor_matrix_multiplication
+  ...
+
+=== Test get_task_details (100_HingeLoss.py) ===
+Task: 100_HingeLoss
+Source length: 566 chars
+First 5 lines:
+  import torch
+  ...
+
+=== Test 2 Part A: PASS ===
+```
+
+#### Part B: Interactive Claude Code Verification (Optional)
+
+**Prerequisites for MCP Server Access:**
+
+The MCP server requires the `mcp` Python package to be installed. Claude Code will automatically start the MCP server based on `.mcp.json` configuration.
+
+**Step 3: Install the MCP package (required for MCP server)**
+
+The `mcp` package requires Python 3.10+. First, check your Python version:
+```bash
+python3 --version
+```
+
+If Python 3.10+, install mcp:
+```bash
+python3 -m ensurepip --upgrade  # Bootstrap pip if needed
+python3 -m pip install mcp
+```
+
+Note: If you see errors about pip not found, run `python3 -m ensurepip --upgrade` first.
+
+**Step 4: Verify MCP server can start**
+```bash
+python3 -c "
+from claudeCodeKernelBenchServer import mcp, MCP_AVAILABLE
+print(f'MCP_AVAILABLE: {MCP_AVAILABLE}')
+if MCP_AVAILABLE:
+    print('SUCCESS: MCP server ready')
+else:
+    print('FAIL: Install mcp package with: python3 -m pip install mcp')
+"
+```
+
+Expected output:
+```
+MCP_AVAILABLE: True
+SUCCESS: MCP server ready
+```
+
+**Step 5: Verify MCP registration file exists**
+```bash
+cat .mcp.json
+```
+
+Expected:
+```json
+{
+  "mcpServers": {
+    "kernel-bench": {
+      "command": "python3",
+      "args": ["claudeCodeKernelBenchServer.py"],
+      "cwd": "."
+    }
+  }
+}
+```
+
+**Step 6: Start a NEW Claude Code session in the project directory**
+
+**IMPORTANT**: You must start Claude Code FROM the project directory (where `.mcp.json` is located).
+Claude Code reads the MCP configuration on startup. If you're already in a Claude Code session, you need to exit and restart.
+
+```bash
+cd /path/to/triton-ag
+claude
+```
+
+**Step 7: Verify MCP server is connected**
+
+In Claude Code, check if the MCP tools are available:
+```
+What MCP tools do you have available? List any tools with "kernel" in the name.
+```
+
+Expected: Claude Code should list `list_kernel_bench_tasks`, `get_task_details`, `eval_kernel`, `save_benchmark_result`, and `get_session_summary`.
+
+**If MCP tools are NOT available**, check:
+1. The `mcp` Python package is installed (`python3 -m pip install mcp`)
+2. `.mcp.json` exists in the project root
+3. You started Claude Code FROM the project directory (not navigated there after)
+4. Run Step 4 to verify MCP server can start
+5. Try exiting Claude Code and restarting
+
+**Step 8: In Claude Code, test the list_kernel_bench_tasks tool**
+```
+Use the list_kernel_bench_tasks MCP tool to list all tasks in level1.
+Show me the first 5 tasks.
+```
+
+Expected: Claude Code calls the MCP tool and displays a list of tasks.
+
+**Step 9: In Claude Code, test the get_task_details tool**
+```
+Use the get_task_details MCP tool to read the task at level1/1_Square_matrix_multiplication_.py
+Show me the PyTorch model code.
+```
+
+Expected: Claude Code displays the source code of the task file.
+
+**Step 10: In Claude Code, generate a kernel (without evaluation)**
+```
+Based on the task you just read, generate a Triton kernel that implements the same operation.
+Do NOT call eval_kernel yet - just show me the generated kernel code.
+```
+
+Expected: Claude Code generates valid Triton/CUDA kernel code.
+
+**Pass Criteria:**
+- [x] MCP server is registered in .mcp.json
+- [x] list_kernel_bench_tasks returns tasks from level1
+- [x] get_task_details returns source code for a task
+- [ ] (Optional) Claude Code interactive test passes
+
+### Test 3: End-to-End Flow with Queue Submission (No kbEvalServer)
+
+This test verifies the complete flow from task enumeration through kernel generation to result storage, without requiring a running kbEvalServer.
+
+**Prerequisites:**
+- MCP server code passes Test 1 and Test 2
+- kernel_bench tasks available at `./kernel_bench/`
+
+#### Part A: Programmatic Verification (Required)
+
+This runs without workflow server and tests file operations.
+
+**Step 1: Run the E2E test script**
+```bash
+python3 test_mcp_e2e.py
+```
+
+Expected output (ends with "Test 3: PASS"):
+```
+Config base_dir: ./kernel_bench
+Output base_dir: /Users/.../.inference/claude_code_output
+
+=== Test: list_kernel_bench_tasks ===
+Found 100 tasks in level1
+First task: 100_HingeLoss
+
+=== Test: get_task_details (100_HingeLoss.py) ===
+Task: 100_HingeLoss
+Source length: 566 chars
+
+=== Test: eval_kernel (queue_only=True) ===
+EXPECTED: Queue error (workflow server not running) - WorkflowClient not available - install workflowClient module
+This is OK for Test 3 without --with-queue flag
+
+=== Test: save_benchmark_result ===
+Saved to: /Users/.../.inference/claude_code_output/test_e2e_flow/100_HingeLoss
+Kernel file syntax: OK
+Eval file structure: OK (model=claude-code)
+
+=== Test: get_session_summary ===
+Session stats:
+  Total tasks: 1
+  Total iterations: 1
+  Success count: 1
+  Avg speedup: 1.45x
+
+=== Test 3: PASS ===
+```
+
+**Step 2: Verify saved files**
+```bash
+ls ~/.inference/claude_code_output/test_e2e_flow/
+```
+
+Expected: `100_HingeLoss/` directory and `summary.json`
+
+**Step 3: Verify kernel file syntax**
+```bash
+python3 -m py_compile ~/.inference/claude_code_output/test_e2e_flow/*/iteration_00_cuda_kernel.py && echo "Kernel syntax OK"
+```
+
+**Step 4: Cleanup**
+```bash
+rm -rf ~/.inference/claude_code_output/test_e2e_flow/
+```
+
+**Pass Criteria (Part A):**
+- [x] Test script runs without errors
+- [x] save_benchmark_result creates valid kernel and eval files
+- [x] get_session_summary returns correct statistics
+- [x] Kernel file passes Python syntax validation
+
+#### Part B: Interactive Claude Code Verification with Workflow Server (Optional)
+
+This tests the full flow including queue submission. Requires workflow server.
+
+**Prerequisites:**
+
+**Prerequisite 1: Python 3.10+ with pip**
+
+Verify:
+```bash
+python3 --version
+```
+Expected: `Python 3.10.x` or higher
+
+If Python < 3.10, you need to install a newer Python version.
+
+**Prerequisite 2: Required packages installed**
+
+Verify:
+```bash
+python3 -c "import yaml, loguru, fastapi, uvicorn, httpx; print('All packages OK')"
+```
+Expected: `All packages OK`
+
+Fix (if import fails):
+```bash
+python3 -m ensurepip --upgrade  # Bootstrap pip if needed
+python3 -m pip install pyyaml loguru fastapi uvicorn httpx
+```
+
+**Prerequisite 3: Workflow config file exists**
+
+Verify:
+```bash
+cat workflow/claude_code.yaml
+```
+Expected: YAML file with `queues` and `global` sections
+
+Fix (if file not found):
+```bash
+cat > workflow/claude_code.yaml << 'EOF'
+# Claude Code Kernel Bench workflow configuration
+queues:
+  - name: kbEval.pending
+
+global:
+  prefix_tag: "claude_code"
+  start_epoch: 0
+  start_block: 0
+  end_epoch: 1
+  end_block: 1
+EOF
+```
+
+**Prerequisite 4: workflow.yaml has claude_code registry entry**
+
+Verify:
+```bash
+grep -A3 "claude_code:" workflow.yaml | head -4
+```
+Expected:
+```
+  claude_code:
+    short_name: "cc"
+    config_path: "workflow/claude_code.yaml"
+    data_dir: "~/.workflow"
+```
+
+Fix (if not found): Add the following to `workflow.yaml` under the `registry:` section:
+```yaml
+  claude_code:
+    short_name: "cc"
+    config_path: "workflow/claude_code.yaml"
+    data_dir: "~/.workflow"
+```
+
+**Prerequisite 5: workflow.yaml has local provider**
+
+Verify:
+```bash
+grep -A4 "^  local:" workflow.yaml
+```
+Expected:
+```
+  local:
+    host: "localhost"
+    port: 8488
+    retries: 3
+    timeout: 60
+```
+
+Fix (if not found): Add the following to `workflow.yaml` under the `providers:` section:
+```yaml
+  local:
+    host: "localhost"
+    port: 8488
+    retries: 3
+    timeout: 60
+```
+
+**Prerequisite 6: Verify workflowServer can import**
+
+Verify:
+```bash
+python3 -c "import workflowServer; print('workflowServer import OK')"
+```
+Expected: `workflowServer import OK`
+
+If import fails, check the error message and install missing dependencies.
+
+---
+
+**Step 1: Start workflow server (in a separate terminal)**
+```bash
+cd /path/to/triton-ag
+python3 workflowServer.py --host :: --port 8488
+```
+
+Wait for the log message: `FastAPI server listening on: [:::8488]`
+
+**Step 2: Verify workflow server is running**
+```bash
+curl -s http://localhost:8488/queue/list/claude_code
+```
+
+Expected: `["queue.kbEval.pending"]`
+
+**Step 3: Run E2E test with queue verification**
+```bash
+python3 test_mcp_e2e.py --with-queue
+```
+
+Expected output:
+```
+Config base_dir: ./kernel_bench
+Output base_dir: /Users/<username>/.inference/claude_code_output
+
+=== Test: list_kernel_bench_tasks ===
+... | INFO     | claudeCodeKernelBenchServer:list_kernel_bench_tasks:... | [kernel-bench] Listed 100 tasks from levels: ['level1']
+Found 100 tasks in level1
+First task: 100_HingeLoss
+
+=== Test: get_task_details (100_HingeLoss.py) ===
+... | INFO     | claudeCodeKernelBenchServer:get_task_details:... | [kernel-bench] Read task: 100_HingeLoss.py (566 chars)
+Task: 100_HingeLoss
+Source length: 566 chars
+
+=== Test: eval_kernel (queue_only=True) ===
+... | INFO     | workflowClient:__init__:... | 🔍 [WorkflowClient] Initialized: [localhost:8488]
+HTTP Request: POST http://localhost:8488/queue/enqueue/claude_code/kbEval.pending "HTTP/1.1 200 OK"
+... | INFO     | workflowClient:enqueue:... | 🔍 [WorkflowClient] [claude_code] Enqueued to [kbEval.pending], content: [...]
+... | INFO     | claudeCodeKernelBenchServer:eval_kernel:... | [kernel-bench] Queued 100_HingeLoss iteration 0 to kbEval.pending
+SUCCESS: Queued to kbEval.pending
+Work item submitted_at: 2026-01-23T...
+
+=== Test: save_benchmark_result ===
+... | INFO     | claudeCodeKernelBenchServer:save_benchmark_result:... | [kernel-bench] Saved result: ...
+Saved to: /Users/<username>/.inference/claude_code_output/test_e2e_flow/100_HingeLoss
+Kernel file syntax: OK
+Eval file structure: OK (model=claude-code)
+
+=== Test: get_session_summary ===
+Session stats:
+  Total tasks: 1
+  Total iterations: 1
+  Success count: 1
+  Avg speedup: 1.45x
+
+=== Test 3: PASS ===
+```
+
+**Step 4: Verify queue submission**
+```bash
+curl -s http://localhost:8488/queue/qsize/claude_code/kbEval.pending
+```
+
+Expected: `1` (or greater)
+
+**Step 5: Peek at queue to verify work item structure**
+```bash
+curl -s http://localhost:8488/queue/peek/claude_code/kbEval.pending | python3 -m json.tool
+```
+
+Expected structure:
+```json
+{
+  "task_path": "level1/100_HingeLoss.py",
+  "kernel_code": "\nimport torch\nimport triton\nimport triton.language as tl...",
+  "session_id": "test_e2e_flow",
+  "iteration": 0,
+  "submitted_at": "2026-01-23T...",
+  "status": "pending"
+}
+```
+
+**Step 6: Cleanup**
+```bash
+rm -rf ~/.inference/claude_code_output/test_e2e_flow/
+```
+
+**Pass Criteria (Part B):**
+- [ ] Workflow server starts and shows `claude_code` registry loaded
+- [ ] Queue list returns `["queue.kbEval.pending"]`
+- [ ] Queue submission succeeds (test_mcp_e2e.py --with-queue passes)
+- [ ] Queue contains work item with correct structure
+
+#### Part C: Full E2E with Claude-Generated Kernels (Batch)
+
+This tests the complete workflow where Claude Code **actually generates** Triton kernel code for multiple tasks. Uses queue submission (same as Part B) - no kbEvalServer required.
+
+**Key Difference from Part B:**
+- Part B: Uses HARDCODED sample kernel code (single task)
+- Part C: Claude Code GENERATES actual kernel code (batch of 3 tasks)
+
+**Prerequisites:**
+- All Part A prerequisites (MCP server, kernel_bench tasks)
+- Workflow server running: `python workflowServer.py --host :: --port 8488`
+
+---
+
+### Simple Command (Copy-Paste This to Claude Code)
+
+```
+Run 3 level1 kernel bench tests. For each task:
+1. Read the PyTorch model
+2. Generate an optimized Triton kernel
+3. Submit via eval_kernel with queue_only=True
+4. Save result via save_benchmark_result
+
+Use session_id="partc_batch_test". Pick any 3 tasks from level1.
+```
+
+---
+
+### Verification Steps
+
+After Claude Code completes, verify these 3 things:
+
+**1. Verify Generated Triton Code**
+
+Location: `~/.inference/claude_code_output/partc_batch_test/*/iteration_00_cuda_kernel.py`
+
+```bash
+# List generated kernels
+ls ~/.inference/claude_code_output/partc_batch_test/
+
+# View kernel code for each task
+cat ~/.inference/claude_code_output/partc_batch_test/*/iteration_00_cuda_kernel.py
+
+# Verify syntax
+python3 -m py_compile ~/.inference/claude_code_output/partc_batch_test/*/iteration_00_cuda_kernel.py && echo "All kernels: Syntax OK"
+```
+
+**2. Verify Queue Submission (inferenceEval)**
+
+```bash
+# Check queue size (should have 3 items)
+curl -s http://localhost:8488/queue/qsize/claude_code/kbEval.pending
+
+# View queue contents
+curl -s http://localhost:8488/queue/peek/claude_code/kbEval.pending | jq '.task_path'
+```
+
+**3. Verify Saved Eval Files**
+
+Location: `~/.inference/claude_code_output/partc_batch_test/*/iteration_00_eval.json`
+
+```bash
+# List eval files
+ls ~/.inference/claude_code_output/partc_batch_test/*/iteration_00_eval.json
+
+# Check structure
+cat ~/.inference/claude_code_output/partc_batch_test/*/iteration_00_eval.json | jq '.status'
+# Expected: "queued_for_eval" for each
+```
+
+---
+
+### Pass Criteria (Part C)
+
+| Criterion | Verification Command | Expected |
+|-----------|---------------------|----------|
+| Claude generates 3 kernels | `ls ~/.inference/claude_code_output/partc_batch_test/ \| wc -l` | 3 |
+| All kernels valid Python | `python3 -m py_compile ~/.inference/.../*.py` | No errors |
+| Queue has 3 items | `curl .../qsize/claude_code/kbEval.pending` | 3 |
+| Eval files saved | `ls ~/.inference/.../*/iteration_00_eval.json \| wc -l` | 3 |
+
+---
+
+### Demo Mode (Automated Testing)
+
+For CI/automated testing without interactive Claude:
+```bash
+# Run demo with 3 tasks
+python3 test_mcp_e2e_claude.py --task level1/1_Square.py --demo
+python3 test_mcp_e2e_claude.py --task level1/2_Tanh.py --demo
+python3 test_mcp_e2e_claude.py --task level1/3_ReLU.py --demo
+```
+
+**Demo Mode Status:** PASS (2026-01-23)
+
+**Part C Full Test Status:** PASS (2026-01-23)
+- Session: `partc_claude_generated`
+- Tasks: 3 (Square, Standard, Batched matrix multiplication)
+- Kernels generated: 3 (all syntax OK)
+- Eval files: 3 (all queued_for_eval)
+
+### Test 4: Full End-to-End with kbEvalServer
+
+This test runs the complete flow with actual kernel compilation and benchmarking.
+
+**Prerequisites:**
+- MCP server registered in Claude Code
+- Workflow server running
+- kbEvalServer running on GPU
+
+**Step 1: Start kbEval server**
+```bash
+python kbEvalServer.py --local_host --port 5676 --device 0
+```
+
+**Step 2: In Claude Code, run kernel optimization**
+```
+Optimize the kernel in kernel_bench/level1/1_relu.py
+
+Use session_id="test_full_e2e" and iterate until you get a correct result with speedup > 1.0x
+```
+
+**Step 3: Verify eval results**
+```bash
+cat ~/.inference/claude_code_output/test_full_e2e/1_relu/iteration_00_eval.json
+```
+
+Expected: `compiled: true`, `correctness: true`, `speedup: > 0`
+
+**Pass Criteria:**
+- [ ] Kernel compiles successfully on GPU
+- [ ] Kernel produces correct output
+- [ ] Speedup is measured and recorded
+
+### Test 5: Comparison Test
+- Run Claude Code on multiple level1 tasks
 - Compare against existing RL output
 - Generate comparison report
 
-### Test 4: End-to-End Workflow
 ```bash
-# Ensure kbEval server is running
-python kbEvalServer.py --local_host --port 5676 --device 0
+python3 benchmarkCompare.py --claude-dir ~/.inference/claude_code_output/my_session --rl-dir ~/.inference/output/my_rl_run --output comparison.json
+```
 
-# Run Claude Code session on benchmark tasks
-# (Claude Code will use MCP tools)
+### Test 6: Batch Benchmark Session
 
-# Generate comparison
-python benchmarkCompare.py --claude-dir ... --rl-dir ...
+Run Claude Code on all level1 tasks to generate a full benchmark session.
+
+**In Claude Code:**
+```
+Run a benchmark session on all kernel_bench/level1/ tasks.
+Use session_id="claude_level1_benchmark".
+For each task, iterate up to 3 times to get a correct result.
+```
+
+**Generate comparison report:**
+```bash
+python3 benchmarkCompare.py --claude-dir ~/.inference/claude_code_output/claude_level1_benchmark --rl-dir ~/.inference/output/my_rl_run --output comparison.json
 ```
 
 ## Configuration
