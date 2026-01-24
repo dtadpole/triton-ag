@@ -912,6 +912,182 @@ async def eval_kernel(
         return await kbeval_client.kb_eval(...)
 ```
 
+### Test 0: Manual Verification Steps
+
+Follow these steps to manually verify Test 0 is passing:
+
+**Step 1: Verify Python syntax is valid**
+```bash
+cd /path/to/triton-ag
+
+# Check MCP server syntax
+python3 -m py_compile claudeCodeKernelBenchServer.py
+echo "MCP server syntax: $?"
+
+# Check comparison tool syntax
+python3 -m py_compile benchmarkCompare.py
+echo "Comparison tool syntax: $?"
+
+# Both should return 0 (no errors)
+```
+
+**Step 2: Create mock test data**
+```bash
+# Create Claude Code test results directory
+mkdir -p /tmp/test_claude_code/1_relu
+mkdir -p /tmp/test_claude_code/2_matmul
+
+# Create RL test results directory
+mkdir -p /tmp/test_rl/1_relu
+mkdir -p /tmp/test_rl/2_matmul
+
+# Create mock eval results for Claude Code
+cat > /tmp/test_claude_code/1_relu/iteration_00_eval.json << 'EOF'
+{
+  "compiled": true,
+  "correctness": true,
+  "runtime": 0.234,
+  "speedup": 1.45,
+  "model": "claude-code"
+}
+EOF
+
+cat > /tmp/test_claude_code/2_matmul/iteration_00_eval.json << 'EOF'
+{
+  "compiled": true,
+  "correctness": true,
+  "runtime": 0.5,
+  "speedup": 1.2,
+  "model": "claude-code"
+}
+EOF
+
+# Create mock eval results for RL model
+cat > /tmp/test_rl/1_relu/iteration_00_eval.json << 'EOF'
+{
+  "compiled": true,
+  "correctness": true,
+  "runtime": 0.3,
+  "speedup": 1.3
+}
+EOF
+
+cat > /tmp/test_rl/2_matmul/iteration_00_eval.json << 'EOF'
+{
+  "compiled": true,
+  "correctness": true,
+  "runtime": 0.4,
+  "speedup": 1.5
+}
+EOF
+```
+
+**Step 3: Run comparison tool**
+```bash
+python3 benchmarkCompare.py \
+  --claude-dir /tmp/test_claude_code \
+  --rl-dir /tmp/test_rl \
+  --output /tmp/test_comparison.json
+```
+
+**Step 4: Verify output**
+
+Expected console output:
+```
+============================================================
+KERNEL BENCHMARK COMPARISON REPORT
+============================================================
+
+--- Aggregate Metrics ---
+
+Metric                             Claude Code        RL Model
+------------------------------------------------------------
+Total Tasks                                  2               2
+Compiled Rate                          100.0%         100.0%
+Success Rate                           100.0%         100.0%
+Avg Speedup (correct only)               1.32x           1.40x
+Max Speedup                              1.45x           1.50x
+Avg Iterations to Success                  1.0             1.0
+
+--- Head-to-Head Summary ---
+
+Tasks compared: 2
+Claude Code wins: 1 (50.0%)
+RL Model wins:    1 (50.0%)
+Ties:             0
+
+--- Notable Results ---
+
+RL Model significantly better (>0.2x speedup advantage):
+  2_matmul: 1.50x vs 1.20x (+0.30x)
+
+============================================================
+```
+
+**Step 5: Verify JSON output**
+```bash
+cat /tmp/test_comparison.json
+```
+
+Expected JSON structure:
+```json
+{
+  "claude_metrics": {
+    "total_tasks": 2,
+    "compiled_rate": 1.0,
+    "success_rate": 1.0,
+    "avg_speedup": 1.325,
+    "max_speedup": 1.45,
+    "avg_iterations_to_success": 1.0
+  },
+  "rl_metrics": {
+    "total_tasks": 2,
+    "compiled_rate": 1.0,
+    "success_rate": 1.0,
+    "avg_speedup": 1.4,
+    "max_speedup": 1.5,
+    "avg_iterations_to_success": 1.0
+  },
+  "task_comparison": {
+    "1_relu": {
+      "claude_speedup": 1.45,
+      "claude_correct": true,
+      "rl_speedup": 1.3,
+      "rl_correct": true,
+      "winner": "claude",
+      "speedup_diff": 0.15
+    },
+    "2_matmul": {
+      "claude_speedup": 1.2,
+      "claude_correct": true,
+      "rl_speedup": 1.5,
+      "rl_correct": true,
+      "winner": "rl",
+      "speedup_diff": -0.3
+    }
+  },
+  "summary": {
+    "total_tasks_compared": 2,
+    "claude_wins": 1,
+    "rl_wins": 1,
+    "ties": 0,
+    "claude_win_rate": 0.5
+  }
+}
+```
+
+**Step 6: Cleanup (optional)**
+```bash
+rm -rf /tmp/test_claude_code /tmp/test_rl /tmp/test_comparison.json
+```
+
+**Pass Criteria:**
+- [x] Both Python files pass syntax validation (exit code 0)
+- [x] Comparison tool runs without errors
+- [x] Console output shows aggregate metrics for both systems
+- [x] JSON output contains all expected fields
+- [x] Task comparison correctly identifies winner per task
+
 ### Test 1: Unit Test MCP Tools
 ```bash
 # Start MCP server
