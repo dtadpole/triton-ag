@@ -538,6 +538,22 @@ ssh devgpu001.example.com "tmux kill-session -t kbEval"
 ssh devgpu001.example.com "tmux new-session -d -s kbEval 'cd /data/users/\$USER/triton-ag && source .venv/bin/activate && CUDA_VISIBLE_DEVICES=1 python3 kbEvalServer.py --local_host --port 5676 --device 0'"
 ```
 
+### Kernel Compilation Timeout
+
+If you see errors like:
+```
+kbEvalCli.py could not generate the result file in time
+```
+
+This usually means Triton kernel compilation is taking longer than the timeout (default: 180 seconds). The first compilation of a new kernel can take 1-2 minutes. Large kernels with big tensors (e.g., >1GB inputs) may need even more time.
+
+**Increase timeout** when starting the server:
+```bash
+CUDA_VISIBLE_DEVICES=0 python3 kbEvalServer.py --local_host --port 5676 --device 0 --max_critical_time 240
+```
+
+**Note:** Subsequent runs with the same kernel will be faster due to Triton's compilation cache.
+
 ### MCP Tools Not Available in Claude Code
 
 **Check MCP server syntax:**

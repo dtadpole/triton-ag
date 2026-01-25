@@ -849,7 +849,7 @@ if __name__ == "__main__":
     parser.add_argument("--workers", type=int, default=100) #
     parser.add_argument("--device", type=str, default="4")
     parser.add_argument("--max_timeout_seconds", type=int, default=240)
-    parser.add_argument("--max_critical_time", type=int, default=60, help="Maximum time in seconds for critical section (inside the lock)")
+    parser.add_argument("--max_critical_time", type=int, default=180, help="Maximum time in seconds for critical section (inside the lock)")
     args = parser.parse_args()
 
     asyncio.run(main(args))
