@@ -5,11 +5,13 @@
 1. [RL Flow - How It Works](#1-rl-flow---how-it-works)
 2. [Envisioned User Flow](#2-envisioned-user-flow)
 3. [Architecture](#3-architecture)
-   - 3.1 [Direct Sync Mode](#31-direct-sync-mode)
-   - 3.2 [MCP Server Tools](#32-mcp-server-tools)
-   - 3.3 [Batch Processing](#33-batch-processing)
-   - 3.4 [Multi-GPU and Remote Access](#34-multi-gpu-and-remote-access)
-   - 3.5 [Configuration](#35-configuration)
+   - 3.1 [System Overview](#31-system-overview)
+   - 3.2 [Multi-Agent Execution Flow](#32-multi-agent-execution-flow)
+   - 3.3 [Direct Sync Mode](#33-direct-sync-mode)
+   - 3.4 [MCP Server Tools](#34-mcp-server-tools)
+   - 3.5 [Batch Processing](#35-batch-processing)
+   - 3.6 [Multi-GPU and Remote Access](#36-multi-gpu-and-remote-access)
+   - 3.7 [Configuration](#37-configuration)
 4. [Test-Driven Development Plan](#4-test-driven-development-plan)
 
 ---
@@ -314,17 +316,134 @@ When multiple GPUs are available, Claude Code can spawn multiple agents for para
 
 ## 3. Architecture
 
-### 3.1 Direct Sync Mode
+### 3.1 System Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           LOCAL MACHINE (macOS)                                  │
+│                                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐    │
+│  │                         Claude Code Session                              │    │
+│  │                                                                          │    │
+│  │   User Prompt: "Optimize kernel_bench/level1/*.py using 4 agents"       │    │
+│  │                              │                                           │    │
+│  │                              ▼                                           │    │
+│  │   ┌──────────────────────────────────────────────────────────────┐      │    │
+│  │   │  Main Agent                                                   │      │    │
+│  │   │  • Lists tasks via list_kernel_bench_tasks()                  │      │    │
+│  │   │  • Partitions: Agent1=[1-12], Agent2=[13-25], ...             │      │    │
+│  │   │  • Spawns parallel agents via Task tool                       │      │    │
+│  │   └──────────────────────────────────────────────────────────────┘      │    │
+│  │                              │                                           │    │
+│  │           ┌──────────────────┼──────────────────┐                       │    │
+│  │           ▼                  ▼                  ▼                       │    │
+│  │   ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                │    │
+│  │   │   Agent 1   │    │   Agent 2   │    │   Agent 3   │  ...           │    │
+│  │   │ tasks 1-12  │    │ tasks 13-25 │    │ tasks 26-37 │                │    │
+│  │   └──────┬──────┘    └──────┬──────┘    └──────┬──────┘                │    │
+│  │          │                  │                  │                        │    │
+│  └──────────┼──────────────────┼──────────────────┼────────────────────────┘    │
+│             │                  │                  │                              │
+│  ┌──────────▼──────────────────▼──────────────────▼────────────────────────┐    │
+│  │                    MCP Server (claudeCodeKernelBenchServer.py)           │    │
+│  │                                                                          │    │
+│  │  ┌────────────────────────────────────────────────────────────────┐     │    │
+│  │  │  Adaptive Semaphore: asyncio.Semaphore(num_devices)            │     │    │
+│  │  │  • Queries /info endpoint on startup → gets num_devices=2      │     │    │
+│  │  │  • Limits concurrent eval_kernel() calls to 2                  │     │    │
+│  │  └────────────────────────────────────────────────────────────────┘     │    │
+│  │                              │                                           │    │
+│  │              eval_kernel() calls queue at semaphore                      │    │
+│  │              (only 2 proceed at a time)                                  │    │
+│  │                              │                                           │    │
+│  │  ┌────────────────────────────────────────────────────────────────┐     │    │
+│  │  │  KbEvalClient                                                   │     │    │
+│  │  │  • Reads kbEval.yaml for provider config                        │     │    │
+│  │  │  • Makes HTTP POST to kbEvalServer                              │     │    │
+│  │  │  • Handles retries with exponential backoff                     │     │    │
+│  │  └────────────────────────────────────────────────────────────────┘     │    │
+│  │                              │                                           │    │
+│  └──────────────────────────────┼───────────────────────────────────────────┘    │
+│                                 │                                                │
+│                                 │ HTTP POST /kb_eval                             │
+│                                 │ (via SSH tunnel localhost:5676)                │
+└─────────────────────────────────┼────────────────────────────────────────────────┘
+                                  │
+                    ══════════════╪══════════════  SSH Tunnel  ═══════════════
+                                  │
+┌─────────────────────────────────┼────────────────────────────────────────────────┐
+│                                 │              REMOTE GPU SERVER                  │
+│                                 ▼                                                │
+│  ┌──────────────────────────────────────────────────────────────────────────┐   │
+│  │                    kbEvalServer.py (FastAPI on :5676)                     │   │
+│  │                                                                           │   │
+│  │  POST /kb_eval                                                            │   │
+│  │    │                                                                      │   │
+│  │    ├─► device = random.choice(DEVICES)  # e.g., [0, 1] → picks GPU 0 or 1│   │
+│  │    │                                                                      │   │
+│  │    ├─► Spawn subprocess with CUDA_VISIBLE_DEVICES={device}               │   │
+│  │    │                                                                      │   │
+│  │    └─► subprocess:                                                        │   │
+│  │          • torch.utils.cpp_extension.load_inline() - compile kernel      │   │
+│  │          • Run correctness check vs reference                             │   │
+│  │          • Benchmark timing (warmup + timed runs)                         │   │
+│  │          • Return: {compiled, correctness, runtime, speedup}             │   │
+│  │                                                                           │   │
+│  │  GET /info                                                                │   │
+│  │    └─► Returns: {num_devices: 2, devices: [0, 1], pending_requests: N}   │   │
+│  │                                                                           │   │
+│  └──────────────────────────────────────────────────────────────────────────┘   │
+│                                 │                                                │
+│              ┌──────────────────┴──────────────────┐                            │
+│              ▼                                     ▼                            │
+│     ┌─────────────────┐                   ┌─────────────────┐                   │
+│     │     GPU 0       │                   │     GPU 1       │                   │
+│     │  (CUDA Device)  │                   │  (CUDA Device)  │                   │
+│     │                 │                   │                 │                   │
+│     │  Compiling...   │                   │  Compiling...   │                   │
+│     │  Benchmarking   │                   │  Benchmarking   │                   │
+│     └─────────────────┘                   └─────────────────┘                   │
+│                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 3.2 Multi-Agent Execution Flow
+
+**Timeline with 4 Agents → 2 GPUs:**
+
+```
+Time    Agent 1         Agent 2         Agent 3         Agent 4         Semaphore    GPUs
+────    ───────         ───────         ───────         ───────         ─────────    ────
+ 0s     eval(task1) ──► ACQUIRED ─────────────────────────────────────► [1/2]        GPU0: task1
+        eval(task13)──► ACQUIRED ─────────────────────────────────────► [2/2]        GPU1: task13
+        eval(task25)──► WAITING... (blocked)
+        eval(task37)──► WAITING... (blocked)
+
+25s     ◄── result1     (waiting)       (waiting)       (waiting)                    GPU0: done
+        eval(task2) ──► ACQUIRED ─────────────────────────────────────► [2/2]        GPU0: task2
+                        (waiting)       ACQUIRED ─────────────────────► [2/2]
+                                        eval(task25)                                  GPU1: task13 (still)
+
+30s                     ◄── result13                    (waiting)                    GPU1: done
+                        eval(task14)──► ACQUIRED ─────────────────────► [2/2]        GPU1: task14
+                                                        ACQUIRED ────► [2/2]
+                                                        eval(task37)                  GPU0: task2 (still)
+...
+```
+
+**Key Behaviors:**
+
+| Component | Behavior |
+|-----------|----------|
+| **Main Agent** | Partitions tasks, spawns sub-agents via Task tool, waits for completion |
+| **Sub-Agents** | Process assigned tasks sequentially; each eval_kernel() blocks until result |
+| **MCP Semaphore** | Limits concurrent HTTP calls to `num_devices` (queried from /info) |
+| **kbEvalServer** | Randomly assigns each request to a GPU via `random.choice(devices)` |
+| **GPU** | CUDA driver queues work; only one kernel compiles/runs at a time per GPU |
+
+### 3.3 Direct Sync Mode
 
 **Approach**: Direct sync calls to kbEvalServer, matching the RL architecture.
-
-```
-Claude Code → MCP eval_kernel() → KbEvalClient → HTTP → kbEvalServer
-                                                           ↓
-                                         Wait for GPU, compile, benchmark
-                                                           ↓
-                                         Return result (10-60s later)
-```
 
 **Rationale:**
 1. **Matches proven RL pattern** - direct HTTP calls work reliably
@@ -333,7 +452,7 @@ Claude Code → MCP eval_kernel() → KbEvalClient → HTTP → kbEvalServer
 
 **No queue mode needed** - Claude Code naturally processes tasks sequentially; parallel agents (Task tool) provide concurrency when desired.
 
-### 3.2 MCP Server Tools
+### 3.4 MCP Server Tools
 
 The MCP server (`claudeCodeKernelBenchServer.py`) provides 5 tools:
 
@@ -345,7 +464,7 @@ The MCP server (`claudeCodeKernelBenchServer.py`) provides 5 tools:
 | `save_benchmark_result` | Save kernel code and eval results to disk |
 | `get_session_summary` | Get statistics for a benchmark session |
 
-### 3.3 Batch Processing
+### 3.5 Batch Processing
 
 **Option A: Sequential Processing**
 
@@ -377,7 +496,7 @@ Claude Code (main)
 - CUDA serialization handles contention (GPU queues requests)
 - Agent count recommendation: 1-3 for single GPU, 5-10 for multiple GPUs
 
-### 3.4 Multi-GPU and Remote Access
+### 3.6 Multi-GPU and Remote Access
 
 > **See [KERNEL_BENCH_SETUP.md](./KERNEL_BENCH_SETUP.md)** for complete setup instructions.
 
@@ -392,7 +511,7 @@ Claude Code (main)
 - `kbEvalClient.py`: `get_info()` method queries device count
 - `claudeCodeKernelBenchServer.py`: `get_eval_semaphore()` creates semaphore matching GPU count
 
-### 3.5 Configuration
+### 3.7 Configuration
 
 **claudeCodeKernelBench.yaml:**
 
