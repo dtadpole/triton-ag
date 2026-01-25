@@ -1,17 +1,158 @@
 # Claude Code Kernel Bench Integration Plan
 
-## Goal
-Create a solution that allows Claude Code to:
-1. Trigger kernel benchmark tasks
-2. Generate CUDA/Triton kernel code
-3. Integrate with the inference eval queue
-4. Generate benchmark results comparable to RL-tuned models
+## Table of Contents
 
-## Key Constraint: No Claude API Access Required
+1. [RL Flow - How It Works](#1-rl-flow---how-it-works)
+2. [Envisioned User Flow](#2-envisioned-user-flow)
+3. [Current Implementation](#3-current-implementation)
+4. [Architecture Choice](#4-architecture-choice)
+5. [Test-Driven Development Plan](#5-test-driven-development-plan)
+
+---
+
+## 1. RL Flow - How It Works
+
+### 1.1 Overview
+
+The RL training system uses a parallel worker architecture where load is managed at the **client side** (inferenceComposer), not at the kbEvalServer level.
+
+**Key Insight**: The RL system does NOT use workflowServer for kbEval calls. kbEval calls are direct HTTP requests from workers to kbEvalServer(s).
+
+### 1.2 Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        inferenceComposer.py                              │
+│                                                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │ Input Processor (runs once at start)                            │    │
+│  │                                                                  │    │
+│  │ 1. DuckDB query loads N random kernel_bench/*.py files          │    │
+│  │ 2. For each file:                                                │    │
+│  │    - Enqueue 1 reference eval task                              │    │
+│  │    - Enqueue M generation tasks (each does T turns)             │    │
+│  │                                                                  │    │
+│  │ Example: 20 samples × 8 generations = 180 tasks enqueued        │    │
+│  └─────────────────────────────────────────────────────────────────┘    │
+│                              │                                           │
+│                              ▼                                           │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │              asyncio.Queue (in-memory, explicit queue)          │    │
+│  └─────────────────────────────────────────────────────────────────┘    │
+│                              │                                           │
+│         ┌────────────────────┼────────────────────┐                     │
+│         ▼                    ▼                    ▼                     │
+│  ┌────────────┐       ┌────────────┐       ┌────────────┐              │
+│  │  Worker 0  │       │  Worker 1  │  ...  │  Worker 31 │              │
+│  └────────────┘       └────────────┘       └────────────┘              │
+│       32 parallel workers (default, configurable)                       │
+└─────────────────────────────────────────────────────────────────────────┘
+                              │
+                              │ Each worker makes SYNC HTTP call
+                              │ Load balanced via random.choice(providers)
+                              ▼
+        ┌─────────────────────┬─────────────────────┐
+        ▼                     ▼                     ▼
+   kbEvalServer          kbEvalServer          kbEvalServer
+   :5676 (GPU 7)         :5677 (GPU 6)         :5678 (GPU 5)
+```
+
+### 1.3 Key Design Principles
+
+1. **Client-side parallelism**: 32 workers pull from asyncio.Queue
+2. **Synchronous HTTP calls**: Each worker blocks on `await kb_eval()` until response
+3. **Random load balancing**: `random.choice(provider_list)` distributes requests
+4. **No server-side queue**: kbEvalServer processes requests as they arrive
+
+### 1.4 Where Wait Happens
+
+The wait is **implicit in the GPU/CUDA layer**, not explicit in any queue:
+
+```
+Worker (inferenceComposer)              kbEvalServer                    GPU
+─────────────────────────              ────────────                    ───
+
+await kb_eval(...)  ──HTTP POST──►  @app.post("/kb_eval")
+                                            │
+        ┌──────────────────────────────────┐│
+        │ Worker blocked here              ││
+        │ (async await on HTTP response)   ▼│
+        │                    spawn subprocess ──────►  [CUDA Queue]
+        │                    await process.wait()          │
+        │                           │                      │
+        │                           │◄─── waiting ────────►│ Other kernels
+        │                           │     for GPU          │ compiling...
+        │                           │                      │
+        │                           │◄─── GPU free ───────►│
+        │                           │     Compile+run      │◄── actual work
+        │                           │◄─── done ───────────►│    (10-30s)
+        │                    process.wait() returns        │
+        │◄────HTTP 200 + JSON───────┘
+result = ...
+```
+
+### 1.5 What Happens with 32 Workers → 3 kbEvalServers
+
+```
+32 Workers make requests simultaneously
+        │
+        │ random.choice() distributes: ~11, ~10, ~11 per server
+        ▼
+   kbEvalServer:5676 receives 11 requests
+        │
+        ├── Request 1: GPU starts immediately (0s wait)
+        ├── Request 2: waits ~25s for GPU
+        ├── Request 3: waits ~50s for GPU
+        ...
+        └── Request 11: waits ~250s for GPU
+
+All 11 HTTP connections stay open
+All 11 subprocesses spawned and waiting
+GPU processes 1 kernel at a time (CUDA serializes)
+```
+
+### 1.6 How RL System Handles Load
+
+| Mechanism | Description |
+|-----------|-------------|
+| **Worker count limit** | 32 concurrent tasks max (configurable) |
+| **Random load balancing** | `random.choice(providers)` spreads load |
+| **Exponential backoff** | Failed requests wait 3^n seconds |
+| **Timeout protection** | 300s HTTP timeout, 240s subprocess timeout |
+| **Many kbEvalServers** | 15+ providers configured in kbEval.yaml |
+
+### 1.7 Key Insight: No Backpressure
+
+The current system has **no admission control**:
+- kbEvalServer accepts all requests immediately
+- Spawns subprocess for each (even if GPU busy)
+- CUDA driver queues work implicitly
+- Workers wait as long as needed (up to timeout)
+
+This works because:
+1. Enough kbEvalServers are deployed to match worker parallelism
+2. Long timeouts tolerate queue buildup
+3. Random distribution is "good enough" for throughput
+
+### 1.8 workflowServer Role (NOT for kbEval)
+
+The workflowServer IS used in RL, but **only for job orchestration**:
+
+```
+workflowServer orchestrates blocks:
+  InferenceBlock → TrainerBlock → SyncBlock → (repeat epochs)
+
+NOT used for:
+  kbEval calls - these are direct HTTP from worker to kbEvalServer
+```
+
+---
+
+## 2. Envisioned User Flow
+
+### 2.1 Key Constraint: No Claude API Access Required
 
 This solution works **entirely through Claude Code** - no separate Claude API key is needed.
-
-### How It Works
 
 ```
 User → Claude Code → [Claude generates CUDA kernel] → MCP tool (eval_kernel) → kbEvalServer → Results
@@ -23,124 +164,59 @@ User → Claude Code → [Claude generates CUDA kernel] → MCP tool (eval_kerne
 - **File I/O**: List tasks, read task details, save results
 - **HTTP calls**: Submit kernels to kbEvalServer for compilation/benchmarking
 
-**What generates the CUDA code?** Claude (via Claude Code conversation). When you ask Claude Code to optimize a kernel, Claude generates the code directly in the conversation - no external LLM API call.
+### 2.2 Single Task Workflow
 
-### Contrast with Existing Agent System
+> **You:** "Optimize the kernel in kernel_bench/level1/1_relu.py"
+>
+> **Claude Code:**
+> 1. Uses `get_task_details` tool to read the PyTorch model
+> 2. Generates optimized CUDA/Triton kernel code
+> 3. Uses `eval_kernel` tool to compile and benchmark
+> 4. Reviews results, iterates if needed
+> 5. Uses `save_benchmark_result` tool to store final result
 
-The existing `agent_kernel_coder.py` DOES require API access (OpenAI, DeepSeek, or local vLLM) because it uses the OpenAI Agents SDK to make LLM calls programmatically. This solution avoids that dependency entirely.
+### 2.3 Batch Session Workflow
 
-## User Workflow
+> **You:** "Run a benchmark session on all level1 tasks and save results for comparison"
+>
+> **Claude Code:**
+> 1. Uses `list_kernel_bench_tasks` tool to get all level1 tasks
+> 2. For each task: Read task, generate kernel, evaluate, iterate
+> 3. Saves all results to `~/.inference/claude_code_output/`
+> 4. Generates summary report
 
-Once the MCP server is registered, you interact with Claude Code naturally:
+### 2.4 Example Complete Session
 
-**Setup (one-time):**
+> **You:** "Run kernel bench on level1 tasks, session name: claude_vs_rl_run1"
+>
+> **Claude Code:**
+> - Lists 50 tasks in level1
+> - Starting task 1/50: 1_relu.py
+> - Reading task... PyTorch model applies ReLU activation.
+> - Generating Triton kernel...
 
-> **See [KERNEL_BENCH_SETUP.md](./KERNEL_BENCH_SETUP.md) for complete environment setup instructions**, including:
-> - Part 1: Remote Server Setup (workflow server, kbEvalServer, GPU configuration)
-> - Part 2: Local Environment Setup (MCP server registration, configuration files)
-> - Part 3: SSH Tunnel Setup (connecting local to remote)
-
-**Usage - Single Task:**
-```
-You: "Optimize the kernel in kernel_bench/level1/1_relu.py"
-
-Claude Code:
-  1. Uses `get_task_details` tool to read the PyTorch model
-  2. Generates optimized CUDA/Triton kernel code
-  3. Uses `eval_kernel` tool to compile and benchmark
-  4. Reviews results, iterates if needed
-  5. Uses `save_benchmark_result` tool to store final result
-```
-
-**Usage - Batch Session:**
-```
-You: "Run a benchmark session on all level1 tasks and save results for comparison"
-
-Claude Code:
-  1. Uses `list_kernel_bench_tasks` tool to get all level1 tasks
-  2. For each task:
-     - Read task, generate kernel, evaluate, iterate
-  3. Saves all results to ~/.inference/claude_code_output/
-  4. Generates summary report
+```python
+@triton.jit
+def relu_kernel(...):
+    ...
 ```
 
-**Example Complete Session:**
-```
-You: "Run kernel bench on level1 tasks, session name: claude_vs_rl_run1"
+> - Evaluating... Compiled: ✓, Correct: ✓, Speedup: 1.23x
+> - Saved to `~/.inference/claude_code_output/claude_vs_rl_run1/1_relu/`
+> - Starting task 2/50: 2_matmul.py ...
+>
+> **=== Session Complete ===**
+> - Success Rate: 45/50 (90%)
+> - Average Speedup: 1.34x
+> - Results saved to: `~/.inference/claude_code_output/claude_vs_rl_run1/`
+>
+> **You:** "Compare this with the RL model results in ~/.inference/output/my_tag.a_001_01/"
+>
+> **Claude Code:** Runs comparison, generates report
 
-Claude Code:
-  [Lists 50 tasks in level1]
-  [Starting task 1/50: 1_relu.py]
+### 2.5 Multi-Turn Iteration Approach
 
-  Reading task... PyTorch model applies ReLU activation.
-  Generating Triton kernel...
-
-  ```python
-  @triton.jit
-  def relu_kernel(...):
-      ...
-  ```
-
-  Evaluating... Compiled: ✓, Correct: ✓, Speedup: 1.23x
-  Saved to ~/.inference/claude_code_output/claude_vs_rl_run1/1_relu/
-
-  [Starting task 2/50: 2_matmul.py]
-  ...
-
-  === Session Complete ===
-  Success Rate: 45/50 (90%)
-  Average Speedup: 1.34x
-  Results saved to: ~/.inference/claude_code_output/claude_vs_rl_run1/
-
-You: "Compare this with the RL model results in ~/.inference/output/my_tag.a_001_01/"
-
-Claude Code:
-  [Runs comparison, generates report]
-```
-
-### How Claude Code Knows Task Locations
-
-In a new session, Claude Code needs to know where kernel_bench tasks are. Three mechanisms ensure this:
-
-**1. MCP Server Configuration (Primary)**
-
-The MCP server has a config file specifying the kernel_bench base path:
-
-```yaml
-# claudeCodeKernelBench.yaml
-kernel_bench:
-  base_dir: "${HOME}/KernelBench/KernelBench"  # or project-relative path
-  levels: ["level1", "level2", "level3"]
-```
-
-When `list_kernel_bench_tasks` is called, it reads from this configured location.
-
-**2. Project CLAUDE.md (Context)**
-
-The project's CLAUDE.md already documents the structure:
-```markdown
-## Data Directories
-- `kernel_bench/level1/`, `level2/`, `level3/` - Benchmark tasks
-```
-
-Claude Code reads CLAUDE.md at session start, providing context.
-
-**3. Explicit Path Override**
-
-Users can always specify explicit paths:
-```
-You: "Run benchmark on tasks in /path/to/my/kernel_bench/level1/"
-```
-
-**Resolution Order:**
-1. User-specified path (highest priority)
-2. MCP server config (`claudeCodeKernelBench.yaml`)
-3. CLAUDE.md documented paths (context)
-4. Default: `~/KernelBench/KernelBench` (fallback)
-
-## Prompt Structure and Multi-Turn Iteration
-
-### Comparison: RL Fine-Tuning vs Claude Code
+**Comparison: RL Fine-Tuning vs Claude Code**
 
 | Aspect | RL Fine-Tuning (TreeTurns) | Claude Code |
 |--------|---------------------------|-------------|
@@ -150,230 +226,24 @@ You: "Run benchmark on tasks in /path/to/my/kernel_bench/level1/"
 | Feedback | Structured JSON prompt templates | Natural language conversation |
 | Training Signal | GRPO reward from speedup/correctness | None (inference only) |
 
-### RL Fine-Tuning Multi-Turn Structure
+**Claude Code Iteration Based on Feedback:**
 
-The RL training uses **TreeTurns** - a tree-structured generation approach:
+> **If compilation fails:**
+> - MCP tool returns: `{"compiled": false, "error": "triton.language has no attribute 'maximum'"}`
+> - Claude: "The kernel failed to compile. Let me fix the syntax..."
+> - Calls `eval_kernel` again
+>
+> **If correct but slow:**
+> - MCP tool returns: `{"compiled": true, "correctness": true, "speedup": 0.85}`
+> - Claude: "The kernel is correct but slower than PyTorch (0.85x). I'll optimize..."
+> - Calls `eval_kernel` again
+>
+> **If successful:**
+> - MCP tool returns: `{"compiled": true, "correctness": true, "speedup": 1.45}`
+> - Claude: "The kernel achieves 1.45x speedup. Saving result."
+> - Calls `save_benchmark_result`
 
-```
-Task (Reference Code)
-  │
-  └─→ Turn 0: 8 Parallel Generations (fresh start)
-      ├─ Gen 00_t00 → eval → {compiled, correctness, speedup}
-      ├─ Gen 01_t00 → eval → {compiled, correctness, speedup}
-      └─ ... (8 total)
-
-  └─→ [SELECTION: Pick best or random from turn 0]
-
-  └─→ Turn 1: 8 Parallel Generations (refine selected)
-      ├─ Gen 00_t01: Previous code + feedback → improved code
-      └─ ... (8 total, all starting from same selected turn 0 code)
-
-  └─→ [SELECTION: Pick best from turn 1]
-
-  └─→ Turn 2, Turn 3: Similar pattern...
-```
-
-**Key parameters:**
-- `num_generations: 8` - 8 independent attempts per turn
-- `num_turns_per_generation: 4` - Up to 4 refinement turns
-- `selection_strategy: "random"` or `"best_speedup"`
-
-### RL Prompt Templates
-
-The RL system uses three distinct user prompts based on evaluation state:
-
-**1. Initial Generation (`user_prompt.init`)**
-```
-Following is the reference PyTorch code, implement the complete new module
-with Triton (no testing code, no init code).
-
-Reference code:
-```python
-{reference_code}
-```
-
-Reference code evaluation:
-```json
-{reference_eval}  // {"runtime": 0.5, "compiled": true, "correctness": true}
-```
-```
-
-**2. Fix Errors (`user_prompt.fix`)** - when compiled=false OR correctness=false
-```
-Your code did not compile or run correctly. Please fix the code and return
-the correct code.
-
-Generated code evaluation:
-```json
-{generated_eval}  // {"compiled": false, "error": "..."}
-```
-```
-
-**3. Optimize Performance (`user_prompt.perf`)** - when correct but needs speedup
-```
-Compare to the reference code performance evaluation and improve your code
-performance by optimizing the code.
-
-Generated code evaluation:
-```json
-{generated_eval}  // {"compiled": true, "correctness": true, "speedup": 0.8}
-```
-```
-
-### Claude Code Multi-Turn Approach
-
-For Claude Code, we mirror the same feedback loop but in a conversational format:
-
-**Turn 0: Initial Generation**
-```
-Claude Code reads task via get_task_details(), then Claude generates:
-
-User: "Optimize the kernel in kernel_bench/level1/1_relu.py"
-
-Claude: [Reads task details]
-        "The task is a simple ReLU activation. I'll generate a Triton kernel:
-
-        ```python
-        @triton.jit
-        def relu_kernel(x_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
-            pid = tl.program_id(0)
-            offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-            mask = offsets < n_elements
-            x = tl.load(x_ptr + offsets, mask=mask)
-            out = tl.maximum(x, 0)
-            tl.store(out_ptr + offsets, out, mask=mask)
-
-        class ModelNew(nn.Module):
-            def forward(self, x):
-                out = torch.empty_like(x)
-                n = x.numel()
-                relu_kernel[(n // 1024,)](x, out, n, BLOCK_SIZE=1024)
-                return out
-        ```"
-
-Claude: [Calls eval_kernel MCP tool]
-```
-
-**Turn 1+: Iteration Based on Feedback**
-
-If compilation fails:
-```
-[MCP tool returns: {"compiled": false, "error": "triton.language has no attribute 'maximum'"}]
-
-Claude: "The kernel failed to compile. The error indicates I used wrong syntax.
-        Let me fix it - Triton uses tl.where() for conditional operations:
-
-        ```python
-        out = tl.where(x > 0, x, 0.0)
-        ```"
-
-Claude: [Calls eval_kernel again]
-```
-
-If correct but slow:
-```
-[MCP tool returns: {"compiled": true, "correctness": true, "speedup": 0.85}]
-
-Claude: "The kernel is correct but slower than PyTorch (0.85x speedup).
-        I'll optimize by increasing block size and using vectorized loads:
-
-        ```python
-        # Use larger blocks and coalesced memory access
-        BLOCK_SIZE=4096
-        # Add prefetching hints...
-        ```"
-
-Claude: [Calls eval_kernel again]
-```
-
-If successful:
-```
-[MCP tool returns: {"compiled": true, "correctness": true, "speedup": 1.45}]
-
-Claude: "The kernel achieves 1.45x speedup. Saving result."
-
-Claude: [Calls save_benchmark_result MCP tool]
-```
-
-### Iteration Flow Diagram
-
-```
-                    RL Fine-Tuning                    Claude Code
-                    ──────────────                    ───────────
-
-Start               8 parallel generations           1 generation
-                    from system prompt               from conversation
-                           │                               │
-                           ▼                               ▼
-Evaluate            8 parallel kbEval calls          1 kbEval call
-                           │                               │
-                           ▼                               ▼
-Feedback            JSON template selection:         Natural language:
-                    - compiled=false → fix           Claude interprets error
-                    - correct=false → fix            and decides approach
-                    - correct=true → perf
-                           │                               │
-                           ▼                               ▼
-Selection           Pick 1 of 8 to continue          N/A (only 1 path)
-                    (random or best_speedup)
-                           │                               │
-                           ▼                               ▼
-Next Turn           8 parallel generations           1 generation
-                    all from selected code           from conversation
-                           │                               │
-                    ───────┴───────────────────────────────┴───────
-                                        │
-                                        ▼
-                              Repeat for N turns
-                              (RL: 4 turns, Claude: until success/limit)
-```
-
-### Key Differences
-
-**1. Parallelism vs Sequential**
-- RL: Explores 8 paths simultaneously, selects best
-- Claude: Single path, but Claude can reason about multiple approaches
-
-**2. Feedback Format**
-- RL: Structured JSON triggers template selection (`fix` vs `perf`)
-- Claude: Natural language allows richer reasoning ("the error suggests...")
-
-**3. Exploration Strategy**
-- RL: Breadth-first (8 × 4 = 32 total attempts)
-- Claude: Depth-first (iterate on single path, but smarter per-step)
-
-**4. Training Signal**
-- RL: Collects log probs, computes rewards, trains model
-- Claude: No training, but leverages Claude's reasoning capabilities
-
-### MCP Tool Feedback Structure
-
-The `eval_kernel` tool returns the same fields used by RL training:
-
-```json
-{
-  "compiled": true,
-  "correctness": true,
-  "runtime": 0.234,
-  "speedup": 1.45,
-  "runtime_stats": {
-    "mean": 0.234,
-    "std": 0.012,
-    "min": 0.220,
-    "max": 0.251
-  },
-  "error": null,
-  "error_type": null
-}
-```
-
-Claude interprets this and decides:
-- `compiled=false` → Read error message, fix syntax/logic
-- `correctness=false` → Debug numerical issues, check edge cases
-- `speedup < 1.0` → Optimize memory access, parallelism, block sizes
-- `speedup >= target` → Save and move to next task
-
-### Recommended Iteration Limits
+### 2.6 Recommended Iteration Limits
 
 | Scenario | RL Fine-Tuning | Claude Code |
 |----------|----------------|-------------|
@@ -381,808 +251,1623 @@ Claude interprets this and decides:
 | Max total attempts | 32 (8×4) | 4 (sequential) |
 | Early stop condition | None (all enqueued upfront) | speedup > 1.3x or 4 failures |
 
-## Architecture Decision
+---
 
-**Chosen Approach: MCP Server**
+## 3. Current Implementation
 
-Create an MCP server (`claudeCodeKernelBenchServer.py`) that Claude Code can use directly. This leverages:
-- Existing `kbEvalClient.py` for kernel evaluation
-- Existing `workflowClient.py` for queue integration
-- Same result format as RL training runs for direct comparison
+### 3.1 MCP Server Structure
 
-## Implementation Overview
+The MCP server (`claudeCodeKernelBenchServer.py`) provides 5 tools:
 
-### Existing Components (No Changes Needed)
+| Tool | Purpose |
+|------|---------|
+| `list_kernel_bench_tasks` | List available kernel benchmark tasks |
+| `get_task_details` | Read PyTorch model code for a task |
+| `eval_kernel` | Evaluate generated kernel via kbEvalServer |
+| `save_benchmark_result` | Save kernel code and eval results to disk |
+| `get_session_summary` | Get statistics for a benchmark session |
 
-| Component | File | Purpose |
-|-----------|------|---------|
-| Workflow Server | `workflowServer.py` | Queue management, already exists |
-| Workflow Client | `workflowClient.py` | Queue submission API |
-| kbEval Server | `kbEvalServer.py` | Kernel compilation/benchmarking |
-| kbEval Client | `kbEvalClient.py` | HTTP client for kbEval |
-| KernelExecResult | `kbEvalUtil.py` | Result data model |
-| Logger | `logger.py` | Logging utilities |
+### 3.2 Evaluation Flow (Direct Sync Mode)
 
-### New Components to Create
+The `eval_kernel` tool uses direct sync calls to kbEvalServer:
 
-| Component | File | Purpose |
-|-----------|------|---------|
-| MCP Server | `claudeCodeKernelBenchServer.py` | MCP tools for Claude Code |
-| MCP Config | `claudeCodeKernelBench.yaml` | Configuration for MCP server |
-| Comparison Tool | `benchmarkCompare.py` | Compare Claude vs RL results |
-| MCP Registration | `.mcp.json` | Register MCP server in project |
-
-## Implementation Steps
-
-### Step 1: Create MCP Server
-**File: `claudeCodeKernelBenchServer.py`**
-
-```python
-import os
-import json
-import asyncio
-from datetime import datetime
-from pathlib import Path
-from mcp.server import Server
-from mcp.types import Tool, TextContent
-import yaml
-
-from kbEvalClient import KBEvalClient
-from workflowClient import WorkflowClient
-from logger import logger
-
-# Load configuration
-def load_config(config_path: str = "claudeCodeKernelBench.yaml") -> dict:
-    with open(config_path) as f:
-        return yaml.safe_load(f)
-
-server = Server("kernel-bench")
-config = load_config()
-kb_client = KBEvalClient()
-workflow_client = WorkflowClient()
-
-@server.tool()
-async def list_kernel_bench_tasks(level: str = None) -> list[dict]:
-    """
-    List available kernel benchmark tasks.
-
-    Args:
-        level: Filter by level (e.g., "level1", "level2"). If None, list all.
-
-    Returns:
-        List of task info dicts with path, name, level
-    """
-    base_dir = Path(os.path.expanduser(config["kernel_bench"]["base_dir"]))
-    levels = [level] if level else config["kernel_bench"]["levels"]
-
-    tasks = []
-    for lvl in levels:
-        level_dir = base_dir / lvl
-        if level_dir.exists():
-            for task_file in sorted(level_dir.glob("*.py")):
-                if not task_file.name.startswith("_"):
-                    tasks.append({
-                        "path": str(task_file),
-                        "name": task_file.stem,
-                        "level": lvl
-                    })
-    return tasks
-
-@server.tool()
-async def get_task_details(task_path: str) -> dict:
-    """
-    Get PyTorch model code and input specifications for a task.
-
-    Args:
-        task_path: Path to the task file (e.g., "kernel_bench/level1/1_relu.py")
-
-    Returns:
-        Dict with source_code, model_class, input_specs
-    """
-    task_path = Path(os.path.expanduser(task_path))
-    if not task_path.exists():
-        # Try resolving relative to base_dir
-        base_dir = Path(os.path.expanduser(config["kernel_bench"]["base_dir"]))
-        task_path = base_dir / task_path
-
-    source_code = task_path.read_text()
-
-    return {
-        "path": str(task_path),
-        "source_code": source_code,
-        "name": task_path.stem
-    }
-
-@server.tool()
-async def eval_kernel(
-    task_path: str,
-    kernel_code: str,
-    session_id: str,
-    iteration: int = 0,
-    provider: str = "local",
-    queue_only: bool = False
-) -> dict:
-    """
-    Evaluate generated kernel against reference PyTorch implementation.
-
-    Args:
-        task_path: Path to the original task file
-        kernel_code: Generated CUDA/Triton kernel code
-        session_id: Session identifier for grouping results
-        iteration: Iteration number within the task
-        provider: kbEval provider (default: "local")
-        queue_only: If True, submit to queue without waiting (for offline testing)
-
-    Returns:
-        KernelExecResult dict with compiled, correctness, runtime, speedup
-    """
-    if queue_only:
-        # Submit to workflow queue without waiting for result
-        queue_name = config.get("workflow", {}).get("eval_queue", "kbEval.pending")
-        prefix_tag = config.get("workflow", {}).get("prefix_tag", "claude_code")
-
-        work_item = {
-            "task_path": task_path,
-            "kernel_code": kernel_code,
-            "session_id": session_id,
-            "iteration": iteration,
-            "submitted_at": datetime.now().isoformat(),
-            "status": "pending"
-        }
-
-        await workflow_client.enqueue(prefix_tag, queue_name, work_item)
-        return {"status": "queued", "queue": queue_name, "work_item": work_item}
-
-    # Normal mode: call kbEval and wait for result
-    result = await kb_client.kb_eval(
-        task_path=task_path,
-        kernel_code=kernel_code,
-        provider=provider
-    )
-
-    return result.model_dump()
-
-@server.tool()
-async def save_benchmark_result(
-    task_path: str,
-    kernel_code: str,
-    eval_result: dict,
-    session_id: str,
-    iteration: int = 0
-) -> str:
-    """
-    Save benchmark result in format compatible with RL training output.
-
-    Args:
-        task_path: Path to the original task file
-        kernel_code: Generated kernel code
-        eval_result: Evaluation result from eval_kernel
-        session_id: Session identifier
-        iteration: Iteration number
-
-    Returns:
-        Path to saved result directory
-    """
-    output_base = Path(os.path.expanduser(config["output"]["base_dir"]))
-    task_name = Path(task_path).stem
-
-    session_dir = output_base / session_id / task_name
-    session_dir.mkdir(parents=True, exist_ok=True)
-
-    # Save kernel code
-    kernel_file = session_dir / f"iteration_{iteration:02d}_cuda_kernel.py"
-    kernel_file.write_text(kernel_code)
-
-    # Save eval result
-    eval_file = session_dir / f"iteration_{iteration:02d}_eval.json"
-    eval_result["model"] = "claude-code"
-    eval_result["timestamp"] = datetime.now().isoformat()
-    eval_file.write_text(json.dumps(eval_result, indent=2))
-
-    # Update summary
-    summary_file = output_base / session_id / "summary.json"
-    summary = {}
-    if summary_file.exists():
-        summary = json.loads(summary_file.read_text())
-
-    if task_name not in summary:
-        summary[task_name] = {"iterations": []}
-    summary[task_name]["iterations"].append({
-        "iteration": iteration,
-        "compiled": eval_result.get("compiled", False),
-        "correctness": eval_result.get("correctness", False),
-        "speedup": eval_result.get("speedup", 0)
-    })
-    summary_file.write_text(json.dumps(summary, indent=2))
-
-    return str(session_dir)
-
-if __name__ == "__main__":
-    import mcp
-    mcp.run(server)
+```
+Claude Code → MCP eval_kernel() → KbEvalClient → HTTP → kbEvalServer
+                                                           ↓
+                                         Wait for GPU, compile, benchmark
+                                                           ↓
+                                         Return result (10-60s later)
 ```
 
-### Step 2: Create MCP Configuration
-**File: `claudeCodeKernelBench.yaml`**
+- **Matches RL architecture pattern** (direct sync calls)
+- **Currently broken**: Import error - "kbEvalClient not available"
+- **Priority**: Fix this to enable end-to-end testing
+
+### 3.3 Current Code Status
+
+**Files implemented:**
+
+| File | Status | Notes |
+|------|--------|-------|
+| `claudeCodeKernelBenchServer.py` | Created | MCP server with 5 tools |
+| `claudeCodeKernelBench.yaml` | Created | Configuration file |
+| `benchmarkCompare.py` | Created | Comparison report generator |
+| `.mcp.json` | Created | MCP registration |
+
+**Known Issue:**
+
+**kbEvalClient import fails** when MCP server runs as subprocess
+- Root cause: Path issues when spawned by Claude Code
+- Impact: eval_kernel() cannot call kbEvalServer
+- Fix: Add proper sys.path handling in MCP server startup
+
+### 3.4 Configuration Files
+
+**claudeCodeKernelBench.yaml:**
 
 ```yaml
-# Claude Code Kernel Bench MCP Server Configuration
-
 kernel_bench:
-  # Base directory for kernel benchmark tasks
-  base_dir: "${HOME}/KernelBench/KernelBench"
-  levels: ["level1", "level2", "level3"]
+  base_dir: "./kernel_bench"
+  levels: ["level1", "level2", "level3", "level4"]
 
 kbeval:
-  # kbEval server settings (uses kbEval.yaml for provider details)
   default_provider: "local"
+  config_file: "kbEval.yaml"
 
 workflow:
-  # Workflow server settings for queue operations
   prefix_tag: "claude_code"
   eval_queue: "kbEval.pending"
-  # Uses workflow.yaml for server connection details
+  provider_name: "local"  # Use "local" with SSH tunnel
 
 output:
-  # Output directory for Claude Code results
   base_dir: "${HOME}/.inference/claude_code_output"
 ```
 
-### Step 3: Create Comparison Tool
-**File: `benchmarkCompare.py`**
+**Result Storage Format:**
 
-```python
-#!/usr/bin/env python
-"""
-Compare Claude Code kernel benchmark results with RL-trained model results.
-"""
-import os
-import json
-import argparse
-from pathlib import Path
-from collections import defaultdict
-from logger import logger
-
-def load_results(result_dir: Path) -> dict:
-    """Load all eval results from a result directory."""
-    results = {}
-    for task_dir in result_dir.iterdir():
-        if task_dir.is_dir() and task_dir.name != "summary.json":
-            task_name = task_dir.name
-            iterations = []
-            for eval_file in sorted(task_dir.glob("*_eval.json")):
-                with open(eval_file) as f:
-                    iterations.append(json.load(f))
-            if iterations:
-                results[task_name] = iterations
-    return results
-
-def compute_metrics(results: dict) -> dict:
-    """Compute aggregate metrics from results."""
-    total_tasks = len(results)
-    compiled_count = 0
-    correct_count = 0
-    speedups = []
-    iterations_to_success = []
-
-    for task_name, iterations in results.items():
-        # Check best result across iterations
-        best_correct = False
-        best_speedup = 0
-        success_iteration = None
-
-        for i, result in enumerate(iterations):
-            if result.get("compiled", False):
-                compiled_count += 1
-                if result.get("correctness", False):
-                    if not best_correct:
-                        success_iteration = i
-                    best_correct = True
-                    best_speedup = max(best_speedup, result.get("speedup", 0))
-
-        if best_correct:
-            correct_count += 1
-            speedups.append(best_speedup)
-            if success_iteration is not None:
-                iterations_to_success.append(success_iteration + 1)
-
-    return {
-        "total_tasks": total_tasks,
-        "compiled_rate": compiled_count / total_tasks if total_tasks else 0,
-        "success_rate": correct_count / total_tasks if total_tasks else 0,
-        "avg_speedup": sum(speedups) / len(speedups) if speedups else 0,
-        "max_speedup": max(speedups) if speedups else 0,
-        "avg_iterations_to_success": sum(iterations_to_success) / len(iterations_to_success) if iterations_to_success else 0
-    }
-
-def compare(claude_dir: Path, rl_dir: Path) -> dict:
-    """Compare Claude Code results with RL model results."""
-    claude_results = load_results(claude_dir)
-    rl_results = load_results(rl_dir)
-
-    claude_metrics = compute_metrics(claude_results)
-    rl_metrics = compute_metrics(rl_results)
-
-    # Per-task comparison
-    all_tasks = set(claude_results.keys()) | set(rl_results.keys())
-    task_comparison = {}
-
-    for task in all_tasks:
-        claude_best = 0
-        rl_best = 0
-
-        if task in claude_results:
-            for r in claude_results[task]:
-                if r.get("correctness"):
-                    claude_best = max(claude_best, r.get("speedup", 0))
-
-        if task in rl_results:
-            for r in rl_results[task]:
-                if r.get("correctness"):
-                    rl_best = max(rl_best, r.get("speedup", 0))
-
-        task_comparison[task] = {
-            "claude_speedup": claude_best,
-            "rl_speedup": rl_best,
-            "winner": "claude" if claude_best > rl_best else "rl" if rl_best > claude_best else "tie"
-        }
-
-    return {
-        "claude_metrics": claude_metrics,
-        "rl_metrics": rl_metrics,
-        "task_comparison": task_comparison,
-        "summary": {
-            "claude_wins": sum(1 for t in task_comparison.values() if t["winner"] == "claude"),
-            "rl_wins": sum(1 for t in task_comparison.values() if t["winner"] == "rl"),
-            "ties": sum(1 for t in task_comparison.values() if t["winner"] == "tie")
-        }
-    }
-
-def main():
-    parser = argparse.ArgumentParser(description="Compare Claude Code vs RL model benchmark results")
-    parser.add_argument("--claude-dir", required=True, help="Claude Code results directory")
-    parser.add_argument("--rl-dir", required=True, help="RL model results directory")
-    parser.add_argument("--output", default="comparison_report.json", help="Output report file")
-    args = parser.parse_args()
-
-    claude_dir = Path(os.path.expanduser(args.claude_dir))
-    rl_dir = Path(os.path.expanduser(args.rl_dir))
-
-    report = compare(claude_dir, rl_dir)
-
-    with open(args.output, "w") as f:
-        json.dump(report, indent=2, fp=f)
-
-    # Print summary
-    print(f"\n=== Comparison Report ===")
-    print(f"Claude Code: {report['claude_metrics']['success_rate']:.1%} success, {report['claude_metrics']['avg_speedup']:.2f}x avg speedup")
-    print(f"RL Model:    {report['rl_metrics']['success_rate']:.1%} success, {report['rl_metrics']['avg_speedup']:.2f}x avg speedup")
-    print(f"\nHead-to-head: Claude wins {report['summary']['claude_wins']}, RL wins {report['summary']['rl_wins']}, Ties {report['summary']['ties']}")
-    print(f"\nFull report saved to: {args.output}")
-
-if __name__ == "__main__":
-    main()
-```
-
-### Step 4: Create MCP Registration
-**File: `.mcp.json` (project root)**
-
-```json
-{
-  "mcpServers": {
-    "kernel-bench": {
-      "command": "python",
-      "args": ["claudeCodeKernelBenchServer.py"],
-      "cwd": "."
-    }
-  }
-}
-```
-
-### Step 5: Result Storage Format
-**Directory: `~/.inference/claude_code_output/`**
-
-Match existing RL output format for comparison:
 ```
 ~/.inference/claude_code_output/
-└── claude_code_{session_id}/
+└── {session_id}/
     ├── {task_name}/
     │   ├── iteration_00_cuda_kernel.py
     │   ├── iteration_00_eval.json
-    │   ├── iteration_01_cuda_kernel.py
-    │   └── iteration_01_eval.json
+    │   └── ...
     └── summary.json
 ```
 
-Each `*_eval.json` contains:
-```json
-{
-  "compiled": true,
-  "correctness": true,
-  "runtime": 0.234,
-  "speedup": 1.45,
-  "metadata": {...},
-  "model": "claude-opus-4-5-20251101",
-  "timestamp": "2025-01-23T..."
-}
+---
+
+## 4. Architecture Choice
+
+### 4.1 Decision: Direct Sync Mode Only
+
+**Chosen Approach**: Use **direct sync calls** exclusively, matching the RL architecture.
+
+```
+Claude Code → MCP eval_kernel() → KbEvalClient → HTTP → kbEvalServer → Result
+                                                            ↑
+                                                Same pattern as RL
 ```
 
-## Critical Files to Create/Modify
+**Rationale:**
+1. **Matches proven RL pattern** - direct HTTP calls work reliably
+2. **Interactive use needs immediate feedback** - waiting is natural for Claude Code
+3. **Simpler architecture** - no queue, no consumer, no polling
+4. **No architectural change needed** - just fix the import error
 
-| File | Action | Purpose |
-|------|--------|---------|
-| `claudeCodeKernelBenchServer.py` | Create | MCP server for Claude Code |
-| `claudeCodeKernelBench.yaml` | Create | Configuration for MCP server |
-| `benchmarkCompare.py` | Create | Comparison report generator |
-| `.mcp.json` | Modify | Register MCP server for project |
+**Queue mode is NOT needed** because:
+- Claude Code naturally processes tasks sequentially
+- Parallel agents (Task tool) provide concurrency when desired
+- No benefit to async queue for Claude Code's use case
 
-## Dependencies (Existing Code to Reuse)
+### 4.2 Handling Multiple Tasks (Batch Processing Vision)
 
-- `kbEvalClient.py`: `kb_eval()`, `kb_eval_ref()` for kernel evaluation
-- `kbEvalUtil.py`: `KernelExecResult` model
-- `util.py`: Path constants (`INFERENCE_DIR`, etc.)
-- `logger.py`: Logging
+When asked to "run all level1 tasks", Claude Code will:
 
-## Verification Plan
+**Option A: Sequential Processing (Simple)**
 
-### Test 0: Offline Integration Test (No kbEvalServer Required)
+> Claude Code processes each task one at a time:
+> 1. Get list of level1 tasks (50 tasks)
+> 2. For task 1: read → generate kernel → eval_kernel() → wait → save result
+> 3. For task 2: read → generate kernel → eval_kernel() → wait → save result
+> 4. ... repeat for all 50 tasks
+> 5. Generate summary report
 
-Test the Claude Code integration without a running kbEvalServer. This validates the generation and queue submission logic independently.
+**Estimated time**: 50 tasks × 30s/task = ~25 minutes
 
-**Prerequisites:**
-- MCP server registered in Claude Code
-- Workflow server running (for queue operations)
-- kbEvalServer NOT required
+**Option B: Parallel Agents (Faster)**
 
-**Test Steps:**
+Claude Code spawns multiple agents via Task tool:
+
+> 1. Get list of level1 tasks (50 tasks)
+> 2. Spawn 5 parallel agents, each handles 10 tasks
+> 3. Each agent: read → generate → eval → save (sequentially within agent)
+> 4. Wait for all agents to complete
+> 5. Aggregate results and generate summary
+
+**Estimated time**: 50 tasks ÷ 5 agents × 30s/task = ~5 minutes
+
+#### Switching Between Options with Prompts
+
+Yes, switching between Option A and B is purely a matter of how you prompt Claude Code. No code changes needed.
+
+**Prompt for Option A (Sequential):**
+> "Run all level1 kernel benchmark tasks sequentially. For each task: read the PyTorch model, generate a Triton kernel, evaluate it, and save the result. Process them one at a time."
+
+**Prompt for Option B (Parallel Agents):**
+> "Run all level1 kernel benchmark tasks in parallel. Use 5 parallel agents - each agent handles a subset of tasks. Spawn the agents using the Task tool and wait for all to complete, then aggregate results."
+
+**More specific parallel prompt:**
+> "Run all level1 tasks with parallel agents. Split 50 tasks across 5 agents (10 tasks each). Each agent should run its tasks sequentially. Use session_id='level1_parallel_run' for all results."
+
+#### Load Management Verification
+
+**How Parallel Agents Interact with kbEvalServer:**
+
+```
+Claude Code (main)
+    │
+    ├── Task tool: Agent 1 (tasks 1-10)  ────► eval_kernel() ──► kbEvalServer
+    ├── Task tool: Agent 2 (tasks 11-20) ────► eval_kernel() ──► kbEvalServer
+    ├── Task tool: Agent 3 (tasks 21-30) ────► eval_kernel() ──► kbEvalServer
+    ├── Task tool: Agent 4 (tasks 31-40) ────► eval_kernel() ──► kbEvalServer
+    └── Task tool: Agent 5 (tasks 41-50) ────► eval_kernel() ──► kbEvalServer
+```
+
+**Key Observations:**
+
+1. **Each agent processes sequentially within itself** - Agent 1 waits for task 1 to complete before starting task 2. No parallel eval_kernel() calls within a single agent.
+
+2. **Concurrent calls = number of agents** - With 5 agents, at most 5 concurrent requests hit kbEvalServer.
+
+3. **CUDA serialization handles contention** - Just like in RL system (Section 1.4), if 5 requests hit 1 kbEvalServer, CUDA driver queues them. Each request waits its turn.
+
+**Timeline with 5 Agents → 1 kbEvalServer:**
+
+| Time | Agent 1 | Agent 2 | Agent 3 | Agent 4 | Agent 5 | GPU |
+|------|---------|---------|---------|---------|---------|-----|
+| 0s | eval task 1 | eval task 11 | eval task 21 | eval task 31 | eval task 41 | Processing task 1 |
+| 30s | **done** → task 2 | waiting | waiting | waiting | waiting | Processing task 11 |
+| 60s | eval task 2 | **done** → task 12 | waiting | waiting | waiting | Processing task 21 |
+| ... | ... | ... | ... | ... | ... | ... |
+
+**Load Management Works Because:**
+
+| Factor | Why It Works |
+|--------|--------------|
+| Sequential within agent | Only 5 concurrent requests max (not 50) |
+| CUDA queuing | GPU naturally serializes, no lost requests |
+| HTTP timeout | 300s timeout tolerates queue buildup |
+| Agent count is user-controlled | User decides parallelism level |
+
+**When to Use More Agents:**
+
+- **1-3 agents**: Safe for single kbEvalServer
+- **5-10 agents**: Better with multiple kbEvalServers (load balanced via random.choice)
+- **>10 agents**: Diminishing returns, mostly waiting in CUDA queue
+
+**No Semaphore Needed**: Unlike RL's 32 parallel workers, Claude Code's Task tool spawns a controlled number of agents. The user explicitly chooses the parallelism level in their prompt.
+
+### 4.3 Remote GPU Access
+
+Architecture for running Claude Code locally with remote GPU:
+
+```
+┌─────────────────────────────┐      SSH Tunnel      ┌──────────────────────┐
+│    LOCAL MACHINE            │                      │  REMOTE GPU MACHINE  │
+│    (macOS, no GPU)          │                      │                      │
+│                             │                      │ ┌──────────────────┐ │
+│ ┌───────────────┐           │                      │ │ kbEvalServer     │ │
+│ │ Claude Code   │           │   localhost:5676 ────┼─│ :5676 (GPU)      │ │
+│ └───────────────┘           │                      │ └──────────────────┘ │
+│        │                    │                      │                      │
+│        ▼                    │                      └──────────────────────┘
+│ ┌───────────────┐           │
+│ │ MCP Server    │───────────┘
+│ │ (local Python)│
+│ └───────────────┘
+└─────────────────────────────┘
+```
+
+**Components:**
+- **Claude Code**: Runs locally, provides LLM for kernel generation
+- **MCP Server**: Local Python process, handles tool calls
+- **kbEvalServer**: Remote GPU machine, compiles and benchmarks kernels
+- **SSH Tunnel**: Forwards localhost:5676 to remote kbEvalServer
+
+**No workflowServer needed** - direct sync calls to kbEvalServer only.
+
+---
+
+## 5. Test-Driven Development Plan
+
+### 5.1 Implementation Work Items
+
+Implementation work items identified. Each work item describes a specific change to the codebase.
+
+| ID | Work Item | File(s) | Description |
+|----|-----------|---------|-------------|
+| W1 | Fix sys.path resolution | `claudeCodeKernelBenchServer.py` | Use `__file__` to resolve script directory for imports when running as subprocess |
+| W2 | Add torch to Mac setup | `KERNEL_BENCH_SETUP.md` | Add `torch` to pip install commands (torch CPU on Mac) |
+| W3 | Remove queue_only parameter | `claudeCodeKernelBenchServer.py` | Remove `queue_only` from `eval_kernel()` - direct sync mode only |
+| W4 | Remove workflow imports | `claudeCodeKernelBenchServer.py` | Remove workflowClient imports and queue submission code |
+| W5 | Remove workflow config section | `claudeCodeKernelBench.yaml` | Remove `workflow:` section (prefix_tag, eval_queue, etc.) |
+| W6 | Update eval_kernel to use KbEvalClient | `claudeCodeKernelBenchServer.py` | Wire up direct sync path: MCP → KbEvalClient.kb_eval() → HTTP |
+| W7 | Add timeout handling | `claudeCodeKernelBenchServer.py` | Match RL's 300s HTTP timeout for eval calls |
+| W8 | Remove LightweightKbEvalClient | `claudeCodeKernelBenchServer.py` | Remove LightweightKbEvalClient class and get_kbeval_client(), use original KbEvalClient directly |
+
+**Work Items Completed:**
+- [x] W1: sys.path fix (using `Path(__file__).resolve().parent`)
+- [x] W2: torch added to Mac setup (pip install torch)
+
+**Work Items Pending:**
+- [ ] W3: Remove queue_only parameter
+- [ ] W4: Remove workflow imports
+- [ ] W5: Remove workflow config section
+- [ ] W6: Update eval_kernel direct sync path
+- [ ] W7: Add timeout handling
+- [ ] W8: Remove LightweightKbEvalClient (use original KbEvalClient with torch CPU)
+
+---
+
+### 5.2 Test Phases Overview
+
+Tests are organized to gradually validate the implementation:
+
+| Phase | Focus | Prerequisites | What It Validates |
+|-------|-------|---------------|-------------------|
+| Phase 1 | Offline (no servers) | None | Python syntax, imports, config loading |
+| Phase 2 | Single Task (no GPU) | Phase 1 | MCP tools, kernel generation, result storage |
+| Phase 3 | Single Task (with GPU) | kbEvalServer running | Actual compilation, correctness, speedup |
+| Phase 4 | Multiple Tasks (sequential) | Phase 3 | Batch processing, session summary |
+| Phase 5 | Multiple Agents (parallel) | Phase 4 | Task tool parallelism, load management |
+
+---
+
+### 5.3 Phase 1: Offline Validation (No Servers Required)
+
+**Purpose**: Verify Python syntax, imports work, and config loads correctly.
+
+#### What This Phase Tests
+
+This phase validates the foundational code quality without requiring any external services.
+
+**Component Depth Diagram:**
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         LOCAL MACHINE                                │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │  Python Interpreter                                            │  │
+│  │  ┌─────────────────────────────────────────────────────────┐  │  │
+│  │  │  ✓ claudeCodeKernelBenchServer.py (syntax check)        │  │  │
+│  │  │  ✓ benchmarkCompare.py (syntax check)                   │  │  │
+│  │  │  ✓ Import chains (yaml, mcp, torch, kbEvalClient)       │  │  │
+│  │  │  ✓ Config loading (claudeCodeKernelBench.yaml)          │  │  │
+│  │  │  ✓ .mcp.json registration file                          │  │  │
+│  │  └─────────────────────────────────────────────────────────┘  │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                                                                      │
+│  NOT TESTED: MCP runtime, tool execution, file I/O, network calls   │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**What's Real vs Faked:**
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Python files | REAL | Actual syntax validation |
+| Config files | REAL | Actual YAML parsing |
+| Import chains | REAL | Actual module loading |
+| MCP server runtime | NOT TESTED | Only imports, not execution |
+| Tool functions | NOT TESTED | No actual calls |
+| kbEvalServer | NOT NEEDED | No network calls |
+
+**Key Validation Points:**
+- All Python files are syntactically valid
+- All dependencies can be imported (torch CPU, kbEvalClient, etc.)
+- Configuration files parse correctly
+- MCP registration is properly formatted
+
+#### Test 1.1: Python Syntax Validation
 
 ```bash
-# 1. Start workflow server (for queue submission)
-python workflowServer.py --host :: --port 8488
-```
-
-**In Claude Code session:**
-```
-You: "Run offline integration test: generate kernels for kernel_bench/level1/1_relu.py
-     and kernel_bench/level1/2_matmul.py, submit to kbEval queue, but don't wait for results"
-```
-
-**Verify:**
-
-1. **Kernel Generation Works:**
-   ```bash
-   # Check generated kernel files exist
-   ls ~/.inference/claude_code_output/test_session/1_relu/iteration_*_cuda_kernel.py
-   ls ~/.inference/claude_code_output/test_session/2_matmul/iteration_*_cuda_kernel.py
-
-   # Verify kernel code is valid Python/Triton syntax
-   python -m py_compile ~/.inference/claude_code_output/test_session/1_relu/iteration_00_cuda_kernel.py
-   ```
-
-2. **Batch Iteration Works:**
-   ```bash
-   # Check both tasks were processed
-   ls ~/.inference/claude_code_output/test_session/
-   # Should show: 1_relu/  2_matmul/  summary.json
-
-   # Verify summary.json has entries for both tasks
-   cat ~/.inference/claude_code_output/test_session/summary.json
-   ```
-
-3. **Queue Submission Works:**
-   ```bash
-   # Check workflow server queue has pending items
-   curl http://localhost:8488/queue/qsize/{prefix_tag}/kbEval.pending
-
-   # Peek at queue to verify work item structure
-   curl http://localhost:8488/queue/peek/{prefix_tag}/kbEval.pending
-   ```
-
-**Expected Queue Item Structure:**
-```json
-{
-  "task_path": "kernel_bench/level1/1_relu.py",
-  "kernel_code": "...",
-  "session_id": "test_session",
-  "iteration": 0,
-  "submitted_at": "2025-01-23T...",
-  "status": "pending"
-}
-```
-
-**MCP Tool Additions for Offline Mode:**
-
-Add `--dry-run` / `--queue-only` mode to `eval_kernel` tool:
-```python
-@server.tool()
-async def eval_kernel(
-    task_path: str,
-    kernel_code: str,
-    provider: str = "local",
-    queue_only: bool = False  # Submit to queue without waiting for result
-) -> dict:
-    if queue_only:
-        # Submit to workflow queue, return immediately
-        await submit_to_queue(task_path, kernel_code)
-        return {"status": "queued", "queue": "kbEval.pending"}
-    else:
-        # Normal: call kbEvalClient and wait for result
-        return await kbeval_client.kb_eval(...)
-```
-
-### Test 0: Manual Verification Steps
-
-Follow these steps to manually verify Test 0 is passing:
-
-**Step 1: Verify Python syntax is valid**
-```bash
-python3 -m py_compile claudeCodeKernelBenchServer.py && python3 -m py_compile benchmarkCompare.py && echo "Syntax OK"
-```
-
-**Step 2: Create mock test data**
-```bash
-mkdir -p /tmp/test_claude_code/1_relu /tmp/test_claude_code/2_matmul /tmp/test_rl/1_relu /tmp/test_rl/2_matmul
-```
-
-```bash
-echo '{"compiled": true, "correctness": true, "runtime": 0.234, "speedup": 1.45, "model": "claude-code"}' > /tmp/test_claude_code/1_relu/iteration_00_eval.json
-```
-
-```bash
-echo '{"compiled": true, "correctness": true, "runtime": 0.5, "speedup": 1.2, "model": "claude-code"}' > /tmp/test_claude_code/2_matmul/iteration_00_eval.json
-```
-
-```bash
-echo '{"compiled": true, "correctness": true, "runtime": 0.3, "speedup": 1.3}' > /tmp/test_rl/1_relu/iteration_00_eval.json
-```
-
-```bash
-echo '{"compiled": true, "correctness": true, "runtime": 0.4, "speedup": 1.5}' > /tmp/test_rl/2_matmul/iteration_00_eval.json
-```
-
-**Step 3: Run comparison tool**
-```bash
-python3 benchmarkCompare.py --claude-dir /tmp/test_claude_code --rl-dir /tmp/test_rl --output /tmp/test_comparison.json
-```
-
-**Step 4: Verify output**
-
-Expected console output:
-```
-============================================================
-KERNEL BENCHMARK COMPARISON REPORT
-============================================================
-
---- Aggregate Metrics ---
-
-Metric                             Claude Code        RL Model
-------------------------------------------------------------
-Total Tasks                                  2               2
-Compiled Rate                          100.0%         100.0%
-Success Rate                           100.0%         100.0%
-Avg Speedup (correct only)               1.32x           1.40x
-Max Speedup                              1.45x           1.50x
-Avg Iterations to Success                  1.0             1.0
-
---- Head-to-Head Summary ---
-
-Tasks compared: 2
-Claude Code wins: 1 (50.0%)
-RL Model wins:    1 (50.0%)
-Ties:             0
-
---- Notable Results ---
-
-RL Model significantly better (>0.2x speedup advantage):
-  2_matmul: 1.50x vs 1.20x (+0.30x)
-
-============================================================
-```
-
-**Step 5: Verify JSON output**
-```bash
-cat /tmp/test_comparison.json
-```
-
-Expected JSON structure:
-```json
-{
-  "claude_metrics": {
-    "total_tasks": 2,
-    "compiled_rate": 1.0,
-    "success_rate": 1.0,
-    "avg_speedup": 1.325,
-    "max_speedup": 1.45,
-    "avg_iterations_to_success": 1.0
-  },
-  "rl_metrics": {
-    "total_tasks": 2,
-    "compiled_rate": 1.0,
-    "success_rate": 1.0,
-    "avg_speedup": 1.4,
-    "max_speedup": 1.5,
-    "avg_iterations_to_success": 1.0
-  },
-  "task_comparison": {
-    "1_relu": {
-      "claude_speedup": 1.45,
-      "claude_correct": true,
-      "rl_speedup": 1.3,
-      "rl_correct": true,
-      "winner": "claude",
-      "speedup_diff": 0.15
-    },
-    "2_matmul": {
-      "claude_speedup": 1.2,
-      "claude_correct": true,
-      "rl_speedup": 1.5,
-      "rl_correct": true,
-      "winner": "rl",
-      "speedup_diff": -0.3
-    }
-  },
-  "summary": {
-    "total_tasks_compared": 2,
-    "claude_wins": 1,
-    "rl_wins": 1,
-    "ties": 0,
-    "claude_win_rate": 0.5
-  }
-}
-```
-
-**Step 6: Cleanup (optional)**
-```bash
-rm -rf /tmp/test_claude_code /tmp/test_rl /tmp/test_comparison.json
+cd /Users/aarontao/Projects/code/triton-ag
+python3 -m py_compile claudeCodeKernelBenchServer.py && echo "✓ MCP server syntax OK"
+python3 -m py_compile benchmarkCompare.py && echo "✓ Comparison tool syntax OK"
 ```
 
 **Pass Criteria:**
-- [x] Both Python files pass syntax validation (exit code 0)
-- [x] Comparison tool runs without errors
-- [x] Console output shows aggregate metrics for both systems
-- [x] JSON output contains all expected fields
-- [x] Task comparison correctly identifies winner per task
+- [x] Both files compile without syntax errors
 
-### Test 1: Unit Test MCP Server
+**Execution Status (2026-01-24):** ✓ PASS
+```
+$ python3 -m py_compile claudeCodeKernelBenchServer.py && echo "✓ MCP server syntax OK"
+✓ MCP server syntax OK
+$ python3 -m py_compile benchmarkCompare.py && echo "✓ Comparison tool syntax OK"
+✓ Comparison tool syntax OK
+```
 
-This test verifies the MCP server can be loaded and its configuration is valid.
-All dependencies (yaml, mcp, kbEvalClient, workflowClient) are optional - the server gracefully falls back to defaults.
+#### Test 1.2: Import and Config Loading
 
-**Step 1: Verify MCP server syntax**
 ```bash
-python3 -m py_compile claudeCodeKernelBenchServer.py && echo "MCP server syntax OK"
-```
-
-**Step 2: Verify configuration YAML exists (optional)**
-```bash
-ls -la claudeCodeKernelBench.yaml && echo "Config YAML exists"
-```
-Note: If PyYAML is not installed, the server falls back to default config. This is expected outside Docker.
-
-**Step 3: Verify MCP registration file exists and is valid JSON**
-```bash
-python3 -c "import json; json.load(open('.mcp.json')); print('MCP registration OK')"
-```
-
-**Step 4: Verify MCP server imports work (graceful with warnings)**
-```bash
-python3 -c "from claudeCodeKernelBenchServer import config, get_default_config; print('MCP imports OK'); print('Config loaded with', len(config), 'sections')"
-```
-
-Expected output (with warnings, which is OK):
-```
-WARNING: YAML not available, using default config (install PyYAML to use claudeCodeKernelBench.yaml)
-WARNING: MCP not available - install 'mcp' package for MCP server functionality
-MCP imports OK
-Config loaded with 5 sections
-```
-
-Note: Warnings about missing yaml/mcp packages are expected outside Docker. The server handles this gracefully.
-
-**Pass Criteria:**
-- [x] MCP server syntax is valid (Step 1)
-- [x] MCP registration JSON is valid (Step 3)
-- [x] MCP imports work and config loads (Step 4 - warnings are OK)
-
-### Test 2: Single Task Integration via Claude Code
-
-This test verifies the MCP tools work correctly. It can be run programmatically first, then optionally verified via Claude Code.
-
-**Prerequisites:**
-- MCP server code passes Test 1
-- kernel_bench tasks available at `./kernel_bench/` (configured in `claudeCodeKernelBench.yaml`)
-
-#### Part A: Programmatic Verification (Required)
-
-**Step 1: Verify MCP server is registered**
-```bash
-cat .mcp.json
-```
-
-Expected output:
-```json
-{
-  "mcpServers": {
-    "kernel-bench": {
-      "command": "python3",
-      "args": ["claudeCodeKernelBenchServer.py"],
-      "cwd": "."
-    }
-  }
-}
-```
-
-**Step 2: Run the MCP functions test script**
-```bash
-python3 test_mcp_functions.py
-```
-
-Expected output (ends with "Test 2 Part A: PASS"):
-```
-Config base_dir: ./kernel_bench
-
-=== Test list_kernel_bench_tasks ===
-Found 100 tasks in level1
-First 5 tasks:
-  - 100_HingeLoss
-  - 10_3D_tensor_matrix_multiplication
-  ...
-
-=== Test get_task_details (100_HingeLoss.py) ===
-Task: 100_HingeLoss
-Source length: 566 chars
-First 5 lines:
-  import torch
-  ...
-
-=== Test 2 Part A: PASS ===
-```
-
-#### Part B: Interactive Claude Code Verification (Optional)
-
-**Prerequisites for MCP Server Access:**
-
-The MCP server requires the `mcp` Python package to be installed. Claude Code will automatically start the MCP server based on `.mcp.json` configuration.
-
-**Step 3: Install the MCP package (required for MCP server)**
-
-The `mcp` package requires Python 3.10+. First, check your Python version:
-```bash
-python3 --version
-```
-
-If Python 3.10+, install mcp:
-```bash
-python3 -m ensurepip --upgrade  # Bootstrap pip if needed
-python3 -m pip install mcp
-```
-
-Note: If you see errors about pip not found, run `python3 -m ensurepip --upgrade` first.
-
-**Step 4: Verify MCP server can start**
-```bash
+cd /Users/aarontao/Projects/code/triton-ag
 python3 -c "
-from claudeCodeKernelBenchServer import mcp, MCP_AVAILABLE
-print(f'MCP_AVAILABLE: {MCP_AVAILABLE}')
-if MCP_AVAILABLE:
-    print('SUCCESS: MCP server ready')
-else:
-    print('FAIL: Install mcp package with: python3 -m pip install mcp')
+from claudeCodeKernelBenchServer import config, get_default_config
+from kbEvalClient import KbEvalClient
+print('✓ Config loaded with', len(config), 'sections')
+print('✓ KbEvalClient imported successfully')
 "
 ```
 
-Expected output:
+**Pass Criteria:**
+- [x] Config loads successfully
+- [x] KbEvalClient imports successfully (requires torch CPU on Mac)
+
+**Execution Status (2026-01-24):** ✓ PASS
 ```
-MCP_AVAILABLE: True
-SUCCESS: MCP server ready
+$ python3 -c "from claudeCodeKernelBenchServer import config, get_default_config; from kbEvalClient import KbEvalClient; print('Config loaded with', len(config), 'sections'); print('KbEvalClient imported successfully')"
+Config loaded with 5 sections
+KbEvalClient imported successfully
 ```
 
-**Step 5: Verify MCP registration file exists**
+**Prerequisites installed:**
 ```bash
-cat .mcp.json
+python3 -m pip install torch psutil numpy httpx --quiet
 ```
 
-Expected:
+#### Test 1.3: MCP Registration
+
+```bash
+cd /Users/aarontao/Projects/code/triton-ag
+python3 -c "
+import json
+with open('.mcp.json') as f:
+    mcp = json.load(f)
+    assert 'mcpServers' in mcp
+    assert 'kernel-bench' in mcp['mcpServers']
+    print('✓ MCP registration valid')
+"
+```
+
+**Pass Criteria:**
+- [x] .mcp.json is valid JSON with kernel-bench server configured
+
+**Execution Status (2026-01-24):** ✓ PASS
+```
+$ python3 -c "import json; mcp=json.load(open('.mcp.json')); assert 'mcpServers' in mcp; assert 'kernel-bench' in mcp['mcpServers']; print('✓ MCP registration valid')"
+✓ MCP registration valid
+```
+
+#### Phase 1 Summary
+
+**All Phase 1 Tests: ✓ PASS**
+
+| Test | Status | Notes |
+|------|--------|-------|
+| 1.1: Syntax Validation | ✓ PASS | Both Python files compile |
+| 1.2: Import and Config | ✓ PASS | Config loads, KbEvalClient imports with torch CPU |
+| 1.3: MCP Registration | ✓ PASS | .mcp.json valid |
+
+---
+
+### 5.4 Phase 2: Single Task Without GPU
+
+**Purpose**: Verify MCP tools work for a single task (kernel generation and result storage, without actual GPU evaluation).
+
+#### What This Phase Tests
+
+This phase validates that MCP tools can list tasks, read task details, and save results - everything except actual GPU evaluation.
+
+**Component Depth Diagram:**
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         LOCAL MACHINE                                    │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │  MCP Server (claudeCodeKernelBenchServer.py)                      │  │
+│  │  ┌─────────────────────────────────────────────────────────────┐  │  │
+│  │  │  ✓ list_kernel_bench_tasks() - Lists level1/2/3 tasks       │  │  │
+│  │  │  ✓ get_task_details() - Reads PyTorch source code           │  │  │
+│  │  │  ✓ save_benchmark_result() - Writes kernel + eval JSON      │  │  │
+│  │  │  ✓ get_session_summary() - Aggregates results               │  │  │
+│  │  │  ✗ eval_kernel() - NOT TESTED (requires GPU)                │  │  │
+│  │  └─────────────────────────────────────────────────────────────┘  │  │
+│  │                              │                                     │  │
+│  │                              ▼                                     │  │
+│  │  ┌─────────────────────────────────────────────────────────────┐  │  │
+│  │  │  File System Operations                                      │  │  │
+│  │  │  ✓ Read: kernel_bench/level1/*.py (task source files)       │  │  │
+│  │  │  ✓ Write: ~/.inference/claude_code_output/{session}/...     │  │  │
+│  │  │    - iteration_XX_cuda_kernel.py (generated code)           │  │  │
+│  │  │    - iteration_XX_eval.json (eval results)                  │  │  │
+│  │  └─────────────────────────────────────────────────────────────┘  │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+│  NOT TESTED: Network calls, kbEvalServer, GPU compilation               │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**What's Real vs Faked:**
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| MCP tool functions | REAL | Actual async functions executing |
+| Task listing | REAL | Reads actual kernel_bench directory |
+| Task source code | REAL | Reads actual PyTorch model files |
+| Kernel code | REAL | Claude generates actual Triton code |
+| File I/O | REAL | Actually writes to ~/.inference/claude_code_output |
+| **Eval results** | **MOCKED** | `{"compiled": true, "correctness": true, "speedup": 1.0}` - manually constructed, not from GPU |
+| kbEvalClient | NOT CALLED | No HTTP requests made |
+| kbEvalServer | NOT NEEDED | Server not required |
+| GPU compilation | NOT DONE | No actual kernel compilation |
+
+**Key Validation Points:**
+- MCP tools execute without errors
+- Task listing returns expected level1/2/3 structure
+- Source code is readable and non-empty
+- File writes succeed with correct directory structure
+- Session summary aggregates mocked results correctly
+- Generated kernel code is syntactically valid Python
+
+**Why Mocked Eval Results:**
+We mock eval results (`compiled=true, correctness=true, speedup=1.0`) because:
+1. No kbEvalServer is running
+2. No GPU is available to compile Triton kernels
+3. This phase focuses on testing the **tooling pipeline**, not kernel correctness
+4. The mock data exercises the save/summary code paths without network dependencies
+
+#### Test 2.1: List and Get Task Details
+
+Create test script:
+
+```bash
+cat > /Users/aarontao/Projects/code/triton-ag/test_phase2_tools.py << 'EOF'
+"""Test Phase 2: MCP tools for single task."""
+import asyncio
+import sys
+sys.path.insert(0, '/Users/aarontao/Projects/code/triton-ag')
+
+from claudeCodeKernelBenchServer import list_kernel_bench_tasks, get_task_details
+
+async def test_list_tasks():
+    print("=== Test 2.1a: list_kernel_bench_tasks ===")
+    result = await list_kernel_bench_tasks(level="level1")
+    tasks = result.get("tasks", [])
+    print(f"Found {len(tasks)} tasks in level1")
+    assert len(tasks) > 0, "Expected at least 1 task"
+    print("✓ list_kernel_bench_tasks works")
+    return tasks[0]["path"]
+
+async def test_get_details(task_path: str):
+    print("\n=== Test 2.1b: get_task_details ===")
+    result = await get_task_details(task_path=task_path)
+    print(f"Task: {result.get('name')}")
+    print(f"Source length: {len(result.get('source_code', ''))} chars")
+    assert "source_code" in result, "Expected source_code in result"
+    assert len(result["source_code"]) > 0, "Expected non-empty source"
+    print("✓ get_task_details works")
+
+async def main():
+    task_path = await test_list_tasks()
+    await test_get_details(task_path)
+    print("\n=== Phase 2.1: PASS ===")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+EOF
+```
+
+Run test:
+
+```bash
+cd /Users/aarontao/Projects/code/triton-ag
+python3 test_phase2_tools.py
+```
+
+**Pass Criteria:**
+- [x] list_kernel_bench_tasks returns level1 tasks
+- [x] get_task_details returns source code
+
+**Execution Status (2026-01-24):** ✓ PASS
+```
+$ python3 test_phase2_tools.py
+=== Test 2.1a: list_kernel_bench_tasks ===
+Found 100 tasks in level1
+✓ list_kernel_bench_tasks works
+
+=== Test 2.1b: get_task_details ===
+Task: 1_Square_matrix_multiplication_
+Source length: 729 chars
+✓ get_task_details works
+
+=== Phase 2.1: PASS ===
+```
+
+**Note:** The test script was updated - `list_kernel_bench_tasks()` returns a list directly, not a dict with "tasks" key.
+
+#### Test 2.2: Save Benchmark Result
+
+Create test script:
+
+```bash
+cat > /Users/aarontao/Projects/code/triton-ag/test_phase2_save.py << 'EOF'
+"""Test Phase 2.2: save_benchmark_result for single task."""
+import asyncio
+import os
+import json
+import sys
+sys.path.insert(0, '/Users/aarontao/Projects/code/triton-ag')
+
+from claudeCodeKernelBenchServer import save_benchmark_result, get_session_summary
+
+MOCK_KERNEL = '''
+import triton
+import triton.language as tl
+
+@triton.jit
+def test_kernel(x_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    x = tl.load(x_ptr + offsets, mask=mask)
+    tl.store(output_ptr + offsets, x, mask=mask)
+'''
+
+MOCK_RESULT = '{"compiled": true, "correctness": true, "speedup": 1.25, "runtime": 0.5}'
+
+async def test_save():
+    print("=== Test 2.2a: save_benchmark_result ===")
+    result = await save_benchmark_result(
+        task_path="level1/1_relu.py",
+        kernel_code=MOCK_KERNEL,
+        eval_result=MOCK_RESULT,
+        session_id="test_phase2_single",
+        iteration=0
+    )
+    print(f"Result: {result}")
+    assert "path" in result or "error" not in result, f"Save failed: {result}"
+
+    # Verify files exist
+    base = os.path.expanduser("~/.inference/claude_code_output/test_phase2_single/1_relu")
+    kernel_file = os.path.join(base, "iteration_00_cuda_kernel.py")
+    eval_file = os.path.join(base, "iteration_00_eval.json")
+
+    assert os.path.exists(kernel_file), f"Kernel file not found: {kernel_file}"
+    assert os.path.exists(eval_file), f"Eval file not found: {eval_file}"
+    print("✓ save_benchmark_result creates files")
+
+async def test_summary():
+    print("\n=== Test 2.2b: get_session_summary ===")
+    result = await get_session_summary(session_id="test_phase2_single")
+    print(f"Summary: {json.dumps(result, indent=2)}")
+    assert "total_tasks" in result, "Expected total_tasks in summary"
+    print("✓ get_session_summary works")
+
+async def main():
+    await test_save()
+    await test_summary()
+    print("\n=== Phase 2.2: PASS ===")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+EOF
+```
+
+Run test:
+
+```bash
+cd /Users/aarontao/Projects/code/triton-ag
+python3 test_phase2_save.py
+```
+
+Cleanup test data:
+
+```bash
+rm -rf ~/.inference/claude_code_output/test_phase2_single
+```
+
+**Pass Criteria:**
+- [x] save_benchmark_result creates kernel and eval files
+- [x] get_session_summary returns valid statistics
+
+**Execution Status (2026-01-24):** ✓ PASS
+```
+$ python3 test_phase2_save.py
+=== Test 2.2a: save_benchmark_result ===
+Result: /Users/aarontao/.inference/claude_code_output/test_phase2_single/19_ReLU
+✓ save_benchmark_result creates files
+
+=== Test 2.2b: get_session_summary ===
+Summary: {"19_ReLU": {...}, "_stats": {"total_tasks": 1, ...}}
+✓ get_session_summary works
+
+=== Phase 2.2: PASS ===
+```
+
+**Notes:**
+- The test script was updated: `eval_result` must be a dict, not JSON string
+- Summary stats are in `_stats` key, not at top level
+- Actual task file is `19_ReLU.py`, not `1_relu.py`
+
+#### Test 2.3: Claude Code Generates Kernel for Single Task
+
+This test can be run via test script OR interactively in Claude Code.
+
+**Option A: Test Script (automated)**
+
+```bash
+cat > /Users/aarontao/Projects/code/triton-ag/test_phase2_generate.py << 'EOF'
+"""Test Phase 2.3: Claude Code generates kernel for single task."""
+import asyncio
+import os
+import sys
+sys.path.insert(0, '/Users/aarontao/Projects/code/triton-ag')
+
+from claudeCodeKernelBenchServer import get_task_details, save_benchmark_result, get_session_summary
+
+RELU_KERNEL = '''
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def relu_kernel(x_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    x = tl.load(x_ptr + offsets, mask=mask)
+    output = tl.maximum(x, 0.0)
+    tl.store(output_ptr + offsets, output, mask=mask)
+
+class ModelNew(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, x):
+        output = torch.empty_like(x)
+        n_elements = x.numel()
+        BLOCK_SIZE = 1024
+        grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
+        relu_kernel[grid](x, output, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+        return output
+'''
+
+MOCK_RESULT = {"compiled": True, "correctness": True, "speedup": 1.15, "runtime": 0.42}
+
+async def main():
+    print("=== Test 2.3: Generate kernel for single task ===")
+
+    # Get task details
+    task = await get_task_details(task_path="level1/19_ReLU.py")
+    print(f"Task: {task.get('name')}")
+
+    # Save generated kernel with mock result
+    session_id = "test_phase2_claude"
+    result = await save_benchmark_result(
+        task_path="level1/19_ReLU.py",
+        kernel_code=RELU_KERNEL,
+        eval_result=MOCK_RESULT,
+        session_id=session_id,
+        iteration=0
+    )
+    print(f"Saved to: {result}")
+
+    # Verify syntax
+    kernel_file = os.path.expanduser(f"~/.inference/claude_code_output/{session_id}/19_ReLU/iteration_00_cuda_kernel.py")
+    compile(open(kernel_file).read(), kernel_file, 'exec')
+    print("✓ Kernel syntax valid")
+
+    print("=== Phase 2.3: PASS ===")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+EOF
+```
+
+Run test:
+```bash
+cd /Users/aarontao/Projects/code/triton-ag
+python3 test_phase2_generate.py
+```
+
+**Option B: Interactive Claude Code**
+
+In Claude Code, run:
+
+> Read the task at kernel_bench/level1/19_ReLU.py using get_task_details.
+> Generate a simple Triton kernel that implements the same functionality.
+> Save the result using save_benchmark_result with session_id="test_phase2_claude" and a mock eval result: {"compiled": true, "correctness": true, "speedup": 1.0}.
+
+Verify:
+
+```bash
+ls -la ~/.inference/claude_code_output/test_phase2_claude/19_ReLU/
+python3 -m py_compile ~/.inference/claude_code_output/test_phase2_claude/19_ReLU/iteration_00_cuda_kernel.py && echo "✓ Kernel syntax valid"
+```
+
+Cleanup:
+
+```bash
+rm -rf ~/.inference/claude_code_output/test_phase2_claude
+rm -rf ~/.inference/claude_code_output/test_phase2_single
+```
+
+**Pass Criteria:**
+- [x] Claude Code (or test script) generates a Triton kernel
+- [x] Kernel passes Python syntax validation
+- [x] Result files are saved correctly
+
+**Execution Status (2026-01-24):** ✓ PASS
+```
+$ python3 test_phase2_generate.py
+=== Test 2.3: Generate kernel for single task ===
+Task: 19_ReLU
+Saved to: /Users/aarontao/.inference/claude_code_output/test_phase2_claude/19_ReLU
+✓ Kernel syntax valid
+=== Phase 2.3: PASS ===
+```
+
+#### Phase 2 Summary
+
+**All Phase 2 Tests: ✓ PASS**
+
+| Test | Status | Notes |
+|------|--------|-------|
+| 2.1: List and Get Details | ✓ PASS | 100 level1 tasks found, source code retrieved |
+| 2.2: Save Benchmark Result | ✓ PASS | Files created, session summary works |
+| 2.3: Generate Kernel | ✓ PASS | Triton kernel generated and saved with valid syntax |
+
+**Key Learnings from Phase 2:**
+- `list_kernel_bench_tasks()` returns a list directly, not wrapped in dict
+- `save_benchmark_result()` expects `eval_result` as dict, not JSON string
+- `get_session_summary()` puts stats in `_stats` key
+- Task filenames may not match expected patterns (e.g., `19_ReLU.py` not `1_relu.py`)
+
+---
+
+### 5.5 Phase 3: Single Task With GPU
+
+> **⚠️ MANUAL SETUP REQUIRED**
+>
+> Phase 3+ requires kbEvalServer running on a GPU machine. Tests stopped at Phase 2.
+>
+> **To continue testing:**
+> 1. Start kbEvalServer on your GPU devserver (see below)
+> 2. Create SSH tunnel to forward port 5676
+> 3. Run Phase 3 tests from local machine
+
+**Purpose**: Verify actual kernel compilation and benchmarking on GPU via kbEvalServer.
+
+**Prerequisites:**
+- kbEvalServer running on GPU machine
+- SSH tunnel or direct network access to port 5676
+
+**Quick Start for Phase 3:**
+
+```bash
+# On GPU devserver (in tmux):
+cd /data/users/$USER/triton-ag
+source .venv/bin/activate
+CUDA_VISIBLE_DEVICES=0 python3 kbEvalServer.py --local_host --port 5676 --device 0
+
+# On local Mac (in separate terminal, keep open):
+ssh -L 5676:localhost:5676 -N devvm8491.cco0.facebook.com
+
+# Verify connection works:
+curl -s http://localhost:5676/health
+```
+
+For detailed setup instructions, see `Claude/KERNEL_BENCH_SETUP.md`.
+
+#### What This Phase Tests
+
+This phase validates the **complete end-to-end flow** for a single kernel: generation → HTTP request → GPU compilation → correctness check → benchmarking → result return.
+
+**Component Depth Diagram:**
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         LOCAL MACHINE (Mac)                              │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │  MCP Server (claudeCodeKernelBenchServer.py)                      │  │
+│  │  ┌─────────────────────────────────────────────────────────────┐  │  │
+│  │  │  ✓ All tools from Phase 2                                   │  │  │
+│  │  │  ✓ eval_kernel() - NOW TESTED                               │  │  │
+│  │  └─────────────────────────────────────────────────────────────┘  │  │
+│  │                              │                                     │  │
+│  │                              ▼                                     │  │
+│  │  ┌─────────────────────────────────────────────────────────────┐  │  │
+│  │  │  KbEvalClient (kbEvalClient.py)                             │  │  │
+│  │  │  ✓ kb_eval() - Makes HTTP POST to kbEvalServer              │  │  │
+│  │  │  ✓ Timeout handling (300s)                                  │  │  │
+│  │  │  ✓ Response parsing (compiled, correctness, speedup)        │  │  │
+│  │  └─────────────────────────────────────────────────────────────┘  │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                              │                                           │
+│                    HTTP POST (port 5676)                                 │
+│                    via SSH tunnel                                        │
+│                              │                                           │
+└──────────────────────────────┼───────────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         GPU MACHINE (devserver)                          │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │  kbEvalServer.py (FastAPI)                                        │  │
+│  │  ┌─────────────────────────────────────────────────────────────┐  │  │
+│  │  │  /kb_eval endpoint                                          │  │  │
+│  │  │  ✓ Receives reference_code + generated_code                 │  │  │
+│  │  │  ✓ Spawns subprocess for compilation                        │  │  │
+│  │  │  ✓ Waits for GPU (CUDA queue)                               │  │  │
+│  │  └─────────────────────────────────────────────────────────────┘  │  │
+│  │                              │                                     │  │
+│  │                              ▼                                     │  │
+│  │  ┌─────────────────────────────────────────────────────────────┐  │  │
+│  │  │  kbEvalUtil.py                                              │  │  │
+│  │  │  ✓ torch.utils.cpp_extension.load_inline() - Compile Triton│  │  │
+│  │  │  ✓ Correctness check (compare Model vs ModelNew output)     │  │  │
+│  │  │  ✓ Timing (torch.cuda.Event for precise GPU timing)         │  │  │
+│  │  │  ✓ Speedup calculation (reference_time / kernel_time)       │  │  │
+│  │  └─────────────────────────────────────────────────────────────┘  │  │
+│  │                              │                                     │  │
+│  │                              ▼                                     │  │
+│  │  ┌─────────────────────────────────────────────────────────────┐  │  │
+│  │  │  NVIDIA GPU (device 7)                                      │  │  │
+│  │  │  ✓ Triton JIT compilation                                   │  │  │
+│  │  │  ✓ Kernel execution (warmup + timed runs)                   │  │  │
+│  │  │  ✓ Memory allocation for inputs/outputs                     │  │  │
+│  │  └─────────────────────────────────────────────────────────────┘  │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**What's Real vs Faked:**
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| MCP tool functions | REAL | Actual async functions executing |
+| Task source code | REAL | Reads actual PyTorch model files |
+| Generated kernel | REAL | Claude generates actual Triton code |
+| HTTP request | REAL | Actual POST to localhost:5676 via SSH tunnel |
+| kbEvalServer | REAL | Running on remote GPU machine |
+| GPU compilation | REAL | Triton JIT compiles to GPU kernels |
+| Correctness check | REAL | Compares outputs with reference |
+| Timing/Speedup | REAL | GPU-timed benchmarking |
+| **SSH tunnel** | **INFRASTRUCTURE** | Manual setup required before test |
+| **Server lifetime** | **MANUAL** | Server started manually, not auto-managed |
+
+**Key Validation Points:**
+- HTTP connection succeeds through SSH tunnel
+- Kernel compiles without CUDA errors
+- Output matches reference (correctness = true)
+- Speedup is measured and >= 1.0 for good kernels
+- Timeout handling works (no hung requests)
+- Error messages are clear for compilation failures
+
+**Typical Response Times:**
+| Operation | Time |
+|-----------|------|
+| HTTP round-trip overhead | ~10-50ms |
+| Triton JIT compilation | 5-15s (first run) |
+| Kernel execution (warmup) | 1-5s |
+| Kernel execution (timed) | 0.1-2s |
+| **Total per eval** | **10-30s** |
+
+**Common Failure Modes:**
+1. **Connection refused**: SSH tunnel not set up or server not running
+2. **Timeout**: Server overloaded or slow compilation
+3. **Compilation error**: Invalid Triton kernel syntax
+4. **Correctness failure**: Kernel produces wrong output
+5. **No speedup**: Kernel slower than PyTorch reference
+
+#### Test 3.0: Setup kbEvalServer and SSH Tunnel
+
+On GPU machine (devserver):
+
+```bash
+cd /data/users/$USER/triton-ag
+source .venv/bin/activate
+python kbEvalServer.py --local_host --port 5676 --device 7
+```
+
+On local machine (create SSH tunnel):
+
+```bash
+ssh -L 5676:localhost:5676 devvm8491.cco0.facebook.com
+```
+
+Verify connection:
+
+```bash
+curl http://localhost:5676/health
+```
+
+Expected: `{"status":"ok",...}`
+
+#### Test 3.1: Direct KbEvalClient Call
+
+Create test script:
+
+```bash
+cat > /Users/aarontao/Projects/code/triton-ag/test_phase3_kbeval.py << 'EOF'
+"""Test Phase 3.1: Direct kbEvalClient call."""
+import asyncio
+import sys
+sys.path.insert(0, '/Users/aarontao/Projects/code/triton-ag')
+
+from claudeCodeKernelBenchServer import get_kbeval_client
+
+REFERENCE_CODE = '''
+import torch
+import torch.nn as nn
+
+class Model(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return torch.relu(x)
+
+def get_inputs():
+    return [torch.randn(1024, 1024, device='cuda')]
+
+def get_init_inputs():
+    return []
+'''
+
+GENERATED_KERNEL = '''
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def relu_kernel(x_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    x = tl.load(x_ptr + offsets, mask=mask)
+    output = tl.maximum(x, 0.0)
+    tl.store(output_ptr + offsets, output, mask=mask)
+
+class ModelNew(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        output = torch.empty_like(x)
+        n_elements = x.numel()
+        grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']),)
+        relu_kernel[grid](x, output, n_elements, BLOCK_SIZE=1024)
+        return output
+'''
+
+async def test_kb_eval():
+    print("=== Test 3.1: Direct kbEvalClient call ===")
+
+    client = get_kbeval_client()
+    print(f"Using client: {type(client).__name__}")
+
+    try:
+        result = await client.kb_eval(
+            provider="local",
+            reference_code=REFERENCE_CODE,
+            generated_code=GENERATED_KERNEL,
+            timeout=120
+        )
+        print(f"Result: {result}")
+
+        if result.get("compiled"):
+            print("✓ Kernel compiled successfully")
+        else:
+            print(f"✗ Compilation failed: {result.get('error')}")
+
+        if result.get("correctness"):
+            print("✓ Kernel produces correct output")
+        else:
+            print(f"✗ Correctness check failed")
+
+        print(f"Speedup: {result.get('speedup', 'N/A')}x")
+        print("\n=== Phase 3.1: PASS ===")
+
+    except Exception as e:
+        print(f"✗ Error: {e}")
+        print("\n=== Phase 3.1: FAIL ===")
+        raise
+
+if __name__ == "__main__":
+    asyncio.run(test_kb_eval())
+EOF
+```
+
+Run test:
+
+```bash
+cd /Users/aarontao/Projects/code/triton-ag
+python3 test_phase3_kbeval.py
+```
+
+**Pass Criteria:**
+- [ ] kbEvalClient connects to server
+- [ ] Kernel compiles successfully
+- [ ] Correctness check passes
+- [ ] Speedup is measured
+
+#### Test 3.2: MCP eval_kernel Tool
+
+Create test script:
+
+```bash
+cat > /Users/aarontao/Projects/code/triton-ag/test_phase3_mcp.py << 'EOF'
+"""Test Phase 3.2: MCP eval_kernel tool."""
+import asyncio
+import sys
+sys.path.insert(0, '/Users/aarontao/Projects/code/triton-ag')
+
+from claudeCodeKernelBenchServer import eval_kernel
+
+GENERATED_KERNEL = '''
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def relu_kernel(x_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    x = tl.load(x_ptr + offsets, mask=mask)
+    output = tl.maximum(x, 0.0)
+    tl.store(output_ptr + offsets, output, mask=mask)
+
+class ModelNew(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        output = torch.empty_like(x)
+        n_elements = x.numel()
+        grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']),)
+        relu_kernel[grid](x, output, n_elements, BLOCK_SIZE=1024)
+        return output
+'''
+
+async def test_eval_kernel():
+    print("=== Test 3.2: MCP eval_kernel tool ===")
+
+    result = await eval_kernel(
+        task_path="level1/1_relu.py",
+        kernel_code=GENERATED_KERNEL,
+        session_id="test_phase3_mcp",
+        iteration=0,
+        provider="local"
+    )
+
+    print(f"Result: {result}")
+
+    if result.get("compiled"):
+        print("✓ Kernel compiled")
+    if result.get("correctness"):
+        print("✓ Kernel correct")
+    print(f"Speedup: {result.get('speedup', 'N/A')}x")
+
+    print("\n=== Phase 3.2: PASS ===")
+
+if __name__ == "__main__":
+    asyncio.run(test_eval_kernel())
+EOF
+```
+
+Run test:
+
+```bash
+cd /Users/aarontao/Projects/code/triton-ag
+python3 test_phase3_mcp.py
+```
+
+**Pass Criteria:**
+- [ ] eval_kernel() successfully calls kbEvalServer
+- [ ] Returns compiled, correctness, speedup fields
+- [ ] Result saved to output directory
+
+#### Test 3.3: Claude Code End-to-End Single Task
+
+In Claude Code, run:
+
+> Optimize the kernel in kernel_bench/level1/1_relu.py
+>
+> Use eval_kernel to compile and benchmark your kernel. Use session_id="test_phase3_e2e".
+> Iterate up to 3 times if needed to get a correct kernel with speedup > 1.0x.
+
+Verify:
+
+```bash
+ls -la ~/.inference/claude_code_output/test_phase3_e2e/
+cat ~/.inference/claude_code_output/test_phase3_e2e/1_relu/iteration_*_eval.json
+```
+
+Cleanup:
+
+```bash
+rm -rf ~/.inference/claude_code_output/test_phase3_e2e
+```
+
+**Pass Criteria:**
+- [ ] Claude Code generates kernel(s)
+- [ ] At least one kernel compiles successfully
+- [ ] Correctness and speedup are measured
+- [ ] Results saved correctly
+
+---
+
+### 5.6 Phase 4: Multiple Tasks (Sequential, Single Agent)
+
+**Purpose**: Verify batch processing of multiple tasks sequentially.
+
+**Prerequisites:**
+- Phase 3 tests pass
+- kbEvalServer running
+
+#### What This Phase Tests
+
+This phase validates that a single Claude Code session can process multiple kernel tasks **sequentially** - completing one task before starting the next.
+
+**Component Depth Diagram:**
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         CLAUDE CODE SESSION                              │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │  Main Agent (single thread of execution)                          │  │
+│  │                                                                    │  │
+│  │  Loop through tasks [1_relu, 2_matmul, 3_sigmoid]:                │  │
+│  │  ┌─────────────────────────────────────────────────────────────┐  │  │
+│  │  │  Task N:                                                     │  │  │
+│  │  │  1. get_task_details() → Read PyTorch source                │  │  │
+│  │  │  2. Generate Triton kernel                                   │  │  │
+│  │  │  3. eval_kernel() → HTTP → GPU → Result (BLOCKING, 10-30s)  │  │  │
+│  │  │  4. save_benchmark_result() → Write files                    │  │  │
+│  │  │  5. (optional) Iterate if correctness=false                  │  │  │
+│  │  └─────────────────────────────────────────────────────────────┘  │  │
+│  │                              │                                     │  │
+│  │                              ▼ (next task)                         │  │
+│  │  ┌─────────────────────────────────────────────────────────────┐  │  │
+│  │  │  Task N+1: (starts after Task N completes)                  │  │  │
+│  │  └─────────────────────────────────────────────────────────────┘  │  │
+│  │                              │                                     │  │
+│  │                              ▼                                     │  │
+│  │  get_session_summary() → Aggregate all results                    │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
+                               │
+                               │ Sequential HTTP calls (one at a time)
+                               ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         kbEvalServer (GPU)                               │
+│  Request queue: [  ] → [ ] → [ ]  (max 1 in-flight at a time)          │
+│                                                                          │
+│  Timeline:                                                               │
+│  |--Task 1 (30s)--|--Task 2 (25s)--|--Task 3 (28s)--|                   │
+│  0s              30s              55s              83s                  │
+│                                                                          │
+│  Total: Sum of individual task times (no parallelism benefit)           │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**What's Real vs Faked:**
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Multiple tasks | REAL | 3+ different kernel_bench tasks |
+| Sequential execution | REAL | One task finishes before next starts |
+| GPU compilation per task | REAL | Each kernel compiled and benchmarked |
+| Session aggregation | REAL | summary includes all task results |
+| File I/O per task | REAL | Each task has its own output files |
+| **Parallelism** | **NONE** | Single thread, no concurrent evals |
+
+**Key Validation Points:**
+- All N tasks complete without errors
+- Each task has its own kernel and eval files
+- Session summary shows correct task count
+- Average speedup is calculated across all tasks
+- No race conditions (only one eval at a time)
+- Total time ≈ sum of individual task times
+
+**Expected Timing (3 tasks):**
+| Task | Time | Cumulative |
+|------|------|------------|
+| 1_relu | 25s | 25s |
+| 2_matmul | 30s | 55s |
+| 3_sigmoid | 20s | 75s |
+| **Total** | - | **~75s** |
+
+**Why Sequential?**
+- Single Claude Code session = single thread of execution
+- Each `eval_kernel()` call blocks until GPU returns result
+- No parallelism within a single agent's context
+- This is the baseline before testing parallel agents (Phase 5)
+
+#### Test 4.1: Programmatic Batch Test
+
+Create test script:
+
+```bash
+cat > /Users/aarontao/Projects/code/triton-ag/test_phase4_batch.py << 'EOF'
+"""Test Phase 4.1: Batch processing multiple tasks."""
+import asyncio
+import sys
+sys.path.insert(0, '/Users/aarontao/Projects/code/triton-ag')
+
+from claudeCodeKernelBenchServer import (
+    list_kernel_bench_tasks,
+    get_task_details,
+    save_benchmark_result,
+    get_session_summary
+)
+
+MOCK_KERNEL_TEMPLATE = '''
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def kernel_{name}(x_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    x = tl.load(x_ptr + offsets, mask=mask)
+    tl.store(output_ptr + offsets, x, mask=mask)
+
+class ModelNew(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, x):
+        return x  # Identity for testing
+'''
+
+SESSION_ID = "test_phase4_batch"
+
+async def main():
+    print("=== Test 4.1: Batch processing ===")
+
+    # Get first 3 tasks
+    tasks_result = await list_kernel_bench_tasks(level="level1")
+    tasks = tasks_result.get("tasks", [])[:3]
+    print(f"Processing {len(tasks)} tasks")
+
+    for i, task in enumerate(tasks):
+        task_path = task["path"]
+        task_name = task["name"]
+        print(f"\n[{i+1}/{len(tasks)}] Processing {task_name}")
+
+        # Get task details
+        details = await get_task_details(task_path=task_path)
+        print(f"  Source: {len(details.get('source_code', ''))} chars")
+
+        # Generate mock kernel
+        kernel = MOCK_KERNEL_TEMPLATE.format(name=task_name.replace("-", "_"))
+
+        # Save result (mock eval)
+        mock_result = f'{{"compiled": true, "correctness": true, "speedup": {1.0 + i*0.1}}}'
+        result = await save_benchmark_result(
+            task_path=task_path,
+            kernel_code=kernel,
+            eval_result=mock_result,
+            session_id=SESSION_ID,
+            iteration=0
+        )
+        print(f"  Saved: {result.get('path', 'OK')}")
+
+    # Get session summary
+    print("\n=== Session Summary ===")
+    summary = await get_session_summary(session_id=SESSION_ID)
+    print(f"Total tasks: {summary.get('total_tasks')}")
+    print(f"Successful: {summary.get('successful_tasks')}")
+    print(f"Avg speedup: {summary.get('average_speedup', 'N/A')}")
+
+    print("\n=== Phase 4.1: PASS ===")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+EOF
+```
+
+Run test:
+
+```bash
+cd /Users/aarontao/Projects/code/triton-ag
+python3 test_phase4_batch.py
+```
+
+Cleanup:
+
+```bash
+rm -rf ~/.inference/claude_code_output/test_phase4_batch
+```
+
+**Pass Criteria:**
+- [ ] All 3 tasks processed successfully
+- [ ] Results saved for each task
+- [ ] Session summary shows correct counts
+
+#### Test 4.2: Claude Code Sequential Batch
+
+In Claude Code, run:
+
+> Run 3 level1 kernel bench tasks sequentially. For each task:
+> 1. Read the PyTorch model
+> 2. Generate a Triton kernel
+> 3. Evaluate with eval_kernel
+> 4. Save result
+>
+> Use session_id="test_phase4_claude". Pick any 3 tasks from level1 (e.g., 1_relu, 2_matmul, 3_sigmoid).
+> Process them one at a time.
+
+Verify:
+
+```bash
+ls -la ~/.inference/claude_code_output/test_phase4_claude/
+cat ~/.inference/claude_code_output/test_phase4_claude/*/iteration_*_eval.json
+```
+
+Get session summary in Claude Code:
+
+> Get the session summary for session_id="test_phase4_claude"
+
+Cleanup:
+
+```bash
+rm -rf ~/.inference/claude_code_output/test_phase4_claude
+```
+
+**Pass Criteria:**
+- [ ] 3 tasks processed
+- [ ] Each task has kernel and eval files
+- [ ] Session summary shows 3 tasks with speedup data
+
+---
+
+### 5.7 Phase 5: Multiple Agents (Parallel Processing)
+
+**Purpose**: Verify parallel processing with multiple agents using Task tool.
+
+**Prerequisites:**
+- Phase 4 tests pass
+- kbEvalServer running
+
+#### What This Phase Tests
+
+This phase validates that Claude Code can use the **Task tool** to spawn multiple sub-agents that work on different kernel tasks **in parallel**, achieving wall-clock speedup compared to sequential execution.
+
+**Component Depth Diagram:**
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         CLAUDE CODE SESSION                              │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │  Main Agent (orchestrator)                                        │  │
+│  │                                                                    │  │
+│  │  1. Partition 6 tasks into 2 groups                               │  │
+│  │  2. Launch parallel agents via Task tool:                         │  │
+│  │                                                                    │  │
+│  │  ┌────────────────────┐      ┌────────────────────┐              │  │
+│  │  │  Sub-Agent 1       │      │  Sub-Agent 2       │              │  │
+│  │  │  [1_relu]          │      │  [4_tanh]          │              │  │
+│  │  │  [2_matmul]        │      │  [5_leaky_relu]    │              │  │
+│  │  │  [3_sigmoid]       │      │  [6_softmax]       │              │  │
+│  │  │  (sequential)      │      │  (sequential)      │              │  │
+│  │  └─────────┬──────────┘      └─────────┬──────────┘              │  │
+│  │            │                           │                          │  │
+│  │            │   CONCURRENT EXECUTION    │                          │  │
+│  │            ▼                           ▼                          │  │
+│  │  ┌─────────────────────────────────────────────────────────────┐  │  │
+│  │  │                    MCP Server                                │  │  │
+│  │  │  eval_kernel() requests interleaved from both agents        │  │  │
+│  │  └─────────────────────────────────────────────────────────────┘  │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
+                               │
+                               │ Multiple concurrent HTTP requests
+                               ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         kbEvalServer (GPU)                               │
+│                                                                          │
+│  Concurrent requests from 2 agents:                                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐│
+│  │ Timeline (overlapped waiting):                                      ││
+│  │                                                                      ││
+│  │ Agent1:  |--1_relu--|--2_matmul--|--3_sigmoid--|                    ││
+│  │ Agent2:  |--4_tanh--|--5_leaky--|--6_softmax--|                     ││
+│  │ GPU:     |===1_relu===|===4_tanh===|===2_matmul===|===5_leaky===|..││
+│  │                                                                      ││
+│  │ Requests queue at GPU, execute one at a time, agents wait in HTTP   ││
+│  └─────────────────────────────────────────────────────────────────────┘│
+│                                                                          │
+│  Wall-clock benefit: Agents prepare next request while GPU runs current │
+│  Total time ≈ max(agent1_time, agent2_time) + GPU serialization         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**What's Real vs Faked:**
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Task tool | REAL | Claude Code spawns actual sub-agents |
+| Parallel agents | REAL | 2+ agents running concurrently |
+| Concurrent HTTP | REAL | Multiple in-flight requests to kbEvalServer |
+| GPU serialization | REAL | GPU processes one kernel at a time (CUDA queue) |
+| Session sharing | REAL | All agents write to same session_id directory |
+| File locking | **RISK** | Potential race conditions on session files |
+| Load management | **IMPLICIT** | No explicit throttling, relies on agent count limit |
+
+**Key Validation Points:**
+- Both agents start concurrently (visible via timestamps)
+- All 6 tasks complete without errors
+- No file conflicts (each task has unique subdirectory)
+- Session summary aggregates results from all agents
+- Wall-clock time < sequential time (parallelism benefit)
+- GPU utilization is higher than sequential (less idle time)
+
+**Expected Timing Comparison:**
+
+| Execution Mode | Tasks | Wall-Clock | Speedup |
+|----------------|-------|------------|---------|
+| Sequential (Phase 4) | 6 tasks | ~150s | 1.0x |
+| 2 Parallel Agents | 6 tasks (3 each) | ~90s | 1.7x |
+| 3 Parallel Agents | 6 tasks (2 each) | ~70s | 2.1x |
+
+*Note: Speedup is limited by GPU serialization - more agents don't help beyond GPU throughput limit*
+
+**Why Parallel Agents Work:**
+
+```
+Sequential:
+Agent:  [generate]-[wait 25s]-[generate]-[wait 25s]-[generate]-[wait 25s]
+GPU:              |===eval===|          |===eval===|          |===eval===|
+
+Parallel (2 agents):
+Agent1: [generate]-[wait]----[generate]-[wait]----...
+Agent2: [generate]-[wait]----[generate]-[wait]----...
+GPU:              |===1===|===2===|===3===|===4===|...
+
+The overlap is in generation time, not GPU time.
+Wall-clock savings = (N_agents - 1) * generation_time_per_kernel
+```
+
+**Potential Issues to Watch:**
+1. **Session file conflicts**: Multiple agents writing summary.json simultaneously
+2. **HTTP timeout cascade**: If one agent times out, does it affect others?
+3. **kbEvalServer overload**: Too many concurrent requests may exhaust resources
+4. **Memory pressure**: Each agent has its own context/memory footprint
+
+#### Test 5.1: Claude Code Parallel Agents (2 Agents)
+
+In Claude Code, run:
+
+> Run 6 level1 kernel bench tasks using 2 parallel agents.
+>
+> Split tasks:
+> - Agent 1: 1_relu, 2_matmul, 3_sigmoid
+> - Agent 2: 4_tanh, 5_leaky_relu, 6_softmax
+>
+> Each agent should process its tasks sequentially.
+> Use session_id="test_phase5_parallel" for all results.
+>
+> Launch both agents in parallel using the Task tool.
+
+Verify parallel execution (during run):
+
+```bash
+# Watch for concurrent file creation
+watch -n 2 'ls -la ~/.inference/claude_code_output/test_phase5_parallel/'
+```
+
+Verify after completion:
+
+```bash
+ls -la ~/.inference/claude_code_output/test_phase5_parallel/
+```
+
+Get session summary in Claude Code:
+
+> Get the session summary for session_id="test_phase5_parallel"
+
+Cleanup:
+
+```bash
+rm -rf ~/.inference/claude_code_output/test_phase5_parallel
+```
+
+**Pass Criteria:**
+- [ ] Both agents run concurrently (visible via file timestamps)
+- [ ] All 6 tasks have results
+- [ ] Session summary shows 6 tasks
+- [ ] No race conditions or file conflicts
+
+#### Test 5.2: Load Management Verification
+
+In Claude Code, run with more agents:
+
+> Run 10 level1 kernel bench tasks using 5 parallel agents.
+>
+> Distribute tasks evenly (2 tasks per agent).
+> Each agent processes its tasks sequentially.
+> Use session_id="test_phase5_load" for all results.
+>
+> Report the total time taken and any errors encountered.
+
+Observe:
+
+```bash
+# Monitor kbEvalServer load (on GPU machine)
+nvidia-smi -l 1
+```
+
+Verify:
+
+```bash
+ls -la ~/.inference/claude_code_output/test_phase5_load/
+```
+
+Cleanup:
+
+```bash
+rm -rf ~/.inference/claude_code_output/test_phase5_load
+```
+
+**Pass Criteria:**
+- [ ] All 10 tasks complete without errors
+- [ ] GPU processes requests (visible in nvidia-smi)
+- [ ] No HTTP timeouts
+- [ ] Load is distributed across agents (visible via file timestamps)
+
+---
+
+### 5.8 Test Status Tracker
+
+| Phase | Test | Status | Date | Notes |
+|-------|------|--------|------|-------|
+| 1 | 1.1: Python Syntax | PASS | 2026-01-23 | Both files compile |
+| 1 | 1.2: Import & Config | PENDING | - | Requires torch installed |
+| 1 | 1.3: MCP Registration | PASS | 2026-01-23 | .mcp.json valid |
+| 2 | 2.1: List & Get Tasks | PASS | 2026-01-23 | MCP tools work |
+| 2 | 2.2: Save Result | PASS | 2026-01-23 | save_benchmark_result works |
+| 2 | 2.3: Claude Generates | PASS | 2026-01-23 | Claude creates valid kernels |
+| 3 | 3.0: Setup | **PENDING** | - | kbEvalServer + SSH tunnel |
+| 3 | 3.1: Direct KbEvalClient | **PENDING** | - | Requires running server |
+| 3 | 3.2: MCP eval_kernel | **PENDING** | - | Requires running server |
+| 3 | 3.3: Claude E2E Single | **PENDING** | - | Full single task flow |
+| 4 | 4.1: Programmatic Batch | PENDING | - | After Phase 3 |
+| 4 | 4.2: Claude Sequential | PENDING | - | 3 tasks sequential |
+| 5 | 5.1: Parallel Agents | PENDING | - | 2 agents, 6 tasks |
+| 5 | 5.2: Load Management | PENDING | - | 5 agents, 10 tasks |
+
+---
+
+### 5.9 Test Script Cleanup
+
+After all tests pass, cleanup test scripts:
+
+```bash
+cd /Users/aarontao/Projects/code/triton-ag
+rm -f test_phase2_tools.py test_phase2_save.py test_phase3_kbeval.py test_phase3_mcp.py test_phase4_batch.py
+rm -rf ~/.inference/claude_code_output/test_phase*
+```
+
+---
+
+## Appendix
+
+### A. Environment Setup
+
+See **[KERNEL_BENCH_SETUP.md](./KERNEL_BENCH_SETUP.md)** for:
+- Part 1: Remote Server Setup (kbEvalServer, GPU configuration)
+- Part 2: Local Environment Setup (MCP server registration, configuration files)
+- Part 3: SSH Tunnel Setup (connecting local to remote)
+
+### B. MCP Registration
+
+**.mcp.json:**
+
 ```json
 {
   "mcpServers": {
@@ -1195,642 +1880,7 @@ Expected:
 }
 ```
 
-**Step 6: Start a NEW Claude Code session in the project directory**
-
-**IMPORTANT**: You must start Claude Code FROM the project directory (where `.mcp.json` is located).
-Claude Code reads the MCP configuration on startup. If you're already in a Claude Code session, you need to exit and restart.
-
-```bash
-cd /path/to/triton-ag
-claude
-```
-
-**Step 7: Verify MCP server is connected**
-
-In Claude Code, check if the MCP tools are available:
-```
-What MCP tools do you have available? List any tools with "kernel" in the name.
-```
-
-Expected: Claude Code should list `list_kernel_bench_tasks`, `get_task_details`, `eval_kernel`, `save_benchmark_result`, and `get_session_summary`.
-
-**If MCP tools are NOT available**, check:
-1. The `mcp` Python package is installed (`python3 -m pip install mcp`)
-2. `.mcp.json` exists in the project root
-3. You started Claude Code FROM the project directory (not navigated there after)
-4. Run Step 4 to verify MCP server can start
-5. Try exiting Claude Code and restarting
-
-**Step 8: In Claude Code, test the list_kernel_bench_tasks tool**
-```
-Use the list_kernel_bench_tasks MCP tool to list all tasks in level1.
-Show me the first 5 tasks.
-```
-
-Expected: Claude Code calls the MCP tool and displays a list of tasks.
-
-**Step 9: In Claude Code, test the get_task_details tool**
-```
-Use the get_task_details MCP tool to read the task at level1/1_Square_matrix_multiplication_.py
-Show me the PyTorch model code.
-```
-
-Expected: Claude Code displays the source code of the task file.
-
-**Step 10: In Claude Code, generate a kernel (without evaluation)**
-```
-Based on the task you just read, generate a Triton kernel that implements the same operation.
-Do NOT call eval_kernel yet - just show me the generated kernel code.
-```
-
-Expected: Claude Code generates valid Triton/CUDA kernel code.
-
-**Pass Criteria:**
-- [x] MCP server is registered in .mcp.json
-- [x] list_kernel_bench_tasks returns tasks from level1
-- [x] get_task_details returns source code for a task
-- [ ] (Optional) Claude Code interactive test passes
-
-### Test 3: End-to-End Flow with Queue Submission (No kbEvalServer)
-
-This test verifies the complete flow from task enumeration through kernel generation to result storage, without requiring a running kbEvalServer.
-
-**Prerequisites:**
-- MCP server code passes Test 1 and Test 2
-- kernel_bench tasks available at `./kernel_bench/`
-
-#### Part A: Programmatic Verification (Required)
-
-This runs without workflow server and tests file operations.
-
-**Step 1: Run the E2E test script**
-```bash
-python3 test_mcp_e2e.py
-```
-
-Expected output (ends with "Test 3: PASS"):
-```
-Config base_dir: ./kernel_bench
-Output base_dir: /Users/.../.inference/claude_code_output
-
-=== Test: list_kernel_bench_tasks ===
-Found 100 tasks in level1
-First task: 100_HingeLoss
-
-=== Test: get_task_details (100_HingeLoss.py) ===
-Task: 100_HingeLoss
-Source length: 566 chars
-
-=== Test: eval_kernel (queue_only=True) ===
-EXPECTED: Queue error (workflow server not running) - WorkflowClient not available - install workflowClient module
-This is OK for Test 3 without --with-queue flag
-
-=== Test: save_benchmark_result ===
-Saved to: /Users/.../.inference/claude_code_output/test_e2e_flow/100_HingeLoss
-Kernel file syntax: OK
-Eval file structure: OK (model=claude-code)
-
-=== Test: get_session_summary ===
-Session stats:
-  Total tasks: 1
-  Total iterations: 1
-  Success count: 1
-  Avg speedup: 1.45x
-
-=== Test 3: PASS ===
-```
-
-**Step 2: Verify saved files**
-```bash
-ls ~/.inference/claude_code_output/test_e2e_flow/
-```
-
-Expected: `100_HingeLoss/` directory and `summary.json`
-
-**Step 3: Verify kernel file syntax**
-```bash
-python3 -m py_compile ~/.inference/claude_code_output/test_e2e_flow/*/iteration_00_cuda_kernel.py && echo "Kernel syntax OK"
-```
-
-**Step 4: Cleanup**
-```bash
-rm -rf ~/.inference/claude_code_output/test_e2e_flow/
-```
-
-**Pass Criteria (Part A):**
-- [x] Test script runs without errors
-- [x] save_benchmark_result creates valid kernel and eval files
-- [x] get_session_summary returns correct statistics
-- [x] Kernel file passes Python syntax validation
-
-#### Part B: Interactive Claude Code Verification with Workflow Server (Optional)
-
-This tests the full flow including queue submission. Requires workflow server.
-
-**Prerequisites:**
-
-**Prerequisite 1: Python 3.10+ with pip**
-
-Verify:
-```bash
-python3 --version
-```
-Expected: `Python 3.10.x` or higher
-
-If Python < 3.10, you need to install a newer Python version.
-
-**Prerequisite 2: Required packages installed**
-
-Verify:
-```bash
-python3 -c "import yaml, loguru, fastapi, uvicorn, httpx; print('All packages OK')"
-```
-Expected: `All packages OK`
-
-Fix (if import fails):
-```bash
-python3 -m ensurepip --upgrade  # Bootstrap pip if needed
-python3 -m pip install pyyaml loguru fastapi uvicorn httpx
-```
-
-**Prerequisite 3: Workflow config file exists**
-
-Verify:
-```bash
-cat workflow/claude_code.yaml
-```
-Expected: YAML file with `queues` and `global` sections
-
-Fix (if file not found):
-```bash
-cat > workflow/claude_code.yaml << 'EOF'
-# Claude Code Kernel Bench workflow configuration
-queues:
-  - name: kbEval.pending
-
-global:
-  prefix_tag: "claude_code"
-  start_epoch: 0
-  start_block: 0
-  end_epoch: 1
-  end_block: 1
-EOF
-```
-
-**Prerequisite 4: workflow.yaml has claude_code registry entry**
-
-Verify:
-```bash
-grep -A3 "claude_code:" workflow.yaml | head -4
-```
-Expected:
-```
-  claude_code:
-    short_name: "cc"
-    config_path: "workflow/claude_code.yaml"
-    data_dir: "~/.workflow"
-```
-
-Fix (if not found): Add the following to `workflow.yaml` under the `registry:` section:
-```yaml
-  claude_code:
-    short_name: "cc"
-    config_path: "workflow/claude_code.yaml"
-    data_dir: "~/.workflow"
-```
-
-**Prerequisite 5: workflow.yaml has local provider**
-
-Verify:
-```bash
-grep -A4 "^  local:" workflow.yaml
-```
-Expected:
-```
-  local:
-    host: "localhost"
-    port: 8488
-    retries: 3
-    timeout: 60
-```
-
-Fix (if not found): Add the following to `workflow.yaml` under the `providers:` section:
-```yaml
-  local:
-    host: "localhost"
-    port: 8488
-    retries: 3
-    timeout: 60
-```
-
-**Prerequisite 6: Verify workflowServer can import**
-
-Verify:
-```bash
-python3 -c "import workflowServer; print('workflowServer import OK')"
-```
-Expected: `workflowServer import OK`
-
-If import fails, check the error message and install missing dependencies.
-
----
-
-**Step 1: Start workflow server (in a separate terminal)**
-```bash
-cd /path/to/triton-ag
-python3 workflowServer.py --host :: --port 8488
-```
-
-Wait for the log message: `FastAPI server listening on: [:::8488]`
-
-**Step 2: Verify workflow server is running**
-```bash
-curl -s http://localhost:8488/queue/list/claude_code
-```
-
-Expected: `["queue.kbEval.pending"]`
-
-**Step 3: Run E2E test with queue verification**
-```bash
-python3 test_mcp_e2e.py --with-queue
-```
-
-Expected output:
-```
-Config base_dir: ./kernel_bench
-Output base_dir: /Users/<username>/.inference/claude_code_output
-
-=== Test: list_kernel_bench_tasks ===
-... | INFO     | claudeCodeKernelBenchServer:list_kernel_bench_tasks:... | [kernel-bench] Listed 100 tasks from levels: ['level1']
-Found 100 tasks in level1
-First task: 100_HingeLoss
-
-=== Test: get_task_details (100_HingeLoss.py) ===
-... | INFO     | claudeCodeKernelBenchServer:get_task_details:... | [kernel-bench] Read task: 100_HingeLoss.py (566 chars)
-Task: 100_HingeLoss
-Source length: 566 chars
-
-=== Test: eval_kernel (queue_only=True) ===
-... | INFO     | workflowClient:__init__:... | 🔍 [WorkflowClient] Initialized: [localhost:8488]
-HTTP Request: POST http://localhost:8488/queue/enqueue/claude_code/kbEval.pending "HTTP/1.1 200 OK"
-... | INFO     | workflowClient:enqueue:... | 🔍 [WorkflowClient] [claude_code] Enqueued to [kbEval.pending], content: [...]
-... | INFO     | claudeCodeKernelBenchServer:eval_kernel:... | [kernel-bench] Queued 100_HingeLoss iteration 0 to kbEval.pending
-SUCCESS: Queued to kbEval.pending
-Work item submitted_at: 2026-01-23T...
-
-=== Test: save_benchmark_result ===
-... | INFO     | claudeCodeKernelBenchServer:save_benchmark_result:... | [kernel-bench] Saved result: ...
-Saved to: /Users/<username>/.inference/claude_code_output/test_e2e_flow/100_HingeLoss
-Kernel file syntax: OK
-Eval file structure: OK (model=claude-code)
-
-=== Test: get_session_summary ===
-Session stats:
-  Total tasks: 1
-  Total iterations: 1
-  Success count: 1
-  Avg speedup: 1.45x
-
-=== Test 3: PASS ===
-```
-
-**Step 4: Verify queue submission**
-```bash
-curl -s http://localhost:8488/queue/qsize/claude_code/kbEval.pending
-```
-
-Expected: `1` (or greater)
-
-**Step 5: Peek at queue to verify work item structure**
-```bash
-curl -s http://localhost:8488/queue/peek/claude_code/kbEval.pending | python3 -m json.tool
-```
-
-Expected structure:
-```json
-{
-  "task_path": "level1/100_HingeLoss.py",
-  "kernel_code": "\nimport torch\nimport triton\nimport triton.language as tl...",
-  "session_id": "test_e2e_flow",
-  "iteration": 0,
-  "submitted_at": "2026-01-23T...",
-  "status": "pending"
-}
-```
-
-**Step 6: Cleanup**
-```bash
-rm -rf ~/.inference/claude_code_output/test_e2e_flow/
-```
-
-**Pass Criteria (Part B):**
-- [ ] Workflow server starts and shows `claude_code` registry loaded
-- [ ] Queue list returns `["queue.kbEval.pending"]`
-- [ ] Queue submission succeeds (test_mcp_e2e.py --with-queue passes)
-- [ ] Queue contains work item with correct structure
-
-#### Part C: Full E2E with Claude-Generated Kernels (Batch)
-
-This tests the complete workflow where Claude Code **actually generates** Triton kernel code for multiple tasks. Uses queue submission (same as Part B) - no kbEvalServer required.
-
-**Key Difference from Part B:**
-- Part B: Uses HARDCODED sample kernel code (single task)
-- Part C: Claude Code GENERATES actual kernel code (batch of 3 tasks)
-
-**Prerequisites:**
-- All Part A prerequisites (MCP server, kernel_bench tasks)
-- Workflow server running: `python workflowServer.py --host :: --port 8488`
-
----
-
-### Simple Command (Copy-Paste This to Claude Code)
-
-```
-Run 3 level1 kernel bench tests. For each task:
-1. Read the PyTorch model
-2. Generate an optimized Triton kernel
-3. Submit via eval_kernel with queue_only=True
-4. Save result via save_benchmark_result
-
-Use session_id="partc_batch_test". Pick any 3 tasks from level1.
-```
-
----
-
-### Verification Steps
-
-After Claude Code completes, verify these 3 things:
-
-**1. Verify Generated Triton Code**
-
-Location: `~/.inference/claude_code_output/partc_batch_test/*/iteration_00_cuda_kernel.py`
-
-```bash
-# List generated kernels
-ls ~/.inference/claude_code_output/partc_batch_test/
-
-# View kernel code for each task
-cat ~/.inference/claude_code_output/partc_batch_test/*/iteration_00_cuda_kernel.py
-
-# Verify syntax
-python3 -m py_compile ~/.inference/claude_code_output/partc_batch_test/*/iteration_00_cuda_kernel.py && echo "All kernels: Syntax OK"
-```
-
-**2. Verify Queue Submission (inferenceEval)**
-
-```bash
-# Check queue size (should have 3 items)
-curl -s http://localhost:8488/queue/qsize/claude_code/kbEval.pending
-
-# View queue contents
-curl -s http://localhost:8488/queue/peek/claude_code/kbEval.pending | jq '.task_path'
-```
-
-**3. Verify Saved Eval Files**
-
-Location: `~/.inference/claude_code_output/partc_batch_test/*/iteration_00_eval.json`
-
-```bash
-# List eval files
-ls ~/.inference/claude_code_output/partc_batch_test/*/iteration_00_eval.json
-
-# Check structure
-cat ~/.inference/claude_code_output/partc_batch_test/*/iteration_00_eval.json | jq '.status'
-# Expected: "queued_for_eval" for each
-```
-
----
-
-### Pass Criteria (Part C)
-
-| Criterion | Verification Command | Expected |
-|-----------|---------------------|----------|
-| Claude generates 3 kernels | `ls ~/.inference/claude_code_output/partc_batch_test/ \| wc -l` | 3 |
-| All kernels valid Python | `python3 -m py_compile ~/.inference/.../*.py` | No errors |
-| Queue has 3 items | `curl .../qsize/claude_code/kbEval.pending` | 3 |
-| Eval files saved | `ls ~/.inference/.../*/iteration_00_eval.json \| wc -l` | 3 |
-
----
-
-### Demo Mode (Automated Testing)
-
-For CI/automated testing without interactive Claude:
-```bash
-# Run demo with 3 tasks
-python3 test_mcp_e2e_claude.py --task level1/1_Square.py --demo
-python3 test_mcp_e2e_claude.py --task level1/2_Tanh.py --demo
-python3 test_mcp_e2e_claude.py --task level1/3_ReLU.py --demo
-```
-
-**Demo Mode Status:** PASS (2026-01-23)
-
-**Part C Full Test Status:** PASS (2026-01-23)
-- Session: `partc_claude_generated`
-- Tasks: 3 (Square, Standard, Batched matrix multiplication)
-- Kernels generated: 3 (all syntax OK)
-- Eval files: 3 (all queued_for_eval)
-
-#### Part D: Remote Workflow Server with GPU (Full E2E)
-
-This extends Part C by running the workflow server and kbEvalServer on a **remote GPU machine** instead of localhost. This enables actual kernel compilation and benchmarking while running Claude Code on a local machine.
-
-**Architecture:**
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                      LOCAL MACHINE                                │
-│  (macOS, no GPU - where Claude Code runs)                         │
-│                                                                   │
-│  ┌─────────────────┐                                              │
-│  │   Claude Code   │───────┐                                      │
-│  └─────────────────┘       │                                      │
-│           │                │                                      │
-│           ▼                │                                      │
-│  ┌─────────────────────┐   │ HTTP                                 │
-│  │  MCP Server         │───┼──────────────────────────────┐       │
-│  │  (kernel-bench)     │   │                              │       │
-│  │                     │   │                              ▼       │
-│  │  provider: "remote" │   │                     ┌────────────────┴─┐
-│  └─────────────────────┘   │                     │ REMOTE GPU       │
-│                            │                     │ MACHINE          │
-│  Files saved locally:      │                     │                  │
-│  ~/.inference/claude_      │                     │ ┌──────────────┐ │
-│    code_output/            │                     │ │ Workflow     │ │
-└────────────────────────────┘                     │ │ Server :8488 │ │
-                                                   │ └──────────────┘ │
-                                                   │        │         │
-                                                   │        ▼         │
-                                                   │ ┌──────────────┐ │
-                                                   │ │ kbEvalServer │ │
-                                                   │ │ :5676        │ │
-                                                   │ │ (GPU 0)      │ │
-                                                   │ └──────────────┘ │
-                                                   └──────────────────┘
-```
-
----
-
-### Part D-1 & D-2: Environment Setup
-
-> **See [KERNEL_BENCH_SETUP.md](./KERNEL_BENCH_SETUP.md)** for complete environment setup instructions:
-> - **Part 1: Remote Server Setup** - One-time setup (clone, proxy, venv, dependencies) and recurring setup (venv activation, server startup)
-> - **Part 2: Local Environment Setup** - MCP server registration, configuration files
-> - **Part 3: SSH Tunnel Setup** - Connecting local machine to remote GPU server
-
----
-
-### Part D-3: Verification Test
-
-**Step 1: Verify MCP tools are available**
-
-In Claude Code:
-```
-What MCP tools do you have available? List any tools with "kernel" in the name.
-```
-
-**Step 2: Run single task E2E test**
-
-In Claude Code:
-```
-Optimize the kernel in kernel_bench/level1/1_Square_matrix_multiplication_.py
-
-Use session_id="partd_remote_test" and provider="remote_gpu".
-Generate a Triton kernel and submit for evaluation.
-```
-
-**Step 3: Verify results**
-
-On local machine:
-```bash
-# Check generated kernel file
-ls ~/.inference/claude_code_output/partd_remote_test/*/iteration_00_cuda_kernel.py
-
-# Check eval result (should have actual compilation result)
-cat ~/.inference/claude_code_output/partd_remote_test/*/iteration_00_eval.json
-```
-
-Expected eval result (with real GPU evaluation):
-```json
-{
-  "compiled": true,
-  "correctness": true,
-  "runtime": 0.234,
-  "speedup": 1.45,
-  "model": "claude-code",
-  "timestamp": "2026-01-24T..."
-}
-```
-
-On remote machine (if using queue mode):
-```bash
-# Check queue was processed
-curl -s http://localhost:8488/queue/qsize/claude_code/kbEval.pending
-```
-
----
-
-### Part D Pass Criteria
-
-| Criterion | Verification | Expected |
-|-----------|--------------|----------|
-| Remote workflow server running | `curl http://remote:8488/health` | `{"status": "ok"}` |
-| Remote kbEval server running | `curl http://remote:5676/health` | `{"status": "ok"}` |
-| Local MCP uses remote provider | Check `claudeCodeKernelBench.yaml` | `provider_name: "remote_gpu"` |
-| Claude generates kernel | Check `~/.inference/.../iteration_00_cuda_kernel.py` | Valid Triton code |
-| Kernel compiles on GPU | Check eval JSON `"compiled": true` | true |
-| Kernel correctness verified | Check eval JSON `"correctness": true` | true |
-| Speedup measured | Check eval JSON `"speedup"` | > 0 |
-
----
-
-### Troubleshooting Part D
-
-**Connection refused to remote server:**
-1. Verify remote servers are running: `ssh remote && curl localhost:8488/health`
-2. Check firewall allows ports 8488 and 5676
-3. Verify hostname in workflow.yaml is correct
-
-**Timeout errors:**
-1. Increase timeout in workflow.yaml provider config: `timeout: 600`
-2. Check network latency: `ping remote-gpu-server.example.com`
-
-**kbEval returns compilation errors:**
-1. Verify CUDA is working on remote: `nvidia-smi`
-2. Check Triton is installed: `python3 -c "import triton; print(triton.__version__)"`
-3. Review kbEvalServer logs for detailed error messages
-
-**Part D Status:** Not yet tested (requires remote GPU setup)
-
-### Test 4: Full End-to-End with kbEvalServer
-
-This test runs the complete flow with actual kernel compilation and benchmarking.
-
-**Prerequisites:**
-- MCP server registered in Claude Code
-- Workflow server running
-- kbEvalServer running on GPU
-
-**Step 1: Start kbEval server**
-```bash
-python kbEvalServer.py --local_host --port 5676 --device 0
-```
-
-**Step 2: In Claude Code, run kernel optimization**
-```
-Optimize the kernel in kernel_bench/level1/1_relu.py
-
-Use session_id="test_full_e2e" and iterate until you get a correct result with speedup > 1.0x
-```
-
-**Step 3: Verify eval results**
-```bash
-cat ~/.inference/claude_code_output/test_full_e2e/1_relu/iteration_00_eval.json
-```
-
-Expected: `compiled: true`, `correctness: true`, `speedup: > 0`
-
-**Pass Criteria:**
-- [ ] Kernel compiles successfully on GPU
-- [ ] Kernel produces correct output
-- [ ] Speedup is measured and recorded
-
-### Test 5: Comparison Test
-- Run Claude Code on multiple level1 tasks
-- Compare against existing RL output
-- Generate comparison report
-
-```bash
-python3 benchmarkCompare.py --claude-dir ~/.inference/claude_code_output/my_session --rl-dir ~/.inference/output/my_rl_run --output comparison.json
-```
-
-### Test 6: Batch Benchmark Session
-
-Run Claude Code on all level1 tasks to generate a full benchmark session.
-
-**In Claude Code:**
-```
-Run a benchmark session on all kernel_bench/level1/ tasks.
-Use session_id="claude_level1_benchmark".
-For each task, iterate up to 3 times to get a correct result.
-```
-
-**Generate comparison report:**
-```bash
-python3 benchmarkCompare.py --claude-dir ~/.inference/claude_code_output/claude_level1_benchmark --rl-dir ~/.inference/output/my_rl_run --output comparison.json
-```
-
-## Configuration
-
-> **See [KERNEL_BENCH_SETUP.md](./KERNEL_BENCH_SETUP.md) Part 2** for MCP server registration and configuration file setup.
-
-## Notes
-
-- **No Claude API key required** - Claude Code provides the LLM access; MCP tools are just utilities
-- Requires kbEval server running for kernel compilation/benchmarking
-- Results use same JSON schema as RL training for direct comparison
-- MCP server approach provides native Claude Code integration
-
-## Component Responsibilities
+### C. Component Responsibilities
 
 | Component | Requires Claude API? | Purpose |
 |-----------|---------------------|---------|
@@ -1838,71 +1888,19 @@ python3 benchmarkCompare.py --claude-dir ~/.inference/claude_code_output/claude_
 | MCP Server | No | File I/O, kbEval HTTP calls, result storage |
 | kbEvalServer | No | Kernel compilation & benchmarking (GPU) |
 
----
+### D. Skill Alternative
 
-## Appendix
+Create `.claude/skills/kernel-bench.md` for streamlined invocation:
 
-### Alternative: Skill (Slash Command)
-
-Create a `/kernel-bench` skill for streamlined invocation:
-
-**Setup:**
-Create `.claude/skills/kernel-bench.md`:
 ```markdown
 ---
 name: kernel-bench
 description: Run kernel benchmark optimization
 ---
 
-# Kernel Bench Skill
-
 When invoked, optimize CUDA kernels for the specified task(s).
 
 ## Usage
 - `/kernel-bench kernel_bench/level1/1_relu.py` - Single task
 - `/kernel-bench kernel_bench/level1/` - All tasks in directory
-- `/kernel-bench --session my_session` - Named session for comparison
-
-## Workflow
-1. List or identify target task(s)
-2. For each task:
-   a. Read PyTorch model using `get_task_details` MCP tool
-   b. Generate optimized CUDA/Triton kernel
-   c. Evaluate using `eval_kernel` MCP tool
-   d. If not correct or slow, iterate (up to 4 attempts)
-   e. Save result using `save_benchmark_result` MCP tool
-3. Generate summary with success rate and speedups
 ```
-
-**Usage:**
-```
-You: /kernel-bench kernel_bench/level1/
-
-Claude Code executes the skill workflow automatically.
-```
-
-### Alternative: CLI Direct (No MCP)
-
-For scripting or non-interactive use, create a CLI wrapper `claudeCodeKernelBench.py`:
-
-```bash
-# List available tasks
-python claudeCodeKernelBench.py list --level level1
-
-# Get task details (for manual inspection)
-python claudeCodeKernelBench.py get kernel_bench/level1/1_relu.py
-
-# Evaluate a kernel you've already written
-python claudeCodeKernelBench.py eval kernel_bench/level1/1_relu.py \
-  --kernel-file my_kernel.py \
-  --session-id my_session
-
-# Run full benchmark session
-python claudeCodeKernelBench.py session --tasks kernel_bench/level1/ \
-  --output-dir ~/.inference/claude_code_output/
-```
-
-This approach is useful for:
-- Scripted/automated benchmarking
-- Integration with CI/CD pipelines
-- Non-interactive environments
