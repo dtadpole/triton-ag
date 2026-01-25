@@ -116,8 +116,10 @@ source .venv/bin/activate
 ```bash
 pip install --upgrade pip
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-pip install fastapi uvicorn pydantic pyyaml ninja loguru psutil triton numpy httpx wandb
+pip install fastapi uvicorn pydantic pyyaml ninja loguru psutil triton numpy httpx wandb black
 ```
+
+**Note:** The `black` package is required for Triton kernel code formatting during compilation.
 
 **Verify:**
 ```bash

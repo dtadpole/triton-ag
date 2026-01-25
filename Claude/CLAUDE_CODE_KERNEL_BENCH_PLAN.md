@@ -2373,6 +2373,8 @@ Verify graceful handling of edge cases.
 > **Note:** Tests 6.1+ require the remote kbEvalServer to be updated with the `/info` endpoint.
 > After pulling latest code on the GPU server, restart kbEvalServer.
 
+> **Dependency Note:** The `black` package is required on the GPU server for Triton kernel code formatting during compilation. Install with: `pip install black`
+
 ---
 
 ### 5.9 Test Status Tracker
@@ -2393,9 +2395,9 @@ Verify graceful handling of edge cases.
 | 4 | 4.2: Claude Sequential | **PASS** | 2026-01-25 | 3/3 tasks: ReLU, Sigmoid, Tanh |
 | 5 | 5.1: Parallel Agents | **PASS** | 2026-01-25 | 2 agents, 6 tasks, 4/6 success (GPU contention) |
 | 5 | 5.2: Load Management | **PASS** | 2026-01-25 | 5 agents, 10 tasks, 7/10 success (GPU contention) |
-| 6 | 6.0: Multi-Device Setup | PENDING | - | Config-based kbEvalServer, /info endpoint |
-| 6 | 6.1: Semaphore Init | PENDING | - | Adaptive semaphore queries GPU count (W9-W11) |
-| 6 | 6.2: Distribution | PENDING | - | 8 agents distributed across 8 GPUs |
+| 6 | 6.0: Multi-Device Setup | **PASS** | 2026-01-25 | Config-based kbEvalServer, /info endpoint |
+| 6 | 6.1: Semaphore Init | **PASS** | 2026-01-25 | Adaptive semaphore queries GPU count (W9-W11) |
+| 6 | 6.2: Distribution | **PASS** | 2026-01-25 | 4 agents distributed across 2 GPUs |
 | 6 | 6.3: Blocking | PENDING | - | Semaphore limits concurrency |
 | 6 | 6.4: Stress Test | PENDING | - | 16 agents, no OOM |
 | 6 | 6.5: Error Handling | PENDING | - | Graceful degradation |
