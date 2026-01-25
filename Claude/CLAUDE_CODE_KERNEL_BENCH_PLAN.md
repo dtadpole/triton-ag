@@ -34,13 +34,11 @@ The existing `agent_kernel_coder.py` DOES require API access (OpenAI, DeepSeek, 
 Once the MCP server is registered, you interact with Claude Code naturally:
 
 **Setup (one-time):**
-```bash
-# 1. Ensure kbEval server is running on a GPU machine
-python kbEvalServer.py --local_host --port 5676 --device 0
 
-# 2. Register MCP server in Claude Code config (~/.claude/mcp.json or project .mcp.json)
-# See Configuration section below
-```
+> **See [KERNEL_BENCH_SETUP.md](./KERNEL_BENCH_SETUP.md) for complete environment setup instructions**, including:
+> - Part 1: Remote Server Setup (workflow server, kbEvalServer, GPU configuration)
+> - Part 2: Local Environment Setup (MCP server registration, configuration files)
+> - Part 3: SSH Tunnel Setup (connecting local to remote)
 
 **Usage - Single Task:**
 ```
@@ -1672,126 +1670,12 @@ This extends Part C by running the workflow server and kbEvalServer on a **remot
 
 ---
 
-### Part D-1: Remote Server Setup (GPU Machine)
+### Part D-1 & D-2: Environment Setup
 
-**Prerequisites:**
-- SSH access to remote GPU machine
-- NVIDIA GPU with CUDA installed
-- Python 3.10+ with dependencies (torch, triton, etc.)
-- triton-ag repository cloned
-
-**Step 1: SSH to remote machine**
-```bash
-ssh user@remote-gpu-server.example.com
-cd /path/to/triton-ag
-```
-
-**Step 2: Install dependencies**
-```bash
-python3 -m pip install pyyaml mcp loguru fastapi uvicorn httpx pydantic torch triton
-```
-
-**Step 3: Start workflow server**
-
-Open a tmux session (recommended for persistent process):
-```bash
-tmux new-session -s workflow
-cd /path/to/triton-ag
-python3 workflowServer.py --host :: --port 8488
-```
-
-Wait for the log message:
-```
-FastAPI server listening on: [:::8488]
-```
-
-**Step 4: Start kbEvalServer (in another tmux session)**
-```bash
-tmux new-session -s kbeval
-cd /path/to/triton-ag
-CUDA_VISIBLE_DEVICES=0 python3 kbEvalServer.py --local_host --port 5676 --device 0
-```
-
-Wait for the server to show ready message.
-
-**Step 5: Verify remote servers are running**
-
-From the remote machine:
-```bash
-# Check workflow server
-curl -s http://localhost:8488/queue/list/claude_code
-
-# Check kbEval server health
-curl -s http://localhost:5676/health
-```
-
-**Step 6: Note the remote hostname/IP**
-
-You'll need this for local configuration:
-```bash
-hostname -f  # or use the IP address
-```
-
----
-
-### Part D-2: Local Environment Setup (Claude Code Machine)
-
-**Prerequisites:**
-- Claude Code installed
-- triton-ag repository cloned
-- Network connectivity to remote GPU machine
-
-**Step 1: Add remote provider to workflow.yaml**
-
-Edit `workflow.yaml` and add a provider for your remote server:
-
-```yaml
-providers:
-  # Existing providers...
-
-  remote_gpu:
-    host: "remote-gpu-server.example.com"  # Replace with your remote hostname
-    port: 8488
-    retries: 5
-    timeout: 300
-```
-
-**Step 2: Update MCP server config to use remote provider**
-
-Edit `claudeCodeKernelBench.yaml`:
-
-```yaml
-workflow:
-  prefix_tag: "claude_code"
-  eval_queue: "kbEval.pending"
-  config_file: "workflow.yaml"
-  provider_name: "remote_gpu"  # Changed from "local" to your remote provider
-```
-
-Alternatively, you can specify the provider when calling `eval_kernel`:
-```
-eval_kernel(task_path=..., kernel_code=..., provider="remote_gpu", queue_only=False)
-```
-
-**Step 3: Verify network connectivity**
-
-```bash
-# Test workflow server connectivity
-curl -s http://remote-gpu-server.example.com:8488/queue/list/claude_code
-
-# Test kbEval server connectivity
-curl -s http://remote-gpu-server.example.com:5676/health
-```
-
-**Expected:** Both should return valid JSON responses.
-
-**Step 4: Restart Claude Code**
-
-MCP server reads config on startup. Restart Claude Code from the project directory:
-```bash
-cd /path/to/triton-ag
-claude
-```
+> **See [KERNEL_BENCH_SETUP.md](./KERNEL_BENCH_SETUP.md)** for complete environment setup instructions:
+> - **Part 1: Remote Server Setup** - One-time setup (clone, proxy, venv, dependencies) and recurring setup (venv activation, server startup)
+> - **Part 2: Local Environment Setup** - MCP server registration, configuration files
+> - **Part 3: SSH Tunnel Setup** - Connecting local machine to remote GPU server
 
 ---
 
@@ -1937,18 +1821,7 @@ python3 benchmarkCompare.py --claude-dir ~/.inference/claude_code_output/claude_
 
 ## Configuration
 
-Add to `mcp.json`:
-```json
-{
-  "mcpServers": {
-    "kernel_bench": {
-      "command": "python",
-      "args": ["claudeCodeKernelBenchServer.py"],
-      "cwd": "/path/to/triton-ag"
-    }
-  }
-}
-```
+> **See [KERNEL_BENCH_SETUP.md](./KERNEL_BENCH_SETUP.md) Part 2** for MCP server registration and configuration file setup.
 
 ## Notes
 

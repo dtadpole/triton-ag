@@ -337,20 +337,71 @@ For running queue-based evaluation with a remote GPU machine. This setup allows 
 
 SSH into your GPU server and set up the workflow server and kbEvalServer.
 
-#### Step 1: Clone or Sync Repository
+> **Note:** For detailed setup instructions including troubleshooting, see `Claude/KBEVAL_SETUP.md`.
+
+#### One-Time Setup
+
+These steps only need to be done once when first setting up the environment.
+
+##### Step 1: Clone Repository
 
 ```bash
-# On remote GPU server
-cd /path/to/projects
-git clone <triton-ag-repo-url> triton-ag
+# On remote GPU server (Meta devserver example)
+cd /data/users/$USER
+git clone -b claude-code-kernel-bench-plan git@github.com:dtadpole/triton-ag.git
 cd triton-ag
 ```
 
-#### Step 2: Install Dependencies
+##### Step 2: Configure Proxy Settings (Meta devservers only)
+
+Add to `~/.bashrc`:
 
 ```bash
-python3 -m ensurepip --upgrade
-python3 -m pip install loguru fastapi uvicorn httpx pyyaml pydantic torch triton
+# Proxy settings for external network access
+export https_proxy=http://fwdproxy:8080
+export http_proxy=http://fwdproxy:8080
+export HTTPS_PROXY=http://fwdproxy:8080
+export HTTP_PROXY=http://fwdproxy:8080
+export no_proxy=".facebook.com,.tfbnw.net,.fb.com,localhost,127.0.0.1"
+export NO_PROXY="$no_proxy"
+```
+
+Then reload:
+```bash
+source ~/.bashrc
+```
+
+##### Step 3: Configure pip Proxy (Meta devservers only)
+
+Create `~/.config/pip/pip.conf`:
+
+```ini
+[global]
+proxy = http://fwdproxy:8080
+trusted-host = pypi.org
+               pypi.python.org
+               files.pythonhosted.org
+```
+
+##### Step 4: Create Virtual Environment
+
+```bash
+cd /data/users/$USER/triton-ag
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+##### Step 5: Install Dependencies
+
+```bash
+# Upgrade pip first
+pip install --upgrade pip
+
+# Install PyTorch with CUDA support
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+
+# Install kbEval and workflow dependencies
+pip install fastapi uvicorn pydantic pyyaml ninja loguru psutil triton numpy httpx
 ```
 
 **Verify:**
@@ -359,20 +410,32 @@ python3 -c "import workflowServer; print('workflowServer OK')"
 python3 -c "import kbEvalServer; print('kbEvalServer OK')"
 ```
 
-#### Step 3: Create Required Directories
+##### Step 6: Create Required Directories
 
 ```bash
 mkdir -p ~/.workflow ~/.kbeval ~/.inference/claude_code_output
 ```
 
-#### Step 4: Start Workflow Server (in tmux)
+#### Recurring Setup (Every Login)
+
+Each time you log into the devserver:
+
+```bash
+cd /data/users/$USER/triton-ag
+source .venv/bin/activate
+```
+
+#### Starting Services
+
+##### Step 7: Start Workflow Server (in tmux)
 
 ```bash
 # Create or attach to tmux session
 tmux new-session -s workflow
 
-# Start workflow server (bind to all interfaces for remote access)
-cd /path/to/triton-ag
+# Inside tmux, activate venv and start workflow server (bind to all interfaces for remote access)
+cd /data/users/$USER/triton-ag
+source .venv/bin/activate
 while true; do python3 workflowServer.py --host :: --port 8488; sleep 5; done
 ```
 
@@ -385,14 +448,15 @@ curl -s http://localhost:8488/queue/list/claude_code
 
 **Expected:** `{"queues":["kbEval.pending"]}`
 
-#### Step 5: Start kbEvalServer (in separate tmux)
+##### Step 8: Start kbEvalServer (in separate tmux)
 
 ```bash
 # Create tmux session for kbEval
 tmux new-session -s kbEval
 
-# Start kbEvalServer (use appropriate GPU device)
-cd /path/to/triton-ag
+# Inside tmux, activate venv and start kbEvalServer (use appropriate GPU device)
+cd /data/users/$USER/triton-ag
+source .venv/bin/activate
 CUDA_VISIBLE_DEVICES=0 python3 kbEvalServer.py --local_host --port 5676 --device 0
 ```
 
@@ -403,7 +467,7 @@ Press `Ctrl+B D` to detach from tmux.
 curl -s http://localhost:5676/health
 ```
 
-#### Step 6: Verify Remote Access
+##### Step 9: Verify Remote Access
 
 From another machine (or the remote server itself), verify the workflow server is accessible:
 
@@ -575,7 +639,7 @@ Claude Code will now use `localhost:8488` which goes through your SSH tunnel to 
 - **Check if tunnel is running** - `lsof -i :8488` should show ssh listening
 - **Reconnect after network changes** - If you change networks (WiFi, VPN), you may need to restart the tunnel
 
-### Part 3: Verification Test
+### Part 3: Verification Test (Queue Submission Only)
 
 #### Test Remote Queue Submission
 
@@ -609,6 +673,328 @@ curl -s http://localhost:8488/queue/peek/claude_code/kbEval.pending | python3 -m
 ```
 
 **Expected:** Work item with task_path, kernel_code, session_id, etc.
+
+---
+
+### Part 4: Full End-to-End Test (Queue + GPU Evaluation)
+
+This test validates the complete pipeline: Claude Code submits kernels → Workflow Server queues them → kbEvalServer evaluates on GPU → Results returned.
+
+#### Prerequisites
+
+- Part 1 completed (workflowServer running on remote)
+- Part 2 completed (local Claude Code can submit to queue)
+- GPU available on remote server
+
+#### Step 1: Stop Workflow Server (if needed to restart fresh)
+
+On the remote server, if you need to restart with a clean queue:
+
+```bash
+# Find and stop existing workflowServer
+tmux kill-session -t workflow 2>/dev/null || true
+
+# Clear the queue (optional - for clean test)
+rm -rf ~/.workflow/claude_code/kbEval.pending 2>/dev/null || true
+```
+
+#### Step 2: Start Workflow Server
+
+```bash
+# Create tmux session for workflow server
+tmux new-session -d -s workflow
+
+# Start workflow server (with venv activation)
+tmux send-keys -t workflow 'cd /data/users/$USER/triton-ag && source .venv/bin/activate && while true; do python3 workflowServer.py --host :: --port 8488; sleep 5; done' Enter
+```
+
+**Verify:**
+```bash
+curl -s http://localhost:8488/queue/list/claude_code
+```
+
+**Expected:** `{"queues":["kbEval.pending"]}`
+
+#### Step 3: Start kbEvalServer
+
+The kbEvalServer handles kernel compilation and benchmarking.
+
+```bash
+# Create tmux session for kbEval
+tmux new-session -d -s kbEval
+
+# Start kbEvalServer (with venv activation)
+tmux send-keys -t kbEval 'cd /data/users/$USER/triton-ag && source .venv/bin/activate && CUDA_VISIBLE_DEVICES=0 python3 kbEvalServer.py --local_host --port 5676 --device 0' Enter
+```
+
+**Verify kbEvalServer is running:**
+```bash
+curl -s http://localhost:5676/health
+```
+
+**Expected:** Health check response (200 OK)
+
+#### Step 4: Start Queue Consumer
+
+The kbEvalServer doesn't consume from the workflow queue directly. Create a queue consumer script that bridges the queue to kbEvalServer.
+
+Create `kbEvalQueueConsumer.py`:
+
+```python
+#!/usr/bin/env python3
+"""
+Queue consumer that pulls from workflow queue and sends to kbEvalServer.
+"""
+import asyncio
+import httpx
+from workflowClient import WorkflowClient
+from loguru import logger
+
+KBEVAL_URL = "http://localhost:5676"
+PREFIX_TAG = "claude_code"
+QUEUE_NAME = "kbEval.pending"
+
+async def process_item(item: dict) -> dict:
+    """Send item to kbEvalServer for evaluation."""
+    async with httpx.AsyncClient(timeout=300) as client:
+        response = await client.post(
+            f"{KBEVAL_URL}/eval",
+            json={
+                "task_path": item["task_path"],
+                "kernel_code": item["kernel_code"],
+                "session_id": item.get("session_id", "unknown"),
+                "iteration": item.get("iteration", 0),
+            }
+        )
+        return response.json()
+
+async def main():
+    workflow_client = WorkflowClient(prefix_tag=PREFIX_TAG, provider_name="local")
+
+    logger.info(f"Starting queue consumer for {PREFIX_TAG}/{QUEUE_NAME}")
+    logger.info(f"Sending evaluations to {KBEVAL_URL}")
+
+    while True:
+        try:
+            # Try to dequeue an item (blocks until available or timeout)
+            item = await workflow_client.dequeue(QUEUE_NAME)
+
+            if item:
+                logger.info(f"Processing: {item.get('task_path')} iter={item.get('iteration')}")
+                result = await process_item(item)
+                logger.info(f"Result: compiled={result.get('compiled')}, "
+                           f"correctness={result.get('correctness')}, "
+                           f"speedup={result.get('speedup', 0):.2f}x")
+            else:
+                # No item available, wait before retrying
+                await asyncio.sleep(1)
+
+        except Exception as e:
+            logger.error(f"Error processing item: {e}")
+            await asyncio.sleep(5)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Start the queue consumer:
+
+```bash
+# Create tmux session for queue consumer
+tmux new-session -d -s queueConsumer
+
+# Start queue consumer (with venv activation)
+tmux send-keys -t queueConsumer 'cd /data/users/$USER/triton-ag && source .venv/bin/activate && python3 kbEvalQueueConsumer.py' Enter
+```
+
+#### Step 5: Verify All Services Running
+
+```bash
+# Check tmux sessions
+tmux list-sessions
+```
+
+**Expected:**
+```
+kbEval: 1 windows ...
+queueConsumer: 1 windows ...
+workflow: 1 windows ...
+```
+
+```bash
+# Check ports are listening
+netstat -tlnp 2>/dev/null | grep -E '8488|5676' || lsof -i :8488 -i :5676
+```
+
+#### Step 6: Submit Test Kernel from Local Claude Code
+
+On your local machine with Claude Code, submit a kernel for evaluation:
+
+In Claude Code:
+```
+Generate a simple ReLU Triton kernel for kernel_bench/level1/19_ReLU.py and submit it for evaluation using eval_kernel with queue_only=True. Use session_id="e2e_test".
+```
+
+Or run programmatically:
+```bash
+python3 test_mcp_e2e.py --with-queue
+```
+
+#### Step 7: Monitor Queue Processing
+
+On the remote server, watch the queue being consumed:
+
+```bash
+# Watch queue size (should go from 1 to 0 as kbEvalServer processes)
+watch -n 1 'curl -s http://localhost:8488/queue/qsize/claude_code/kbEval.pending'
+```
+
+Or check kbEvalServer logs:
+```bash
+tmux attach -t kbEval
+# (Press Ctrl+B D to detach)
+```
+
+**Expected log output:**
+```
+Processing work item from queue: kbEval.pending
+Task: level1/19_ReLU.py
+Compiling kernel...
+Running benchmark...
+Result: compiled=True, correctness=True, speedup=1.23
+```
+
+#### Step 8: Verify Evaluation Results
+
+The kbEvalServer will store results. Check the output directory:
+
+```bash
+ls -la ~/.inference/claude_code_output/e2e_test/
+```
+
+**Expected:** Directory with evaluation results
+
+#### Step 9: Full E2E Test Script
+
+For automated testing, create a test that:
+1. Submits a kernel
+2. Waits for processing
+3. Verifies results
+
+```bash
+# Submit kernel and wait for evaluation
+python3 -c "
+import asyncio
+import time
+from claudeCodeKernelBenchServer import eval_kernel, get_session_summary
+
+async def test_e2e():
+    # Submit kernel
+    kernel_code = '''
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def relu_kernel(x_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    x = tl.load(x_ptr + offsets, mask=mask)
+    tl.store(output_ptr + offsets, tl.maximum(x, 0.0), mask=mask)
+
+class ModelNew(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, x):
+        out = torch.empty_like(x.view(-1))
+        relu_kernel[(triton.cdiv(x.numel(), 1024),)](x.view(-1), out, x.numel(), BLOCK_SIZE=1024)
+        return out.view(x.shape)
+'''
+    result = await eval_kernel('level1/19_ReLU.py', kernel_code, 'e2e_full_test', 0, queue_only=True)
+    print(f'Submitted: {result}')
+
+    # Wait for processing (adjust timeout as needed)
+    print('Waiting for kbEvalServer to process...')
+    for i in range(30):
+        time.sleep(2)
+        summary = await get_session_summary('e2e_full_test')
+        if summary.get('19_ReLU', {}).get('iterations', []):
+            latest = summary['19_ReLU']['iterations'][-1]
+            if latest.get('compiled'):
+                print(f'SUCCESS: compiled={latest[\"compiled\"]}, correctness={latest[\"correctness\"]}, speedup={latest[\"speedup\"]}')
+                return
+        print(f'  Waiting... ({i+1}/30)')
+    print('TIMEOUT: kbEvalServer did not process in time')
+
+asyncio.run(test_e2e())
+"
+```
+
+### Part 4 Pass Criteria
+
+| Check | How to Verify | Expected |
+|-------|---------------|----------|
+| Workflow server running | `curl http://localhost:8488/health` | 200 OK |
+| kbEvalServer running | `curl http://localhost:5676/health` | 200 OK |
+| Queue accessible | `curl .../queue/list/claude_code` | Shows `kbEval.pending` |
+| Submission works | Submit kernel from Claude Code | `status: queued` |
+| Queue consumed | Watch queue size | Goes from 1 → 0 |
+| Evaluation succeeds | Check kbEvalServer logs | `compiled=True` |
+| Results saved | Check output directory | Files present |
+
+### Troubleshooting Part 4
+
+#### Queue Not Being Consumed
+
+1. **Verify all three services are running:**
+   ```bash
+   tmux list-sessions
+   # Should show: workflow, kbEval, queueConsumer
+   ```
+
+2. **Check queue consumer is connected:**
+   ```bash
+   tmux attach -t queueConsumer
+   # Should show: "Starting queue consumer for claude_code/kbEval.pending"
+   ```
+
+3. **Verify kbEvalServer is accessible from queue consumer:**
+   ```bash
+   curl -s http://localhost:5676/health
+   ```
+
+4. **Check queue consumer logs for errors:**
+   ```bash
+   tmux attach -t queueConsumer
+   # Look for error messages
+   ```
+
+#### Kernel Compilation Fails
+
+1. **Check CUDA is available:**
+   ```bash
+   python3 -c "import torch; print(torch.cuda.is_available())"
+   ```
+
+2. **Check Triton is installed:**
+   ```bash
+   python3 -c "import triton; print(triton.__version__)"
+   ```
+
+3. **Check GPU memory:**
+   ```bash
+   nvidia-smi
+   ```
+
+#### Results Not Appearing
+
+1. **Check output directory permissions:**
+   ```bash
+   ls -la ~/.inference/claude_code_output/
+   ```
+
+2. **Check kbEvalServer output path configuration**
 
 ### Remote Server Pass Criteria
 
