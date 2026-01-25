@@ -53,13 +53,6 @@ except ImportError:
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     logger = logging.getLogger(__name__)
 
-# Try importing httpx for HTTP client (needed for kbEval calls)
-try:
-    import httpx
-    HTTPX_AVAILABLE = True
-except ImportError:
-    HTTPX_AVAILABLE = False
-
 # These imports are optional for standalone testing
 try:
     from mcp.server.fastmcp import FastMCP
@@ -78,169 +71,54 @@ except ImportError as e:
     KbEvalClient = None
     KBEVAL_IMPORT_ERROR = str(e)
 
-try:
-    from workflowClient import WorkflowClient
-    WORKFLOW_AVAILABLE = True
-except ImportError:
-    WORKFLOW_AVAILABLE = False
-    WorkflowClient = None
+# Singleton kbEval client instance
+_kbeval_client = None
 
-
-class LightweightKbEvalClient:
-    """
-    Lightweight kbEval client that doesn't require torch.
-
-    This is used when the full KbEvalClient cannot be imported due to
-    missing dependencies like torch (which is not needed on the client side).
-    """
-
-    def __init__(self, config_file: str = "kbEval.yaml"):
-        self.config_file = Path(_script_dir) / config_file
-        self.provider_config_cache = {}
-
-    def _load_provider_config(self, provider_name: str) -> dict:
-        """Load provider config from YAML file."""
-        if provider_name in self.provider_config_cache:
-            return self.provider_config_cache[provider_name]
-
-        if not self.config_file.exists():
-            # Use defaults for local provider
-            if provider_name == "local":
-                return {
-                    "base_url": "http://localhost:5676",
-                    "api_key": "dummy",
-                    "timeout": 300
-                }
-            raise ValueError(f"Config file not found: {self.config_file}")
-
-        with open(self.config_file) as f:
-            config = yaml.safe_load(f)
-
-        if provider_name not in config.get("providers", {}):
-            raise ValueError(f"Provider [{provider_name}] not found in {self.config_file}")
-
-        provider_config = config["providers"][provider_name]
-
-        # Build base_url from host/port if not specified
-        base_url = provider_config.get("base_url")
-        if not base_url:
-            host = provider_config.get("host", "localhost")
-            port = provider_config.get("port", 5676)
-            base_url = f"http://{host}:{port}"
-
-        # Load API key
-        api_key_path = os.path.expanduser(provider_config.get("api_key_path", "~/.keys/kbeval.api.key"))
-        try:
-            with open(api_key_path) as f:
-                api_key = f.read().strip()
-        except FileNotFoundError:
-            api_key = "dummy"
-
-        result = {
-            "base_url": base_url,
-            "api_key": api_key,
-            "timeout": provider_config.get("timeout", 300),
-            "retry_count": provider_config.get("retry_count", 3)
-        }
-
-        self.provider_config_cache[provider_name] = result
-        return result
-
-    async def kb_eval(
-        self,
-        provider: str,
-        reference_code: str,
-        generated_code: str,
-        run_tag: str = "auto",
-        model_tag: str = "claude_code",
-        task_tag: str = "task",
-        eval_tag: str = "iter_00",
-        code_type: str = "cuda"
-    ) -> dict:
-        """
-        Call kbEvalServer to evaluate generated kernel code.
-
-        Returns dict with: compiled, correctness, runtime, speedup, error
-        """
-        if not HTTPX_AVAILABLE:
-            return {
-                "compiled": False,
-                "correctness": False,
-                "error": "httpx not installed - run: pip install httpx",
-                "runtime": 0,
-                "speedup": 0
-            }
-
-        provider_config = self._load_provider_config(provider)
-        base_url = provider_config["base_url"]
-        api_key = provider_config["api_key"]
-        timeout = provider_config["timeout"]
-
-        payload = {
-            "reference_code": reference_code,
-            "generated_code": generated_code,
-            "run_tag": run_tag,
-            "model_tag": model_tag,
-            "task_tag": task_tag,
-            "eval_tag": eval_tag,
-            "code_type": code_type
-        }
-
-        headers = {"Authorization": f"Bearer {api_key}"}
-
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(
-                    f"{base_url}/kb_eval",
-                    json=payload,
-                    headers=headers
-                )
-                response.raise_for_status()
-                result = response.json()
-
-                # Normalize response to expected format
-                return {
-                    "compiled": result.get("compiled", False),
-                    "correctness": result.get("correctness", False),
-                    "runtime": result.get("runtime", 0),
-                    "speedup": result.get("speedup", result.get("metadata", {}).get("speedup", 0)),
-                    "error": result.get("error") or result.get("metadata", {}).get("error"),
-                    "metadata": result.get("metadata", {})
-                }
-
-        except httpx.TimeoutException:
-            return {
-                "compiled": False,
-                "correctness": False,
-                "error": f"Timeout after {timeout}s",
-                "runtime": 0,
-                "speedup": 0
-            }
-        except httpx.HTTPStatusError as e:
-            return {
-                "compiled": False,
-                "correctness": False,
-                "error": f"HTTP error: {e.response.status_code} - {e.response.text[:200]}",
-                "runtime": 0,
-                "speedup": 0
-            }
-        except Exception as e:
-            return {
-                "compiled": False,
-                "correctness": False,
-                "error": str(e),
-                "runtime": 0,
-                "speedup": 0
-            }
+# Adaptive semaphore for concurrency control based on GPU count
+_eval_semaphore = None
+_semaphore_size = 1  # Default to 1 (conservative)
 
 
 def get_kbeval_client(config_file: str = "kbEval.yaml"):
-    """Get the best available kbEval client."""
-    if KBEVAL_AVAILABLE:
-        return KbEvalClient(config_file=config_file)
-    else:
-        logger.info(f"[kernel-bench] Using lightweight kbEval client (full client unavailable: {KBEVAL_IMPORT_ERROR})")
-        return LightweightKbEvalClient(config_file=config_file)
+    """Get the kbEval client singleton."""
+    global _kbeval_client
+    if _kbeval_client is None:
+        if KBEVAL_AVAILABLE:
+            _kbeval_client = KbEvalClient(config_file=config_file)
+            logger.info("[kernel-bench] KbEvalClient initialized")
+        else:
+            raise RuntimeError(
+                f"KbEvalClient not available: {KBEVAL_IMPORT_ERROR}\n"
+                "Install required dependencies: pip install torch httpx"
+            )
+    return _kbeval_client
+
+
+async def get_eval_semaphore(provider: str = "local") -> asyncio.Semaphore:
+    """Get or create adaptive semaphore based on server GPU count.
+
+    Queries the kbEval server's /info endpoint to determine num_devices,
+    then creates a semaphore with that capacity. Caches the semaphore
+    for subsequent calls.
+    """
+    global _eval_semaphore, _semaphore_size
+
+    if _eval_semaphore is not None:
+        return _eval_semaphore
+
+    # Try to get server info for adaptive sizing
+    try:
+        kb_client = get_kbeval_client()
+        info = await kb_client.get_info(provider)
+        if info and "num_devices" in info:
+            _semaphore_size = max(1, info["num_devices"])
+            logger.info(f"[kernel-bench] Adaptive semaphore: {_semaphore_size} slots (from server info)")
+    except Exception as e:
+        logger.warning(f"[kernel-bench] Could not get server info, using default semaphore size: {e}")
+        _semaphore_size = 1
+
+    _eval_semaphore = asyncio.Semaphore(_semaphore_size)
+    return _eval_semaphore
 
 
 def get_default_config() -> dict:
@@ -253,12 +131,6 @@ def get_default_config() -> dict:
         "kbeval": {
             "default_provider": "local",
             "config_file": "kbEval.yaml"
-        },
-        "workflow": {
-            "prefix_tag": "claude_code",
-            "eval_queue": "kbEval.pending",
-            "config_file": "workflow.yaml",
-            "provider_name": "local"
         },
         "output": {
             "base_dir": os.path.expanduser("~/.inference/claude_code_output")
@@ -415,7 +287,6 @@ async def eval_kernel(
     session_id: str = "default",
     iteration: int = 0,
     provider: str = "local",
-    queue_only: bool = False,
     code_type: str = "triton"
 ) -> dict:
     """
@@ -427,21 +298,15 @@ async def eval_kernel(
         session_id: Session identifier for grouping results
         iteration: Iteration number within the task (0, 1, 2, ...)
         provider: kbEval provider from kbEval.yaml (default: "local")
-        queue_only: If True, submit to workflow queue without waiting for result.
-                    Useful for offline testing when kbEvalServer is not running.
         code_type: Type of kernel code - "triton" (default) or "cuda"
 
     Returns:
-        If queue_only=False:
-            KernelExecResult dict with:
-            - compiled: bool - Did the kernel compile?
-            - correctness: bool - Does output match reference?
-            - runtime: float - Kernel execution time in ms
-            - speedup: float - Speedup vs reference PyTorch
-            - error: str|None - Error message if failed
-
-        If queue_only=True:
-            {"status": "queued", "queue": queue_name, "work_item": {...}}
+        KernelExecResult dict with:
+        - compiled: bool - Did the kernel compile?
+        - correctness: bool - Does output match reference?
+        - runtime: float - Kernel execution time in ms
+        - speedup: float - Speedup vs reference PyTorch
+        - error: str|None - Error message if failed
 
     Example:
         >>> result = await eval_kernel(
@@ -463,45 +328,7 @@ async def eval_kernel(
 
     task_name = task_path_obj.stem if task_path_obj.exists() else Path(task_path).stem
 
-    if queue_only:
-        # Submit to workflow queue without waiting for result
-        queue_name = config.get("workflow", {}).get("eval_queue", "kbEval.pending")
-        prefix_tag = config.get("workflow", {}).get("prefix_tag", "claude_code")
-
-        work_item = {
-            "task_path": str(task_path),
-            "kernel_code": kernel_code,
-            "session_id": session_id,
-            "iteration": iteration,
-            "submitted_at": datetime.now().isoformat(),
-            "status": "pending"
-        }
-
-        if not WORKFLOW_AVAILABLE:
-            logger.warning(f"[kernel-bench] WorkflowClient not available - cannot queue work item")
-            return {
-                "status": "queue_error",
-                "error": "WorkflowClient not available - install workflowClient module",
-                "work_item": work_item
-            }
-
-        try:
-            workflow_client = WorkflowClient(
-                prefix_tag=prefix_tag,
-                provider_name=config.get("workflow", {}).get("provider_name", "local")
-            )
-            await workflow_client.enqueue(queue_name, work_item, create_queue=True)
-            logger.info(f"[kernel-bench] Queued {task_name} iteration {iteration} to {queue_name}")
-            return {"status": "queued", "queue": queue_name, "work_item": work_item}
-        except Exception as e:
-            logger.warning(f"[kernel-bench] Queue submission failed: {e}")
-            return {
-                "status": "queue_error",
-                "error": str(e),
-                "work_item": work_item
-            }
-
-    # Normal mode: call kbEval and wait for result
+    # Call kbEval and wait for result
     try:
         # Read reference code
         if not task_path_obj.exists():
@@ -517,16 +344,19 @@ async def eval_kernel(
 
         kb_client = get_kbeval_client(config_file=config.get("kbeval", {}).get("config_file", "kbEval.yaml"))
 
-        result = await kb_client.kb_eval(
-            provider=provider,
-            reference_code=reference_code,
-            generated_code=kernel_code,
-            run_tag=f"{session_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-            model_tag="claude_code",
-            task_tag=task_name,
-            eval_tag=f"iter_{iteration:02d}",
-            code_type=code_type
-        )
+        # Use adaptive semaphore for concurrency control
+        semaphore = await get_eval_semaphore(provider)
+        async with semaphore:
+            result = await kb_client.kb_eval(
+                provider=provider,
+                reference_code=reference_code,
+                generated_code=kernel_code,
+                run_tag=f"{session_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                model_tag="claude_code",
+                task_tag=task_name,
+                eval_tag=f"iter_{iteration:02d}",
+                code_type=code_type
+            )
 
         if result is None:
             return {

@@ -224,6 +224,19 @@ async def stats():
     }
 
 
+@app.get("/info")
+async def info():
+    """Return server configuration info for adaptive concurrency control."""
+    return {
+        "num_devices": len(DEVICES),
+        "pending_requests": parallel_request_counter,
+        "code_type": CODE_TYPE,
+        "compile_cache": COMPILE_CACHE,
+        "compile_pytorch": COMPILE_PYTORCH,
+        "max_timeout_seconds": MAX_TIMEOUT_SECONDS,
+    }
+
+
 @app.post("/kb_eval_ref")
 async def kb_eval_ref(
     request: Request,  # injected by fastapi

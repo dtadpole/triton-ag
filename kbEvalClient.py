@@ -28,6 +28,28 @@ class KbEvalClient:
         self.server_last_refresh_time = time.time()
         self.server_stats = {}
 
+    async def get_info(self, provider: str) -> Dict[str, Any]:
+        """Get server info for adaptive concurrency control.
+
+        Args:
+            provider: Provider name from kbEval.yaml
+
+        Returns:
+            Dict with num_devices, pending_requests, code_type, etc.
+            Returns None if request fails.
+        """
+        try:
+            provider_config = self._provider_config_from_yaml(provider)
+            base_url = provider_config.get('base_url')
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(f"{base_url}/info")
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            logger.warning(f"[kbEvalClient] Failed to get info from {provider}: {e}")
+            return None
+
     def _provider_config_from_yaml(
         self,
         provider_name: str,

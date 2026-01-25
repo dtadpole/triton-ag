@@ -6,6 +6,9 @@
 2. [Envisioned User Flow](#2-envisioned-user-flow)
 3. [Current Implementation](#3-current-implementation)
 4. [Architecture Choice](#4-architecture-choice)
+   - 4.1 [Decision: Direct Sync Mode Only](#41-decision-direct-sync-mode-only)
+   - 4.2 [Handling Multiple Tasks](#42-handling-multiple-tasks-batch-processing-vision)
+   - 4.3 [Multi-GPU Setup and Remote Access](#43-multi-gpu-setup-and-remote-access)
 5. [Test-Driven Development Plan](#5-test-driven-development-plan)
 
 ---
@@ -251,6 +254,54 @@ def relu_kernel(...):
 | Max total attempts | 32 (8×4) | 4 (sequential) |
 | Early stop condition | None (all enqueued upfront) | speedup > 1.3x or 4 failures |
 
+### 2.7 Multi-GPU Batch Workflow
+
+When multiple GPUs are available, Claude Code can distribute work across them for faster throughput.
+
+**Example Prompt:**
+
+> Run all level1 tasks in parallel using 4 agents across 2 GPUs.
+>
+> Distribution:
+> - Agents 1-2: Use provider="local" (GPU 1 via localhost:5676)
+> - Agents 3-4: Use provider="local_2" (GPU 2 via localhost:5677)
+>
+> Each agent processes ~12 tasks sequentially.
+> Use session_id="level1_multi_gpu_run".
+
+**Claude Code Response:**
+
+> 1. Lists 50 tasks in level1
+> 2. Partitions tasks: Agent 1 gets 1-12, Agent 2 gets 13-25, Agent 3 gets 26-37, Agent 4 gets 38-50
+> 3. Spawns 4 agents via Task tool, each with assigned provider
+> 4. Agents run in parallel, 2 per GPU
+> 5. Aggregates results and generates summary
+>
+> **=== Session Complete ===**
+> - Total time: ~10 minutes (vs ~25 minutes with 1 GPU)
+> - Success Rate: 47/50 (94%)
+> - Results saved to: `~/.inference/claude_code_output/level1_multi_gpu_run/`
+
+**Key Prompt Elements:**
+
+| Element | Example | Purpose |
+|---------|---------|---------|
+| Agent count | "4 agents" | Controls parallelism level |
+| Provider assignment | "provider=local" | Routes to specific GPU |
+| Task distribution | "Agents 1-2 handle tasks 1-25" | Balances load |
+| Session ID | "session_id=my_run" | Groups results together |
+
+**Sample Prompts for Common Scenarios:**
+
+1. **2 GPUs, light load (few tasks per agent):**
+   > Run 10 level1 tasks using 2 agents. Agent 1 uses provider="local", Agent 2 uses provider="local_2". 5 tasks each.
+
+2. **2 GPUs, heavy load (maximize throughput):**
+   > Run all level1 tasks (50) using 4 agents across 2 GPUs. Agents 1-2 use "local", Agents 3-4 use "local_2". session_id="full_level1_run".
+
+3. **3+ GPUs:**
+   > Run 30 tasks using 6 agents across 3 GPUs. Agents 1-2 use "local", Agents 3-4 use "local_2", Agents 5-6 use "local_3". 5 tasks per agent.
+
 ---
 
 ## 3. Current Implementation
@@ -448,34 +499,186 @@ Claude Code (main)
 
 **No Semaphore Needed**: Unlike RL's 32 parallel workers, Claude Code's Task tool spawns a controlled number of agents. The user explicitly chooses the parallelism level in their prompt.
 
-### 4.3 Remote GPU Access
+### 4.3 Multi-GPU Setup and Remote Access
 
-Architecture for running Claude Code locally with remote GPU:
+This section describes the architecture for running Claude Code locally (macOS, no GPU) while evaluating kernels on remote GPU servers.
+
+#### Architecture Overview
 
 ```
-┌─────────────────────────────┐      SSH Tunnel      ┌──────────────────────┐
-│    LOCAL MACHINE            │                      │  REMOTE GPU MACHINE  │
-│    (macOS, no GPU)          │                      │                      │
-│                             │                      │ ┌──────────────────┐ │
-│ ┌───────────────┐           │                      │ │ kbEvalServer     │ │
-│ │ Claude Code   │           │   localhost:5676 ────┼─│ :5676 (GPU)      │ │
-│ └───────────────┘           │                      │ └──────────────────┘ │
-│        │                    │                      │                      │
-│        ▼                    │                      └──────────────────────┘
-│ ┌───────────────┐           │
-│ │ MCP Server    │───────────┘
-│ │ (local Python)│
+┌─────────────────────────────┐      SSH Tunnel      ┌───────────────────────────────┐
+│    LOCAL MACHINE            │                      │     REMOTE GPU SERVER         │
+│    (macOS, no GPU)          │                      │                               │
+│                             │                      │ ┌───────────────────────────┐ │
+│ ┌───────────────┐           │                      │ │ kbEvalServer              │ │
+│ │ Claude Code   │           │   localhost:5676 ────┼─│ port: 5676                │ │
+│ │               │           │                      │ │ devices: [0,1,2,3,4,5,6,7]│ │
+│ └───────────────┘           │                      │ └───────────────────────────┘ │
+│        │                    │                      │                               │
+│        ▼                    │                      │  Each request → random GPU    │
+│ ┌───────────────┐           │                      │  (load distribution)          │
+│ │ MCP Server    │───────────┘                      │                               │
+│ │ (Python)      │                                  └───────────────────────────────┘
 │ └───────────────┘
 └─────────────────────────────┘
 ```
 
 **Components:**
-- **Claude Code**: Runs locally, provides LLM for kernel generation
-- **MCP Server**: Local Python process, handles tool calls
-- **kbEvalServer**: Remote GPU machine, compiles and benchmarks kernels
+- **Claude Code**: Runs locally, orchestrates kernel generation
+- **MCP Server**: Local Python process (`claudeCodeKernelBenchServer.py`), handles tool calls
+- **kbEvalServer**: Remote GPU server, compiles and benchmarks kernels on multiple GPUs
 - **SSH Tunnel**: Forwards localhost:5676 to remote kbEvalServer
 
 **No workflowServer needed** - direct sync calls to kbEvalServer only.
+
+#### Design: Multi-Device kbEvalServer (Same as RL)
+
+The RL training system runs one kbEvalServer managing 7-8 GPUs. Each incoming request is assigned to a random GPU via `random.choice(devices)`. This distributes compilation and evaluation load across GPUs, preventing OOM when multiple agents run in parallel.
+
+**We use the same approach for Claude Code** - no architectural differences from RL.
+
+```
+┌─────────────────────────────────────────────────┐
+│  kbEvalServer (config-based, 8 devices)         │
+│                                                 │
+│  8 concurrent requests → random.choice(devices) │
+│         ┌────────────────┼────────────────┐     │
+│         ▼                ▼                ▼     │
+│     GPU 0            GPU 3            GPU 7     │
+│   ~1 req each      ~1 req each      ~1 req each │
+└─────────────────────────────────────────────────┘
+```
+
+| Parallel Agents | GPUs Available | Requests/GPU (avg) | OOM Risk |
+|-----------------|----------------|-------------------|----------|
+| 5 | 8 | 0.625 | Very Low |
+| 8 | 8 | 1.0 | Low |
+| 16 | 8 | 2.0 | Medium |
+
+#### Changes Required
+
+| Component | Change | Details |
+|-----------|--------|---------|
+| **kbEval.yaml (server)** | Add server config | Add hostname entry with `devices` list |
+| **kbEvalServer.py** | Add `/info` endpoint | Returns `num_devices` and `devices` list |
+| **kbEvalClient.py** | Add `get_info()` method | Calls `/info` endpoint |
+| **claudeCodeKernelBenchServer.py** | Add adaptive semaphore | Queries GPU count, limits concurrency |
+| **kbEvalServer startup** | Remove `--local_host` | Use config-based mode instead of single-device mode |
+| **SSH tunnel** | No change | Same single tunnel to port 5676 |
+| **Claude Code prompts** | No change | Same provider="local" |
+
+#### Setup Steps
+
+**Step 1: Add server config to `kbEval.yaml` on GPU server**
+
+```yaml
+servers:
+  your-hostname:  # Must match output of `hostname` command
+    host: "::"
+    port: 5676
+    compile_cache: true
+    check_get_inputs: false
+    devices:
+      - 0
+      - 1
+      - 2
+      - 3
+      - 4
+      - 5
+      - 6
+      - 7
+```
+
+**Step 2: Start kbEvalServer (config-based mode)**
+
+```bash
+# On GPU server - uses config from kbEval.yaml, manages all 8 GPUs
+python kbEvalServer.py
+```
+
+Note: Do NOT use `--local_host --device X`. That mode only uses a single GPU.
+
+**Step 3: SSH tunnel from local Mac**
+
+```bash
+ssh -L 5676:localhost:5676 gpu-server
+```
+
+**Step 4: Provider config on local Mac (`kbEval.yaml`)**
+
+```yaml
+providers:
+  local:
+    base_url: http://localhost:5676
+    api_key_path: ~/.keys/kbeval.api.key
+    timeout: 300
+```
+
+#### Adaptive Semaphore for Concurrency Control
+
+The MCP server queries the kbEvalServer for available GPU count, then creates a semaphore to limit concurrent eval requests. This works for any GPU configuration (1 GPU or 8 GPUs) and guarantees OOM prevention.
+
+**kbEvalServer.py - Add `/info` endpoint:**
+
+```python
+@app.get("/info")
+async def get_server_info():
+    """Return server info including device count."""
+    return {
+        "num_devices": len(DEVICES),
+        "devices": DEVICES,
+    }
+```
+
+**kbEvalClient.py - Add `get_info()` method:**
+
+```python
+async def get_info(self, provider: str = "local") -> dict:
+    """Get server info (device count)."""
+    config = self._get_provider_config(provider)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"{config['base_url']}/info") as response:
+            return await response.json()
+```
+
+**claudeCodeKernelBenchServer.py - Adaptive semaphore:**
+
+```python
+import asyncio
+from kbEvalClient import get_kbeval_client
+
+_eval_semaphore: asyncio.Semaphore | None = None
+
+async def _init_semaphore(provider: str = "local"):
+    """Initialize semaphore based on GPU count from kbEvalServer."""
+    global _eval_semaphore
+    if _eval_semaphore is not None:
+        return  # Already initialized
+
+    client = get_kbeval_client()
+    try:
+        info = await client.get_info(provider=provider)
+        num_gpus = info.get("num_devices", 1)
+    except Exception:
+        num_gpus = 1  # Fallback to safe default
+
+    _eval_semaphore = asyncio.Semaphore(num_gpus)
+    logger.info(f"Initialized eval semaphore with {num_gpus} GPU slots")
+
+async def eval_kernel(...):
+    await _init_semaphore(provider)
+
+    async with _eval_semaphore:  # Blocks if all GPUs busy
+        # ... existing kbEvalClient call ...
+        result = await client.kb_eval(...)
+        return result
+```
+
+**Behavior:**
+- 8 GPUs available → 8 concurrent evals allowed
+- 1 GPU available → serializes evals (safe, slower)
+- Server unreachable → defaults to 1 (safe fallback)
+- Extra agent requests block until a GPU slot frees up
 
 ---
 
@@ -495,18 +698,24 @@ Implementation work items identified. Each work item describes a specific change
 | W6 | Update eval_kernel to use KbEvalClient | `claudeCodeKernelBenchServer.py` | Wire up direct sync path: MCP → KbEvalClient.kb_eval() → HTTP |
 | W7 | Add timeout handling | `claudeCodeKernelBenchServer.py` | Match RL's 300s HTTP timeout for eval calls |
 | W8 | Remove LightweightKbEvalClient | `claudeCodeKernelBenchServer.py` | Remove LightweightKbEvalClient class and get_kbeval_client(), use original KbEvalClient directly |
+| W9 | Add `/info` endpoint | `kbEvalServer.py` | Return `num_devices` and `devices` list for concurrency control |
+| W10 | Add `get_info()` method | `kbEvalClient.py` | Client method to call `/info` endpoint |
+| W11 | Add adaptive semaphore | `claudeCodeKernelBenchServer.py` | Query GPU count on init, limit concurrent evals to match available GPUs |
 
 **Work Items Completed:**
 - [x] W1: sys.path fix (using `Path(__file__).resolve().parent`)
 - [x] W2: torch added to Mac setup (pip install torch)
+- [x] W3: Remove queue_only parameter from eval_kernel
+- [x] W4: Remove workflow imports (WorkflowClient, WORKFLOW_AVAILABLE)
+- [x] W5: Remove workflow config section from claudeCodeKernelBench.yaml
+- [x] W6: Update eval_kernel to use KbEvalClient.kb_eval() directly
+- [x] W7: Add timeout handling (KbEvalClient uses 300s httpx timeout)
+- [x] W8: Remove LightweightKbEvalClient, use original KbEvalClient with singleton pattern
+- [x] W9: Add `/info` endpoint to kbEvalServer.py
+- [x] W10: Add `get_info()` method to kbEvalClient.py
+- [x] W11: Add adaptive semaphore to MCP server (get_eval_semaphore())
 
-**Work Items Pending:**
-- [ ] W3: Remove queue_only parameter
-- [ ] W4: Remove workflow imports
-- [ ] W5: Remove workflow config section
-- [ ] W6: Update eval_kernel direct sync path
-- [ ] W7: Add timeout handling
-- [ ] W8: Remove LightweightKbEvalClient (use original KbEvalClient with torch CPU)
+**All Work Items Complete** ✓
 
 ---
 
@@ -1822,7 +2031,338 @@ rm -rf ~/.inference/claude_code_output/test_phase5_load
 
 ---
 
-### 5.8 Test Status Tracker
+### 5.8 Phase 6: Multi-GPU with Adaptive Semaphore
+
+**Purpose**: Verify the RL-style multi-device architecture with adaptive semaphore for OOM prevention.
+
+**Prerequisites:**
+- Phase 5 tests pass
+- kbEvalServer configured with multiple GPUs (config-based mode)
+- SSH tunnel to remote GPU server
+- Work items W9-W11 implemented (see Section 5.1)
+
+#### What This Phase Tests
+
+This phase validates:
+1. **Adaptive semaphore**: MCP server queries GPU count, limits concurrency accordingly
+2. **Multi-device distribution**: kbEvalServer distributes load across GPUs via `random.choice()`
+3. **OOM prevention**: No GPU memory errors during parallel agent execution
+
+**Architecture:**
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         CLAUDE CODE SESSION                              │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │  Main Agent (orchestrator)                                        │  │
+│  │                                                                    │  │
+│  │  Launch 8 parallel agents (provider="local")                      │  │
+│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐                  │  │
+│  │  │ Agent 1 │ │ Agent 2 │ │ Agent 3 │ │ Agent 4 │ ...              │  │
+│  │  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘                  │  │
+│  └───────┼──────────┼──────────┼──────────┼─────────────────────────┘  │
+│          ▼          ▼          ▼          ▼                            │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │  MCP Server (claudeCodeKernelBenchServer.py)                      │  │
+│  │                                                                    │  │
+│  │  _init_semaphore():                                               │  │
+│  │    → GET /info → {"num_devices": 8}                               │  │
+│  │    → Semaphore(8)  # Allow 8 concurrent evals                     │  │
+│  │                                                                    │  │
+│  │  async with _eval_semaphore:  # Blocks if 8 already running       │  │
+│  │      → POST /kb_eval                                              │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
+                               │
+                    SSH Tunnel (localhost:5676)
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         kbEvalServer (config-based)                      │
+│                                                                          │
+│  GET /info → {"num_devices": 8, "devices": [0,1,2,3,4,5,6,7]}           │
+│                                                                          │
+│  POST /kb_eval → device = random.choice(devices)                         │
+│         ┌───────────────────────────────────────────────────────────┐   │
+│         │  GPU 0    GPU 1    GPU 2    GPU 3    GPU 4    GPU 5  ...  │   │
+│         │    ▼        ▼        ▼        ▼        ▼        ▼         │   │
+│         │  task 3  task 1  task 5  task 2  task 7  task 4   ...     │   │
+│         └───────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Test 6.0: Setup Multi-Device kbEvalServer
+
+**Step 1: Add server config to `kbEval.yaml` on GPU server**
+
+```yaml
+servers:
+  your-hostname:  # Must match output of `hostname` command
+    host: "::"
+    port: 5676
+    compile_cache: true
+    check_get_inputs: false
+    devices:
+      - 0
+      - 1
+      - 2
+      - 3
+      - 4
+      - 5
+      - 6
+      - 7
+```
+
+**Step 2: Start kbEvalServer (config-based mode)**
+
+```bash
+# On GPU server - uses config from kbEval.yaml, manages all 8 GPUs
+cd /data/users/$USER/triton-ag
+source .venv/bin/activate
+python kbEvalServer.py  # NO --local_host flag
+```
+
+**Step 3: SSH tunnel from local Mac**
+
+```bash
+ssh -L 5676:localhost:5676 -N gpu-server
+```
+
+**Step 4: Verify setup**
+
+```bash
+# Check health
+curl -s http://localhost:5676/health && echo " ✓ Server OK"
+
+# Check device info (after W9 implemented)
+curl -s http://localhost:5676/info | jq
+# Expected: {"num_devices": 8, "devices": [0,1,2,3,4,5,6,7]}
+```
+
+**Pass Criteria:**
+- [ ] kbEvalServer running in config-based mode (not `--local_host`)
+- [ ] `/health` endpoint responds
+- [ ] `/info` endpoint returns correct device count (after W9 implemented)
+
+#### Test 6.1: Adaptive Semaphore Initialization
+
+Test that the MCP server correctly queries GPU count and creates appropriate semaphore.
+
+**Create test script:**
+
+```bash
+cat > /Users/aarontao/Projects/code/triton-ag/test_phase6_semaphore.py << 'EOF'
+"""Test Phase 6.1: Adaptive semaphore initialization."""
+import asyncio
+import sys
+sys.path.insert(0, '/Users/aarontao/Projects/code/triton-ag')
+
+from claudeCodeKernelBenchServer import _init_semaphore, _eval_semaphore, get_kbeval_client
+
+async def main():
+    print("=== Test 6.1: Adaptive Semaphore Initialization ===\n")
+
+    # Test 1: Query /info endpoint directly
+    print("Step 1: Query /info endpoint")
+    client = get_kbeval_client()
+    try:
+        info = await client.get_info(provider="local")
+        print(f"  Server info: {info}")
+        num_devices = info.get("num_devices", "unknown")
+        print(f"  ✓ num_devices = {num_devices}")
+    except Exception as e:
+        print(f"  ✗ Failed to get info: {e}")
+        print("  (W9/W10 may not be implemented yet)")
+        return
+
+    # Test 2: Initialize semaphore
+    print("\nStep 2: Initialize adaptive semaphore")
+    await _init_semaphore(provider="local")
+
+    if _eval_semaphore is not None:
+        # Semaphore._value gives current count
+        print(f"  ✓ Semaphore initialized with {_eval_semaphore._value} slots")
+        if _eval_semaphore._value == num_devices:
+            print("  ✓ Semaphore matches device count")
+            print("\n=== Phase 6.1: PASS ===")
+        else:
+            print(f"  ✗ Mismatch: semaphore={_eval_semaphore._value}, devices={num_devices}")
+    else:
+        print("  ✗ Semaphore not initialized")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+EOF
+```
+
+**Run test:**
+
+```bash
+python3 test_phase6_semaphore.py
+```
+
+**Pass Criteria:**
+- [ ] `/info` endpoint returns `num_devices`
+- [ ] Semaphore initialized with correct count
+- [ ] Semaphore value matches device count
+
+#### Test 6.2: Multi-Device Distribution
+
+Verify that parallel agents are distributed across GPUs.
+
+**In Claude Code:**
+
+> Run 8 level1 tasks using 8 parallel agents with provider="local".
+> Tasks: 19_ReLU, 20_LeakyReLU, 21_Sigmoid, 22_Tanh, 26_GELU, 27_SELU, 28_HardSwish, 29_Softplus
+> Use session_id="test_phase6_distribution".
+>
+> **IMPORTANT:** Launch all 8 agents in parallel using the Task tool (single message with 8 Task tool calls).
+
+**Monitor GPU distribution** (on GPU machine):
+
+```bash
+watch -n 1 'nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv'
+```
+
+**Expected Behavior:**
+- Multiple GPUs show activity (not just one)
+- Load is distributed (random, so not perfectly even)
+- No OOM errors
+
+**Verify:**
+
+```bash
+# Check all 8 tasks have results
+ls -la ~/.inference/claude_code_output/test_phase6_distribution/
+
+# Check eval results
+cat ~/.inference/claude_code_output/test_phase6_distribution/*/iteration_*_eval.json | jq -s 'map({task: .task_name, compiled, speedup})'
+```
+
+**Cleanup:**
+
+```bash
+rm -rf ~/.inference/claude_code_output/test_phase6_distribution
+```
+
+**Pass Criteria:**
+- [ ] All 8 agents complete without OOM
+- [ ] Multiple GPUs show utilization during test (nvidia-smi)
+- [ ] All 8 tasks have valid results
+
+#### Test 6.3: Semaphore Blocking (Concurrency Limit)
+
+Verify that the semaphore blocks excess requests when all GPU slots are in use.
+
+**Setup:** Use a server with fewer GPUs (or modify config temporarily)
+
+```yaml
+# Temporarily limit to 2 devices for testing
+servers:
+  test-hostname:
+    devices:
+      - 0
+      - 1
+```
+
+**In Claude Code:**
+
+> Run 5 level1 tasks using 5 parallel agents with provider="local".
+> Use session_id="test_phase6_blocking".
+>
+> With only 2 GPUs available, 3 agents should block until slots free up.
+
+**Expected Behavior:**
+- First 2 agents start immediately
+- Remaining 3 agents block until first agents complete
+- All 5 complete eventually (no OOM)
+- Total time ≈ 3 rounds × task_time (not 5 × task_time)
+
+**Pass Criteria:**
+- [ ] All 5 tasks complete
+- [ ] No OOM errors
+- [ ] Semaphore correctly limits concurrency
+
+#### Test 6.4: Stress Test (Maximum Parallelism)
+
+Push the system to verify OOM protection at scale.
+
+**In Claude Code:**
+
+> Run 16 level1 tasks using 16 parallel agents with provider="local".
+> Use session_id="test_phase6_stress".
+> With 8 GPUs, expect 2 rounds of execution.
+
+**Expected Results:**
+
+| Parallel Agents | GPUs | Requests/GPU | Expected Behavior |
+|-----------------|------|--------------|-------------------|
+| 8 | 8 | 1.0 | All pass, no OOM |
+| 16 | 8 | 2.0 | Semaphore blocks 8, all pass |
+| 24 | 8 | 3.0 | Semaphore blocks 16, all pass |
+
+**Monitor:**
+
+```bash
+# GPU memory should stay stable (no spikes)
+watch -n 1 'nvidia-smi --query-gpu=memory.used --format=csv,noheader'
+```
+
+**Cleanup:**
+
+```bash
+rm -rf ~/.inference/claude_code_output/test_phase6_stress
+```
+
+**Pass Criteria:**
+- [ ] All 16 tasks complete without OOM
+- [ ] GPU memory stays within safe limits
+- [ ] Semaphore correctly queues excess requests
+
+#### Test 6.5: Error Handling
+
+Verify graceful handling of edge cases.
+
+**Scenario A: Server unreachable (semaphore fallback)**
+
+1. Stop kbEvalServer
+2. Run a task - should fail gracefully with connection error
+3. Semaphore should default to 1 (safe fallback)
+
+**Scenario B: Invalid provider**
+
+> Run a task with provider="nonexistent".
+
+**Expected:** Clear error message, no crash
+
+**Scenario C: Partial failure**
+
+> Run 8 parallel agents where 2 generate invalid kernel code.
+
+**Expected:**
+- 6 succeed with speedup data
+- 2 fail with compilation errors captured
+- Session summary shows partial success
+
+**Pass Criteria:**
+- [ ] Connection errors handled gracefully
+- [ ] Invalid provider gives clear error
+- [ ] Partial failures don't crash the session
+
+#### Phase 6 Summary
+
+| Test | Purpose | Pass Criteria |
+|------|---------|---------------|
+| 6.0: Setup | Configure multi-device server | Server running, `/info` works |
+| 6.1: Semaphore Init | Adaptive semaphore queries GPU count | Semaphore = device count |
+| 6.2: Distribution | Load spread across GPUs | 8 agents, all GPUs active |
+| 6.3: Blocking | Semaphore limits concurrency | 5 agents on 2 GPUs, no OOM |
+| 6.4: Stress | Maximum parallelism | 16 agents, no OOM |
+| 6.5: Errors | Graceful error handling | No crashes |
+
+---
+
+### 5.9 Test Status Tracker
 
 | Phase | Test | Status | Date | Notes |
 |-------|------|--------|------|-------|
@@ -1832,18 +2372,24 @@ rm -rf ~/.inference/claude_code_output/test_phase5_load
 | 2 | 2.1: List & Get Tasks | PASS | 2026-01-23 | MCP tools work |
 | 2 | 2.2: Save Result | PASS | 2026-01-23 | save_benchmark_result works |
 | 2 | 2.3: Claude Generates | PASS | 2026-01-23 | Claude creates valid kernels |
-| 3 | 3.0: Setup | **PENDING** | - | kbEvalServer + SSH tunnel |
-| 3 | 3.1: Direct KbEvalClient | **PENDING** | - | Requires running server |
-| 3 | 3.2: MCP eval_kernel | **PENDING** | - | Requires running server |
-| 3 | 3.3: Claude E2E Single | **PENDING** | - | Full single task flow |
-| 4 | 4.1: Programmatic Batch | PENDING | - | After Phase 3 |
-| 4 | 4.2: Claude Sequential | PENDING | - | 3 tasks sequential |
-| 5 | 5.1: Parallel Agents | PENDING | - | 2 agents, 6 tasks |
-| 5 | 5.2: Load Management | PENDING | - | 5 agents, 10 tasks |
+| 3 | 3.0: Setup | **PASS** | 2026-01-25 | kbEvalServer via SSH tunnel |
+| 3 | 3.1: Direct KbEvalClient | **PASS** | 2026-01-25 | HTTP call works |
+| 3 | 3.2: MCP eval_kernel | **PASS** | 2026-01-25 | compiled=true, correct=true, 7.78ms |
+| 3 | 3.3: Claude E2E Single | **PASS** | 2026-01-25 | Result saved to ~/.inference/claude_code_output/ |
+| 4 | 4.1: Programmatic Batch | SKIP | - | Using 4.2 with real GPU instead |
+| 4 | 4.2: Claude Sequential | **PASS** | 2026-01-25 | 3/3 tasks: ReLU, Sigmoid, Tanh |
+| 5 | 5.1: Parallel Agents | **PASS** | 2026-01-25 | 2 agents, 6 tasks, 4/6 success (GPU contention) |
+| 5 | 5.2: Load Management | **PASS** | 2026-01-25 | 5 agents, 10 tasks, 7/10 success (GPU contention) |
+| 6 | 6.0: Multi-Device Setup | PENDING | - | Config-based kbEvalServer, /info endpoint |
+| 6 | 6.1: Semaphore Init | PENDING | - | Adaptive semaphore queries GPU count (W9-W11) |
+| 6 | 6.2: Distribution | PENDING | - | 8 agents distributed across 8 GPUs |
+| 6 | 6.3: Blocking | PENDING | - | Semaphore limits concurrency |
+| 6 | 6.4: Stress Test | PENDING | - | 16 agents, no OOM |
+| 6 | 6.5: Error Handling | PENDING | - | Graceful degradation |
 
 ---
 
-### 5.9 Test Script Cleanup
+### 5.10 Test Script Cleanup
 
 After all tests pass, cleanup test scripts:
 

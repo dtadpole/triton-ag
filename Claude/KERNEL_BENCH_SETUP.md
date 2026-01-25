@@ -298,7 +298,7 @@ mkdir -p ~/.inference/claude_code_output
 
 Create an SSH tunnel to forward local port 5676 to the remote kbEvalServer.
 
-### Step 3.1: Open SSH Tunnel
+### Step 3.1: Open SSH Tunnel (Single GPU)
 
 Open a **dedicated terminal window** and run:
 
@@ -310,7 +310,44 @@ Replace `devgpu001.example.com` with your remote server hostname.
 
 **This terminal must stay open** while using Claude Code.
 
-### Step 3.2: Verify Tunnel is Active
+### Step 3.2: Open SSH Tunnel (Multi-GPU)
+
+For Phase 6 multi-GPU support, forward multiple ports for different kbEvalServers:
+
+**Option A: Multiple ports to same server (different GPUs on same machine):**
+```bash
+ssh -L 5676:localhost:8082 -L 5677:localhost:8081 -N devvm8491.cco0.facebook.com
+```
+
+**Option B: Multiple SSH connections to different servers:**
+```bash
+# Terminal 1: GPU server 1
+ssh -L 5676:localhost:8082 -N devvm8491.cco0.facebook.com
+
+# Terminal 2: GPU server 2
+ssh -L 5677:localhost:8082 -N devvm8492.cco0.facebook.com
+```
+
+**kbEval.yaml configuration for multi-GPU:**
+```yaml
+providers:
+  local:
+    base_url: http://localhost:5676  # GPU 1
+    api_key_path: ~/.keys/kbeval.api.key
+    timeout: 300
+  local_2:
+    base_url: http://localhost:5677  # GPU 2
+    api_key_path: ~/.keys/kbeval.api.key
+    timeout: 300
+```
+
+**Verify both connections:**
+```bash
+curl http://localhost:5676/health && echo " (GPU 1 OK)"
+curl http://localhost:5677/health && echo " (GPU 2 OK)"
+```
+
+### Step 3.3: Verify Tunnel is Active
 
 In a **different terminal**:
 
