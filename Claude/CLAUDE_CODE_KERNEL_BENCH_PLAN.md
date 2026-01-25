@@ -4,12 +4,13 @@
 
 1. [RL Flow - How It Works](#1-rl-flow---how-it-works)
 2. [Envisioned User Flow](#2-envisioned-user-flow)
-3. [Current Implementation](#3-current-implementation)
-4. [Architecture Choice](#4-architecture-choice)
-   - 4.1 [Decision: Direct Sync Mode Only](#41-decision-direct-sync-mode-only)
-   - 4.2 [Handling Multiple Tasks](#42-handling-multiple-tasks-batch-processing-vision)
-   - 4.3 [Multi-GPU Setup and Remote Access](#43-multi-gpu-setup-and-remote-access)
-5. [Test-Driven Development Plan](#5-test-driven-development-plan)
+3. [Architecture](#3-architecture)
+   - 3.1 [Direct Sync Mode](#31-direct-sync-mode)
+   - 3.2 [MCP Server Tools](#32-mcp-server-tools)
+   - 3.3 [Batch Processing](#33-batch-processing)
+   - 3.4 [Multi-GPU and Remote Access](#34-multi-gpu-and-remote-access)
+   - 3.5 [Configuration](#35-configuration)
+4. [Test-Driven Development Plan](#4-test-driven-development-plan)
 
 ---
 
@@ -311,9 +312,28 @@ When multiple GPUs are available, Claude Code can spawn multiple agents for para
 
 ---
 
-## 3. Current Implementation
+## 3. Architecture
 
-### 3.1 MCP Server Structure
+### 3.1 Direct Sync Mode
+
+**Approach**: Direct sync calls to kbEvalServer, matching the RL architecture.
+
+```
+Claude Code → MCP eval_kernel() → KbEvalClient → HTTP → kbEvalServer
+                                                           ↓
+                                         Wait for GPU, compile, benchmark
+                                                           ↓
+                                         Return result (10-60s later)
+```
+
+**Rationale:**
+1. **Matches proven RL pattern** - direct HTTP calls work reliably
+2. **Interactive use needs immediate feedback** - waiting is natural for Claude Code
+3. **Simpler architecture** - no queue, no consumer, no polling
+
+**No queue mode needed** - Claude Code naturally processes tasks sequentially; parallel agents (Task tool) provide concurrency when desired.
+
+### 3.2 MCP Server Tools
 
 The MCP server (`claudeCodeKernelBenchServer.py`) provides 5 tools:
 
@@ -325,41 +345,54 @@ The MCP server (`claudeCodeKernelBenchServer.py`) provides 5 tools:
 | `save_benchmark_result` | Save kernel code and eval results to disk |
 | `get_session_summary` | Get statistics for a benchmark session |
 
-### 3.2 Evaluation Flow (Direct Sync Mode)
+### 3.3 Batch Processing
 
-The `eval_kernel` tool uses direct sync calls to kbEvalServer:
+**Option A: Sequential Processing**
+
+> Claude Code processes each task one at a time.
+> Estimated time: 50 tasks × 30s/task = ~25 minutes
+
+**Option B: Parallel Agents (Faster)**
+
+> Claude Code spawns multiple agents via Task tool, each handling a subset of tasks.
+> Estimated time: 50 tasks ÷ 5 agents × 30s/task = ~5 minutes
+
+**Switching is prompt-controlled** - no code changes needed:
+
+- Sequential: "Run all level1 tasks sequentially..."
+- Parallel: "Run all level1 tasks using 5 parallel agents..."
+
+**Load Management:**
 
 ```
-Claude Code → MCP eval_kernel() → KbEvalClient → HTTP → kbEvalServer
-                                                           ↓
-                                         Wait for GPU, compile, benchmark
-                                                           ↓
-                                         Return result (10-60s later)
+Claude Code (main)
+    │
+    ├── Task tool: Agent 1 (tasks 1-10)  ────► eval_kernel() ──► kbEvalServer
+    ├── Task tool: Agent 2 (tasks 11-20) ────► eval_kernel() ──► kbEvalServer
+    └── ...
 ```
 
-- **Matches RL architecture pattern** (direct sync calls)
-- **Currently broken**: Import error - "kbEvalClient not available"
-- **Priority**: Fix this to enable end-to-end testing
+- Each agent processes sequentially within itself
+- Concurrent calls = number of agents
+- CUDA serialization handles contention (GPU queues requests)
+- Agent count recommendation: 1-3 for single GPU, 5-10 for multiple GPUs
 
-### 3.3 Current Code Status
+### 3.4 Multi-GPU and Remote Access
 
-**Files implemented:**
+> **See [KERNEL_BENCH_SETUP.md](./KERNEL_BENCH_SETUP.md)** for complete setup instructions.
 
-| File | Status | Notes |
-|------|--------|-------|
-| `claudeCodeKernelBenchServer.py` | Created | MCP server with 5 tools |
-| `claudeCodeKernelBench.yaml` | Created | Configuration file |
-| `benchmarkCompare.py` | Created | Comparison report generator |
-| `.mcp.json` | Created | MCP registration |
+**Architecture Summary:**
+- Claude Code runs locally (macOS), kbEvalServer runs on remote GPU server
+- SSH tunnel forwards localhost:5676 to remote server
+- Multi-GPU distribution uses `random.choice(devices)` (same as RL system)
+- Adaptive semaphore limits concurrent evals to match available GPUs
 
-**Known Issue:**
+**Key Components:**
+- `kbEvalServer.py`: `/info` endpoint returns `num_devices` and `devices` list
+- `kbEvalClient.py`: `get_info()` method queries device count
+- `claudeCodeKernelBenchServer.py`: `get_eval_semaphore()` creates semaphore matching GPU count
 
-**kbEvalClient import fails** when MCP server runs as subprocess
-- Root cause: Path issues when spawned by Claude Code
-- Impact: eval_kernel() cannot call kbEvalServer
-- Fix: Add proper sys.path handling in MCP server startup
-
-### 3.4 Configuration Files
+### 3.5 Configuration
 
 **claudeCodeKernelBench.yaml:**
 
@@ -371,11 +404,6 @@ kernel_bench:
 kbeval:
   default_provider: "local"
   config_file: "kbEval.yaml"
-
-workflow:
-  prefix_tag: "claude_code"
-  eval_queue: "kbEval.pending"
-  provider_name: "local"  # Use "local" with SSH tunnel
 
 output:
   base_dir: "${HOME}/.inference/claude_code_output"
@@ -395,137 +423,9 @@ output:
 
 ---
 
-## 4. Architecture Choice
+## 4. Test-Driven Development Plan
 
-### 4.1 Decision: Direct Sync Mode Only
-
-**Chosen Approach**: Use **direct sync calls** exclusively, matching the RL architecture.
-
-```
-Claude Code → MCP eval_kernel() → KbEvalClient → HTTP → kbEvalServer → Result
-                                                            ↑
-                                                Same pattern as RL
-```
-
-**Rationale:**
-1. **Matches proven RL pattern** - direct HTTP calls work reliably
-2. **Interactive use needs immediate feedback** - waiting is natural for Claude Code
-3. **Simpler architecture** - no queue, no consumer, no polling
-4. **No architectural change needed** - just fix the import error
-
-**Queue mode is NOT needed** because:
-- Claude Code naturally processes tasks sequentially
-- Parallel agents (Task tool) provide concurrency when desired
-- No benefit to async queue for Claude Code's use case
-
-### 4.2 Handling Multiple Tasks (Batch Processing Vision)
-
-When asked to "run all level1 tasks", Claude Code will:
-
-**Option A: Sequential Processing (Simple)**
-
-> Claude Code processes each task one at a time:
-> 1. Get list of level1 tasks (50 tasks)
-> 2. For task 1: read → generate kernel → eval_kernel() → wait → save result
-> 3. For task 2: read → generate kernel → eval_kernel() → wait → save result
-> 4. ... repeat for all 50 tasks
-> 5. Generate summary report
-
-**Estimated time**: 50 tasks × 30s/task = ~25 minutes
-
-**Option B: Parallel Agents (Faster)**
-
-Claude Code spawns multiple agents via Task tool:
-
-> 1. Get list of level1 tasks (50 tasks)
-> 2. Spawn 5 parallel agents, each handles 10 tasks
-> 3. Each agent: read → generate → eval → save (sequentially within agent)
-> 4. Wait for all agents to complete
-> 5. Aggregate results and generate summary
-
-**Estimated time**: 50 tasks ÷ 5 agents × 30s/task = ~5 minutes
-
-#### Switching Between Options with Prompts
-
-Yes, switching between Option A and B is purely a matter of how you prompt Claude Code. No code changes needed.
-
-**Prompt for Option A (Sequential):**
-> "Run all level1 kernel benchmark tasks sequentially. For each task: read the PyTorch model, generate a Triton kernel, evaluate it, and save the result. Process them one at a time."
-
-**Prompt for Option B (Parallel Agents):**
-> "Run all level1 kernel benchmark tasks in parallel. Use 5 parallel agents - each agent handles a subset of tasks. Spawn the agents using the Task tool and wait for all to complete, then aggregate results."
-
-**More specific parallel prompt:**
-> "Run all level1 tasks with parallel agents. Split 50 tasks across 5 agents (10 tasks each). Each agent should run its tasks sequentially. Use session_id='level1_parallel_run' for all results."
-
-#### Load Management Verification
-
-**How Parallel Agents Interact with kbEvalServer:**
-
-```
-Claude Code (main)
-    │
-    ├── Task tool: Agent 1 (tasks 1-10)  ────► eval_kernel() ──► kbEvalServer
-    ├── Task tool: Agent 2 (tasks 11-20) ────► eval_kernel() ──► kbEvalServer
-    ├── Task tool: Agent 3 (tasks 21-30) ────► eval_kernel() ──► kbEvalServer
-    ├── Task tool: Agent 4 (tasks 31-40) ────► eval_kernel() ──► kbEvalServer
-    └── Task tool: Agent 5 (tasks 41-50) ────► eval_kernel() ──► kbEvalServer
-```
-
-**Key Observations:**
-
-1. **Each agent processes sequentially within itself** - Agent 1 waits for task 1 to complete before starting task 2. No parallel eval_kernel() calls within a single agent.
-
-2. **Concurrent calls = number of agents** - With 5 agents, at most 5 concurrent requests hit kbEvalServer.
-
-3. **CUDA serialization handles contention** - Just like in RL system (Section 1.4), if 5 requests hit 1 kbEvalServer, CUDA driver queues them. Each request waits its turn.
-
-**Timeline with 5 Agents → 1 kbEvalServer:**
-
-| Time | Agent 1 | Agent 2 | Agent 3 | Agent 4 | Agent 5 | GPU |
-|------|---------|---------|---------|---------|---------|-----|
-| 0s | eval task 1 | eval task 11 | eval task 21 | eval task 31 | eval task 41 | Processing task 1 |
-| 30s | **done** → task 2 | waiting | waiting | waiting | waiting | Processing task 11 |
-| 60s | eval task 2 | **done** → task 12 | waiting | waiting | waiting | Processing task 21 |
-| ... | ... | ... | ... | ... | ... | ... |
-
-**Load Management Works Because:**
-
-| Factor | Why It Works |
-|--------|--------------|
-| Sequential within agent | Only 5 concurrent requests max (not 50) |
-| CUDA queuing | GPU naturally serializes, no lost requests |
-| HTTP timeout | 300s timeout tolerates queue buildup |
-| Agent count is user-controlled | User decides parallelism level |
-
-**When to Use More Agents:**
-
-- **1-3 agents**: Safe for single kbEvalServer
-- **5-10 agents**: Better with multiple kbEvalServers (load balanced via random.choice)
-- **>10 agents**: Diminishing returns, mostly waiting in CUDA queue
-
-**No Semaphore Needed**: Unlike RL's 32 parallel workers, Claude Code's Task tool spawns a controlled number of agents. The user explicitly chooses the parallelism level in their prompt.
-
-### 4.3 Multi-GPU Setup and Remote Access
-
-> **See [KERNEL_BENCH_SETUP.md](./KERNEL_BENCH_SETUP.md)** for complete step-by-step setup instructions.
-
-**Architecture Summary:**
-- Claude Code runs locally (macOS), kbEvalServer runs on remote GPU server
-- SSH tunnel forwards localhost:5676 to remote server
-- Multi-GPU distribution uses `random.choice(devices)` (same as RL system)
-- Adaptive semaphore limits concurrent evals to match available GPUs
-
-**Key Implementation:**
-- `kbEvalServer.py`: `/info` endpoint returns `num_devices` and `devices` list
-- `kbEvalClient.py`: `get_info()` method queries device count
-- `claudeCodeKernelBenchServer.py`: `get_eval_semaphore()` creates semaphore matching GPU count
-
----
-
-## 5. Test-Driven Development Plan
-
-### 5.1 Implementation Work Items
+### 4.1 Implementation Work Items
 
 **All 11 work items complete** ✓
 
@@ -537,7 +437,7 @@ Key changes implemented:
 
 ---
 
-### 5.2 Test Phases Overview
+### 4.2 Test Phases Overview
 
 Tests are organized to gradually validate the implementation:
 
@@ -551,7 +451,7 @@ Tests are organized to gradually validate the implementation:
 
 ---
 
-### 5.3 Phase 1: Offline Validation ✓ PASS
+### 4.3 Phase 1: Offline Validation ✓ PASS
 
 **Purpose**: Verify Python syntax, imports work, and config loads correctly.
 
@@ -565,7 +465,7 @@ Tests are organized to gradually validate the implementation:
 
 ---
 
-### 5.4 Phase 2: Single Task Without GPU ✓ PASS
+### 4.4 Phase 2: Single Task Without GPU ✓ PASS
 
 **Purpose**: Verify MCP tools work for task listing, source reading, and result storage (no GPU required).
 
@@ -584,7 +484,7 @@ Tests are organized to gradually validate the implementation:
 
 ---
 
-### 5.5 Phase 3: Single Task With GPU ✓ PASS
+### 4.5 Phase 3: Single Task With GPU ✓ PASS
 
 **Purpose**: Verify actual kernel compilation and benchmarking on GPU via kbEvalServer.
 
@@ -605,7 +505,7 @@ Tests are organized to gradually validate the implementation:
 
 ---
 
-### 5.6 Phase 4: Multiple Tasks (Sequential) ✓ PASS
+### 4.6 Phase 4: Multiple Tasks (Sequential) ✓ PASS
 
 **Purpose**: Verify batch processing of multiple tasks sequentially by single agent.
 
@@ -621,7 +521,7 @@ Tests are organized to gradually validate the implementation:
 
 ---
 
-### 5.7 Phase 5: Multiple Agents (Parallel) ✓ PASS
+### 4.7 Phase 5: Multiple Agents (Parallel) ✓ PASS
 
 **Purpose**: Verify parallel processing with multiple agents using Task tool.
 
@@ -637,7 +537,7 @@ Tests are organized to gradually validate the implementation:
 
 ---
 
-### 5.8 Phase 6: Multi-GPU with Adaptive Semaphore ✓ PARTIAL
+### 4.8 Phase 6: Multi-GPU with Adaptive Semaphore ✓ PARTIAL
 
 **Purpose**: Verify RL-style multi-device architecture with adaptive semaphore.
 
@@ -664,7 +564,7 @@ Tests are organized to gradually validate the implementation:
 
 ---
 
-### 5.9 Test Status Tracker
+### 4.9 Test Status Tracker
 
 | Phase | Test | Status | Date | Notes |
 |-------|------|--------|------|-------|
@@ -691,7 +591,7 @@ Tests are organized to gradually validate the implementation:
 
 ---
 
-### 5.10 Test Script Cleanup
+### 4.10 Test Script Cleanup
 
 After all tests pass, cleanup test scripts:
 
