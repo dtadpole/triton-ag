@@ -2093,6 +2093,14 @@ This phase validates:
 
 #### Test 6.0: Setup Multi-Device kbEvalServer
 
+**Step 0: Update code on GPU server (required for /info endpoint)**
+
+```bash
+# On GPU server
+cd /data/users/$USER/triton-ag
+git pull origin claude-code-kernel-bench-plan
+```
+
 **Step 1: Add server config to `kbEval.yaml` on GPU server**
 
 ```yaml
@@ -2131,18 +2139,19 @@ ssh -L 5676:localhost:5676 -N gpu-server
 **Step 4: Verify setup**
 
 ```bash
-# Check health
-curl -s http://localhost:5676/health && echo " ✓ Server OK"
+# Check server status
+curl -s http://localhost:5676/stats
+# Expected: {"num_devices":8,"pending_requests":0}
 
-# Check device info (after W9 implemented)
-curl -s http://localhost:5676/info | jq
-# Expected: {"num_devices": 8, "devices": [0,1,2,3,4,5,6,7]}
+# Check device info
+curl -s http://localhost:5676/info
+# Expected: {"num_devices":8,"pending_requests":0,"code_type":"triton",...}
 ```
 
 **Pass Criteria:**
 - [ ] kbEvalServer running in config-based mode (not `--local_host`)
-- [ ] `/health` endpoint responds
-- [ ] `/info` endpoint returns correct device count (after W9 implemented)
+- [ ] `/stats` endpoint responds with num_devices
+- [ ] `/info` endpoint returns correct device count
 
 #### Test 6.1: Adaptive Semaphore Initialization
 
@@ -2157,38 +2166,39 @@ import asyncio
 import sys
 sys.path.insert(0, '/Users/aarontao/Projects/code/triton-ag')
 
-from claudeCodeKernelBenchServer import _init_semaphore, _eval_semaphore, get_kbeval_client
+import claudeCodeKernelBenchServer as mcp_server
 
 async def main():
     print("=== Test 6.1: Adaptive Semaphore Initialization ===\n")
 
     # Test 1: Query /info endpoint directly
     print("Step 1: Query /info endpoint")
-    client = get_kbeval_client()
+    client = mcp_server.get_kbeval_client()
     try:
         info = await client.get_info(provider="local")
+        if info is None:
+            print("  ✗ Server returned None - /info endpoint may not exist")
+            print("  (Ensure kbEvalServer is updated with /info endpoint)")
+            return
         print(f"  Server info: {info}")
-        num_devices = info.get("num_devices", "unknown")
+        num_devices = info.get("num_devices", 1)
         print(f"  ✓ num_devices = {num_devices}")
     except Exception as e:
         print(f"  ✗ Failed to get info: {e}")
-        print("  (W9/W10 may not be implemented yet)")
         return
 
-    # Test 2: Initialize semaphore
+    # Test 2: Initialize semaphore via get_eval_semaphore
     print("\nStep 2: Initialize adaptive semaphore")
-    await _init_semaphore(provider="local")
+    semaphore = await mcp_server.get_eval_semaphore(provider="local")
+    semaphore_size = mcp_server._semaphore_size
 
-    if _eval_semaphore is not None:
-        # Semaphore._value gives current count
-        print(f"  ✓ Semaphore initialized with {_eval_semaphore._value} slots")
-        if _eval_semaphore._value == num_devices:
-            print("  ✓ Semaphore matches device count")
-            print("\n=== Phase 6.1: PASS ===")
-        else:
-            print(f"  ✗ Mismatch: semaphore={_eval_semaphore._value}, devices={num_devices}")
+    print(f"  ✓ Semaphore initialized with {semaphore_size} slots")
+    if semaphore_size == num_devices:
+        print("  ✓ Semaphore matches device count")
+        print("\n=== Phase 6.1: PASS ===")
     else:
-        print("  ✗ Semaphore not initialized")
+        print(f"  ✗ Mismatch: semaphore={semaphore_size}, devices={num_devices}")
+        print("\n=== Phase 6.1: FAIL ===")
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -2353,12 +2363,15 @@ Verify graceful handling of edge cases.
 
 | Test | Purpose | Pass Criteria |
 |------|---------|---------------|
-| 6.0: Setup | Configure multi-device server | Server running, `/info` works |
+| 6.0: Setup | Configure multi-device server | Server running, `/stats` and `/info` work |
 | 6.1: Semaphore Init | Adaptive semaphore queries GPU count | Semaphore = device count |
 | 6.2: Distribution | Load spread across GPUs | 8 agents, all GPUs active |
 | 6.3: Blocking | Semaphore limits concurrency | 5 agents on 2 GPUs, no OOM |
 | 6.4: Stress | Maximum parallelism | 16 agents, no OOM |
 | 6.5: Errors | Graceful error handling | No crashes |
+
+> **Note:** Tests 6.1+ require the remote kbEvalServer to be updated with the `/info` endpoint.
+> After pulling latest code on the GPU server, restart kbEvalServer.
 
 ---
 
