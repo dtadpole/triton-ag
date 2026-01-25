@@ -99,7 +99,7 @@ async def get_eval_semaphore(provider: str = "local") -> asyncio.Semaphore:
 
     Queries the kbEval server's /info endpoint to determine num_devices,
     then creates a semaphore with that capacity. Caches the semaphore
-    for subsequent calls.
+    for subsequent calls. Falls back to /stats if /info is not available.
     """
     global _eval_semaphore, _semaphore_size
 
@@ -112,7 +112,23 @@ async def get_eval_semaphore(provider: str = "local") -> asyncio.Semaphore:
         info = await kb_client.get_info(provider)
         if info and "num_devices" in info:
             _semaphore_size = max(1, info["num_devices"])
-            logger.info(f"[kernel-bench] Adaptive semaphore: {_semaphore_size} slots (from server info)")
+            logger.info(f"[kernel-bench] Adaptive semaphore: {_semaphore_size} slots (from /info)")
+        else:
+            # Fall back to /stats endpoint
+            logger.info("[kernel-bench] /info not available, trying /stats fallback...")
+            try:
+                import httpx
+                provider_config = kb_client._provider_config_from_yaml(provider)
+                base_url = provider_config.get('base_url', 'http://localhost:5676')
+                async with httpx.AsyncClient(timeout=10.0, trust_env=False) as http_client:
+                    response = await http_client.get(f"{base_url}/stats")
+                    if response.status_code == 200:
+                        stats = response.json()
+                        _semaphore_size = max(1, stats.get("num_devices", 1))
+                        logger.info(f"[kernel-bench] Adaptive semaphore: {_semaphore_size} slots (from /stats)")
+            except Exception as stats_err:
+                logger.warning(f"[kernel-bench] /stats fallback also failed: {stats_err}")
+                _semaphore_size = 1
     except Exception as e:
         logger.warning(f"[kernel-bench] Could not get server info, using default semaphore size: {e}")
         _semaphore_size = 1

@@ -42,7 +42,7 @@ class KbEvalClient:
             provider_config = self._provider_config_from_yaml(provider)
             base_url = provider_config.get('base_url')
 
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
                 response = await client.get(f"{base_url}/info")
                 response.raise_for_status()
                 return response.json()
