@@ -1632,6 +1632,251 @@ python3 test_mcp_e2e_claude.py --task level1/3_ReLU.py --demo
 - Kernels generated: 3 (all syntax OK)
 - Eval files: 3 (all queued_for_eval)
 
+#### Part D: Remote Workflow Server with GPU (Full E2E)
+
+This extends Part C by running the workflow server and kbEvalServer on a **remote GPU machine** instead of localhost. This enables actual kernel compilation and benchmarking while running Claude Code on a local machine.
+
+**Architecture:**
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                      LOCAL MACHINE                                │
+│  (macOS, no GPU - where Claude Code runs)                         │
+│                                                                   │
+│  ┌─────────────────┐                                              │
+│  │   Claude Code   │───────┐                                      │
+│  └─────────────────┘       │                                      │
+│           │                │                                      │
+│           ▼                │                                      │
+│  ┌─────────────────────┐   │ HTTP                                 │
+│  │  MCP Server         │───┼──────────────────────────────┐       │
+│  │  (kernel-bench)     │   │                              │       │
+│  │                     │   │                              ▼       │
+│  │  provider: "remote" │   │                     ┌────────────────┴─┐
+│  └─────────────────────┘   │                     │ REMOTE GPU       │
+│                            │                     │ MACHINE          │
+│  Files saved locally:      │                     │                  │
+│  ~/.inference/claude_      │                     │ ┌──────────────┐ │
+│    code_output/            │                     │ │ Workflow     │ │
+└────────────────────────────┘                     │ │ Server :8488 │ │
+                                                   │ └──────────────┘ │
+                                                   │        │         │
+                                                   │        ▼         │
+                                                   │ ┌──────────────┐ │
+                                                   │ │ kbEvalServer │ │
+                                                   │ │ :5676        │ │
+                                                   │ │ (GPU 0)      │ │
+                                                   │ └──────────────┘ │
+                                                   └──────────────────┘
+```
+
+---
+
+### Part D-1: Remote Server Setup (GPU Machine)
+
+**Prerequisites:**
+- SSH access to remote GPU machine
+- NVIDIA GPU with CUDA installed
+- Python 3.10+ with dependencies (torch, triton, etc.)
+- triton-ag repository cloned
+
+**Step 1: SSH to remote machine**
+```bash
+ssh user@remote-gpu-server.example.com
+cd /path/to/triton-ag
+```
+
+**Step 2: Install dependencies**
+```bash
+python3 -m pip install pyyaml mcp loguru fastapi uvicorn httpx pydantic torch triton
+```
+
+**Step 3: Start workflow server**
+
+Open a tmux session (recommended for persistent process):
+```bash
+tmux new-session -s workflow
+cd /path/to/triton-ag
+python3 workflowServer.py --host :: --port 8488
+```
+
+Wait for the log message:
+```
+FastAPI server listening on: [:::8488]
+```
+
+**Step 4: Start kbEvalServer (in another tmux session)**
+```bash
+tmux new-session -s kbeval
+cd /path/to/triton-ag
+CUDA_VISIBLE_DEVICES=0 python3 kbEvalServer.py --local_host --port 5676 --device 0
+```
+
+Wait for the server to show ready message.
+
+**Step 5: Verify remote servers are running**
+
+From the remote machine:
+```bash
+# Check workflow server
+curl -s http://localhost:8488/queue/list/claude_code
+
+# Check kbEval server health
+curl -s http://localhost:5676/health
+```
+
+**Step 6: Note the remote hostname/IP**
+
+You'll need this for local configuration:
+```bash
+hostname -f  # or use the IP address
+```
+
+---
+
+### Part D-2: Local Environment Setup (Claude Code Machine)
+
+**Prerequisites:**
+- Claude Code installed
+- triton-ag repository cloned
+- Network connectivity to remote GPU machine
+
+**Step 1: Add remote provider to workflow.yaml**
+
+Edit `workflow.yaml` and add a provider for your remote server:
+
+```yaml
+providers:
+  # Existing providers...
+
+  remote_gpu:
+    host: "remote-gpu-server.example.com"  # Replace with your remote hostname
+    port: 8488
+    retries: 5
+    timeout: 300
+```
+
+**Step 2: Update MCP server config to use remote provider**
+
+Edit `claudeCodeKernelBench.yaml`:
+
+```yaml
+workflow:
+  prefix_tag: "claude_code"
+  eval_queue: "kbEval.pending"
+  config_file: "workflow.yaml"
+  provider_name: "remote_gpu"  # Changed from "local" to your remote provider
+```
+
+Alternatively, you can specify the provider when calling `eval_kernel`:
+```
+eval_kernel(task_path=..., kernel_code=..., provider="remote_gpu", queue_only=False)
+```
+
+**Step 3: Verify network connectivity**
+
+```bash
+# Test workflow server connectivity
+curl -s http://remote-gpu-server.example.com:8488/queue/list/claude_code
+
+# Test kbEval server connectivity
+curl -s http://remote-gpu-server.example.com:5676/health
+```
+
+**Expected:** Both should return valid JSON responses.
+
+**Step 4: Restart Claude Code**
+
+MCP server reads config on startup. Restart Claude Code from the project directory:
+```bash
+cd /path/to/triton-ag
+claude
+```
+
+---
+
+### Part D-3: Verification Test
+
+**Step 1: Verify MCP tools are available**
+
+In Claude Code:
+```
+What MCP tools do you have available? List any tools with "kernel" in the name.
+```
+
+**Step 2: Run single task E2E test**
+
+In Claude Code:
+```
+Optimize the kernel in kernel_bench/level1/1_Square_matrix_multiplication_.py
+
+Use session_id="partd_remote_test" and provider="remote_gpu".
+Generate a Triton kernel and submit for evaluation.
+```
+
+**Step 3: Verify results**
+
+On local machine:
+```bash
+# Check generated kernel file
+ls ~/.inference/claude_code_output/partd_remote_test/*/iteration_00_cuda_kernel.py
+
+# Check eval result (should have actual compilation result)
+cat ~/.inference/claude_code_output/partd_remote_test/*/iteration_00_eval.json
+```
+
+Expected eval result (with real GPU evaluation):
+```json
+{
+  "compiled": true,
+  "correctness": true,
+  "runtime": 0.234,
+  "speedup": 1.45,
+  "model": "claude-code",
+  "timestamp": "2026-01-24T..."
+}
+```
+
+On remote machine (if using queue mode):
+```bash
+# Check queue was processed
+curl -s http://localhost:8488/queue/qsize/claude_code/kbEval.pending
+```
+
+---
+
+### Part D Pass Criteria
+
+| Criterion | Verification | Expected |
+|-----------|--------------|----------|
+| Remote workflow server running | `curl http://remote:8488/health` | `{"status": "ok"}` |
+| Remote kbEval server running | `curl http://remote:5676/health` | `{"status": "ok"}` |
+| Local MCP uses remote provider | Check `claudeCodeKernelBench.yaml` | `provider_name: "remote_gpu"` |
+| Claude generates kernel | Check `~/.inference/.../iteration_00_cuda_kernel.py` | Valid Triton code |
+| Kernel compiles on GPU | Check eval JSON `"compiled": true` | true |
+| Kernel correctness verified | Check eval JSON `"correctness": true` | true |
+| Speedup measured | Check eval JSON `"speedup"` | > 0 |
+
+---
+
+### Troubleshooting Part D
+
+**Connection refused to remote server:**
+1. Verify remote servers are running: `ssh remote && curl localhost:8488/health`
+2. Check firewall allows ports 8488 and 5676
+3. Verify hostname in workflow.yaml is correct
+
+**Timeout errors:**
+1. Increase timeout in workflow.yaml provider config: `timeout: 600`
+2. Check network latency: `ping remote-gpu-server.example.com`
+
+**kbEval returns compilation errors:**
+1. Verify CUDA is working on remote: `nvidia-smi`
+2. Check Triton is installed: `python3 -c "import triton; print(triton.__version__)"`
+3. Review kbEvalServer logs for detailed error messages
+
+**Part D Status:** Not yet tested (requires remote GPU setup)
+
 ### Test 4: Full End-to-End with kbEvalServer
 
 This test runs the complete flow with actual kernel compilation and benchmarking.

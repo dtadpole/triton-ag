@@ -24,12 +24,18 @@ Configure in .mcp.json:
 """
 
 import os
+import sys
 import json
 import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any
 import logging
+
+# Ensure the project directory is in sys.path for local module imports
+# This is needed when the MCP server runs as a subprocess from Claude Code
+if '.' not in sys.path:
+    sys.path.insert(0, '.')
 
 # Optional yaml import - fall back to defaults if not available
 try:
