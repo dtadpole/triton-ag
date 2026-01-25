@@ -428,7 +428,17 @@ sudo ufw allow 8488/tcp
 
 Configure the local machine to connect to the remote workflow server.
 
-#### Step 1: Add Remote Provider to workflow.yaml
+There are two connection methods:
+- **Option A: Direct Connection** - If your local machine can directly reach the remote server (same network, VPN, etc.)
+- **Option B: SSH Tunnel** - If the remote server is on an internal network not directly accessible
+
+---
+
+#### Option A: Direct Connection
+
+Use this if your local machine can directly reach the remote server's IP/hostname.
+
+##### Step A1: Add Remote Provider to workflow.yaml
 
 Edit `workflow.yaml` to add a new provider for the remote GPU server:
 
@@ -453,7 +463,7 @@ providers:
 grep -A4 "remote_gpu:" workflow.yaml
 ```
 
-#### Step 2: Update MCP Server Configuration
+##### Step A2: Update MCP Server Configuration
 
 Edit `claudeCodeKernelBench.yaml` to use the remote provider:
 
@@ -465,7 +475,7 @@ workflow:
   provider_name: "remote_gpu"  # Changed from "local"
 ```
 
-#### Step 3: Verify WorkflowClient Can Connect
+#### Step A3: Verify WorkflowClient Can Connect
 
 ```bash
 python3 -c "
@@ -479,7 +489,7 @@ print(f'Connected! Queues: {result}')
 
 **Expected:** `Connected! Queues: ['kbEval.pending']`
 
-#### Step 4: Restart Claude Code
+#### Step A4: Restart Claude Code
 
 Claude Code must be restarted to pick up the configuration changes:
 
@@ -487,6 +497,83 @@ Claude Code must be restarted to pick up the configuration changes:
 cd /path/to/triton-ag
 claude
 ```
+
+---
+
+#### Option B: SSH Tunnel
+
+Use this if the remote server is on an internal network that your local machine cannot directly reach. The SSH tunnel creates a secure connection through an SSH bastion/jump host.
+
+##### Step B1: Create SSH Tunnel
+
+On your local machine, open a terminal and create the tunnel:
+
+```bash
+# Replace devvm8491.cco0.facebook.com with your remote server hostname
+ssh -L 8488:localhost:8488 -N devvm8491.cco0.facebook.com
+```
+
+This command:
+- `-L 8488:localhost:8488` - Forwards local port 8488 to the remote server's localhost:8488
+- `-N` - Don't run a command, just forward ports
+- The tunnel stays open as long as this terminal is running
+
+**Keep this terminal open** while using Claude Code.
+
+##### Step B2: Verify Tunnel Connection
+
+In another terminal, test the connection:
+
+```bash
+curl -s http://localhost:8488/queue/list/claude_code
+```
+
+**Expected:** `{"queues":["kbEval.pending"]}`
+
+If this works, your tunnel is active and forwarding correctly.
+
+##### Step B3: Configure Local Provider
+
+The `workflow.yaml` already has a `local` provider configured for `localhost:8488`. Verify it:
+
+```bash
+grep -A4 "^  local:" workflow.yaml
+```
+
+**Expected:**
+```yaml
+  local:
+    host: "localhost"
+    port: 8488
+    retries: 3
+    timeout: 60
+```
+
+Ensure `claudeCodeKernelBench.yaml` uses the local provider:
+
+```bash
+grep "provider_name" claudeCodeKernelBench.yaml
+```
+
+**Expected:** `provider_name: "local"`
+
+##### Step B4: Restart Claude Code
+
+Exit any running Claude Code session and restart:
+
+```bash
+cd /path/to/triton-ag
+claude
+```
+
+Claude Code will now use `localhost:8488` which goes through your SSH tunnel to the remote server.
+
+##### SSH Tunnel Tips
+
+- **Keep the tunnel terminal open** - The tunnel closes when you close the terminal or press Ctrl+C
+- **Background the tunnel** - Use `ssh -L 8488:localhost:8488 -N -f devvm8491...` (adds `-f` to run in background)
+- **Check if tunnel is running** - `lsof -i :8488` should show ssh listening
+- **Reconnect after network changes** - If you change networks (WiFi, VPN), you may need to restart the tunnel
 
 ### Part 3: Verification Test
 
