@@ -579,6 +579,7 @@ def _clean_stale_marker(marker_path: Path) -> bool:
 async def init_session(
     session_id: str,
     level: str,
+    task_names: list = None,
     config_override: dict = None
 ) -> dict:
     """
@@ -590,7 +591,10 @@ async def init_session(
     Args:
         session_id: Unique session identifier
         level: Kernel bench level (e.g., "level1", "level2")
-        config_override: Optional config overrides (num_workers, etc.)
+        task_names: Optional list of specific task names to include.
+                    If provided, only these tasks will be tracked.
+                    If None, all tasks from the level are included.
+        config_override: Optional config overrides (num_workers, original_request, etc.)
 
     Returns:
         Dict with session info: session_id, level, created_at, status
@@ -612,22 +616,29 @@ async def init_session(
     # Create new session
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    # Get task list for this level
-    tasks = await list_kernel_bench_tasks(level=level)
+    # Get task list - use provided task_names or fetch all from level
+    if task_names:
+        # Use specific tasks provided by caller
+        task_list = task_names
+        logger.info(f"[kernel-bench] Using {len(task_list)} specified tasks")
+    else:
+        # Fetch all tasks from the level
+        tasks = await list_kernel_bench_tasks(level=level)
+        task_list = [t["name"] for t in tasks]
 
     manifest = {
         "session_id": session_id,
         "level": level,
         "created_at": datetime.now().isoformat(),
-        "total_tasks": len(tasks),
-        "tasks": [t["name"] for t in tasks],
+        "total_tasks": len(task_list),
+        "tasks": task_list,
         "config": config_override or {},
         "status": "initialized"
     }
 
     manifest_file.write_text(json.dumps(manifest, indent=2))
 
-    logger.info(f"[kernel-bench] Initialized session: {session_id} with {len(tasks)} tasks")
+    logger.info(f"[kernel-bench] Initialized session: {session_id} with {len(task_list)} tasks")
 
     return manifest
 

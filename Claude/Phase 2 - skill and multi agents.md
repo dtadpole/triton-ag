@@ -687,90 +687,572 @@ Total per task: ~90 seconds worst case, often faster with early termination
 | Phase | Item | Status |
 |-------|------|--------|
 | **1. Foundation** | | |
-| 1.1 | Create `.claude/{skills,agents,memory,logs}/` directories | DONE |
-| 1.2 | Create `.claude/skills/kernel-bench.md` | DONE |
-| 1.3 | Create `.claude/agents/kernel-bench-coordinator.md` | DONE |
-| 1.4 | Create `.claude/agents/kernel-bench-optimizer.md` | DONE |
-| 1.5 | Create `.claude/agents/kernel-bench-strategy.md` | DONE |
-| 1.6 | Create memory templates (kernel-strategies.md, learnings.md) | DONE |
+| 1.1 | Create `.claude/{skills,agents,memory,logs}/` directories | ✅ DONE |
+| 1.2 | Create `.claude/skills/kernel-bench.md` | ✅ DONE |
+| 1.3 | Create `.claude/agents/kernel-bench-coordinator.md` | ✅ DONE |
+| 1.4 | Create `.claude/agents/kernel-bench-optimizer.md` | ✅ DONE |
+| 1.5 | Create `.claude/agents/kernel-bench-strategy.md` | ✅ DONE |
+| 1.6 | Create memory templates (kernel-strategies.md, learnings.md) | ✅ DONE |
 | **2. MCP Tools** | | |
-| 2.1 | `init_session()` | DONE |
-| 2.2 | `claim_task()` with atomic marker + PID | DONE |
-| 2.3 | `release_task()` with failure recording | DONE |
-| 2.4 | `get_session_state()` with stale cleanup | DONE |
-| 2.5 | `get_pending_tasks()` | DONE |
-| **3. Knowledge Base** (defer for MVP) | | |
-| 3.1 | `search_knowledge_base()` | PENDING |
-| 3.2 | `update_knowledge_base()` | PENDING |
+| 2.1 | `init_session()` with task filtering | ✅ DONE + TESTED |
+| 2.2 | `claim_task()` with atomic marker + PID | ✅ DONE + TESTED |
+| 2.3 | `release_task()` with failure recording | ✅ DONE + TESTED |
+| 2.4 | `get_session_state()` with stale cleanup | ✅ DONE + TESTED |
+| 2.5 | `get_pending_tasks()` | ✅ DONE + TESTED |
+| **3. Testing** | | |
+| 3.1 | Automated tests for MCP tools (T5, T6, T7, T9, T10) | ✅ DONE |
+| 3.2 | Resume flow end-to-end test | ✅ DONE |
+| 3.3 | Integration tests with agents | 🔲 PENDING |
+| **4. Knowledge Base** (defer for MVP) | | |
+| 4.1 | `search_knowledge_base()` | 🔲 PENDING |
+| 4.2 | `update_knowledge_base()` | 🔲 PENDING |
 
 ### 5.2 Implementation Order
 
-1. **Phase 1: Foundation** - Directory structure and prompt files (including strategy sub-agent)
-2. **Phase 2: MCP Tools** - Focus on `claim_task()` and `get_session_state()` first
-3. **Phase 3: Knowledge Base** - Can defer for MVP
+1. **Phase 1: Foundation** - Directory structure and prompt files ✅
+2. **Phase 2: MCP Tools** - State management with tests ✅
+3. **Phase 3: Integration** - Agent testing with coordinator/worker 🔲
+4. **Phase 4: Knowledge Base** - Defer for MVP 🔲
+
+### 5.3 Test Files
+
+| File | Purpose |
+|------|---------|
+| `test_phase2_comprehensive.py` | T5, T6, T7, T9, T10 + task filtering |
+| `test_phase2_resume_flow.py` | End-to-end resume scenario |
+| `test_phase2_session.py` | Basic session management |
 
 ---
 
 ## 6. Test-Driven Verification
 
-### 6.1 Test Plan
+### 6.1 Automated Tests (Unit)
 
-| Test | Description | Validates |
-|------|-------------|-----------|
-| **T1: Skill Parsing** | `/kernel-bench level1/19_ReLU.py` routes to single task mode | Input style detection |
-| **T2: Skill Parsing** | `/kernel-bench level1/` routes to batch mode | Directory detection |
-| **T3: Skill Parsing** | `/kernel-bench --resume my_run` loads existing session | Resume detection |
-| **T4: Coordinator Spawn** | Coordinator spawns N workers via Task tool | Agent hierarchy |
-| **T5: Atomic Claim** | Two workers claim same task, only one succeeds | `claim_task()` atomicity |
-| **T6: Stale Cleanup** | Create 35-min old marker, verify auto-cleanup | Stale detection |
-| **T7: PID Cleanup** | Create marker with dead PID, verify cleanup | PID-based staleness |
-| **T8: Worker Loop** | Worker claims, processes, saves, claims next | End-to-end worker |
-| **T9: Resume** | Kill mid-session, resume, verify continuation | Crash recovery |
-| **T10: Parallel Workers** | 4 workers, 20 tasks, no duplicates claimed | Worker concurrency |
-| **T11: Structured Output** | All agent outputs parse as valid JSON | JSON format |
-| **T12: Strategy Sub-Agents** | Worker spawns 3 strategy sub-agents in parallel | Parallel strategies |
-| **T13: GPU Semaphore** | 12 concurrent eval_kernel() calls, only 2 run at a time | GPU bounding |
-| **T14: Best-of-3 Selection** | Worker picks best result from 3 strategies | Strategy aggregation |
-| **T15: Full Batch** | Complete level1 (100 tasks) with 4 workers | Production readiness |
-
-### 6.2 Verification Commands
-
+Run all automated tests:
 ```bash
-# T1-T3: Skill parsing (manual in Claude Code)
-/kernel-bench level1/19_ReLU.py
-/kernel-bench level1/
-/kernel-bench --resume test_session
-
-# T5: Atomic claim (programmatic)
-python -c "
-from claudeCodeKernelBenchServer import claim_task
-import asyncio
-r1 = asyncio.run(claim_task('test', 'task1', 'w1'))
-r2 = asyncio.run(claim_task('test', 'task1', 'w2'))
-assert r1['success'] and not r2['success']
-print('T5 PASS')
-"
-
-# T6: Stale cleanup (create old marker, run get_session_state)
-# T9: Resume (kill mid-session, re-run with --resume)
-# T12: Full batch
-/kernel-bench level1 --session=full_test --workers=4
+python3 test_phase2_comprehensive.py
 ```
 
-### 6.3 Success Criteria
+---
 
-| Metric | Target |
-|--------|--------|
-| Skill input styles | All 5 styles parse correctly |
-| Atomic claiming | 0 duplicate claims in parallel test |
-| Stale cleanup | 100% stale markers removed |
-| Resume | Picks up exactly where left off |
-| Parallel workers | Wall time < sequential time / workers |
-| **Strategy sub-agents** | 3 sub-agents spawn per iteration |
-| **GPU semaphore** | Max 2 concurrent evals (with 2 GPUs) |
-| **Best-of-3** | Worker correctly selects highest speedup |
-| Full batch | >= 95% task completion rate |
-| **Speedup improvement** | Parallel strategies achieve higher avg speedup than sequential |
+#### T5: Atomic Claim
+
+| Field | Value |
+|-------|-------|
+| **What is tested** | `claim_task()` uses atomic file creation. Two workers cannot claim the same task. |
+| **Expected result** | First worker succeeds, second worker gets `{success: false, reason: "already_claimed"}` |
+| **Status** | ✅ PASS |
+
+**Test steps (automated):**
+1. Initialize session with 5 tasks
+2. Worker-1 claims task A → expects success
+3. Worker-2 claims task A → expects failure with reason "already_claimed"
+4. Worker-2 claims task B → expects success (different task)
+
+---
+
+#### T6: Stale Cleanup (Time-based)
+
+| Field | Value |
+|-------|-------|
+| **What is tested** | Markers older than 30 minutes are automatically cleaned by `get_session_state()` |
+| **Expected result** | Old marker removed, task becomes claimable again |
+| **Status** | ✅ PASS |
+
+**Test steps (automated):**
+1. Claim a task (creates `.in_progress` marker)
+2. Modify marker's `started_at` to 35 minutes ago
+3. Call `get_session_state()` → should report `stale_cleaned: 1`
+4. Verify marker file deleted
+5. Claim same task again → should succeed
+
+---
+
+#### T7: PID Cleanup (Dead Process)
+
+| Field | Value |
+|-------|-------|
+| **What is tested** | Markers with non-existent PIDs are cleaned (crashed worker recovery) |
+| **Expected result** | Dead PID marker removed, task becomes claimable |
+| **Status** | ✅ PASS |
+
+**Test steps (automated):**
+1. Create marker with `pid: 99999999` (non-existent process)
+2. Call `get_session_state()` → should report `stale_cleaned: 1`
+3. Verify marker file deleted
+4. Claim task → should succeed
+
+**Why this matters:** If a worker crashes mid-task, its claimed tasks become available again without waiting 30 minutes.
+
+---
+
+#### T9: Resume (Crash Recovery)
+
+| Field | Value |
+|-------|-------|
+| **What is tested** | Session state correctly tracks completed vs in-progress vs pending tasks |
+| **Expected result** | After partial completion, resume shows exact progress |
+| **Status** | ✅ PASS |
+
+**Test steps (automated):**
+1. Initialize session with 5 specific tasks
+2. Complete 2 tasks (create `best_result.json`)
+3. Leave 1 task in-progress (has `.in_progress` marker)
+4. Leave 2 tasks untouched
+5. Call `get_session_state()` → expect:
+   - `total: 5`
+   - `completed: 2`
+   - `in_progress: 1`
+   - `pending: 2`
+6. Call `get_pending_tasks()` → expect 2 tasks available
+
+---
+
+#### T10: Parallel Workers (Concurrency)
+
+| Field | Value |
+|-------|-------|
+| **What is tested** | Multiple concurrent workers claiming tasks without duplicates |
+| **Expected result** | All 20 tasks claimed exactly once, zero duplicates |
+| **Status** | ✅ PASS |
+
+**Test steps (automated):**
+1. Initialize session with 20 tasks
+2. Spawn 4 async workers, each trying to claim up to 10 tasks
+3. Collect all claims
+4. Verify: unique claims = total claims (no duplicates)
+5. Verify: all 20 tasks claimed
+6. Verify: `get_session_state()` shows 20 in-progress
+
+---
+
+#### Additional: Task Filtering
+
+| Field | Value |
+|-------|-------|
+| **What is tested** | `init_session(task_names=[...])` stores only specified tasks, not all from level |
+| **Expected result** | Manifest contains exactly the requested tasks |
+| **Status** | ✅ PASS |
+
+**Test steps (automated):**
+1. Call `init_session(task_names=["task1", "task2", "task3"])`
+2. Verify manifest has `total_tasks: 3` (not 100)
+3. Verify manifest `tasks` array matches input exactly
+4. Call `init_session()` without `task_names` → should get all 100 level1 tasks
+
+---
+
+### 6.2 Manual Tests (CLI)
+
+These tests require running Claude Code and invoking the `/kernel-bench` skill.
+
+---
+
+#### T1: Skill Parsing - Single Task Mode
+
+| Field | Value |
+|-------|-------|
+| **What is tested** | Single `.py` file path routes to direct optimization (no coordinator) |
+| **Expected result** | Interactive optimization of one task with progress shown |
+| **Status** | 🔲 PENDING |
+
+**Prompt:**
+```
+/kernel-bench level1/19_ReLU.py
+```
+
+**Validation steps:**
+
+| Step | What to look for | Pass if | Fail if |
+|------|------------------|---------|---------|
+| 1. Task read | Claude shows PyTorch code | See `class Model(torch.nn.Module)` in output | "Task not found" error |
+| 2. Direct mode | No coordinator spawned | Claude generates kernel immediately | See "spawning coordinator" or "spawning workers" |
+| 3. Kernel eval | `eval_kernel()` called | See output like `compiled: true, correct: true, speedup: 1.xx` | "kbEval server unavailable" error |
+| 4. Iteration | Continues if speedup < 1.3x | See "Iteration 2" or "trying different approach" | Stops after first attempt regardless of speedup |
+| 5. Save result | `save_benchmark_result()` called | See "Saved to ~/.inference/claude_code_output/" | No save confirmation |
+
+**Post-test file check:**
+```bash
+# Verify result saved
+ls ~/.inference/claude_code_output/*/19_ReLU/best_result.json
+cat ~/.inference/claude_code_output/*/19_ReLU/best_result.json
+# Should contain: {"speedup": 1.xx, "completed_at": "..."}
+```
+
+---
+
+#### T2: Skill Parsing - Batch Mode
+
+| Field | Value |
+|-------|-------|
+| **What is tested** | Directory path routes to batch mode with coordinator |
+| **Expected result** | Coordinator spawned, workers process tasks in parallel |
+| **Status** | 🔲 PENDING |
+
+**Prompt:**
+```
+/kernel-bench level1/ --session=test_batch --workers=2
+```
+
+**Validation steps:**
+
+| Step | What to look for | Pass if | Fail if |
+|------|------------------|---------|---------|
+| 1. Session init | `init_session()` called | See "Initialized session: test_batch with N tasks" in logs | "Session not found" error |
+| 2. Coordinator | Coordinator agent spawned | See "spawning coordinator" or Task tool call with coordinator | Claude processes tasks directly without coordinator |
+| 3. Workers | 2 worker agents spawned | Coordinator mentions "spawning 2 workers" | Only 1 worker or no workers mentioned |
+| 4. Claims | Workers claim tasks | See `claim_task()` calls in logs | Workers process without claiming |
+| 5. Progress | Periodic updates | See "Progress: X/Y completed" messages | No progress updates |
+
+**Post-test file check:**
+```bash
+# Verify session created
+cat ~/.inference/claude_code_output/test_batch/session_manifest.json
+# Should contain: {"session_id": "test_batch", "total_tasks": 100, ...}
+
+# Verify claims happening
+ls ~/.inference/claude_code_output/test_batch/*/.in_progress 2>/dev/null | head -5
+# Should show in-progress markers with different worker IDs
+
+# Check worker IDs are different
+cat ~/.inference/claude_code_output/test_batch/*/.in_progress | jq '.worker' | sort -u
+# Should show multiple unique worker IDs (e.g., "worker-1", "worker-2")
+```
+
+---
+
+#### T3: Skill Parsing - Resume Mode
+
+| Field | Value |
+|-------|-------|
+| **What is tested** | `--resume` flag loads existing session and continues |
+| **Expected result** | Shows completed count, continues with remaining tasks |
+| **Status** | 🔲 PENDING |
+
+**Setup:**
+1. Run T2 first to create session `test_batch`
+2. Interrupt with Ctrl+C after some tasks complete
+3. Verify some `best_result.json` files exist
+
+**Prompt:**
+```
+/kernel-bench --resume test_batch
+```
+
+**Validation steps:**
+
+| Step | What to look for | Pass if | Fail if |
+|------|------------------|---------|---------|
+| 1. State check | `get_session_state()` called | See "Session test_batch: X/Y complete" | "Session not found" error |
+| 2. Progress shown | Reports existing progress | See "Found X completed, Y pending" or similar | Shows "0 completed" when files exist |
+| 3. No re-process | Completed tasks skipped | Completed task names NOT in new claim logs | Same tasks being re-claimed |
+| 4. Continues | Remaining tasks processed | New claims for pending tasks | No new work happening |
+
+**Pre-test verification:**
+```bash
+# Check how many completed before resume
+ls ~/.inference/claude_code_output/test_batch/*/best_result.json 2>/dev/null | wc -l
+# Note this number: ___
+
+# Check total tasks
+cat ~/.inference/claude_code_output/test_batch/session_manifest.json | jq '.total_tasks'
+# Note this number: ___
+```
+
+**Post-test verification:**
+```bash
+# Completed count should be higher than before
+ls ~/.inference/claude_code_output/test_batch/*/best_result.json 2>/dev/null | wc -l
+# Should be > pre-resume count
+
+# Verify original completed files unchanged (same timestamp)
+ls -la ~/.inference/claude_code_output/test_batch/*/best_result.json | head -3
+# Timestamps of early files should be from T2 run, not T3 run
+```
+
+---
+
+### 6.3 Integration Tests (Agents)
+
+These tests validate the agent hierarchy and coordination. They require the full agent system to be working.
+
+---
+
+#### T4: Coordinator Spawn
+
+| Field | Value |
+|-------|-------|
+| **What is tested** | Coordinator agent spawns N worker agents via Task tool |
+| **Expected result** | N workers running in parallel, each claiming different tasks |
+| **Status** | 🔲 PENDING |
+
+**Prompt:**
+```
+/kernel-bench level1/ --session=test_coord --workers=4
+```
+
+**Validation steps:**
+
+| Step | What to look for | Pass if | Fail if |
+|------|------------------|---------|---------|
+| 1. Coordinator spawned | Task tool call for coordinator | See "Spawning coordinator agent" or similar | No coordinator mentioned |
+| 2. Workers spawned | Coordinator spawns workers | See "Spawning 4 worker agents" | Workers not mentioned or wrong count |
+| 3. Unique worker IDs | Each worker has different ID | `.in_progress` files show worker-1, worker-2, etc. | All claims show same worker ID |
+| 4. Parallel claims | Multiple workers claim simultaneously | Different tasks claimed within same second | Claims happen sequentially with gaps |
+
+**Post-test file check:**
+```bash
+# Check worker ID distribution
+cat ~/.inference/claude_code_output/test_coord/*/.in_progress 2>/dev/null | jq -r '.worker' | sort | uniq -c
+# Should show roughly equal distribution across 4 workers
+# Example: "25 worker-1", "25 worker-2", "25 worker-3", "25 worker-4"
+```
+
+---
+
+#### T8: Worker Loop
+
+| Field | Value |
+|-------|-------|
+| **What is tested** | Worker claims task → optimizes → saves → claims next → repeats |
+| **Expected result** | Worker processes multiple tasks sequentially |
+| **Status** | 🔲 PENDING |
+
+**Validation steps:**
+
+| Step | What to look for | Pass if | Fail if |
+|------|------------------|---------|---------|
+| 1. Find work | Worker calls `get_pending_tasks()` | See pending tasks query in logs | Worker starts without checking |
+| 2. Claim before work | `claim_task()` before optimization | Claim happens before kernel generation | Kernel generated without claim |
+| 3. Optimization | Kernel generated and evaluated | `eval_kernel()` called with result | No eval or error |
+| 4. Save result | `save_benchmark_result()` called | See "Saved result" message | No save or save error |
+| 5. Completion marker | `best_result.json` created | File exists after task done | Only `.in_progress` remains |
+| 6. Loop continues | Worker claims next task | Multiple tasks processed by same worker | Worker stops after first task |
+| 7. Graceful exit | Worker stops when done | "No pending tasks" or "Worker complete" | Crashes or hangs |
+
+**Observation method:**
+Watch a single worker's log output as it processes multiple tasks. You should see a repeating pattern:
+```
+[Worker-1] Claiming task: 19_ReLU
+[Worker-1] Generating kernel...
+[Worker-1] Evaluating... speedup: 1.25x
+[Worker-1] Saved result
+[Worker-1] Claiming task: 20_LeakyReLU
+...
+[Worker-1] No pending tasks. Worker complete.
+```
+
+---
+
+#### T11: Structured JSON Output
+
+| Field | Value |
+|-------|-------|
+| **What is tested** | Agent outputs are valid JSON for reliable parsing |
+| **Expected result** | All coordinator/worker outputs parse as JSON |
+| **Status** | 🔲 PENDING |
+
+**Validation steps:**
+
+| Step | What to look for | Pass if | Fail if |
+|------|------------------|---------|---------|
+| 1. Coordinator JSON | Status updates in JSON | `{"status": "running", "completed": 10, ...}` | Plain text like "10 tasks done" |
+| 2. Worker JSON | Results in JSON | `{"task": "19_ReLU", "speedup": 1.3, ...}` | Plain text results |
+| 3. No mixed output | JSON not mixed with prose | Clean JSON blocks | "Here's the result: {json}" |
+
+**Test method:**
+Capture agent output and attempt to parse:
+```python
+import json
+# If this fails, T11 fails
+result = json.loads(agent_output)
+```
+
+---
+
+#### T12: Strategy Sub-Agents
+
+| Field | Value |
+|-------|-------|
+| **What is tested** | Worker spawns 3 strategy sub-agents in parallel per iteration |
+| **Expected result** | 3 different strategies tried, best one selected |
+| **Status** | 🔲 PENDING |
+
+**Validation steps:**
+
+| Step | What to look for | Pass if | Fail if |
+|------|------------------|---------|---------|
+| 1. Strategy spawn | Worker spawns sub-agents | "Spawning 3 strategy agents" or 3 Task tool calls | Only 1 strategy or sequential |
+| 2. Different approaches | Each strategy is distinct | See "vectorized", "tiled", "fused" etc. | All 3 identical |
+| 3. Parallel eval | 3 `eval_kernel()` calls | 3 eval results returned | Only 1 eval |
+| 4. Best selected | Highest speedup chosen | Worker says "Selected strategy X with 1.3x" | Random or first selection |
+
+**Observation:**
+```
+[Worker] Spawning 3 strategy sub-agents...
+[Strategy-A] Vectorized loads approach: speedup 1.15x
+[Strategy-B] Tiled shared memory approach: speedup 1.32x  ← Best
+[Strategy-C] Fused operations approach: speedup 1.21x
+[Worker] Selected Strategy-B with speedup 1.32x
+```
+
+---
+
+#### T13: GPU Semaphore
+
+| Field | Value |
+|-------|-------|
+| **What is tested** | MCP server limits concurrent `eval_kernel()` calls to GPU count |
+| **Expected result** | With N GPUs, max N evals run simultaneously |
+| **Status** | 🔲 PENDING |
+
+**Validation steps:**
+
+| Step | What to look for | Pass if | Fail if |
+|------|------------------|---------|---------|
+| 1. Semaphore init | Server startup log | "Adaptive semaphore: N slots" | No semaphore message |
+| 2. Queuing | Many evals queue up | Evals complete in batches of N | All evals run at once |
+| 3. No OOM | GPU memory stable | All evals complete | CUDA OOM errors |
+
+**Test method (requires MCP server logs):**
+```bash
+# Start kbEval server and watch logs
+python kbEvalServer.py --device 0,1  # 2 GPUs
+
+# In server logs, look for:
+# "Adaptive semaphore: 2 slots"
+
+# During heavy load, you should see:
+# "Eval queued (2/2 slots in use)"
+# "Eval started (1/2 slots in use)"
+```
+
+---
+
+#### T14: Best-of-3 Selection
+
+| Field | Value |
+|-------|-------|
+| **What is tested** | Worker correctly selects highest speedup from 3 strategy results |
+| **Expected result** | Best kernel saved, others discarded |
+| **Status** | 🔲 PENDING |
+
+**Validation steps:**
+
+| Step | What to look for | Pass if | Fail if |
+|------|------------------|---------|---------|
+| 1. Multiple results | 3 different speedups returned | See 3 distinct speedup values | Only 1 value or all same |
+| 2. Max selected | Highest speedup chosen | Worker reports selecting max | Selects non-max value |
+| 3. Saved correctly | `best_result.json` has max | File contains highest speedup | File contains lower speedup |
+
+**Post-test verification:**
+```bash
+# Check a completed task
+cat ~/.inference/claude_code_output/test_session/19_ReLU/best_result.json | jq '.speedup'
+# Should match the highest of the 3 strategies shown in logs
+
+# Check iteration files to see all attempts
+ls ~/.inference/claude_code_output/test_session/19_ReLU/iteration_*.json
+cat ~/.inference/claude_code_output/test_session/19_ReLU/iteration_*_eval.json | jq '.speedup'
+# best_result.json speedup should be max of these
+```
+
+---
+
+### 6.4 Production Test
+
+#### T15: Full Batch
+
+| Field | Value |
+|-------|-------|
+| **What is tested** | Complete level1 (100 tasks) with 4 workers end-to-end |
+| **Expected result** | ≥95% completion rate, results saved correctly |
+| **Status** | 🔲 PENDING |
+
+**Prompt:**
+```
+/kernel-bench level1 --session=prod_full --workers=4
+```
+
+**Validation steps:**
+
+| Step | What to look for | Pass if | Fail if |
+|------|------------------|---------|---------|
+| 1. Session init | 100 tasks initialized | "Initialized session with 100 tasks" | Wrong task count |
+| 2. Workers active | 4 workers processing | See 4 worker IDs in logs | Fewer workers or single-threaded |
+| 3. Progress updates | Periodic status | "Progress: 50/100" messages | No updates for >5 min |
+| 4. Completion rate | ≥95 tasks complete | ≥95 `best_result.json` files | <95 completed |
+| 5. Failures logged | Failed tasks recorded | `failures.json` exists for failed tasks | Failures silently dropped |
+| 6. Summary accurate | Stats match reality | `summary.json` counts match file counts | Mismatched stats |
+
+**Post-test verification:**
+```bash
+# 1. Check completion count (should be ≥95)
+COMPLETED=$(ls ~/.inference/claude_code_output/prod_full/*/best_result.json 2>/dev/null | wc -l)
+echo "Completed: $COMPLETED / 100"
+# PASS if ≥95, FAIL if <95
+
+# 2. Check for failures
+FAILED=$(ls ~/.inference/claude_code_output/prod_full/*/failures.json 2>/dev/null | wc -l)
+echo "Failed: $FAILED"
+
+# 3. Verify total = completed + failed (approximately)
+echo "Total accounted: $((COMPLETED + FAILED))"
+# Should be close to 100
+
+# 4. Check summary statistics
+cat ~/.inference/claude_code_output/prod_full/summary.json | jq '._stats'
+# Expected output:
+# {
+#   "total_tasks": 100,
+#   "total_iterations": ...,
+#   "success_count": ≥95,
+#   "avg_speedup": 1.xx,
+#   "last_updated": "..."
+# }
+
+# 5. Verify summary matches file count
+SUMMARY_COUNT=$(cat ~/.inference/claude_code_output/prod_full/summary.json | jq '._stats.success_count')
+echo "Summary says: $SUMMARY_COUNT, Files show: $COMPLETED"
+# These should match
+
+# 6. Check average speedup is reasonable
+AVG_SPEEDUP=$(cat ~/.inference/claude_code_output/prod_full/summary.json | jq '._stats.avg_speedup')
+echo "Average speedup: ${AVG_SPEEDUP}x"
+# Should be >1.0 (faster than PyTorch baseline)
+
+# 7. Spot check a few results
+for task in 19_ReLU 23_Softmax 88_MinGPTNewGelu; do
+  echo "--- $task ---"
+  cat ~/.inference/claude_code_output/prod_full/$task/best_result.json 2>/dev/null | jq '{speedup, completed_at}'
+done
+```
+
+**Success criteria:**
+- ✓ ≥95/100 tasks have `best_result.json`
+- ✓ Average speedup > 1.0x
+- ✓ No unaccounted tasks (completed + failed ≈ 100)
+- ✓ Summary stats match actual file counts
+- ✓ Run completed without crashes
+
+---
+
+### 6.5 Test Summary
+
+| Category | Tests | Passed | Pending |
+|----------|-------|--------|---------|
+| **Automated (Unit)** | T5, T6, T7, T9, T10, Task Filtering | 6 | 0 |
+| **Manual (CLI)** | T1, T2, T3 | 0 | 3 |
+| **Integration (Agents)** | T4, T8, T11, T12, T13, T14 | 0 | 6 |
+| **Production** | T15 | 0 | 1 |
+| **Total** | 16 | **6** | **10** |
+
+**Run automated tests:**
+```bash
+python3 test_phase2_comprehensive.py   # T5, T6, T7, T9, T10 + extras
+python3 test_phase2_resume_flow.py     # Detailed resume scenario
+python3 test_phase2_session.py         # Basic session operations
+```
 
 ---
 
