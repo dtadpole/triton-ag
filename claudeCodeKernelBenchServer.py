@@ -518,6 +518,464 @@ async def get_session_summary(session_id: str) -> dict:
         return {"error": str(e)}
 
 
+# ============================================================================
+# Phase 2: Session and Task Management Tools
+# ============================================================================
+
+import socket
+
+# Stale marker timeout in seconds (30 minutes)
+STALE_TIMEOUT_SECONDS = 30 * 60
+
+
+def _is_marker_stale(marker_data: dict) -> bool:
+    """Check if an in-progress marker is stale.
+
+    A marker is stale if ANY of these conditions are true:
+    - started_at > 30 minutes ago
+    - PID is not running (only checked if hostname matches)
+    - hostname doesn't match current host (can't verify PID)
+    - marker data is corrupted/missing fields
+    """
+    try:
+        started_at = datetime.fromisoformat(marker_data.get("started_at", ""))
+        age_seconds = (datetime.now() - started_at).total_seconds()
+
+        # Time-based staleness
+        if age_seconds > STALE_TIMEOUT_SECONDS:
+            return True
+
+        # PID-based staleness (only if same host)
+        marker_hostname = marker_data.get("hostname", "")
+        current_hostname = socket.gethostname()
+
+        if marker_hostname == current_hostname:
+            pid = marker_data.get("pid")
+            if pid:
+                try:
+                    os.kill(pid, 0)  # Check if process exists
+                except OSError:
+                    return True  # Process not running
+
+        return False
+
+    except Exception:
+        # Corrupted marker data
+        return True
+
+
+def _clean_stale_marker(marker_path: Path) -> bool:
+    """Remove a stale marker file. Returns True if cleaned."""
+    try:
+        marker_path.unlink()
+        logger.info(f"[kernel-bench] Cleaned stale marker: {marker_path}")
+        return True
+    except Exception as e:
+        logger.warning(f"[kernel-bench] Failed to clean marker {marker_path}: {e}")
+        return False
+
+
+@mcp_tool()
+async def init_session(
+    session_id: str,
+    level: str,
+    config_override: dict = None
+) -> dict:
+    """
+    Initialize a new kernel bench session.
+
+    Creates session directory and manifest file. If session already exists,
+    returns existing session info without overwriting.
+
+    Args:
+        session_id: Unique session identifier
+        level: Kernel bench level (e.g., "level1", "level2")
+        config_override: Optional config overrides (num_workers, etc.)
+
+    Returns:
+        Dict with session info: session_id, level, created_at, status
+    """
+    output_base = Path(config["output"]["base_dir"])
+    session_dir = output_base / session_id
+    manifest_file = session_dir / "session_manifest.json"
+
+    # Check if session already exists
+    if manifest_file.exists():
+        try:
+            existing = json.loads(manifest_file.read_text())
+            existing["status"] = "existing"
+            logger.info(f"[kernel-bench] Session already exists: {session_id}")
+            return existing
+        except json.JSONDecodeError:
+            pass  # Corrupted manifest, recreate
+
+    # Create new session
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    # Get task list for this level
+    tasks = await list_kernel_bench_tasks(level=level)
+
+    manifest = {
+        "session_id": session_id,
+        "level": level,
+        "created_at": datetime.now().isoformat(),
+        "total_tasks": len(tasks),
+        "tasks": [t["name"] for t in tasks],
+        "config": config_override or {},
+        "status": "initialized"
+    }
+
+    manifest_file.write_text(json.dumps(manifest, indent=2))
+
+    logger.info(f"[kernel-bench] Initialized session: {session_id} with {len(tasks)} tasks")
+
+    return manifest
+
+
+@mcp_tool()
+async def claim_task(
+    session_id: str,
+    task_name: str,
+    worker_id: str
+) -> dict:
+    """
+    Atomically claim a task for processing.
+
+    Uses exclusive file creation to prevent race conditions between workers.
+    Creates an .in_progress marker with worker info.
+
+    Args:
+        session_id: Session identifier
+        task_name: Name of the task to claim
+        worker_id: Identifier of the claiming worker
+
+    Returns:
+        Dict with success status and claim info
+    """
+    output_base = Path(config["output"]["base_dir"])
+    task_dir = output_base / session_id / task_name
+    marker_file = task_dir / ".in_progress"
+
+    # Create task directory if needed
+    task_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check if already completed
+    if (task_dir / "best_result.json").exists():
+        return {
+            "success": False,
+            "reason": "already_completed",
+            "task_name": task_name
+        }
+
+    # Check for existing marker
+    if marker_file.exists():
+        try:
+            marker_data = json.loads(marker_file.read_text())
+
+            # Check if stale
+            if _is_marker_stale(marker_data):
+                _clean_stale_marker(marker_file)
+            else:
+                return {
+                    "success": False,
+                    "reason": "already_claimed",
+                    "claimed_by": marker_data.get("worker"),
+                    "task_name": task_name
+                }
+        except json.JSONDecodeError:
+            # Corrupted marker, clean it
+            _clean_stale_marker(marker_file)
+
+    # Try to claim with exclusive create
+    marker_data = {
+        "worker": worker_id,
+        "started_at": datetime.now().isoformat(),
+        "pid": os.getpid(),
+        "hostname": socket.gethostname()
+    }
+
+    try:
+        # 'x' mode = exclusive create, fails if file exists
+        with open(marker_file, 'x') as f:
+            json.dump(marker_data, f)
+
+        logger.info(f"[kernel-bench] Worker {worker_id} claimed task: {task_name}")
+
+        return {
+            "success": True,
+            "task_name": task_name,
+            "worker_id": worker_id,
+            "started_at": marker_data["started_at"]
+        }
+
+    except FileExistsError:
+        # Another worker claimed it between our check and create
+        return {
+            "success": False,
+            "reason": "race_condition",
+            "task_name": task_name
+        }
+
+
+@mcp_tool()
+async def release_task(
+    session_id: str,
+    task_name: str,
+    error: str = None
+) -> dict:
+    """
+    Release a claimed task, optionally recording an error.
+
+    Removes the .in_progress marker. If error is provided, logs it to
+    failures.json for analysis.
+
+    Args:
+        session_id: Session identifier
+        task_name: Name of the task to release
+        error: Optional error message if task failed
+
+    Returns:
+        Dict with release status
+    """
+    output_base = Path(config["output"]["base_dir"])
+    task_dir = output_base / session_id / task_name
+    marker_file = task_dir / ".in_progress"
+
+    # Remove marker
+    if marker_file.exists():
+        try:
+            marker_file.unlink()
+            logger.info(f"[kernel-bench] Released task: {task_name}")
+        except Exception as e:
+            logger.warning(f"[kernel-bench] Failed to remove marker: {e}")
+
+    # Record error if provided
+    if error:
+        failures_file = task_dir / "failures.json"
+        failures = []
+
+        if failures_file.exists():
+            try:
+                failures = json.loads(failures_file.read_text())
+            except json.JSONDecodeError:
+                failures = []
+
+        failures.append({
+            "error": error,
+            "timestamp": datetime.now().isoformat()
+        })
+
+        failures_file.write_text(json.dumps(failures, indent=2))
+        logger.info(f"[kernel-bench] Recorded failure for {task_name}: {error[:50]}...")
+
+    return {
+        "success": True,
+        "task_name": task_name,
+        "error_recorded": error is not None
+    }
+
+
+@mcp_tool()
+async def get_session_state(session_id: str) -> dict:
+    """
+    Get full session state with progress counts.
+
+    Scans the session directory to determine task status:
+    - pending: No task directory exists
+    - in_progress: Has .in_progress marker (and not stale)
+    - incomplete: Has iteration files but no best_result.json
+    - completed: Has best_result.json
+
+    Automatically cleans stale markers during scan.
+
+    Args:
+        session_id: Session identifier
+
+    Returns:
+        Dict with total, completed, in_progress, pending counts and task lists
+    """
+    output_base = Path(config["output"]["base_dir"])
+    session_dir = output_base / session_id
+    manifest_file = session_dir / "session_manifest.json"
+
+    if not manifest_file.exists():
+        return {"error": f"Session not found: {session_id}"}
+
+    try:
+        manifest = json.loads(manifest_file.read_text())
+    except json.JSONDecodeError:
+        return {"error": f"Corrupted manifest for session: {session_id}"}
+
+    all_tasks = manifest.get("tasks", [])
+
+    completed = []
+    in_progress = []
+    incomplete = []
+    pending = []
+    stale_cleaned = 0
+
+    for task_name in all_tasks:
+        task_dir = session_dir / task_name
+
+        if not task_dir.exists():
+            pending.append(task_name)
+            continue
+
+        # Check for completion marker
+        if (task_dir / "best_result.json").exists():
+            completed.append(task_name)
+            continue
+
+        # Check for in-progress marker
+        marker_file = task_dir / ".in_progress"
+        if marker_file.exists():
+            try:
+                marker_data = json.loads(marker_file.read_text())
+                if _is_marker_stale(marker_data):
+                    _clean_stale_marker(marker_file)
+                    stale_cleaned += 1
+                    # Falls through to incomplete check
+                else:
+                    in_progress.append({
+                        "task": task_name,
+                        "worker": marker_data.get("worker"),
+                        "started_at": marker_data.get("started_at")
+                    })
+                    continue
+            except json.JSONDecodeError:
+                _clean_stale_marker(marker_file)
+                stale_cleaned += 1
+
+        # Check for partial work (has iteration files but not complete)
+        iteration_files = list(task_dir.glob("iteration_*_cuda_kernel.py"))
+        if iteration_files:
+            incomplete.append(task_name)
+        else:
+            pending.append(task_name)
+
+    # Calculate statistics
+    completed_speedups = []
+    for task_name in completed:
+        result_file = session_dir / task_name / "best_result.json"
+        if result_file.exists():
+            try:
+                result = json.loads(result_file.read_text())
+                if result.get("speedup"):
+                    completed_speedups.append(result["speedup"])
+            except json.JSONDecodeError:
+                pass
+
+    avg_speedup = sum(completed_speedups) / len(completed_speedups) if completed_speedups else 0
+
+    result = {
+        "session_id": session_id,
+        "level": manifest.get("level"),
+        "total": len(all_tasks),
+        "completed": len(completed),
+        "in_progress": len(in_progress),
+        "incomplete": len(incomplete),
+        "pending": len(pending),
+        "stale_cleaned": stale_cleaned,
+        "avg_speedup": round(avg_speedup, 3),
+        "completed_tasks": completed,
+        "in_progress_tasks": in_progress,
+        "incomplete_tasks": incomplete,
+        "pending_tasks": pending[:20]  # Limit for readability
+    }
+
+    if len(pending) > 20:
+        result["pending_tasks_truncated"] = True
+        result["pending_count"] = len(pending)
+
+    logger.info(f"[kernel-bench] Session {session_id}: "
+               f"{len(completed)}/{len(all_tasks)} complete, "
+               f"{len(in_progress)} in-progress, {stale_cleaned} stale cleaned")
+
+    return result
+
+
+@mcp_tool()
+async def get_pending_tasks(
+    session_id: str,
+    limit: int = 10
+) -> dict:
+    """
+    Get list of tasks available for claiming.
+
+    Returns tasks that are:
+    - Not completed (no best_result.json)
+    - Not in progress (no valid .in_progress marker)
+
+    Includes both pending (never started) and incomplete (partial work).
+
+    Args:
+        session_id: Session identifier
+        limit: Maximum number of tasks to return
+
+    Returns:
+        Dict with list of claimable tasks and their paths
+    """
+    # Get full state (not using get_session_state to avoid truncation)
+    output_base = Path(config["output"]["base_dir"])
+    session_dir = output_base / session_id
+    manifest_file = session_dir / "session_manifest.json"
+
+    if not manifest_file.exists():
+        return {"error": f"Session not found: {session_id}"}
+
+    try:
+        manifest = json.loads(manifest_file.read_text())
+    except json.JSONDecodeError:
+        return {"error": f"Corrupted manifest for session: {session_id}"}
+
+    all_tasks = manifest.get("tasks", [])
+    level = manifest.get("level", "level1")
+
+    claimable = []
+
+    for task_name in all_tasks:
+        task_dir = session_dir / task_name
+
+        # Skip completed tasks
+        if task_dir.exists() and (task_dir / "best_result.json").exists():
+            continue
+
+        # Skip in-progress tasks (with valid markers)
+        marker_file = task_dir / ".in_progress"
+        if marker_file.exists():
+            try:
+                marker_data = json.loads(marker_file.read_text())
+                if not _is_marker_stale(marker_data):
+                    continue  # Valid in-progress, skip
+                # Stale marker - will be cleaned, task is claimable
+                _clean_stale_marker(marker_file)
+            except json.JSONDecodeError:
+                _clean_stale_marker(marker_file)
+
+        # Determine status
+        if task_dir.exists():
+            iteration_files = list(task_dir.glob("iteration_*_cuda_kernel.py"))
+            status = "incomplete" if iteration_files else "pending"
+        else:
+            status = "pending"
+
+        claimable.append({
+            "task_name": task_name,
+            "status": status,
+            "task_path": f"{level}/{task_name}.py"
+        })
+
+    # Sort by name for consistent ordering
+    claimable.sort(key=lambda x: x["task_name"])
+
+    return {
+        "session_id": session_id,
+        "available_count": len(claimable),
+        "tasks": claimable[:limit],
+        "truncated": len(claimable) > limit
+    }
+
+
 if __name__ == "__main__":
     if MCP_AVAILABLE and mcp is not None:
         mcp.run()

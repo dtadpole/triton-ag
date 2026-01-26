@@ -687,18 +687,18 @@ Total per task: ~90 seconds worst case, often faster with early termination
 | Phase | Item | Status |
 |-------|------|--------|
 | **1. Foundation** | | |
-| 1.1 | Create `.claude/{skills,agents,memory,logs}/` directories | PENDING |
-| 1.2 | Create `.claude/skills/kernel-bench.md` | PENDING |
-| 1.3 | Create `.claude/agents/kernel-bench-coordinator.md` | PENDING |
-| 1.4 | Create `.claude/agents/kernel-bench-optimizer.md` | PENDING |
-| 1.5 | Create `.claude/agents/kernel-bench-strategy.md` | PENDING |
-| 1.6 | Create memory templates (kernel-strategies.md, learnings.md) | PENDING |
+| 1.1 | Create `.claude/{skills,agents,memory,logs}/` directories | DONE |
+| 1.2 | Create `.claude/skills/kernel-bench.md` | DONE |
+| 1.3 | Create `.claude/agents/kernel-bench-coordinator.md` | DONE |
+| 1.4 | Create `.claude/agents/kernel-bench-optimizer.md` | DONE |
+| 1.5 | Create `.claude/agents/kernel-bench-strategy.md` | DONE |
+| 1.6 | Create memory templates (kernel-strategies.md, learnings.md) | DONE |
 | **2. MCP Tools** | | |
-| 2.1 | `init_session()` | PENDING |
-| 2.2 | `claim_task()` with atomic marker + PID | PENDING |
-| 2.3 | `release_task()` with failure recording | PENDING |
-| 2.4 | `get_session_state()` with stale cleanup | PENDING |
-| 2.5 | `get_pending_tasks()` | PENDING |
+| 2.1 | `init_session()` | DONE |
+| 2.2 | `claim_task()` with atomic marker + PID | DONE |
+| 2.3 | `release_task()` with failure recording | DONE |
+| 2.4 | `get_session_state()` with stale cleanup | DONE |
+| 2.5 | `get_pending_tasks()` | DONE |
 | **3. Knowledge Base** (defer for MVP) | | |
 | 3.1 | `search_knowledge_base()` | PENDING |
 | 3.2 | `update_knowledge_base()` | PENDING |
