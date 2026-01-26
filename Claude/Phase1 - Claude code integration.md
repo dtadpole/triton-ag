@@ -1,5 +1,7 @@
 # Claude Code Kernel Bench Integration Plan
 
+> **See also:** [CLAUDE_CODE_AGENT_ADVANCED.md](./CLAUDE_CODE_AGENT_ADVANCED.md) for advanced features (skill with multiple input styles, MD-based agents, structured responses, crash recovery).
+
 ## Table of Contents
 
 1. [RL Flow - How It Works](#1-rl-flow---how-it-works)

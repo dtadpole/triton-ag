@@ -305,7 +305,7 @@ Create an SSH tunnel to forward local port 5676 to the remote kbEvalServer.
 Open a **dedicated terminal window** and run:
 
 ```bash
-ssh -L 5676:localhost:5676 -N devgpu001.example.com
+ssh -L 5676:localhost:5676 -N devvm12754.rva0.facebook.com
 ```
 
 Replace `devgpu001.example.com` with your remote server hostname.
