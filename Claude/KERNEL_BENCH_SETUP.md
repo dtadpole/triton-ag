@@ -51,32 +51,12 @@ Set up the kbEvalServer on a machine with NVIDIA GPU.
 ### Step 1.1: SSH into Remote Server
 
 ```bash
-ssh devgpu001.example.com
+ssh devvm8857.rva0.facebook.com
 ```
 
-### Step 1.2: Clone Repository
+### Step 1.2: Configure Proxy (Meta devservers only)
 
-```bash
-cd /data/users/$USER
-
-# Get your GitHub token (create one at https://github.com/settings/tokens if needed)
-export GITHUB_TOKEN=$(cat ~/.keys/github.api.key)
-
-# Clone with token authentication on the correct branch
-git clone -b claude-code-kernel-bench-plan https://${GITHUB_TOKEN}@github.com/dtadpole/triton-ag.git
-cd triton-ag
-```
-
-**If you don't have a token file yet:**
-```bash
-mkdir -p ~/.keys
-echo "ghp_xxxxxxxxxxxx" > ~/.keys/github.api.key  # Your actual token, no $ prefix
-chmod 600 ~/.keys/github.api.key
-```
-
-**Note:** The token value should be the raw token (e.g., `ghp_abc123`), not prefixed with `$`. The `${GITHUB_TOKEN}` syntax is shell variable expansion - it substitutes the variable's value into the URL.
-
-### Step 1.3: Configure Proxy (Meta devservers only)
+Configure proxy before cloning to enable access to external sites (GitHub, PyPI).
 
 ```bash
 cat >> ~/.bashrc << 'EOF'
@@ -103,6 +83,28 @@ trusted-host = pypi.org
 EOF
 ```
 
+### Step 1.3: Clone Repository
+
+```bash
+cd /data/users/$USER
+
+# Get your GitHub token (create one at https://github.com/settings/tokens if needed)
+export GITHUB_TOKEN=$(cat ~/.keys/github.api.key)
+
+# Clone with token authentication on the correct branch
+git clone -b claude-code-kernel-bench-plan https://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@github.com/dtadpole/triton-ag.git
+cd triton-ag
+```
+
+**If you don't have a token file yet:**
+```bash
+mkdir -p ~/.keys
+echo "ghp_xxxxxxxxxxxx" > ~/.keys/github.api.key  # Your actual token, no $ prefix
+chmod 600 ~/.keys/github.api.key
+```
+
+**Note:** The token value should be the raw token (e.g., `ghp_abc123`), not prefixed with `$`. The `${GITHUB_TOKEN}` syntax is shell variable expansion - it substitutes the variable's value into the URL.
+
 ### Step 1.4: Create Virtual Environment
 
 ```bash
@@ -116,10 +118,10 @@ source .venv/bin/activate
 ```bash
 pip install --upgrade pip
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-pip install fastapi uvicorn pydantic pyyaml ninja loguru psutil triton numpy httpx wandb black
+pip install fastapi uvicorn pydantic pyyaml ninja loguru psutil triton numpy httpx wandb black duckdb
 ```
 
-**Note:** The `black` package is required for Triton kernel code formatting during compilation.
+**Note:** The `black` package is required for Triton kernel code formatting during compilation. The `duckdb` package is required for data storage and querying.
 
 **Verify:**
 ```bash
@@ -169,6 +171,7 @@ Choose a GPU with 8GB+ free memory. Note the index (0, 1, 2, etc.).
 
 ### Step 1.10: Start kbEvalServer (Interactive)
 
+**Single GPU:**
 ```bash
 cd /data/users/$USER/triton-ag
 source .venv/bin/activate
@@ -177,10 +180,27 @@ CUDA_VISIBLE_DEVICES=0 python3 kbEvalServer.py --local_host --port 5676 --device
 
 Replace `CUDA_VISIBLE_DEVICES=0` and `--device 0` with your chosen GPU index.
 
+**Multiple GPUs (4 GPUs):**
+```bash
+cd /data/users/$USER/triton-ag
+source .venv/bin/activate
+CUDA_VISIBLE_DEVICES=0,1,2,3 python3 kbEvalServer.py --local_host --port 5676 --device 0,1,2,3
+```
+
+The server automatically load-balances evaluation requests across all specified devices. This enables parallel kernel compilation and benchmarking.
+
+**Note:** The `--device` parameter accepts comma-separated device IDs. The device IDs correspond to the indices after `CUDA_VISIBLE_DEVICES` remapping (i.e., always start from 0).
+
 ### Step 1.11: Start kbEvalServer (Persistent with tmux)
 
+**Single GPU:**
 ```bash
 tmux new-session -d -s kbEval "cd /data/users/$USER/triton-ag && source .venv/bin/activate && while true; do CUDA_VISIBLE_DEVICES=0 python3 kbEvalServer.py --local_host --port 5676 --device 0; sleep 5; done"
+```
+
+**Multiple GPUs (4 GPUs):**
+```bash
+tmux new-session -d -s kbEval "cd /data/users/$USER/triton-ag && source .venv/bin/activate && while true; do CUDA_VISIBLE_DEVICES=0,1,2,3 python3 kbEvalServer.py --local_host --port 5676 --device 0,1,2,3; sleep 5; done"
 ```
 
 **Check it's running:**
@@ -269,7 +289,46 @@ grep -A6 "^  local:" kbEval.yaml
     timeout: 300
 ```
 
-### Step 2.6: Verify MCP Registration
+### Step 2.6: Update kbEval Server Address & Port (If Needed)
+
+If your kbEvalServer is running on a different address or port (e.g., a different SSH tunnel port or direct connection), update the configuration in `kbEval.yaml`.
+
+**Using Claude Code (recommended):**
+
+Start Claude Code and ask it to update the configuration:
+```
+Update kbEval.yaml to use port 8082 for the local provider
+```
+
+or for a custom address:
+```
+Update kbEval.yaml local provider base_url to http://localhost:8082
+```
+
+**Manual update:**
+
+Edit `kbEval.yaml` and modify the `providers.local.base_url` field:
+```yaml
+providers:
+  local:
+    base_url: http://localhost:8082  # Change port here
+    api_key_path: ~/.keys/kbeval.api.key
+    retry_count: 4
+    initial_retry_interval: 3
+    timeout: 300
+```
+
+**Verify the update:**
+```bash
+grep "base_url" kbEval.yaml | head -1
+```
+
+**Note:** After changing the port, ensure your SSH tunnel uses the matching port:
+```bash
+ssh -L 8082:localhost:8082 -N your-devserver.facebook.com
+```
+
+### Step 2.7: Verify MCP Registration
 
 ```bash
 cat .mcp.json
@@ -288,7 +347,7 @@ cat .mcp.json
 }
 ```
 
-### Step 2.7: Create Output Directory
+### Step 2.8: Create Output Directory
 
 ```bash
 mkdir -p ~/.inference/claude_code_output
@@ -305,10 +364,10 @@ Create an SSH tunnel to forward local port 5676 to the remote kbEvalServer.
 Open a **dedicated terminal window** and run:
 
 ```bash
-ssh -L 5676:localhost:5676 -N devvm12754.rva0.facebook.com
+ssh -L 5676:localhost:5676 -N devvm8857.rva0.facebook.com
 ```
 
-Replace `devgpu001.example.com` with your remote server hostname.
+Replace `devvm8857.rva0.facebook.com` with your remote server hostname.
 
 **This terminal must stay open** while using Claude Code.
 
@@ -318,7 +377,7 @@ For Phase 6 multi-GPU support, forward multiple ports for different kbEvalServer
 
 **Option A: Multiple ports to same server (different GPUs on same machine):**
 ```bash
-ssh -L 5676:localhost:8082 -L 5677:localhost:8081 -N devvm8491.cco0.facebook.com
+ssh -L 5676:localhost:5676 -N devvm8857.rva0.facebook.com
 ```
 
 **Option B: Multiple SSH connections to different servers:**
@@ -482,7 +541,6 @@ List the MCP tools with "kernel" in the name
 In Claude Code, type:
 ```
 Use eval_kernel to evaluate a simple ReLU Triton kernel for level1/19_ReLU.py.
-Use session_id="mcp_test" and provider="local".
 ```
 
 **Expected:** Claude generates a kernel, submits it, and receives compilation/correctness results.
@@ -529,17 +587,17 @@ lsof -i :5676 | grep ssh
 
 If no output, restart the tunnel:
 ```bash
-ssh -L 5676:localhost:5676 -N devgpu001.example.com
+ssh -L 5676:localhost:5676 -N devvm8857.rva0.facebook.com
 ```
 
 **Check remote kbEvalServer is running:**
 ```bash
-ssh devgpu001.example.com "curl -s http://localhost:5676/health"
+ssh devvm8857.rva0.facebook.com "curl -s http://localhost:5676/health"
 ```
 
 If no response, restart kbEvalServer on remote:
 ```bash
-ssh devgpu001.example.com "tmux attach -t kbEval"
+ssh devvm8857.rva0.facebook.com "tmux attach -t kbEval"
 ```
 
 ### API Key Authentication Failed
@@ -550,12 +608,12 @@ ssh devgpu001.example.com "tmux attach -t kbEval"
 cat ~/.keys/kbeval.api.key
 
 # Remote key:
-ssh devgpu001.example.com "cat ~/.keys/kbeval.api.key"
+ssh devvm8857.rva0.facebook.com "cat ~/.keys/kbeval.api.key"
 ```
 
 Both must be identical. If different, copy remote key to local:
 ```bash
-ssh devgpu001.example.com "cat ~/.keys/kbeval.api.key" > ~/.keys/kbeval.api.key
+ssh devvm8857.rva0.facebook.com "cat ~/.keys/kbeval.api.key" > ~/.keys/kbeval.api.key
 chmod 600 ~/.keys/kbeval.api.key
 ```
 
@@ -563,18 +621,24 @@ chmod 600 ~/.keys/kbeval.api.key
 
 **Check GPU memory on remote:**
 ```bash
-ssh devgpu001.example.com "nvidia-smi --query-gpu=index,memory.free --format=csv"
+ssh devvm8857.rva0.facebook.com "nvidia-smi --query-gpu=index,memory.free --format=csv"
 ```
 
 **Find processes using GPU:**
 ```bash
-ssh devgpu001.example.com "nvidia-smi --query-compute-apps=pid,used_memory --format=csv"
+ssh devvm8857.rva0.facebook.com "nvidia-smi --query-compute-apps=pid,used_memory --format=csv"
 ```
 
 **Switch to different GPU** (e.g., GPU 1):
 ```bash
-ssh devgpu001.example.com "tmux kill-session -t kbEval"
-ssh devgpu001.example.com "tmux new-session -d -s kbEval 'cd /data/users/\$USER/triton-ag && source .venv/bin/activate && CUDA_VISIBLE_DEVICES=1 python3 kbEvalServer.py --local_host --port 5676 --device 0'"
+ssh devvm8857.rva0.facebook.com "tmux kill-session -t kbEval"
+ssh devvm8857.rva0.facebook.com "tmux new-session -d -s kbEval 'cd /data/users/\$USER/triton-ag && source .venv/bin/activate && CUDA_VISIBLE_DEVICES=1 python3 kbEvalServer.py --local_host --port 5676 --device 0'"
+```
+
+**Switch to all 4 GPUs:**
+```bash
+ssh devvm8857.rva0.facebook.com "tmux kill-session -t kbEval"
+ssh devvm8857.rva0.facebook.com "tmux new-session -d -s kbEval 'cd /data/users/\$USER/triton-ag && source .venv/bin/activate && CUDA_VISIBLE_DEVICES=0,1,2,3 python3 kbEvalServer.py --local_host --port 5676 --device 0,1,2,3'"
 ```
 
 ### Kernel Compilation Timeout
@@ -635,7 +699,7 @@ claude
 
 **Terminal 1 - SSH Tunnel (keep open):**
 ```bash
-ssh -L 5676:localhost:5676 -N devgpu001.example.com
+ssh -L 5676:localhost:5676 -N devvm8857.rva0.facebook.com
 ```
 
 **Terminal 2 - Claude Code:**
@@ -662,23 +726,28 @@ python3 -c "from claudeCodeKernelBenchServer import MCP_AVAILABLE; print(f'MCP: 
 
 ### Remote Server Management
 
-**Start kbEvalServer:**
+**Start kbEvalServer (single GPU):**
 ```bash
-ssh devgpu001.example.com "cd /data/users/\$USER/triton-ag && tmux new-session -d -s kbEval 'source .venv/bin/activate && CUDA_VISIBLE_DEVICES=0 python3 kbEvalServer.py --local_host --port 5676 --device 0'"
+ssh devvm8857.rva0.facebook.com "cd /data/users/\$USER/triton-ag && tmux new-session -d -s kbEval 'source .venv/bin/activate && CUDA_VISIBLE_DEVICES=0 python3 kbEvalServer.py --local_host --port 5676 --device 0'"
+```
+
+**Start kbEvalServer (4 GPUs):**
+```bash
+ssh devvm8857.rva0.facebook.com "cd /data/users/\$USER/triton-ag && tmux new-session -d -s kbEval 'source .venv/bin/activate && CUDA_VISIBLE_DEVICES=0,1,2,3 python3 kbEvalServer.py --local_host --port 5676 --device 0,1,2,3'"
 ```
 
 **Check kbEvalServer status:**
 ```bash
-ssh devgpu001.example.com "tmux list-sessions | grep kbEval"
+ssh devvm8857.rva0.facebook.com "tmux list-sessions | grep kbEval"
 ```
 
 **View kbEvalServer logs:**
 ```bash
-ssh -t devgpu001.example.com "tmux attach -t kbEval"
+ssh -t devvm8857.rva0.facebook.com "tmux attach -t kbEval"
 # Detach: Ctrl+B D
 ```
 
 **Stop kbEvalServer:**
 ```bash
-ssh devgpu001.example.com "tmux kill-session -t kbEval"
+ssh devvm8857.rva0.facebook.com "tmux kill-session -t kbEval"
 ```

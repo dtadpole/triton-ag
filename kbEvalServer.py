@@ -787,7 +787,8 @@ async def main(args):
     if args.local_host:
         host = "localhost"
         port = args.port
-        DEVICES = [args.device]
+        # Parse comma-separated device IDs (e.g., "0,1,2,3" -> [0, 1, 2, 3])
+        DEVICES = [int(d.strip()) for d in args.device.split(',')]
     else:
         host = kbEval_config["servers"][hostname]["host"]
         port = kbEval_config["servers"][hostname]["port"]
