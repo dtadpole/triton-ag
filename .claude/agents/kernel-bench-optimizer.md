@@ -384,20 +384,20 @@ Task(subagent_type="general-purpose", name="strategy-C", run_in_background=false
 ```
 Level 1 tasks (simple ops):
 - Target: 1.5x speedup
-- Acceptable: 1.3x after 2 iterations
-- Max iterations: 3
+- Acceptable: 1.3x after 5 iterations
+- Max iterations: 10
 - If not beating PyTorch (1.0x): likely a Triton overhead issue, try larger input sizes
 
 Level 2 tasks (fused ops, attention):
 - Target: 2.0x speedup (fusion should give big wins!)
-- Acceptable: 1.5x after 3 iterations
-- Max iterations: 6 (these need more exploration)
+- Acceptable: 1.3x after 5 iterations
+- Max iterations: 10 (these need more exploration)
 - Key insight: If not getting fusion benefits, re-analyze computation graph
 
 Level 3 tasks (complex components):
 - Target: 1.5x speedup (these are hard!)
-- Acceptable: 1.2x after 3 iterations
-- Max iterations: 6 (complex tasks need patience)
+- Acceptable: 1.2x after 5 iterations
+- Max iterations: 10 (complex tasks need patience)
 - Consider: Partial optimization (optimize the bottleneck sub-component)
 ```
 
@@ -464,7 +464,7 @@ New strategy: block_1024_unroll_8_prefetch
 | 1.5x - 2.0x | Good: Fusion/algorithm benefits showing |
 | > 2.0x | Excellent: Significant algorithmic improvement (eliminated memory, better algorithm) |
 
-**Max iterations: 3 for L1, 6 for L2/L3 tasks.**
+**Max iterations: 10 for all levels.**
 
 **When iterating, your next attempt MUST reference what went wrong AND what worked:**
 ```

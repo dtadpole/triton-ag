@@ -94,7 +94,7 @@ _best_result_tracker: dict[tuple[str, str], dict] = {}
 
 # Default completion thresholds
 DEFAULT_TARGET_SPEEDUP = 1.5
-DEFAULT_MAX_ITERATIONS = 3
+DEFAULT_MAX_ITERATIONS = 10
 
 
 def get_kbeval_client(config_file: str = "kbEval.yaml"):
@@ -449,7 +449,7 @@ async def _auto_update_progress(
         should_complete = True
         completion_reason = f"target_reached ({speedup:.2f}x >= {DEFAULT_TARGET_SPEEDUP}x)"
 
-    # Condition 2: Max iterations reached (iteration is 0-indexed, so >= 2 means 3 iterations)
+    # Condition 2: Max iterations reached (iteration is 0-indexed, so >= 9 means 10 iterations)
     elif iteration >= DEFAULT_MAX_ITERATIONS - 1:
         should_complete = True
         completion_reason = f"max_iterations ({iteration + 1} >= {DEFAULT_MAX_ITERATIONS})"
@@ -510,7 +510,7 @@ async def eval_kernel(
 
     **Auto-completion**: Tasks are automatically marked complete when:
     - Speedup >= 1.5x (target reached), OR
-    - 3 iterations completed (max iterations)
+    - 10 iterations completed (max iterations)
 
     Args:
         task_path: Path to the original task file (contains reference Model)
@@ -1370,7 +1370,7 @@ async def update_task_progress(
         "started_at": None,
         "completed_at": None,
         "config": {
-            "max_iterations": 3,
+            "max_iterations": 10,
             "strategies_per_iteration": 1
         },
         "iterations": [],
@@ -1545,7 +1545,7 @@ async def get_task_progress(
         return {
             "task_name": task_name,
             "status": "pending",
-            "iterations_planned": 3,
+            "iterations_planned": 10,
             "iterations_done": 0,
             "iterations": [],
             "best": None
@@ -1571,7 +1571,7 @@ async def get_task_progress(
             "worker_id": progress.get("worker_id"),
             "started_at": progress.get("started_at"),
             "completed_at": progress.get("completed_at") or best_result.get("completed_at"),
-            "iterations_planned": progress.get("config", {}).get("max_iterations", 3),
+            "iterations_planned": progress.get("config", {}).get("max_iterations", 10),
             "iterations_done": len(progress.get("iterations", [])),
             "iterations": progress.get("iterations", []),
             "best": {
@@ -1619,7 +1619,7 @@ async def get_task_progress(
         "worker_id": worker_id or progress.get("worker_id"),
         "started_at": started_at or progress.get("started_at"),
         "completed_at": None,
-        "iterations_planned": progress.get("config", {}).get("max_iterations", 3),
+        "iterations_planned": progress.get("config", {}).get("max_iterations", 10),
         "iterations_done": len(iterations),
         "iterations": iterations,
         "best": progress.get("best")
@@ -1675,7 +1675,7 @@ async def get_batch_progress(
             "name": task_name,
             "status": "pending",
             "worker": None,
-            "iterations_planned": 3,
+            "iterations_planned": 10,
             "iterations_done": 0,
             "best_speedup": None,
             "last_iteration": None
@@ -1696,7 +1696,7 @@ async def get_batch_progress(
 
         iterations = progress.get("iterations", [])
         task_info["worker"] = progress.get("worker_id")
-        task_info["iterations_planned"] = progress.get("config", {}).get("max_iterations", 3)
+        task_info["iterations_planned"] = progress.get("config", {}).get("max_iterations", 10)
         task_info["iterations_done"] = len(iterations)
 
         if include_iterations:
@@ -1743,7 +1743,7 @@ async def get_batch_progress(
                     pending_count += 1
             elif iterations:
                 # Has work but no marker - incomplete
-                if all(not it.get("correct") for it in iterations) and len(iterations) >= 3:
+                if all(not it.get("correct") for it in iterations) and len(iterations) >= 10:
                     task_info["status"] = "failed"
                     failed_count += 1
                 else:

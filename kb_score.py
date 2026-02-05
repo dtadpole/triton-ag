@@ -144,11 +144,11 @@ def compute_summary(session_data: dict) -> dict:
     speedups = [t["best_speedup"] for t in tasks if t["best_speedup"] and t["best_speedup"] > 0]
     avg_speedup = sum(speedups) / len(speedups) if speedups else 0.0
 
-    # Failed = all iterations failed OR incomplete with 3+ failed iterations
+    # Failed = all iterations failed OR incomplete with 10+ failed iterations
     failed = 0
     for t in tasks:
         if t["iterations"] and not t["has_correct_result"]:
-            if len(t["iterations"]) >= 3:
+            if len(t["iterations"]) >= 10:
                 failed += 1
 
     return {
@@ -221,7 +221,7 @@ def generate_markdown_report(session_data: dict, summary: dict) -> str:
         lines.append("|------|--------|------------|--------------|")
         for t in in_progress_tasks:
             speedup_str = f"{t['best_speedup']:.2f}x" if t["best_speedup"] else "-"
-            lines.append(f"| {t['name']} | {t['worker'] or '-'} | {len(t['iterations'])}/3 | {speedup_str} |")
+            lines.append(f"| {t['name']} | {t['worker'] or '-'} | {len(t['iterations'])}/10 | {speedup_str} |")
         lines.append("")
 
     # Completed Tasks (sorted by speedup)
@@ -241,7 +241,7 @@ def generate_markdown_report(session_data: dict, summary: dict) -> str:
         lines.append("")
 
     # Failed Tasks
-    failed_tasks = [t for t in sorted_tasks if t["status"] == "incomplete" and not t["has_correct_result"] and len(t["iterations"]) >= 3]
+    failed_tasks = [t for t in sorted_tasks if t["status"] == "incomplete" and not t["has_correct_result"] and len(t["iterations"]) >= 10]
     if failed_tasks:
         lines.append("## Failed Tasks")
         lines.append("")
@@ -324,7 +324,7 @@ def main():
             sys.exit(1)
 
         print(f"\n=== Task: {task_name} ===")
-        print(f"Status: {task['status']} | Worker: {task['worker'] or '-'} | Iterations: {len(task['iterations'])}/3")
+        print(f"Status: {task['status']} | Worker: {task['worker'] or '-'} | Iterations: {len(task['iterations'])}/10")
         print()
 
         if task["iterations"]:
