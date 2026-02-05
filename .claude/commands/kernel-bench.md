@@ -293,7 +293,7 @@ When user says "progress", "progress {session_id}", or just asks about progress:
 
 **STEP 1 (REQUIRED): Run the progress script via Bash:**
 ```bash
-python3 kb_progress.py {session_id}
+python3 kb_score.py {session_id}
 ```
 
 This script:
@@ -324,7 +324,7 @@ The script automatically generates a detailed markdown report file in the sessio
 **If no session_id is provided**, use the most recent session:
 ```bash
 session=$(ls -t ~/.inference/claude_code_output/ | head -1)
-python3 kb_progress.py $session
+python3 kb_score.py $session
 ```
 
 #### Single Task Detail ("progress {session_id} {task_name}")
