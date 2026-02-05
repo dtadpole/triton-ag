@@ -27,9 +27,42 @@ Phase 1 integration works for basic tasks but lacks:
 
 | Decision | Implementation |
 |----------|----------------|
+| **Parallel execution by default** | Workers and strategy sub-agents MUST be spawned in parallel using multiple Task calls in a single message |
+| **Default 4 concurrent workers** | Batch mode spawns 4 workers unless overridden with `--workers=N` |
 | **Skill with multiple input styles** | Single `/kernel-bench` skill handles all use cases |
 | **MD-based agents** | Agent prompts in `.claude/agents/*.md`, spawned via Task tool |
 | **Structured JSON responses** | All agent communication uses JSON to mitigate LLM non-determinism |
+
+### 1.4 Parallel Execution Architecture
+
+**CRITICAL: All parallelism is achieved by spawning multiple Task tool calls in a SINGLE message.**
+
+```
+CORRECT (parallel):
+┌─────────────────────────────────────────────────────────────┐
+│ One Message containing:                                      │
+│   Task(optimizer-1) + Task(optimizer-2) + Task(optimizer-3) │
+│   + Task(optimizer-4)                                        │
+│                                                              │
+│   Result: All 4 workers run concurrently                     │
+└─────────────────────────────────────────────────────────────┘
+
+WRONG (sequential):
+┌───────────────────────┐
+│ Message 1: Task(opt-1)│ → wait for completion
+└───────────────────────┘
+┌───────────────────────┐
+│ Message 2: Task(opt-2)│ → wait for completion
+└───────────────────────┘
+... (workers run one at a time)
+```
+
+**Where parallelism applies:**
+| Level | Component | Parallelism |
+|-------|-----------|-------------|
+| Session | Workers (optimizer agents) | N workers spawned in parallel (default: 4) |
+| Task | Strategies (strategy sub-agents) | 3 strategies spawned in parallel per iteration |
+| GPU | eval_kernel() calls | Bounded by semaphore (default: num_devices) |
 
 ---
 
@@ -42,7 +75,7 @@ The `/kernel-bench` skill supports flexible invocation:
 | Style | Example | Mode |
 |-------|---------|------|
 | **Single task** | `/kernel-bench level1/19_ReLU.py` | Direct optimization |
-| **Directory batch** | `/kernel-bench level1/` | Coordinator + workers |
+| **Directory batch** | `/kernel-bench level1/` | Skill spawns parallel workers |
 | **Full parameters** | `/kernel-bench level1 --session=my_run --workers=4` | Batch with config |
 | **Natural language** | `/kernel-bench 4 random tasks from level1` | Interpreted |
 | **Resume** | `/kernel-bench --resume my_run` | Continue session |
@@ -62,13 +95,18 @@ Claude: Reading task... PyTorch ReLU activation.
         Target reached. Saved to ~/.inference/claude_code_output/
 ```
 
-**Batch Run (parallel workers):**
+**Batch Run (parallel workers - DEFAULT BEHAVIOR):**
 ```
-User: /kernel-bench level1 --session=prod_run --workers=4
+User: /kernel-bench level1 --session=prod_run
 
 Claude: Initializing session "prod_run"...
         Found 100 tasks in level1, 0 completed.
-        Spawning 4 optimizer workers...
+        Spawning 4 workers in parallel (default)...
+        [ALL workers spawned in single message]
+          - optimizer-1: running in background
+          - optimizer-2: running in background
+          - optimizer-3: running in background
+          - optimizer-4: running in background
 
         Progress: 25/100 completed, avg speedup: 1.28x
         Progress: 50/100 completed, avg speedup: 1.31x
@@ -80,6 +118,17 @@ Claude: Initializing session "prod_run"...
         Average speedup: 1.34x
 ```
 
+**Batch Run with Custom Worker Count:**
+```
+User: /kernel-bench level1 --session=prod_run --workers=8
+
+Claude: Initializing session "prod_run"...
+        Found 100 tasks in level1, 0 completed.
+        Spawning 8 workers in parallel...
+        [ALL 8 workers spawned in single message]
+        ...
+```
+
 **Resume After Crash:**
 ```
 User: /kernel-bench --resume prod_run
@@ -87,7 +136,7 @@ User: /kernel-bench --resume prod_run
 Claude: Resuming session "prod_run"...
         Found 50 completed, 2 in_progress (stale), 48 pending.
         Cleaning stale markers...
-        Spawning 4 workers for remaining 50 tasks...
+        Spawning 4 workers in parallel for remaining 50 tasks...
 ```
 
 ### 2.3 Structured Output
@@ -96,7 +145,7 @@ All responses use JSON for consistency:
 
 ```json
 {
-  "agent": "coordinator",
+  "agent": "skill",
   "session_id": "prod_run",
   "status": { "total": 100, "completed": 97, "failed": 3, "avg_speedup": 1.34 },
   "top_performers": [{"task": "88_MinGPTNewGelu", "speedup": 2.1}]
@@ -118,10 +167,10 @@ All responses use JSON for consistency:
 │  │                                                                                │  │
 │  │   .claude/skills/kernel-bench.md        .claude/agents/kernel-bench-*.md      │  │
 │  │   ┌─────────────────────────────┐       ┌─────────────────────────────────┐   │  │
-│  │   │  SKILL                      │       │  COORDINATOR    OPTIMIZER       │   │  │
-│  │   │  • Parse input styles       │       │  (spawned via   WORKERS         │   │  │
-│  │   │  • Route to mode            │──────▶│   Task tool)   (spawned by      │   │  │
-│  │   │  • Spawn coordinator        │       │                 coordinator)    │   │  │
+│  │   │  SKILL                      │       │  OPTIMIZER WORKERS              │   │  │
+│  │   │  • Parse input styles       │       │  (spawned directly by skill     │   │  │
+│  │   │  • Spawn workers directly   │──────▶│   via Task tool, in parallel)   │   │  │
+│  │   │  • Monitor progress         │       │                                 │   │  │
 │  │   └─────────────────────────────┘       └─────────────────────────────────┘   │  │
 │  │                                                       │                        │  │
 │  │                            Agents call MCP tools      │                        │  │
@@ -195,48 +244,57 @@ All responses use JSON for consistency:
 | **Remote GPU Server** | `kbEvalServer.py` | Stateless kernel compilation and benchmarking |
 
 **How the layers integrate:**
-1. **Skill** (MD) parses user input, decides mode, spawns coordinator
-2. **Coordinator** (MD) calls MCP tools to check state, spawns workers
-3. **Workers** (MD) call MCP tools to claim tasks, eval kernels, save results
-4. **MCP Tools** (Python) handle atomic file ops, HTTP to GPU server
-5. **Local State** (filesystem) persists progress, enables resume
-6. **GPU Server** (remote) does actual compilation/benchmarking
+1. **Skill** (MD) parses user input, decides mode, spawns workers directly in parallel
+2. **Workers** (MD) call MCP tools to claim tasks, eval kernels, save results
+3. **MCP Tools** (Python) handle atomic file ops, HTTP to GPU server
+4. **Local State** (filesystem) persists progress, enables resume
+5. **GPU Server** (remote) does actual compilation/benchmarking
 
-### 3.2 Agent Hierarchy
+### 3.2 Agent Hierarchy (Parallel by Default)
 
 ```
                     ┌─────────────────┐
-                    │   Coordinator   │  ← .claude/agents/kernel-bench-coordinator.md
-                    │   (supervisor)  │
+                    │      Skill      │  ← .claude/commands/kernel-bench.md
+                    │ (parses input)  │
                     └────────┬────────┘
                              │
-            ┌────────────────┼────────────────┐
-            ↓                ↓                ↓
-     ┌──────────┐     ┌──────────┐     ┌──────────┐
-     │ Optimizer│     │ Optimizer│     │ Optimizer│  ← .claude/agents/kernel-bench-optimizer.md
-     │ Worker 1 │     │ Worker 2 │     │ Worker N │
-     └────┬─────┘     └────┬─────┘     └────┬─────┘
-          │                │                │
-    ┌─────┴─────┐    ┌─────┴─────┐    ┌─────┴─────┐
-    │ Strategy  │    │ Strategy  │    │ Strategy  │  ← .claude/agents/kernel-bench-strategy.md
-    │ Sub-Agents│    │ Sub-Agents│    │ Sub-Agents│     (spawned per iteration, 3 per worker)
-    │ (A, B, C) │    │ (A, B, C) │    │ (A, B, C) │
-    └───────────┘    └───────────┘    └───────────┘
-          │                │                │
-          └────────────────┴────────────────┘
-                           │
-                           ▼
-                  ┌──────────────────┐
-                  │   eval_kernel()  │  ← MCP tool with GPU semaphore
-                  │  (HW-bounded)    │
-                  └──────────────────┘
+                             │ Batch Mode: Spawns workers DIRECTLY
+                             │ (Single message with N Task calls)
+                             │
+            ┌────────────────┼────────────────┐────────────────┐
+            ↓                ↓                ↓                ↓
+     ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+     │ Optimizer│     │ Optimizer│     │ Optimizer│     │ Optimizer│  ← Spawned IN PARALLEL
+     │ Worker 1 │     │ Worker 2 │     │ Worker 3 │     │ Worker N │    (default N=4)
+     └────┬─────┘     └────┬─────┘     └────┬─────┘     └────┬─────┘
+          │                │                │                │
+          │ Per task:      │                │                │
+          │ 3 strategies   │                │                │
+          │ in parallel    │                │                │
+    ┌─────┴─────┐    ┌─────┴─────┐    ┌─────┴─────┐    ┌─────┴─────┐
+    │ Strategy  │    │ Strategy  │    │ Strategy  │    │ Strategy  │  ← Spawned IN PARALLEL
+    │ Sub-Agents│    │ Sub-Agents│    │ Sub-Agents│    │ Sub-Agents│    (3 per task iteration)
+    │ (A, B, C) │    │ (A, B, C) │    │ (A, B, C) │    │ (A, B, C) │
+    └───────────┘    └───────────┘    └───────────┘    └───────────┘
+          │                │                │                │
+          └────────────────┴────────────────┴────────────────┘
+                                   │
+                                   ▼
+                          ┌──────────────────┐
+                          │   eval_kernel()  │  ← MCP tool with GPU semaphore
+                          │  (HW-bounded)    │     (max concurrent = num_devices)
+                          └──────────────────┘
 ```
 
-| Agent | Role | Key MCP Tools | GPU Access |
-|-------|------|---------------|------------|
-| **Coordinator** | Spawns workers, monitors progress | `get_session_state`, `get_pending_tasks` | None |
-| **Optimizer Worker** | Claims tasks, orchestrates strategies | `claim_task`, `save_benchmark_result` | None |
-| **Strategy Sub-Agent** | Generates ONE kernel, evaluates it | `eval_kernel()` | **Yes (semaphore-bounded)** |
+**Parallelism summary:**
+- **Workers**: 4 by default, all spawned in ONE message (parallel)
+- **Strategies per task**: 3 per iteration, all spawned in ONE message (parallel)
+- **GPU evals**: Bounded by semaphore to prevent OOM
+
+| Agent | Role | Parallel Spawning |
+|-------|------|-------------------|
+| **Optimizer Workers** | Claim tasks, orchestrate strategies | 4 workers in 1 message |
+| **Strategy Sub-Agents** | Generate ONE kernel, evaluate it | 3 strategies in 1 message per iteration |
 
 **GPU resource control:** Only Strategy Sub-Agents call `eval_kernel()`. The MCP server's adaptive semaphore (set to `num_devices`) ensures at most N concurrent GPU evaluations regardless of how many sub-agents are spawned.
 
@@ -247,7 +305,6 @@ triton-ag/
 ├── .claude/
 │   ├── skills/kernel-bench.md              # Skill definition
 │   ├── agents/
-│   │   ├── kernel-bench-coordinator.md     # Coordinator prompt
 │   │   ├── kernel-bench-optimizer.md       # Worker prompt
 │   │   └── kernel-bench-strategy.md        # Strategy sub-agent prompt
 │   ├── memory/
@@ -319,11 +376,11 @@ LOCAL CLIENT (Mac)                          REMOTE SERVER (GPU)
 | `incomplete` | Has iteration files but no `best_result.json` | Can be claimed (previous attempt failed) |
 | `completed` | Has `best_result.json` | Skip (already done) |
 
-#### 4.1.4 How Coordinator Uses State
+#### 4.1.4 How Skill Uses State
 
 ```
-COORDINATOR STARTUP
-───────────────────
+SKILL STARTUP (Batch Mode)
+──────────────────────────
 1. Call get_session_state(session_id)
    └─► MCP tool scans ~/.inference/claude_code_output/{session_id}/
    └─► Returns: {total: 100, completed: 45, in_progress: 2, pending: 53}
@@ -332,22 +389,22 @@ COORDINATOR STARTUP
    └─► Auto-cleanup stale markers (30min timeout or dead PID)
    └─► Those tasks become "incomplete" → claimable
 
-3. Spawn N workers with session_id
+3. Spawn N workers with session_id (in parallel, single message)
    └─► Each worker will call get_pending_tasks() independently
 
-COORDINATOR MONITORING (periodic)
-─────────────────────────────────
-1. Call get_session_state(session_id) every few minutes
+SKILL MONITORING (periodic)
+───────────────────────────
+1. Call get_session_state(session_id) periodically
 2. Compare progress to previous check
-3. Detect stalled workers (no progress for >10 min)
-4. Log to .claude/logs/workflow-trace.md
+3. Report to user: "Progress: X/Y completed"
+4. Detect stalled workers (no progress for >10 min)
 
-COORDINATOR FINALIZATION
-────────────────────────
-1. All workers report completion
+SKILL FINALIZATION
+──────────────────
+1. All pending tasks completed (pending == 0, in_progress == 0)
 2. Call get_session_state() for final counts
-3. Generate summary report with metrics
-4. Write summary.json
+3. Call get_session_summary() for metrics
+4. Generate summary report
 ```
 
 #### 4.1.5 How Resume Works
@@ -392,11 +449,10 @@ SKILL BEHAVIOR
    - 69_Softmax → status becomes "incomplete" (has iteration files)
    - 70_LayerNorm → status becomes "incomplete" (has marker removed)
 
-5. Spawns coordinator with resume=true
-6. Coordinator spawns 4 workers
-7. Workers see 50 pending tasks (48 + 2 incomplete)
-8. Workers claim and process remaining tasks
-9. Session completes 100/100
+5. Skill spawns 4 workers directly (in parallel, single message)
+6. Workers see 50 pending tasks (48 + 2 incomplete)
+7. Workers claim and process remaining tasks
+8. Session completes 100/100
 ```
 
 **Key resume behaviors:**
@@ -485,32 +541,37 @@ Parallel strategy exploration is worth the complexity because:
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                          GPU RESOURCE FLOW                                       │
 │                                                                                  │
-│   WORKERS (4)                    MCP SERVER                    GPU SERVER       │
-│   ───────────                    ──────────                    ──────────       │
+│   WORKERS (4, default)             MCP SERVER                    GPU SERVER     │
+│   ─────────────────────            ──────────                    ──────────     │
+│   [ALL spawned in ONE msg]                                                       │
 │                                                                                  │
 │   Worker 1 ─┬─ Sub-A ──► eval_kernel() ──┐                                      │
-│             ├─ Sub-B ──► eval_kernel() ──┤                                      │
+│   (running) ├─ Sub-B ──► eval_kernel() ──┤                                      │
 │             └─ Sub-C ──► eval_kernel() ──┤      ┌──────────────┐                │
-│                                          │      │              │                │
+│                        [3 in ONE msg]    │      │              │                │
 │   Worker 2 ─┬─ Sub-A ──► eval_kernel() ──┼─────►│  SEMAPHORE   │───► GPU 0     │
-│             ├─ Sub-B ──► eval_kernel() ──┤      │  (limit = 2) │               │
+│   (running) ├─ Sub-B ──► eval_kernel() ──┤      │  (limit = 2) │               │
 │             └─ Sub-C ──► eval_kernel() ──┤      │              │───► GPU 1     │
-│                                          │      │  Queues up   │                │
+│                        [3 in ONE msg]    │      │  Queues up   │                │
 │   Worker 3 ─┬─ Sub-A ──► eval_kernel() ──┤      │  to 12 reqs  │                │
-│             ├─ Sub-B ──► eval_kernel() ──┤      └──────────────┘                │
+│   (running) ├─ Sub-B ──► eval_kernel() ──┤      └──────────────┘                │
 │             └─ Sub-C ──► eval_kernel() ──┤                                      │
-│                                          │                                      │
+│                        [3 in ONE msg]    │                                      │
 │   Worker 4 ─┬─ Sub-A ──► eval_kernel() ──┤                                      │
-│             ├─ Sub-B ──► eval_kernel() ──┘                                      │
+│   (running) ├─ Sub-B ──► eval_kernel() ──┘                                      │
 │             └─ Sub-C ──► eval_kernel() ──┘                                      │
+│                        [3 in ONE msg]                                           │
 │                                                                                  │
 │   4 workers × 3 sub-agents = 12 potential concurrent evals                      │
 │   Semaphore(2) ensures only 2 run at a time → no GPU OOM                        │
 │                                                                                  │
+│   KEY: Workers and strategies spawned in PARALLEL (single messages)             │
+│        GPU access bounded by semaphore (prevents OOM)                           │
+│                                                                                  │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Key Mechanism:** The MCP server's adaptive semaphore (initialized from `/info` endpoint's `num_devices`) limits concurrent `eval_kernel()` calls regardless of how many sub-agents are spawned.
+**Key Mechanism:** The MCP server's adaptive semaphore (initialized from `/info` endpoint's `num_devices`) limits concurrent `eval_kernel()` calls regardless of how many sub-agents are spawned in parallel.
 
 #### 4.2.3 Optimization Loop with Parallel Strategies
 
@@ -644,16 +705,34 @@ Total per task: ~90 seconds worst case, often faster with early termination
 | Matmul | Tiled + shared memory, register blocking |
 | Normalization | Single-pass mean/var, Welford's algorithm |
 
-### 4.4 Coordinator Agent Spec
+### 4.4 Worker Spawning Model (Updated)
 
-**Responsibilities:**
-1. Initialize session via `get_session_state()`
-2. Spawn N workers via Task tool (parallel)
-3. Monitor progress periodically
-4. Flag repeated failures for review
-5. Generate final summary with metrics
+**The skill now spawns workers DIRECTLY (no separate coordinator agent).**
 
-**Output:** Structured JSON with status counts, worker list, avg_speedup
+This simplifies the architecture and ensures parallel execution:
+
+```
+/kernel-bench level1 --session=my_run
+                │
+                ▼
+         ┌──────────────┐
+         │    SKILL     │  Parses input, calls init_session()
+         └──────┬───────┘
+                │
+                │ SINGLE MESSAGE with 4 Task calls
+                │
+    ┌───────────┼───────────┬───────────┐
+    ▼           ▼           ▼           ▼
+┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
+│Worker 1│ │Worker 2│ │Worker 3│ │Worker 4│  ← ALL run in PARALLEL
+└────────┘ └────────┘ └────────┘ └────────┘
+```
+
+**Why direct spawning?**
+- Simpler architecture with fewer layers
+- Skill can spawn workers directly with `run_in_background=true`
+- Skill handles monitoring directly (no coordinator overhead)
+- Parallel execution is guaranteed by single-message multi-Task pattern
 
 ### 4.5 Optimizer Worker Agent Spec
 
@@ -688,31 +767,36 @@ Total per task: ~90 seconds worst case, often faster with early termination
 |-------|------|--------|
 | **1. Foundation** | | |
 | 1.1 | Create `.claude/{skills,agents,memory,logs}/` directories | ✅ DONE |
-| 1.2 | Create `.claude/skills/kernel-bench.md` | ✅ DONE |
-| 1.3 | Create `.claude/agents/kernel-bench-coordinator.md` | ✅ DONE |
-| 1.4 | Create `.claude/agents/kernel-bench-optimizer.md` | ✅ DONE |
-| 1.5 | Create `.claude/agents/kernel-bench-strategy.md` | ✅ DONE |
-| 1.6 | Create memory templates (kernel-strategies.md, learnings.md) | ✅ DONE |
+| 1.2 | Create `.claude/commands/kernel-bench.md` | ✅ DONE |
+| 1.3 | Create `.claude/agents/kernel-bench-optimizer.md` | ✅ DONE |
+| 1.4 | Create `.claude/agents/kernel-bench-strategy.md` | ✅ DONE |
+| 1.5 | Create memory templates (kernel-strategies.md, learnings.md) | ✅ DONE |
 | **2. MCP Tools** | | |
 | 2.1 | `init_session()` with task filtering | ✅ DONE + TESTED |
 | 2.2 | `claim_task()` with atomic marker + PID | ✅ DONE + TESTED |
 | 2.3 | `release_task()` with failure recording | ✅ DONE + TESTED |
 | 2.4 | `get_session_state()` with stale cleanup | ✅ DONE + TESTED |
 | 2.5 | `get_pending_tasks()` | ✅ DONE + TESTED |
-| **3. Testing** | | |
-| 3.1 | Automated tests for MCP tools (T5, T6, T7, T9, T10) | ✅ DONE |
-| 3.2 | Resume flow end-to-end test | ✅ DONE |
-| 3.3 | Integration tests with agents | 🔲 PENDING |
-| **4. Knowledge Base** (defer for MVP) | | |
-| 4.1 | `search_knowledge_base()` | 🔲 PENDING |
-| 4.2 | `update_knowledge_base()` | 🔲 PENDING |
+| **3. Parallel Execution** | | |
+| 3.1 | Skill spawns workers directly (no coordinator layer) | ✅ DONE |
+| 3.2 | Default 4 concurrent workers | ✅ DONE |
+| 3.3 | `--workers=N` parameter support | ✅ DONE |
+| 3.4 | Single-message multi-Task spawning documented | ✅ DONE |
+| **4. Testing** | | |
+| 4.1 | Automated tests for MCP tools (T5, T6, T7, T9, T10) | ✅ DONE |
+| 4.2 | Resume flow end-to-end test | ✅ DONE |
+| 4.3 | Integration tests with skill/worker agents | 🔲 PENDING |
+| **5. Knowledge Base** (defer for MVP) | | |
+| 5.1 | `search_knowledge_base()` | 🔲 PENDING |
+| 5.2 | `update_knowledge_base()` | 🔲 PENDING |
 
 ### 5.2 Implementation Order
 
 1. **Phase 1: Foundation** - Directory structure and prompt files ✅
 2. **Phase 2: MCP Tools** - State management with tests ✅
-3. **Phase 3: Integration** - Agent testing with coordinator/worker 🔲
-4. **Phase 4: Knowledge Base** - Defer for MVP 🔲
+3. **Phase 3: Parallel Execution** - Skill spawns workers directly ✅
+4. **Phase 4: Integration** - Agent testing with skill/workers 🔲
+5. **Phase 5: Knowledge Base** - Defer for MVP 🔲
 
 ### 5.3 Test Files
 
@@ -852,7 +936,7 @@ These tests require running Claude Code and invoking the `/kernel-bench` skill.
 
 | Field | Value |
 |-------|-------|
-| **What is tested** | Single `.py` file path routes to direct optimization (no coordinator) |
+| **What is tested** | Single `.py` file path routes to direct optimization (no workers spawned) |
 | **Expected result** | Interactive optimization of one task with progress shown |
 | **Status** | 🔲 PENDING |
 
@@ -866,7 +950,7 @@ These tests require running Claude Code and invoking the `/kernel-bench` skill.
 | Step | What to look for | Pass if | Fail if |
 |------|------------------|---------|---------|
 | 1. Task read | Claude shows PyTorch code | See `class Model(torch.nn.Module)` in output | "Task not found" error |
-| 2. Direct mode | No coordinator spawned | Claude generates kernel immediately | See "spawning coordinator" or "spawning workers" |
+| 2. Direct mode | No workers spawned | Claude generates kernel immediately | See "spawning workers" |
 | 3. Kernel eval | `eval_kernel()` called | See output like `compiled: true, correct: true, speedup: 1.xx` | "kbEval server unavailable" error |
 | 4. Iteration | Continues if speedup < 1.3x | See "Iteration 2" or "trying different approach" | Stops after first attempt regardless of speedup |
 | 5. Save result | `save_benchmark_result()` called | See "Saved to ~/.inference/claude_code_output/" | No save confirmation |
@@ -885,8 +969,8 @@ cat ~/.inference/claude_code_output/*/19_ReLU/best_result.json
 
 | Field | Value |
 |-------|-------|
-| **What is tested** | Directory path routes to batch mode with coordinator |
-| **Expected result** | Coordinator spawned, workers process tasks in parallel |
+| **What is tested** | Directory path routes to batch mode with parallel workers |
+| **Expected result** | Workers spawned in parallel, process tasks concurrently |
 | **Status** | 🔲 PENDING |
 
 **Prompt:**
@@ -899,8 +983,8 @@ cat ~/.inference/claude_code_output/*/19_ReLU/best_result.json
 | Step | What to look for | Pass if | Fail if |
 |------|------------------|---------|---------|
 | 1. Session init | `init_session()` called | See "Initialized session: test_batch with N tasks" in logs | "Session not found" error |
-| 2. Coordinator | Coordinator agent spawned | See "spawning coordinator" or Task tool call with coordinator | Claude processes tasks directly without coordinator |
-| 3. Workers | 2 worker agents spawned | Coordinator mentions "spawning 2 workers" | Only 1 worker or no workers mentioned |
+| 2. Workers spawned | 2 workers spawned in parallel | See "spawning 2 workers" and multiple Task calls in single message | Workers spawned sequentially |
+| 3. Parallel execution | Workers claim different tasks | See different task names in claim logs | Same task claimed twice |
 | 4. Claims | Workers claim tasks | See `claim_task()` calls in logs | Workers process without claiming |
 | 5. Progress | Periodic updates | See "Progress: X/Y completed" messages | No progress updates |
 
@@ -978,34 +1062,34 @@ These tests validate the agent hierarchy and coordination. They require the full
 
 ---
 
-#### T4: Coordinator Spawn
+#### T4: Parallel Worker Spawning
 
 | Field | Value |
 |-------|-------|
-| **What is tested** | Coordinator agent spawns N worker agents via Task tool |
+| **What is tested** | Skill spawns N worker agents via Task tool in a SINGLE message |
 | **Expected result** | N workers running in parallel, each claiming different tasks |
 | **Status** | 🔲 PENDING |
 
 **Prompt:**
 ```
-/kernel-bench level1/ --session=test_coord --workers=4
+/kernel-bench level1/ --session=test_parallel --workers=4
 ```
 
 **Validation steps:**
 
 | Step | What to look for | Pass if | Fail if |
 |------|------------------|---------|---------|
-| 1. Coordinator spawned | Task tool call for coordinator | See "Spawning coordinator agent" or similar | No coordinator mentioned |
-| 2. Workers spawned | Coordinator spawns workers | See "Spawning 4 worker agents" | Workers not mentioned or wrong count |
+| 1. Single message | All Task calls in one message | See 4 Task tool calls in same response | Task calls spread across multiple messages |
+| 2. Background mode | Workers run in background | See `run_in_background: true` in Task calls | Workers block the skill |
 | 3. Unique worker IDs | Each worker has different ID | `.in_progress` files show worker-1, worker-2, etc. | All claims show same worker ID |
 | 4. Parallel claims | Multiple workers claim simultaneously | Different tasks claimed within same second | Claims happen sequentially with gaps |
 
 **Post-test file check:**
 ```bash
 # Check worker ID distribution
-cat ~/.inference/claude_code_output/test_coord/*/.in_progress 2>/dev/null | jq -r '.worker' | sort | uniq -c
+cat ~/.inference/claude_code_output/test_parallel/*/.in_progress 2>/dev/null | jq -r '.worker' | sort | uniq -c
 # Should show roughly equal distribution across 4 workers
-# Example: "25 worker-1", "25 worker-2", "25 worker-3", "25 worker-4"
+# Example: "25 optimizer-1", "25 optimizer-2", "25 optimizer-3", "25 optimizer-4"
 ```
 
 ---
@@ -1049,14 +1133,14 @@ Watch a single worker's log output as it processes multiple tasks. You should se
 | Field | Value |
 |-------|-------|
 | **What is tested** | Agent outputs are valid JSON for reliable parsing |
-| **Expected result** | All coordinator/worker outputs parse as JSON |
+| **Expected result** | All skill/worker outputs parse as JSON |
 | **Status** | 🔲 PENDING |
 
 **Validation steps:**
 
 | Step | What to look for | Pass if | Fail if |
 |------|------------------|---------|---------|
-| 1. Coordinator JSON | Status updates in JSON | `{"status": "running", "completed": 10, ...}` | Plain text like "10 tasks done" |
+| 1. Skill JSON | Status updates in JSON | `{"status": "running", "completed": 10, ...}` | Plain text like "10 tasks done" |
 | 2. Worker JSON | Results in JSON | `{"task": "19_ReLU", "speedup": 1.3, ...}` | Plain text results |
 | 3. No mixed output | JSON not mixed with prose | Clean JSON blocks | "Here's the result: {json}" |
 
@@ -1264,7 +1348,7 @@ Based on multi-agent LLM research ([arXiv:2503.13657](https://arxiv.org/html/250
 |-------|------------|
 | LLM non-determinism (~15% variance) | MCP tools for atomic ops, structured JSON |
 | Context loss in handoffs | File-based state, workflow-trace.md |
-| Premature termination | Coordinator gates, explicit completion markers |
+| Premature termination | Skill monitoring loop, explicit completion markers |
 | Task disobedience | Clear output format, explicit constraints |
 
 **This design works well for:** Kernel bench (independent, idempotent tasks) ✓

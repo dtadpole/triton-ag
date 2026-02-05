@@ -4,13 +4,14 @@ You are an optimizer worker generating optimized CUDA/Triton kernels for kernel_
 
 ## Your Role
 
-Claim tasks, run deep optimization with parallel strategies, save results. Repeat until no tasks remain.
+Claim tasks, run deep optimization with configurable strategy count, save results. Repeat until no tasks remain.
 
 ## Context
 
 You receive:
 - `session_id`: Session to work in
 - `worker_id`: Your worker identifier (e.g., "optimizer-1")
+- `num_strategies`: Number of strategies to try per iteration (1 = simple mode, 3 = exploration mode)
 
 ## Main Loop
 
@@ -67,26 +68,64 @@ Generate 3 optimization strategies based on operation type:
 - Strategy B: Parallel mean+variance
 - Strategy C: Fused RMS+scaling
 
-### Phase 3: PARALLEL GENERATION + EVALUATION
+### Phase 3: STRATEGY GENERATION + EVALUATION
 
-Spawn 3 strategy sub-agents via Task tool IN PARALLEL:
+The number of strategies depends on `num_strategies` parameter:
+
+#### Simple Mode (num_strategies=1) - DEFAULT
+
+Generate ONE kernel directly, evaluate it, iterate if needed:
 
 ```
-For each strategy in [A, B, C]:
-  Task(
-    subagent_type: "general-purpose",
-    prompt: "Generate kernel using strategy: {strategy_description}
+1. Pick the BEST strategy from Phase 2 based on operation type
+2. Generate kernel code using that strategy
+3. Call eval_kernel() to evaluate
+4. If speedup >= 1.5x: DONE
+5. If speedup < target: reflect on what went wrong, try next best strategy
+```
+
+No sub-agents spawned. You generate and evaluate directly.
+
+#### Exploration Mode (num_strategies=3)
+
+**CRITICAL: Spawn ALL 3 strategy sub-agents in a SINGLE message with MULTIPLE Task tool calls.**
+
+This is the ONLY correct way to try strategies in parallel:
+- ✅ CORRECT: One message with 3 Task tool calls → 3 strategies evaluated in parallel
+- ❌ WRONG: Three messages, each with 1 Task call → strategies run sequentially (slow!)
+
+**Your message must contain EXACTLY 3 Task calls together:**
+
+```
+Task(subagent_type="general-purpose", name="strategy-A", run_in_background=false,
+     prompt="Generate kernel using strategy: {strategy_A_description}
              Task: {pytorch_code}
              Follow .claude/agents/kernel-bench-strategy.md protocol.
-             Call eval_kernel() and return result.",
-    name: "strategy-{strategy_letter}"
-  )
+             Call eval_kernel() and return result.")
+
+Task(subagent_type="general-purpose", name="strategy-B", run_in_background=false,
+     prompt="Generate kernel using strategy: {strategy_B_description}
+             Task: {pytorch_code}
+             Follow .claude/agents/kernel-bench-strategy.md protocol.
+             Call eval_kernel() and return result.")
+
+Task(subagent_type="general-purpose", name="strategy-C", run_in_background=false,
+     prompt="Generate kernel using strategy: {strategy_C_description}
+             Task: {pytorch_code}
+             Follow .claude/agents/kernel-bench-strategy.md protocol.
+             Call eval_kernel() and return result.")
 ```
 
-IMPORTANT: Spawn ALL 3 in a SINGLE message. Do NOT spawn sequentially.
+**NEVER spawn strategies one at a time. Always include all 3 Task calls in ONE message.**
 
 ### Phase 4: AGGREGATE + REFLECT
 
+**For Simple Mode (num_strategies=1):**
+1. Review your single result
+2. If successful: proceed to Phase 5
+3. If failed: analyze why, pick next strategy, loop back to Phase 3
+
+**For Exploration Mode (num_strategies=3):**
 1. Collect results from all 3 sub-agents
 2. Rank by: compiled → correct → speedup
 3. Pick best result

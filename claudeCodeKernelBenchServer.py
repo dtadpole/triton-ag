@@ -76,7 +76,9 @@ _kbeval_client = None
 
 # Adaptive semaphore for concurrency control based on GPU count
 _eval_semaphore = None
-_semaphore_size = 1  # Default to 1 (conservative)
+# Default semaphore size - can be overridden via KBEVAL_CONCURRENCY env var
+# Set to 4 as a reasonable default for multi-GPU servers
+_semaphore_size = int(os.environ.get("KBEVAL_CONCURRENCY", "4"))
 
 
 def get_kbeval_client(config_file: str = "kbEval.yaml"):
@@ -127,13 +129,12 @@ async def get_eval_semaphore(provider: str = "local") -> asyncio.Semaphore:
                         _semaphore_size = max(1, stats.get("num_devices", 1))
                         logger.info(f"[kernel-bench] Adaptive semaphore: {_semaphore_size} slots (from /stats)")
             except Exception as stats_err:
-                logger.warning(f"[kernel-bench] /stats fallback also failed: {stats_err}")
-                _semaphore_size = 1
+                logger.warning(f"[kernel-bench] /stats fallback also failed: {stats_err}, using default {_semaphore_size}")
     except Exception as e:
-        logger.warning(f"[kernel-bench] Could not get server info, using default semaphore size: {e}")
-        _semaphore_size = 1
+        logger.warning(f"[kernel-bench] Could not get server info, using default semaphore size {_semaphore_size}: {e}")
 
     _eval_semaphore = asyncio.Semaphore(_semaphore_size)
+    logger.info(f"[kernel-bench] Initialized eval semaphore with {_semaphore_size} concurrent slots")
     return _eval_semaphore
 
 
