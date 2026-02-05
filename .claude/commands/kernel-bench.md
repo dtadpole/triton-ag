@@ -360,91 +360,68 @@ Best: iteration {N}, {speedup}x ({strategy})
 
 When user says "server", "server --list", or provides server configuration parameters:
 
+**Use the `kb_server.py` script for all server operations.**
+
 #### List Available Providers (`/kernel-bench server` or `/kernel-bench server --list`)
 
-Read and display the kbEval.yaml configuration:
+```bash
+python3 kb_server.py list
+```
+
+This displays all configured providers, their URLs, and API key status.
+
+#### Add/Update Provider (`/kernel-bench server --provider=NAME --url=URL`)
 
 ```bash
-# Read the config file
-cat kbEval.yaml
+python3 kb_server.py add {provider_name} {url} [--devices=N] [--timeout=N]
 ```
 
-Format as:
-```
-=== kbEval Server Configuration ===
-
-Available Providers:
-| Provider | URL | Timeout |
-|----------|-----|---------|
-| local | http://localhost:5676 | 300s |
-| remote | http://192.168.1.100:8082 | 300s |
-| ... | ... | ... |
-
-Current default: local
+Examples:
+```bash
+python3 kb_server.py add gpu_server http://10.0.0.5:8082 --devices=4
+python3 kb_server.py add remote http://192.168.1.100:8082 --timeout=600
 ```
 
-#### Update Provider (`/kernel-bench server --provider=NAME --url=URL [--devices=N]`)
+#### Test Server Connection (`/kernel-bench server test [PROVIDER]`)
 
-Parameters:
-- `--provider=NAME`: Provider name to add or update (required)
-- `--url=URL`: Server URL in format `http://host:port` (required)
-- `--devices=N`: Number of GPU devices on server (optional, for concurrency tuning)
-- `--timeout=N`: Request timeout in seconds (optional, default: 300)
-
-**Update kbEval.yaml using the Edit tool:**
-
-1. Read current kbEval.yaml
-2. Parse the provider name from `--provider`
-3. Parse the URL from `--url`
-4. Add or update the provider entry in the `providers:` section:
-
-```yaml
-providers:
-  {provider_name}:
-    base_url: {url}
-    api_key_path: ~/.keys/kbeval.api.key
-    retry_count: 4
-    initial_retry_interval: 3
-    timeout: {timeout or 300}
+```bash
+python3 kb_server.py test              # Test default (local)
+python3 kb_server.py test gpu_server   # Test specific provider
 ```
 
-5. If `--devices` is provided, also add a comment noting the device count for reference
+#### Set API Key (`/kernel-bench server key`)
 
-**Example:**
+The API key is stored at `~/.keys/kbeval.api.key` and shared by all providers.
+
+```bash
+python3 kb_server.py key                    # View current key
+python3 kb_server.py key --set=YOUR_KEY     # Set new key
 ```
-User: /kernel-bench server --provider=gpu_server --url=http://10.0.0.5:8082 --devices=4
 
-Response:
-Updated kbEval.yaml:
-  Provider: gpu_server
-  URL: http://10.0.0.5:8082
-  Devices: 4 (for concurrency tuning)
-  Timeout: 300s
+If user doesn't have an API key, ask them to provide one or check with server admin.
 
-To use this provider in batch mode:
-  /kernel-bench level1 --session=test --provider=gpu_server
+#### SSH Tunnel (`/kernel-bench server tunnel USER@HOST:PORT`)
+
+For servers behind firewalls, set up SSH tunnel:
+
+```bash
+python3 kb_server.py tunnel user@remote-server:8082 --local=5676
+```
+
+This forwards `localhost:5676` to `remote-server:8082` via SSH.
+
+After tunnel is up, add a local provider pointing to the tunnel:
+```bash
+python3 kb_server.py add tunneled http://localhost:5676
 ```
 
 #### Quick URL Update (`/kernel-bench server --url=URL`)
 
-When only `--url` is provided without `--provider`, update the `local` provider:
-
-```
-User: /kernel-bench server --url=http://192.168.1.50:5676
-
-Response:
-Updated local provider URL to: http://192.168.1.50:5676
-```
-
-#### Test Server Connection
-
-After updating, optionally verify the server is reachable:
+When only `--url` is provided, update the `local` provider:
 
 ```bash
-curl -s --max-time 5 {url}/health || curl -s --max-time 5 {url}/stats
+python3 kb_server.py add local {url}
 ```
-
-Report connection status to user.
 
 ## Output Format
 
@@ -603,16 +580,17 @@ Best: iteration 1, 1.31x (block_tuning_512)
 User: /kernel-bench server --provider=gpu_cluster --url=http://10.0.0.100:8082 --devices=8
 
 Response:
-Updated kbEval.yaml:
-  Provider: gpu_cluster
+[Runs: python3 kb_server.py add gpu_cluster http://10.0.0.100:8082 --devices=8]
+
+Updated provider 'gpu_cluster':
   URL: http://10.0.0.100:8082
-  Devices: 8
   Timeout: 300s
+  Devices: 8 (info only, server reports actual count)
 
-Testing connection... ✓ Server reachable (8 GPUs available)
+Testing gpu_cluster (http://10.0.0.100:8082)...
+  ✓ Connected - 8 GPU(s) available
 
-To use this provider:
-  /kernel-bench level1 --session=test --provider=gpu_cluster
+To use: /kernel-bench level1 --session=test --provider=gpu_cluster
 ```
 
 **Example 9: List available servers**
@@ -620,14 +598,41 @@ To use this provider:
 User: /kernel-bench server
 
 Response:
+[Runs: python3 kb_server.py list]
+
 === kbEval Server Configuration ===
 
-Available Providers:
-| Provider    | URL                          | Timeout |
-|-------------|------------------------------|---------|
-| local       | http://localhost:5676        | 300s    |
-| gpu_cluster | http://10.0.0.100:8082       | 300s    |
-| h8_1        | http://devgpu139.cco2:8082   | 300s    |
+Provider        URL                                           Timeout
+----------------------------------------------------------------------
+local           http://localhost:5676                         300s
+gpu_cluster     http://10.0.0.100:8082                        300s
+h8_1            http://devgpu139.cco2.facebook.com:8082       300s
 
-Current default: local
+API Key: test_key...2345 (/Users/user/.keys/kbeval.api.key)
+```
+
+**Example 10: Set API key and test connection**
+```
+User: /kernel-bench server key --set=my_secret_key
+
+Response:
+[Runs: python3 kb_server.py key --set=my_secret_key]
+
+API key saved to /Users/user/.keys/kbeval.api.key
+```
+
+**Example 11: Setup SSH tunnel**
+```
+User: /kernel-bench server tunnel user@gpu-server.example.com:8082
+
+Response:
+[Runs: python3 kb_server.py tunnel user@gpu-server.example.com:8082 --local=5676]
+
+Setting up SSH tunnel:
+  Local:  localhost:5676
+  Remote: user@gpu-server.example.com:8082
+
+Command: ssh -N -L 5676:localhost:8082 user@gpu-server.example.com
+
+Starting tunnel (Ctrl+C to stop)...
 ```
