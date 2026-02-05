@@ -285,44 +285,58 @@ When user provides `--resume my_session`:
 
 ### PROGRESS MODE
 
-When user provides `progress session_id [task_name]`:
+When user says "progress" or "progress {session_id}":
 
-1. **Batch progress** (no task_name):
-   Call `get_batch_progress(session_id)` and display:
-
-   ```
-   === Session: test1 (level1) ===
-   Progress: 25/100 completed, 12 in progress, 3 failed, 60 pending
-   Average speedup: 1.34x
-
-   | Task                | Status      | Worker      | Iter | Best   | Last Result          |
-   |---------------------|-------------|-------------|------|--------|----------------------|
-   | 19_ReLU             | in_progress | optimizer-3 | 2/3  | 1.12x  | ✓ compiled, ✓ correct|
-   | 23_Softmax          | in_progress | optimizer-7 | 1/3  | -      | ✗ compile error      |
-   | 50_Conv2d           | failed      | optimizer-1 | 3/3  | -      | ✗ correctness        |
-   | 88_MinGPTNewGelu    | completed   | optimizer-2 | 2/3  | 2.1x   | ✓ done               |
-   ...
+1. **Run the progress script**:
+   ```bash
+   python3 kb_progress.py {session_id}
    ```
 
-2. **Single task detail** (with task_name):
-   Call `get_task_progress(session_id, task_name)` and display:
-
+2. **Display the quick summary** directly in the chat (the script outputs this to stdout):
    ```
-   === Task: 19_ReLU ===
-   Status: in_progress
-   Worker: optimizer-3
-   Started: 2026-02-04T22:16:26
-   Iterations: 2/3
+   ═══ Session: {session_id} ═══
 
-   | Iter | Strategy          | Compiled | Correct | Speedup | Runtime |
-   |------|-------------------|----------|---------|---------|---------|
-   | 0    | vectorized_loads  | ✓        | ✓       | 1.12x   | 0.042ms |
-   | 1    | block_tuning_512  | ✓        | ✓       | 1.31x   | 0.038ms |
+     Total:       100
+     Completed:   98
+     In Progress: 2
+     Pending:     0
+     Failed:      0
+     Avg Speedup: 2.607x
 
-   Best: iteration 1, 1.31x (block_tuning_512)
+   📄 Detailed report: /path/to/session/progress_YYYYMMDD_HHMMSS.md
    ```
 
-3. **With --detail flag**: Include full iteration data for all tasks
+3. **The script automatically generates** a detailed markdown report file in the session directory with:
+   - Full summary table
+   - In-progress tasks with worker/iteration info
+   - All completed tasks sorted by speedup with iteration paths
+   - Failed tasks with error details
+   - Pending tasks list
+
+**If no session_id is provided**, use the most recent session:
+```bash
+session=$(ls -t ~/.inference/claude_code_output/ | head -1)
+python3 kb_progress.py $session
+```
+
+#### Single Task Detail ("progress {session_id} {task_name}")
+
+```bash
+# Get single task progress via MCP
+result = get_task_progress(session_id='{session_id}', task_name='{task_name}')
+```
+
+Format as:
+```
+=== Task: {task_name} ===
+Status: {status} | Worker: {worker} | Iterations: {done}/{planned}
+
+| Iter | Strategy | Compiled | Correct | Speedup | Runtime | Error |
+|------|----------|----------|---------|---------|---------|-------|
+(all iterations with full details)
+
+Best: iteration {N}, {speedup}x ({strategy})
+```
 
 ## Output Format
 

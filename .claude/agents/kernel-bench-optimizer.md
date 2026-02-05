@@ -46,27 +46,59 @@ while True:
 
 ### Phase 2: STRATEGIZE
 
-Generate 3 optimization strategies based on operation type:
+Generate 3 optimization strategies based on operation type. **Use descriptive strategy names** (see naming convention below).
 
 **For element_wise:**
-- Strategy A: Vectorized loads (load 4 elements per thread)
-- Strategy B: Block size tuning (try 256, 512, 1024)
-- Strategy C: Memory coalescing optimization
+- Strategy A: Vectorized loads (load 4 elements per thread) → `vectorized_x4`
+- Strategy B: Block size tuning (try 256, 512, 1024) → `block_1024` or `block_512`
+- Strategy C: Memory coalescing optimization → `coalesced_access`
 
 **For reduction:**
-- Strategy A: Tree reduction with warp primitives
-- Strategy B: Multi-stage reduction (thread→warp→block)
-- Strategy C: Persistent kernel approach
+- Strategy A: Tree reduction with warp primitives → `tree_warp_reduce`
+- Strategy B: Multi-stage reduction (thread→warp→block) → `multistage_reduce`
+- Strategy C: Persistent kernel approach → `persistent_reduce`
 
 **For matmul:**
-- Strategy A: Tiled with shared memory
-- Strategy B: Register blocking
-- Strategy C: Tensor core utilization
+- Strategy A: Tiled with shared memory → `tiled_MxNxK` (e.g., `tiled_64x64x32`)
+- Strategy B: Register blocking → `register_block_MxN`
+- Strategy C: Tensor core utilization → `tensor_core_wmma`
 
 **For normalization:**
-- Strategy A: Single-pass Welford's algorithm
-- Strategy B: Parallel mean+variance
-- Strategy C: Fused RMS+scaling
+- Strategy A: Single-pass Welford's algorithm → `welford_single_pass`
+- Strategy B: Parallel mean+variance → `parallel_mean_var`
+- Strategy C: Fused RMS+scaling → `fused_rms_scale`
+
+**For special structures:**
+- Diagonal matrix exploitation → `diagonal_row_scale`
+- Sparse/structured matrices → `sparse_csr` or `structured_exploit`
+- Scan operations → `parallel_scan_hillis` or `work_efficient_scan`
+
+## Strategy Naming Convention (REQUIRED)
+
+**NEVER use generic names like "triton" or "cuda".** Strategy names MUST describe the actual optimization technique.
+
+### Format: `{technique}_{params}`
+
+| Category | Pattern | Examples |
+|----------|---------|----------|
+| Tiling | `tiled_{M}x{N}x{K}` | `tiled_64x64x32`, `tiled_128x128x64` |
+| Block size | `block_{size}` | `block_256`, `block_512`, `block_1024` |
+| Vectorization | `vectorized_x{N}` | `vectorized_x4`, `vectorized_x8` |
+| Reduction | `{type}_reduce` | `tree_warp_reduce`, `multistage_reduce` |
+| Memory | `{pattern}_access` | `coalesced_access`, `strided_access` |
+| Fusion | `fused_{ops}` | `fused_relu_bias`, `fused_rms_scale` |
+| Structure | `{struct}_exploit` | `diagonal_row_scale`, `triangular_skip` |
+| Algorithm | `{algo_name}` | `welford_single_pass`, `parallel_scan_hillis` |
+
+### Bad vs Good Examples
+
+| BAD (rejected) | GOOD (required) |
+|----------------|-----------------|
+| `triton` | `tiled_64x64x32` |
+| `cuda` | `vectorized_x4_block_256` |
+| `optimized` | `tree_warp_reduce` |
+| `fast` | `diagonal_row_scale` |
+| `v1`, `v2` | `coalesced_block_512` |
 
 ### Phase 3: STRATEGY GENERATION + EVALUATION
 
@@ -146,7 +178,7 @@ Max 3 iterations per task.
 
 ## Output Format
 
-Report progress in structured JSON:
+Report progress in structured JSON with **descriptive strategy names**:
 
 ```json
 {
@@ -155,11 +187,11 @@ Report progress in structured JSON:
   "task": "19_ReLU",
   "iteration": 1,
   "strategies": [
-    {"name": "A", "compiled": true, "correct": true, "speedup": 1.12},
-    {"name": "B", "compiled": true, "correct": true, "speedup": 1.31},
-    {"name": "C", "compiled": false, "error": "syntax error"}
+    {"name": "vectorized_x4_block_256", "compiled": true, "correct": true, "speedup": 1.12},
+    {"name": "coalesced_block_512", "compiled": true, "correct": true, "speedup": 1.31},
+    {"name": "vectorized_x8_block_1024", "compiled": false, "error": "register spill"}
   ],
-  "best": {"strategy": "B", "speedup": 1.31},
+  "best": {"strategy": "coalesced_block_512", "speedup": 1.31},
   "action": "continue | save | fail"
 }
 ```
@@ -181,25 +213,25 @@ Report progress in structured JSON:
 
 ## Required Workflow Per Evaluation
 
-After EVERY `eval_kernel()` call, you MUST call `update_task_progress()`:
+After EVERY `eval_kernel()` call, the strategy name is automatically recorded. You MUST pass the **descriptive strategy name** to `eval_kernel()`:
 
 ```python
-# 1. Evaluate kernel
-result = eval_kernel(task_path, kernel_code, session_id=session_id)
-
-# 2. Immediately update progress (REQUIRED)
-update_task_progress(
+# Evaluate kernel with DESCRIPTIVE strategy name
+result = eval_kernel(
+    task_path=task_path,
+    kernel_code=kernel_code,
     session_id=session_id,
-    task_name=task_name,
-    iteration=result["iteration"],
-    strategy="vectorized_loads",  # Your strategy name
-    compiled=result["compiled"],
-    correct=result["correctness"],
-    speedup=result["speedup"],
-    runtime_ms=result.get("runtime", 0),
-    error=result.get("error")
+    strategy="tiled_64x64x32"  # REQUIRED: descriptive name (see naming convention)
 )
 ```
+
+The `strategy` parameter is **required** for proper progress tracking. Use names like:
+- `"vectorized_x4_block_256"` for element-wise ops
+- `"tiled_64x64x32"` for matmul
+- `"tree_warp_reduce"` for reductions
+- `"welford_single_pass"` for normalization
+
+**NEVER** use generic names like `"triton"` or `"cuda"`.
 
 When task is complete (target reached OR max iterations), call `complete_task_progress()`:
 

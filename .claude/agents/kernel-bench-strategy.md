@@ -81,17 +81,18 @@ def get_init_inputs():
 
 ### 4. Evaluate
 
-Call `eval_kernel()` with your generated code:
+Call `eval_kernel()` with your generated code AND your **strategy name**:
 
 ```python
 result = eval_kernel(
     task_path=task_path,
     kernel_code=your_kernel_code,
     session_id=session_id,
-    iteration=iteration,
-    provider="local"
+    strategy="vectorized_x4_block_1024"  # REQUIRED: your strategy name
 )
 ```
+
+The `strategy` parameter MUST be a descriptive name (NOT "triton" or "cuda").
 
 ### 5. Return Result
 

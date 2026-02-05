@@ -393,7 +393,7 @@ async def _auto_update_progress(
     task_name: str,
     iteration: int,
     result: dict,
-    code_type: str = "triton"
+    strategy: str
 ) -> None:
     """
     Internal helper to auto-update progress tracking and auto-complete tasks.
@@ -417,7 +417,7 @@ async def _auto_update_progress(
             session_id=session_id,
             task_name=task_name,
             iteration=iteration,
-            strategy=code_type,  # Use code_type as strategy identifier
+            strategy=strategy,  # Use the descriptive strategy name passed in
             compiled=compiled,
             correct=correct,
             speedup=speedup,
@@ -436,7 +436,7 @@ async def _auto_update_progress(
             _best_result_tracker[tracker_key] = {
                 "speedup": speedup,
                 "iteration": iteration,
-                "strategy": code_type
+                "strategy": strategy
             }
             current_best = _best_result_tracker[tracker_key]
 
@@ -496,7 +496,8 @@ async def eval_kernel(
     session_id: str = "default",
     iteration: int = None,
     provider: str = "local",
-    code_type: str = "triton"
+    code_type: str = "triton",
+    strategy: str = None
 ) -> dict:
     """
     Evaluate generated kernel against reference PyTorch implementation.
@@ -518,6 +519,11 @@ async def eval_kernel(
         iteration: Optional iteration override (auto-tracked if not provided)
         provider: kbEval provider from kbEval.yaml (default: "local")
         code_type: Type of kernel code - "triton" (default) or "cuda"
+        strategy: Descriptive name of the optimization strategy used (e.g.,
+                  "vectorized_x4_block_256", "tiled_64x64x32", "tree_warp_reduce").
+                  REQUIRED for proper progress tracking. Do NOT use generic names
+                  like "triton" or "cuda" - use names that describe the actual
+                  optimization technique applied.
 
     Returns:
         KernelExecResult dict with:
@@ -532,7 +538,8 @@ async def eval_kernel(
         >>> result = await eval_kernel(
         ...     "level1/1_relu.py",
         ...     "import triton\\n@triton.jit\\ndef relu_kernel(...): ...",
-        ...     session_id="my_session"
+        ...     session_id="my_session",
+        ...     strategy="vectorized_x4_block_1024"
         ... )
         >>> print(result["speedup"], result["iteration"])
         1.45 0
@@ -647,12 +654,14 @@ async def eval_kernel(
         )
 
         # Auto-update progress tracking for real-time visibility
+        # Use explicit strategy if provided, otherwise fall back to code_type
+        effective_strategy = strategy if strategy else code_type
         await _auto_update_progress(
             session_id=session_id,
             task_name=task_name,
             iteration=current_iteration,
             result=result,
-            code_type=code_type
+            strategy=effective_strategy
         )
 
         return result
@@ -678,12 +687,13 @@ async def eval_kernel(
                 iteration=current_iteration
             )
             # Also update progress for failed results
+            effective_strategy = strategy if strategy else code_type
             await _auto_update_progress(
                 session_id=session_id,
                 task_name=task_name,
                 iteration=current_iteration,
                 result=error_result,
-                code_type=code_type
+                strategy=effective_strategy
             )
         except Exception as save_err:
             logger.warning(f"[kernel-bench] Failed to auto-save error result: {save_err}")
