@@ -80,6 +80,10 @@ _eval_semaphore = None
 # Set to 4 as a reasonable default for multi-GPU servers
 _semaphore_size = int(os.environ.get("KBEVAL_CONCURRENCY", "4"))
 
+# Cache for reference runtimes to avoid repeated measurements
+# Key: task_path (resolved absolute path), Value: ref_runtime in ms
+_ref_runtime_cache: dict[str, float] = {}
+
 
 def get_kbeval_client(config_file: str = "kbEval.yaml"):
     """Get the kbEval client singleton."""
@@ -361,6 +365,29 @@ async def eval_kernel(
 
         kb_client = get_kbeval_client(config_file=config.get("kbeval", {}).get("config_file", "kbEval.yaml"))
 
+        # Get reference runtime (cached per task to avoid repeated measurements)
+        task_key = str(task_path_obj.resolve())
+        ref_runtime = _ref_runtime_cache.get(task_key)
+
+        if ref_runtime is None:
+            # Measure reference runtime first
+            semaphore = await get_eval_semaphore(provider)
+            async with semaphore:
+                ref_result = await kb_client.kb_eval_ref(
+                    provider=provider,
+                    reference_code=reference_code,
+                    run_tag=f"{session_id}_ref_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                    model_tag="claude_code",
+                    task_tag=task_name,
+                )
+            if ref_result and ref_result.get("compiled") and ref_result.get("runtime", 0) > 0:
+                ref_runtime = ref_result["runtime"]
+                _ref_runtime_cache[task_key] = ref_runtime
+                logger.info(f"[kernel-bench] Cached reference runtime for {task_name}: {ref_runtime:.3f}ms")
+            else:
+                logger.warning(f"[kernel-bench] Failed to get reference runtime for {task_name}")
+                ref_runtime = 0
+
         # Use adaptive semaphore for concurrency control
         semaphore = await get_eval_semaphore(provider)
         async with semaphore:
@@ -384,9 +411,20 @@ async def eval_kernel(
                 "speedup": 0
             }
 
+        # Compute speedup from reference runtime and kernel runtime
+        kernel_runtime = result.get("runtime", 0)
+        if ref_runtime and ref_runtime > 0 and kernel_runtime and kernel_runtime > 0:
+            speedup = ref_runtime / kernel_runtime
+        else:
+            speedup = 0
+
+        # Add speedup and ref_runtime to result
+        result["speedup"] = round(speedup, 3)
+        result["ref_runtime"] = ref_runtime
+
         logger.info(f"[kernel-bench] Eval {task_name} iter {iteration}: "
                    f"compiled={result.get('compiled')}, correct={result.get('correctness')}, "
-                   f"speedup={result.get('speedup', 0):.2f}x")
+                   f"speedup={speedup:.2f}x (ref={ref_runtime:.3f}ms, kernel={kernel_runtime:.3f}ms)")
 
         return result
 
