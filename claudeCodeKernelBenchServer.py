@@ -84,6 +84,10 @@ _semaphore_size = int(os.environ.get("KBEVAL_CONCURRENCY", "4"))
 # Key: task_path (resolved absolute path), Value: ref_runtime in ms
 _ref_runtime_cache: dict[str, float] = {}
 
+# Iteration counter per (session_id, task_name) for auto-tracking
+# Key: (session_id, task_name), Value: next iteration number
+_iteration_counter: dict[tuple[str, str], int] = {}
+
 
 def get_kbeval_client(config_file: str = "kbEval.yaml"):
     """Get the kbEval client singleton."""
@@ -301,23 +305,101 @@ async def get_task_details(task_path: str) -> dict:
     }
 
 
+async def _auto_save_result(
+    task_path: str,
+    kernel_code: str,
+    eval_result: dict,
+    session_id: str,
+    iteration: int
+) -> str:
+    """
+    Internal helper to auto-save evaluation results.
+    Called automatically by eval_kernel after each evaluation.
+    """
+    output_base = Path(config["output"]["base_dir"])
+    task_name = Path(task_path).stem
+
+    session_dir = output_base / session_id / task_name
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save kernel code
+    kernel_file = session_dir / f"iteration_{iteration:02d}_cuda_kernel.py"
+    kernel_file.write_text(kernel_code)
+
+    # Save eval result with metadata
+    eval_file = session_dir / f"iteration_{iteration:02d}_eval.json"
+    eval_result_copy = eval_result.copy()
+    eval_result_copy["model"] = "claude-code"
+    eval_result_copy["timestamp"] = datetime.now().isoformat()
+    eval_result_copy["task_name"] = task_name
+    eval_result_copy["iteration"] = iteration
+    eval_file.write_text(json.dumps(eval_result_copy, indent=2))
+
+    # Update summary
+    summary_file = output_base / session_id / "summary.json"
+    summary = {}
+    if summary_file.exists():
+        try:
+            summary = json.loads(summary_file.read_text())
+        except json.JSONDecodeError:
+            summary = {}
+
+    if task_name not in summary:
+        summary[task_name] = {"iterations": []}
+
+    summary[task_name]["iterations"].append({
+        "iteration": iteration,
+        "compiled": eval_result.get("compiled", False),
+        "correctness": eval_result.get("correctness", False),
+        "speedup": eval_result.get("speedup", 0),
+        "error": eval_result.get("error"),
+        "timestamp": datetime.now().isoformat()
+    })
+
+    # Update overall stats
+    all_iterations = []
+    for task_data in summary.values():
+        if isinstance(task_data, dict) and "iterations" in task_data:
+            all_iterations.extend(task_data["iterations"])
+
+    successful_iters = [i for i in all_iterations if i.get("correctness")]
+    summary["_stats"] = {
+        "total_tasks": len([k for k in summary.keys() if not k.startswith("_")]),
+        "total_iterations": len(all_iterations),
+        "success_count": len(successful_iters),
+        "fail_count": len(all_iterations) - len(successful_iters),
+        "avg_speedup": sum(i.get("speedup", 0) for i in successful_iters) /
+                       max(1, len(successful_iters)),
+        "last_updated": datetime.now().isoformat()
+    }
+
+    summary_file.write_text(json.dumps(summary, indent=2))
+
+    logger.debug(f"[kernel-bench] Auto-saved iter {iteration} for {task_name}")
+
+    return str(session_dir)
+
+
 @mcp_tool()
 async def eval_kernel(
     task_path: str,
     kernel_code: str,
     session_id: str = "default",
-    iteration: int = 0,
+    iteration: int = None,
     provider: str = "local",
     code_type: str = "triton"
 ) -> dict:
     """
     Evaluate generated kernel against reference PyTorch implementation.
 
+    Results are automatically saved after each evaluation. Iteration numbers
+    are auto-tracked per (session_id, task_name) - you don't need to pass them.
+
     Args:
         task_path: Path to the original task file (contains reference Model)
         kernel_code: Generated CUDA/Triton kernel code (must define ModelNew)
         session_id: Session identifier for grouping results
-        iteration: Iteration number within the task (0, 1, 2, ...)
+        iteration: Optional iteration override (auto-tracked if not provided)
         provider: kbEval provider from kbEval.yaml (default: "local")
         code_type: Type of kernel code - "triton" (default) or "cuda"
 
@@ -327,17 +409,17 @@ async def eval_kernel(
         - correctness: bool - Does output match reference?
         - runtime: float - Kernel execution time in ms
         - speedup: float - Speedup vs reference PyTorch
+        - iteration: int - The iteration number used
         - error: str|None - Error message if failed
 
     Example:
         >>> result = await eval_kernel(
         ...     "level1/1_relu.py",
         ...     "import triton\\n@triton.jit\\ndef relu_kernel(...): ...",
-        ...     session_id="my_session",
-        ...     iteration=0
+        ...     session_id="my_session"
         ... )
-        >>> print(result["speedup"])
-        1.45
+        >>> print(result["speedup"], result["iteration"])
+        1.45 0
     """
     # Resolve task path
     task_path_obj = Path(os.path.expanduser(task_path))
@@ -348,6 +430,18 @@ async def eval_kernel(
             task_path_obj = candidate
 
     task_name = task_path_obj.stem if task_path_obj.exists() else Path(task_path).stem
+
+    # Auto-track iteration number per (session_id, task_name)
+    iter_key = (session_id, task_name)
+    if iteration is not None:
+        # Use provided iteration (for backwards compatibility)
+        current_iteration = iteration
+    else:
+        # Auto-increment
+        current_iteration = _iteration_counter.get(iter_key, 0)
+
+    # Always increment the counter for next call
+    _iteration_counter[iter_key] = current_iteration + 1
 
     # Call kbEval and wait for result
     try:
@@ -398,7 +492,7 @@ async def eval_kernel(
                 run_tag=f"{session_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
                 model_tag="claude_code",
                 task_tag=task_name,
-                eval_tag=f"iter_{iteration:02d}",
+                eval_tag=f"iter_{current_iteration:02d}",
                 code_type=code_type
             )
 
@@ -418,25 +512,50 @@ async def eval_kernel(
         else:
             speedup = 0
 
-        # Add speedup and ref_runtime to result
+        # Add speedup, ref_runtime, and iteration to result
         result["speedup"] = round(speedup, 3)
         result["ref_runtime"] = ref_runtime
+        result["iteration"] = current_iteration
 
-        logger.info(f"[kernel-bench] Eval {task_name} iter {iteration}: "
+        logger.info(f"[kernel-bench] Eval {task_name} iter {current_iteration}: "
                    f"compiled={result.get('compiled')}, correct={result.get('correctness')}, "
                    f"speedup={speedup:.2f}x (ref={ref_runtime:.3f}ms, kernel={kernel_runtime:.3f}ms)")
+
+        # Auto-save the result (captures all iterations, success or failure)
+        await _auto_save_result(
+            task_path=str(task_path_obj),
+            kernel_code=kernel_code,
+            eval_result=result,
+            session_id=session_id,
+            iteration=current_iteration
+        )
 
         return result
 
     except Exception as e:
-        logger.error(f"[kernel-bench] Eval error: {e}")
-        return {
+        logger.error(f"[kernel-bench] Eval error for {task_name} iter {current_iteration}: {e}")
+        error_result = {
             "compiled": False,
             "correctness": False,
             "error": str(e),
             "runtime": 0,
-            "speedup": 0
+            "speedup": 0,
+            "iteration": current_iteration
         }
+
+        # Auto-save even failed results
+        try:
+            await _auto_save_result(
+                task_path=str(task_path_obj),
+                kernel_code=kernel_code,
+                eval_result=error_result,
+                session_id=session_id,
+                iteration=current_iteration
+            )
+        except Exception as save_err:
+            logger.warning(f"[kernel-bench] Failed to auto-save error result: {save_err}")
+
+        return error_result
 
 
 @mcp_tool()
@@ -449,6 +568,9 @@ async def save_benchmark_result(
 ) -> str:
     """
     Save benchmark result in format compatible with RL training output.
+
+    NOTE: This is now OPTIONAL - eval_kernel() auto-saves all results.
+    Use this only if you need to save additional/custom results.
 
     This stores results in ~/.inference/claude_code_output/ using the same
     structure as RL training outputs, enabling direct comparison.
