@@ -88,6 +88,14 @@ _ref_runtime_cache: dict[str, float] = {}
 # Key: (session_id, task_name), Value: next iteration number
 _iteration_counter: dict[tuple[str, str], int] = {}
 
+# Best result tracker per (session_id, task_name) for auto-completion
+# Key: (session_id, task_name), Value: {"speedup": float, "iteration": int, "strategy": str}
+_best_result_tracker: dict[tuple[str, str], dict] = {}
+
+# Default completion thresholds
+DEFAULT_TARGET_SPEEDUP = 1.5
+DEFAULT_MAX_ITERATIONS = 3
+
 
 def get_kbeval_client(config_file: str = "kbEval.yaml"):
     """Get the kbEval client singleton."""
@@ -380,6 +388,107 @@ async def _auto_save_result(
     return str(session_dir)
 
 
+async def _auto_update_progress(
+    session_id: str,
+    task_name: str,
+    iteration: int,
+    result: dict,
+    code_type: str = "triton"
+) -> None:
+    """
+    Internal helper to auto-update progress tracking and auto-complete tasks.
+
+    Called automatically by eval_kernel after each evaluation to:
+    1. Update progress.json for real-time visibility
+    2. Track best result so far
+    3. Auto-complete when target reached or max iterations exhausted
+    """
+    global _best_result_tracker
+
+    compiled = result.get("compiled", False)
+    correct = result.get("correctness", False)
+    speedup = result.get("speedup", 0)
+    runtime = result.get("runtime", 0)
+    error = result.get("error")
+
+    # Update progress.json for real-time tracking
+    try:
+        await update_task_progress(
+            session_id=session_id,
+            task_name=task_name,
+            iteration=iteration,
+            strategy=code_type,  # Use code_type as strategy identifier
+            compiled=compiled,
+            correct=correct,
+            speedup=speedup,
+            runtime_ms=runtime,
+            error=error
+        )
+    except Exception as e:
+        logger.warning(f"[kernel-bench] Failed to update progress for {task_name}: {e}")
+
+    # Track best result for this task
+    tracker_key = (session_id, task_name)
+    current_best = _best_result_tracker.get(tracker_key)
+
+    if compiled and correct and speedup > 0:
+        if current_best is None or speedup > current_best.get("speedup", 0):
+            _best_result_tracker[tracker_key] = {
+                "speedup": speedup,
+                "iteration": iteration,
+                "strategy": code_type
+            }
+            current_best = _best_result_tracker[tracker_key]
+
+    # Check for auto-completion conditions
+    should_complete = False
+    completion_reason = None
+
+    # Condition 1: Target speedup reached (1.5x by default)
+    if speedup >= DEFAULT_TARGET_SPEEDUP:
+        should_complete = True
+        completion_reason = f"target_reached ({speedup:.2f}x >= {DEFAULT_TARGET_SPEEDUP}x)"
+
+    # Condition 2: Max iterations reached (iteration is 0-indexed, so >= 2 means 3 iterations)
+    elif iteration >= DEFAULT_MAX_ITERATIONS - 1:
+        should_complete = True
+        completion_reason = f"max_iterations ({iteration + 1} >= {DEFAULT_MAX_ITERATIONS})"
+
+    # Auto-complete if conditions met
+    if should_complete and current_best:
+        try:
+            await complete_task_progress(
+                session_id=session_id,
+                task_name=task_name,
+                final_speedup=current_best["speedup"],
+                final_iteration=current_best["iteration"],
+                final_strategy=current_best["strategy"]
+            )
+            logger.info(f"[kernel-bench] Auto-completed {task_name}: {current_best['speedup']:.2f}x "
+                       f"({completion_reason})")
+
+            # Clean up tracker
+            if tracker_key in _best_result_tracker:
+                del _best_result_tracker[tracker_key]
+
+        except Exception as e:
+            logger.warning(f"[kernel-bench] Failed to auto-complete {task_name}: {e}")
+    elif should_complete and not current_best:
+        # All iterations failed - mark as completed with 0 speedup
+        try:
+            await complete_task_progress(
+                session_id=session_id,
+                task_name=task_name,
+                final_speedup=0,
+                final_iteration=iteration,
+                final_strategy="failed"
+            )
+            logger.info(f"[kernel-bench] Auto-completed {task_name} as failed "
+                       f"({completion_reason}, no successful iteration)")
+        except Exception as e:
+            logger.warning(f"[kernel-bench] Failed to auto-complete failed task {task_name}: {e}")
+
+
 @mcp_tool()
 async def eval_kernel(
     task_path: str,
@@ -394,6 +503,13 @@ async def eval_kernel(
 
     Results are automatically saved after each evaluation. Iteration numbers
     are auto-tracked per (session_id, task_name) - you don't need to pass them.
+
+    **Auto-progress tracking**: Each eval automatically updates progress.json
+    for real-time visibility via get_batch_progress().
+
+    **Auto-completion**: Tasks are automatically marked complete when:
+    - Speedup >= 1.5x (target reached), OR
+    - 3 iterations completed (max iterations)
 
     Args:
         task_path: Path to the original task file (contains reference Model)
@@ -530,6 +646,15 @@ async def eval_kernel(
             iteration=current_iteration
         )
 
+        # Auto-update progress tracking for real-time visibility
+        await _auto_update_progress(
+            session_id=session_id,
+            task_name=task_name,
+            iteration=current_iteration,
+            result=result,
+            code_type=code_type
+        )
+
         return result
 
     except Exception as e:
@@ -551,6 +676,14 @@ async def eval_kernel(
                 eval_result=error_result,
                 session_id=session_id,
                 iteration=current_iteration
+            )
+            # Also update progress for failed results
+            await _auto_update_progress(
+                session_id=session_id,
+                task_name=task_name,
+                iteration=current_iteration,
+                result=error_result,
+                code_type=code_type
             )
         except Exception as save_err:
             logger.warning(f"[kernel-bench] Failed to auto-save error result: {save_err}")

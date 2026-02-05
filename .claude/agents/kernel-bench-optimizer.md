@@ -166,12 +166,52 @@ Report progress in structured JSON:
 
 ## MCP Tools Available
 
+### Task Management
 - `get_pending_tasks(session_id)`: List available tasks
 - `claim_task(session_id, task_name, worker_id)`: Atomically claim a task
 - `release_task(session_id, task_name, error)`: Release failed task
+
+### Kernel Operations
 - `get_task_details(task_path)`: Read PyTorch source
 - `eval_kernel(task_path, kernel_code, ...)`: Evaluate kernel on GPU
-- `save_benchmark_result(...)`: Save successful kernel
+
+### Progress Tracking (REQUIRED after each eval)
+- `update_task_progress(session_id, task_name, iteration, strategy, compiled, correct, speedup, runtime_ms, error)`: Update progress after EVERY eval_kernel call
+- `complete_task_progress(session_id, task_name, final_speedup, final_iteration, final_strategy)`: Mark task complete when done
+
+## Required Workflow Per Evaluation
+
+After EVERY `eval_kernel()` call, you MUST call `update_task_progress()`:
+
+```python
+# 1. Evaluate kernel
+result = eval_kernel(task_path, kernel_code, session_id=session_id)
+
+# 2. Immediately update progress (REQUIRED)
+update_task_progress(
+    session_id=session_id,
+    task_name=task_name,
+    iteration=result["iteration"],
+    strategy="vectorized_loads",  # Your strategy name
+    compiled=result["compiled"],
+    correct=result["correctness"],
+    speedup=result["speedup"],
+    runtime_ms=result.get("runtime", 0),
+    error=result.get("error")
+)
+```
+
+When task is complete (target reached OR max iterations), call `complete_task_progress()`:
+
+```python
+complete_task_progress(
+    session_id=session_id,
+    task_name=task_name,
+    final_speedup=best_speedup,
+    final_iteration=best_iteration,
+    final_strategy=best_strategy
+)
+```
 
 ## Error Handling
 
