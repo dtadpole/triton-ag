@@ -13,7 +13,14 @@ import httpx
 import gzip
 from typing import Dict, Any, List
 from logger import logger
-from kbEvalUtil import KernelExecResult
+
+# Optional torch dependency - kbEvalUtil requires torch but the client only needs httpx
+try:
+    from kbEvalUtil import KernelExecResult
+    KBEVAL_UTIL_AVAILABLE = True
+except ImportError:
+    KBEVAL_UTIL_AVAILABLE = False
+    KernelExecResult = None
 
 # reusable client for calling kbEvalRemoteServer
 class KbEvalClient:
@@ -152,8 +159,20 @@ class KbEvalClient:
 
                     response.raise_for_status()
 
-                    result = KernelExecResult(**response.json())
-                    if (not result.compiled or not result.correctness) and "retriable" in result.metadata and result.metadata["retriable"]:
+                    response_data = response.json()
+                    if KBEVAL_UTIL_AVAILABLE:
+                        result = KernelExecResult(**response_data)
+                        result_dict = result.model_dump()
+                        compiled = result.compiled
+                        correctness = result.correctness
+                        metadata = result.metadata
+                    else:
+                        result_dict = response_data
+                        compiled = response_data.get("compiled", False)
+                        correctness = response_data.get("correctness", False)
+                        metadata = response_data.get("metadata", {})
+
+                    if (not compiled or not correctness) and "retriable" in metadata and metadata["retriable"]:
                         elapsed_time = time.time() - start_time
                         sleep_seconds = initial_retry_interval ** retry_count
                         if retry_count < num_retries:
@@ -163,9 +182,9 @@ class KbEvalClient:
                             continue
                         else:
                             logger.warning(f"⚠️ [kbEvalClient] [{provider_name}] [{run_tag}] [{model_tag}] [{task_tag}] Return the last result from retriable error... [{retry_count}/{num_retries}] [elapsed_time: {elapsed_time:.2f}s]")
-                            return result.model_dump()
+                            return result_dict
 
-                    return result.model_dump()
+                    return result_dict
 
             except Exception as e:
                 elapsed_time = time.time() - start_time
@@ -244,8 +263,20 @@ class KbEvalClient:
 
                     response.raise_for_status()
 
-                    result = KernelExecResult(**response.json())
-                    if (not result.compiled or not result.correctness) and "retriable" in result.metadata and result.metadata["retriable"]:
+                    response_data = response.json()
+                    if KBEVAL_UTIL_AVAILABLE:
+                        result = KernelExecResult(**response_data)
+                        result_dict = result.model_dump()
+                        compiled = result.compiled
+                        correctness = result.correctness
+                        metadata = result.metadata
+                    else:
+                        result_dict = response_data
+                        compiled = response_data.get("compiled", False)
+                        correctness = response_data.get("correctness", False)
+                        metadata = response_data.get("metadata", {})
+
+                    if (not compiled or not correctness) and "retriable" in metadata and metadata["retriable"]:
                         elapsed_time = time.time() - start_time
                         sleep_seconds = initial_retry_interval ** retry_count
                         if retry_count < num_retries:
@@ -254,9 +285,9 @@ class KbEvalClient:
                             continue
                         else:
                             logger.warning(f"⚠️ [kbEvalClient] [{provider_name}] [{run_tag}] [{model_tag}] [{task_tag}] [{eval_tag}] Return the last result from retriable error... [{retry_count}/{num_retries}] [elapsed_time: {elapsed_time:.2f}s]")
-                            return result.model_dump()
+                            return result_dict
 
-                    return result.model_dump()
+                    return result_dict
 
             except Exception as e:
                 elapsed_time = time.time() - start_time
