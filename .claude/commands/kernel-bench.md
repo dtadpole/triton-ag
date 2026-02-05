@@ -89,18 +89,28 @@ Each optimizer spawns 3 strategy sub-agents IN PARALLEL per iteration, picks the
 ```
 → Query batch progress or single task details
 
+### Style 7: Server Configuration
+```
+/kernel-bench server
+/kernel-bench server --provider=local --url=http://localhost:5676
+/kernel-bench server --provider=remote --url=http://192.168.1.100:8082 --devices=8
+/kernel-bench server --list
+```
+→ View or update kbEval server configuration
+
 ## Parsing Logic
 
 When invoked with `/kernel-bench [args]`, parse the input:
 
-**⚠️ CRITICAL: For "progress" queries, you MUST run `python3 kb_progress.py` - see PROGRESS MODE section below!**
+**⚠️ CRITICAL: For "progress" queries, you MUST run `python3 kb_score.py` - see PROGRESS MODE section below!**
 
-1. **Detect progress query**: Starts with `progress` OR user just says "progress" → **PROGRESS MODE** (run the script!)
-2. **Detect single task**: Path ends with `.py` → SINGLE TASK MODE
-3. **Detect directory**: Path ends with `/` or is a level name (level1, level2, level3) → BATCH MODE
-4. **Detect resume**: Contains `--resume` or starts with `resume` → RESUME MODE
-5. **Detect parameters**: Contains `--session`, `--workers`, or `--strategies` → BATCH MODE with config
-6. **Detect natural language**: Contains numbers + keywords ("tasks", "agents", "random") → interpret and route
+1. **Detect server config**: Starts with `server` → **SERVER MODE**
+2. **Detect progress query**: Starts with `progress` OR user just says "progress" → **PROGRESS MODE** (run the script!)
+3. **Detect single task**: Path ends with `.py` → SINGLE TASK MODE
+4. **Detect directory**: Path ends with `/` or is a level name (level1, level2, level3) → BATCH MODE
+5. **Detect resume**: Contains `--resume` or starts with `resume` → RESUME MODE
+6. **Detect parameters**: Contains `--session`, `--workers`, or `--strategies` → BATCH MODE with config
+7. **Detect natural language**: Contains numbers + keywords ("tasks", "agents", "random") → interpret and route
 
 **Parameter defaults:**
 - `--workers=4` (if not specified)
@@ -346,6 +356,96 @@ Status: {status} | Worker: {worker} | Iterations: {done}/{planned}
 Best: iteration {N}, {speedup}x ({strategy})
 ```
 
+### SERVER MODE
+
+When user says "server", "server --list", or provides server configuration parameters:
+
+#### List Available Providers (`/kernel-bench server` or `/kernel-bench server --list`)
+
+Read and display the kbEval.yaml configuration:
+
+```bash
+# Read the config file
+cat kbEval.yaml
+```
+
+Format as:
+```
+=== kbEval Server Configuration ===
+
+Available Providers:
+| Provider | URL | Timeout |
+|----------|-----|---------|
+| local | http://localhost:5676 | 300s |
+| remote | http://192.168.1.100:8082 | 300s |
+| ... | ... | ... |
+
+Current default: local
+```
+
+#### Update Provider (`/kernel-bench server --provider=NAME --url=URL [--devices=N]`)
+
+Parameters:
+- `--provider=NAME`: Provider name to add or update (required)
+- `--url=URL`: Server URL in format `http://host:port` (required)
+- `--devices=N`: Number of GPU devices on server (optional, for concurrency tuning)
+- `--timeout=N`: Request timeout in seconds (optional, default: 300)
+
+**Update kbEval.yaml using the Edit tool:**
+
+1. Read current kbEval.yaml
+2. Parse the provider name from `--provider`
+3. Parse the URL from `--url`
+4. Add or update the provider entry in the `providers:` section:
+
+```yaml
+providers:
+  {provider_name}:
+    base_url: {url}
+    api_key_path: ~/.keys/kbeval.api.key
+    retry_count: 4
+    initial_retry_interval: 3
+    timeout: {timeout or 300}
+```
+
+5. If `--devices` is provided, also add a comment noting the device count for reference
+
+**Example:**
+```
+User: /kernel-bench server --provider=gpu_server --url=http://10.0.0.5:8082 --devices=4
+
+Response:
+Updated kbEval.yaml:
+  Provider: gpu_server
+  URL: http://10.0.0.5:8082
+  Devices: 4 (for concurrency tuning)
+  Timeout: 300s
+
+To use this provider in batch mode:
+  /kernel-bench level1 --session=test --provider=gpu_server
+```
+
+#### Quick URL Update (`/kernel-bench server --url=URL`)
+
+When only `--url` is provided without `--provider`, update the `local` provider:
+
+```
+User: /kernel-bench server --url=http://192.168.1.50:5676
+
+Response:
+Updated local provider URL to: http://192.168.1.50:5676
+```
+
+#### Test Server Connection
+
+After updating, optionally verify the server is reachable:
+
+```bash
+curl -s --max-time 5 {url}/health || curl -s --max-time 5 {url}/stats
+```
+
+Report connection status to user.
+
 ## Output Format
 
 All skill invocations return structured JSON for consistency:
@@ -496,4 +596,38 @@ Iterations: 2/3
 | 1    | block_tuning_512  | ✓        | ✓       | 1.31x   | 0.038ms  |
 
 Best: iteration 1, 1.31x (block_tuning_512)
+```
+
+**Example 8: Configure eval server**
+```
+User: /kernel-bench server --provider=gpu_cluster --url=http://10.0.0.100:8082 --devices=8
+
+Response:
+Updated kbEval.yaml:
+  Provider: gpu_cluster
+  URL: http://10.0.0.100:8082
+  Devices: 8
+  Timeout: 300s
+
+Testing connection... ✓ Server reachable (8 GPUs available)
+
+To use this provider:
+  /kernel-bench level1 --session=test --provider=gpu_cluster
+```
+
+**Example 9: List available servers**
+```
+User: /kernel-bench server
+
+Response:
+=== kbEval Server Configuration ===
+
+Available Providers:
+| Provider    | URL                          | Timeout |
+|-------------|------------------------------|---------|
+| local       | http://localhost:5676        | 300s    |
+| gpu_cluster | http://10.0.0.100:8082       | 300s    |
+| h8_1        | http://devgpu139.cco2:8082   | 300s    |
+
+Current default: local
 ```
