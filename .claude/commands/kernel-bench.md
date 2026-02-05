@@ -93,7 +93,9 @@ Each optimizer spawns 3 strategy sub-agents IN PARALLEL per iteration, picks the
 
 When invoked with `/kernel-bench [args]`, parse the input:
 
-1. **Detect progress query**: Starts with `progress` → PROGRESS MODE
+**⚠️ CRITICAL: For "progress" queries, you MUST run `python3 kb_progress.py` - see PROGRESS MODE section below!**
+
+1. **Detect progress query**: Starts with `progress` OR user just says "progress" → **PROGRESS MODE** (run the script!)
 2. **Detect single task**: Path ends with `.py` → SINGLE TASK MODE
 3. **Detect directory**: Path ends with `/` or is a level name (level1, level2, level3) → BATCH MODE
 4. **Detect resume**: Contains `--resume` or starts with `resume` → RESUME MODE
@@ -285,15 +287,21 @@ When user provides `--resume my_session`:
 
 ### PROGRESS MODE
 
-When user says "progress" or "progress {session_id}":
+**⚠️ MANDATORY: You MUST run the progress script - do NOT just call MCP tools directly!**
 
-1. **Run the progress script**:
-   ```bash
-   python3 kb_progress.py {session_id}
-   ```
+When user says "progress", "progress {session_id}", or just asks about progress:
 
-2. **Display the quick summary** directly in the chat (the script outputs this to stdout):
-   ```
+**STEP 1 (REQUIRED): Run the progress script via Bash:**
+```bash
+python3 kb_progress.py {session_id}
+```
+
+This script:
+- Outputs a quick summary to stdout (which you display to the user)
+- **Automatically generates a detailed markdown report file** in the session directory
+
+**STEP 2: Display the script output** directly in the chat:
+```
    ═══ Session: {session_id} ═══
 
      Total:       100
@@ -306,12 +314,12 @@ When user says "progress" or "progress {session_id}":
    📄 Detailed report: /path/to/session/progress_YYYYMMDD_HHMMSS.md
    ```
 
-3. **The script automatically generates** a detailed markdown report file in the session directory with:
-   - Full summary table
-   - In-progress tasks with worker/iteration info
-   - All completed tasks sorted by speedup with iteration paths
-   - Failed tasks with error details
-   - Pending tasks list
+The script automatically generates a detailed markdown report file in the session directory with:
+- Full summary table
+- In-progress tasks with worker/iteration info
+- All completed tasks sorted by speedup with iteration paths
+- Failed tasks with error details
+- Pending tasks list
 
 **If no session_id is provided**, use the most recent session:
 ```bash
