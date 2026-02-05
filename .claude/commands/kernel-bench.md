@@ -81,15 +81,24 @@ Each optimizer spawns 3 strategy sub-agents IN PARALLEL per iteration, picks the
 ```
 → Resumes existing session from last checkpoint
 
+### Style 6: Progress Query
+```
+/kernel-bench progress test1
+/kernel-bench progress test1 --detail
+/kernel-bench progress test1 19_ReLU
+```
+→ Query batch progress or single task details
+
 ## Parsing Logic
 
 When invoked with `/kernel-bench [args]`, parse the input:
 
-1. **Detect single task**: Path ends with `.py` → SINGLE TASK MODE
-2. **Detect directory**: Path ends with `/` or is a level name (level1, level2, level3) → BATCH MODE
-3. **Detect resume**: Contains `--resume` or starts with `resume` → RESUME MODE
-4. **Detect parameters**: Contains `--session`, `--workers`, or `--strategies` → BATCH MODE with config
-5. **Detect natural language**: Contains numbers + keywords ("tasks", "agents", "random") → interpret and route
+1. **Detect progress query**: Starts with `progress` → PROGRESS MODE
+2. **Detect single task**: Path ends with `.py` → SINGLE TASK MODE
+3. **Detect directory**: Path ends with `/` or is a level name (level1, level2, level3) → BATCH MODE
+4. **Detect resume**: Contains `--resume` or starts with `resume` → RESUME MODE
+5. **Detect parameters**: Contains `--session`, `--workers`, or `--strategies` → BATCH MODE with config
+6. **Detect natural language**: Contains numbers + keywords ("tasks", "agents", "random") → interpret and route
 
 **Parameter defaults:**
 - `--workers=4` (if not specified)
@@ -120,11 +129,29 @@ When user provides directory, level name, or session parameters:
    - `--workers=N` → N concurrent workers (default: 4)
    - `--strategies=N` → N strategies per optimizer per iteration (default: 1)
    - `--session=ID` → session identifier (default: auto-generated)
+   - `--provider=X` → kbEval provider (default: "local")
 
-2. **Initialize or resume session**:
-   - If `--resume`: Call `get_session_state(session_id)` to check progress
-   - Else: Call `init_session(session_id, level, config)` to create new session
-   - Store `strategies` count in session config for workers to use
+2. **Initialize session with full config**:
+
+   Build the original command string from parsed args:
+   ```
+   original_command = "/kernel-bench {level} --session={session_id} --workers={num_workers} --strategies={num_strategies}"
+   ```
+
+   Call `init_session()` with all config params:
+   ```
+   init_session(
+     session_id=session_id,
+     level=level,
+     num_workers=num_workers,
+     num_strategies=num_strategies,
+     provider=provider,
+     code_type="triton",
+     original_command=original_command
+   )
+   ```
+
+   This stores the full config in `session_manifest.json` for resume support.
 
 3. **Spawn workers DIRECTLY in parallel** (skip coordinator for efficiency):
 
@@ -213,11 +240,89 @@ When user provides directory, level name, or session parameters:
 
 When user provides `--resume my_session`:
 
-1. **Check session exists**: Call `get_session_state(my_session)`
-2. **Show current state**: Display completed, in_progress, pending counts
-3. **Clean stale markers**: Auto-cleanup happens in get_session_state()
-4. **Spawn workers directly**: Same as BATCH MODE step 3 - spawn N workers in parallel
-5. **Monitor and complete**: Same as BATCH MODE steps 4-5
+1. **Get session state with config**: Call `get_session_state(my_session)`
+
+   The response includes the original config:
+   ```json
+   {
+     "session_id": "my_session",
+     "level": "level1",
+     "created_at": "2026-02-04T...",
+     "config": {
+       "original_command": "/kernel-bench level1 --session=my_session --workers=4 --strategies=3",
+       "num_workers": 4,
+       "num_strategies": 3,
+       "provider": "local",
+       "code_type": "triton"
+     },
+     "total": 100,
+     "completed": 50,
+     "pending": 50,
+     ...
+   }
+   ```
+
+2. **Extract config from session** (use stored values, not defaults):
+   ```
+   num_workers = state.config.get("num_workers", 4)
+   num_strategies = state.config.get("num_strategies", 1)
+   provider = state.config.get("provider", "local")
+   ```
+
+3. **Show resume info to user**:
+   ```
+   Resuming session "{session_id}"...
+   Original command: {state.config.original_command}
+   Config: workers={num_workers}, strategies={num_strategies}, provider={provider}
+   Progress: {state.completed}/{state.total} completed, {state.pending} remaining
+   ```
+
+4. **Clean stale markers**: Auto-cleanup happens in `get_session_state()`
+
+5. **Spawn workers directly**: Same as BATCH MODE step 3 - spawn N workers in parallel using the stored `num_workers` and `num_strategies`
+
+6. **Monitor and complete**: Same as BATCH MODE steps 4-5
+
+### PROGRESS MODE
+
+When user provides `progress session_id [task_name]`:
+
+1. **Batch progress** (no task_name):
+   Call `get_batch_progress(session_id)` and display:
+
+   ```
+   === Session: test1 (level1) ===
+   Progress: 25/100 completed, 12 in progress, 3 failed, 60 pending
+   Average speedup: 1.34x
+
+   | Task                | Status      | Worker      | Iter | Best   | Last Result          |
+   |---------------------|-------------|-------------|------|--------|----------------------|
+   | 19_ReLU             | in_progress | optimizer-3 | 2/3  | 1.12x  | ✓ compiled, ✓ correct|
+   | 23_Softmax          | in_progress | optimizer-7 | 1/3  | -      | ✗ compile error      |
+   | 50_Conv2d           | failed      | optimizer-1 | 3/3  | -      | ✗ correctness        |
+   | 88_MinGPTNewGelu    | completed   | optimizer-2 | 2/3  | 2.1x   | ✓ done               |
+   ...
+   ```
+
+2. **Single task detail** (with task_name):
+   Call `get_task_progress(session_id, task_name)` and display:
+
+   ```
+   === Task: 19_ReLU ===
+   Status: in_progress
+   Worker: optimizer-3
+   Started: 2026-02-04T22:16:26
+   Iterations: 2/3
+
+   | Iter | Strategy          | Compiled | Correct | Speedup | Runtime |
+   |------|-------------------|----------|---------|---------|---------|
+   | 0    | vectorized_loads  | ✓        | ✓       | 1.12x   | 0.042ms |
+   | 1    | block_tuning_512  | ✓        | ✓       | 1.31x   | 0.038ms |
+
+   Best: iteration 1, 1.31x (block_tuning_512)
+   ```
+
+3. **With --detail flag**: Include full iteration data for all tasks
 
 ## Output Format
 
@@ -317,13 +422,56 @@ Spawning 8 workers in parallel... [ALL 8 spawned in single message]
 ...
 ```
 
-**Example 5: Resume**
+**Example 5: Resume (config restored from session)**
 ```
 User: /kernel-bench --resume prod_run
 
 Response:
 Resuming session "prod_run"...
-Config: workers=4, strategies=1 (from session config)
-Found 50 completed, 2 stale (cleaned), 48 pending.
+Original command: /kernel-bench level1 --session=prod_run --workers=4 --strategies=3
+Config restored: workers=4, strategies=3, provider=local
+Progress: 50/100 completed, 2 stale (cleaned), 48 pending.
 Spawning 4 workers in parallel for remaining 48 tasks...
+  - optimizer-1: running in background
+  - optimizer-2: running in background
+  - optimizer-3: running in background
+  - optimizer-4: running in background
+
+Progress: 55/100 (avg 1.38x)
+...
+```
+
+**Example 6: Query batch progress**
+```
+User: /kernel-bench progress test1
+
+Response:
+=== Session: test1 (level1) ===
+Progress: 25/100 completed, 12 in progress, 3 failed, 60 pending
+Average speedup: 1.34x
+
+| Task                | Status      | Worker      | Iter | Best   | Last Result           |
+|---------------------|-------------|-------------|------|--------|-----------------------|
+| 19_ReLU             | in_progress | optimizer-3 | 2/3  | 1.12x  | ✓ compiled, ✓ correct |
+| 23_Softmax          | in_progress | optimizer-7 | 1/3  | -      | ✗ compile error       |
+| 88_MinGPTNewGelu    | completed   | optimizer-2 | 2/3  | 2.1x   | ✓ done                |
+```
+
+**Example 7: Query single task detail**
+```
+User: /kernel-bench progress test1 19_ReLU
+
+Response:
+=== Task: 19_ReLU ===
+Status: in_progress
+Worker: optimizer-3
+Started: 2026-02-04T22:16:26
+Iterations: 2/3
+
+| Iter | Strategy          | Compiled | Correct | Speedup | Runtime  |
+|------|-------------------|----------|---------|---------|----------|
+| 0    | vectorized_loads  | ✓        | ✓       | 1.12x   | 0.042ms  |
+| 1    | block_tuning_512  | ✓        | ✓       | 1.31x   | 0.038ms  |
+
+Best: iteration 1, 1.31x (block_tuning_512)
 ```

@@ -741,7 +741,13 @@ async def init_session(
     session_id: str,
     level: str,
     task_names: list = None,
-    config_override: dict = None
+    config_override: dict = None,
+    # Explicit config params for resume support
+    num_workers: int = None,
+    num_strategies: int = None,
+    provider: str = None,
+    code_type: str = None,
+    original_command: str = None
 ) -> dict:
     """
     Initialize a new kernel bench session.
@@ -755,10 +761,15 @@ async def init_session(
         task_names: Optional list of specific task names to include.
                     If provided, only these tasks will be tracked.
                     If None, all tasks from the level are included.
-        config_override: Optional config overrides (num_workers, original_request, etc.)
+        config_override: Optional config overrides dict (legacy, prefer explicit params)
+        num_workers: Number of parallel workers (for resume)
+        num_strategies: Strategy mode (1=simple, 3=exploration) (for resume)
+        provider: kbEval provider (for resume)
+        code_type: "triton" or "cuda" (for resume)
+        original_command: The original command that started the session (for resume)
 
     Returns:
-        Dict with session info: session_id, level, created_at, status
+        Dict with session info: session_id, level, created_at, status, config
     """
     output_base = Path(config["output"]["base_dir"])
     session_dir = output_base / session_id
@@ -787,19 +798,34 @@ async def init_session(
         tasks = await list_kernel_bench_tasks(level=level)
         task_list = [t["name"] for t in tasks]
 
+    # Build config from explicit params, falling back to config_override
+    session_config = config_override.copy() if config_override else {}
+
+    # Explicit params override config_override
+    if num_workers is not None:
+        session_config["num_workers"] = num_workers
+    if num_strategies is not None:
+        session_config["num_strategies"] = num_strategies
+    if provider is not None:
+        session_config["provider"] = provider
+    if code_type is not None:
+        session_config["code_type"] = code_type
+    if original_command is not None:
+        session_config["original_command"] = original_command
+
     manifest = {
         "session_id": session_id,
         "level": level,
         "created_at": datetime.now().isoformat(),
         "total_tasks": len(task_list),
         "tasks": task_list,
-        "config": config_override or {},
+        "config": session_config,
         "status": "initialized"
     }
 
     manifest_file.write_text(json.dumps(manifest, indent=2))
 
-    logger.info(f"[kernel-bench] Initialized session: {session_id} with {len(task_list)} tasks")
+    logger.info(f"[kernel-bench] Initialized session: {session_id} with {len(task_list)} tasks, config: {session_config}")
 
     return manifest
 
@@ -1042,6 +1068,8 @@ async def get_session_state(session_id: str) -> dict:
     result = {
         "session_id": session_id,
         "level": manifest.get("level"),
+        "created_at": manifest.get("created_at"),
+        "config": manifest.get("config", {}),  # Include config for resume
         "total": len(all_tasks),
         "completed": len(completed),
         "in_progress": len(in_progress),
@@ -1145,6 +1173,462 @@ async def get_pending_tasks(
         "available_count": len(claimable),
         "tasks": claimable[:limit],
         "truncated": len(claimable) > limit
+    }
+
+
+# ============================================================================
+# Phase 2.5: Real-time Progress Tracking Tools
+# ============================================================================
+
+
+@mcp_tool()
+async def update_task_progress(
+    session_id: str,
+    task_name: str,
+    iteration: int,
+    strategy: str,
+    compiled: bool,
+    correct: bool,
+    speedup: float = 0.0,
+    runtime_ms: float = 0.0,
+    error: str = None
+) -> dict:
+    """
+    Update task progress after each eval_kernel call.
+
+    Workers should call this after every eval_kernel() to enable real-time
+    progress tracking. Updates the progress.json file in the task directory.
+
+    Args:
+        session_id: Session identifier
+        task_name: Name of the task being optimized
+        iteration: Current iteration number (0-indexed)
+        strategy: Name of the strategy used (e.g., "vectorized_loads", "block_tuning_512")
+        compiled: Whether the kernel compiled successfully
+        correct: Whether the kernel produced correct output
+        speedup: Speedup vs reference (0 if not measured)
+        runtime_ms: Kernel runtime in milliseconds
+        error: Error message if compilation or correctness failed
+
+    Returns:
+        Dict with update status and current best result
+    """
+    output_base = Path(config["output"]["base_dir"])
+    task_dir = output_base / session_id / task_name
+    progress_file = task_dir / "progress.json"
+
+    task_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load existing progress or create new
+    progress = {
+        "task_name": task_name,
+        "worker_id": None,
+        "status": "in_progress",
+        "started_at": None,
+        "completed_at": None,
+        "config": {
+            "max_iterations": 3,
+            "strategies_per_iteration": 1
+        },
+        "iterations": [],
+        "best": None
+    }
+
+    if progress_file.exists():
+        try:
+            progress = json.loads(progress_file.read_text())
+        except json.JSONDecodeError:
+            pass
+
+    # Get worker info from in_progress marker if available
+    marker_file = task_dir / ".in_progress"
+    if marker_file.exists():
+        try:
+            marker_data = json.loads(marker_file.read_text())
+            progress["worker_id"] = marker_data.get("worker")
+            if not progress["started_at"]:
+                progress["started_at"] = marker_data.get("started_at")
+        except json.JSONDecodeError:
+            pass
+
+    # Add iteration result
+    iteration_data = {
+        "iteration": iteration,
+        "strategy": strategy,
+        "compiled": compiled,
+        "correct": correct,
+        "speedup": round(speedup, 3) if speedup else 0,
+        "runtime_ms": round(runtime_ms, 4) if runtime_ms else 0,
+        "error": error,
+        "timestamp": datetime.now().isoformat()
+    }
+
+    # Update or append iteration
+    existing_idx = None
+    for i, it in enumerate(progress["iterations"]):
+        if it["iteration"] == iteration:
+            existing_idx = i
+            break
+
+    if existing_idx is not None:
+        progress["iterations"][existing_idx] = iteration_data
+    else:
+        progress["iterations"].append(iteration_data)
+
+    # Update best result
+    successful_iters = [it for it in progress["iterations"]
+                       if it.get("compiled") and it.get("correct") and it.get("speedup", 0) > 0]
+    if successful_iters:
+        best_iter = max(successful_iters, key=lambda x: x.get("speedup", 0))
+        progress["best"] = {
+            "iteration": best_iter["iteration"],
+            "strategy": best_iter["strategy"],
+            "speedup": best_iter["speedup"]
+        }
+
+    # Save progress
+    progress_file.write_text(json.dumps(progress, indent=2))
+
+    logger.info(f"[kernel-bench] Progress update: {task_name} iter {iteration} "
+               f"({strategy}) - compiled={compiled}, correct={correct}, speedup={speedup:.2f}x")
+
+    return {
+        "success": True,
+        "task_name": task_name,
+        "iteration": iteration,
+        "best": progress["best"]
+    }
+
+
+@mcp_tool()
+async def complete_task_progress(
+    session_id: str,
+    task_name: str,
+    final_speedup: float,
+    final_iteration: int,
+    final_strategy: str
+) -> dict:
+    """
+    Mark a task as completed and save the best result.
+
+    Workers should call this after optimization is done (either target reached
+    or max iterations exhausted). Creates best_result.json and updates progress.json.
+
+    Args:
+        session_id: Session identifier
+        task_name: Name of the completed task
+        final_speedup: Best achieved speedup
+        final_iteration: Iteration that achieved best result
+        final_strategy: Strategy that achieved best result
+
+    Returns:
+        Dict with completion status
+    """
+    output_base = Path(config["output"]["base_dir"])
+    task_dir = output_base / session_id / task_name
+    progress_file = task_dir / "progress.json"
+    best_result_file = task_dir / "best_result.json"
+    marker_file = task_dir / ".in_progress"
+
+    # Update progress.json
+    progress = {}
+    if progress_file.exists():
+        try:
+            progress = json.loads(progress_file.read_text())
+        except json.JSONDecodeError:
+            pass
+
+    progress["status"] = "completed"
+    progress["completed_at"] = datetime.now().isoformat()
+    progress["best"] = {
+        "iteration": final_iteration,
+        "strategy": final_strategy,
+        "speedup": round(final_speedup, 3)
+    }
+
+    progress_file.write_text(json.dumps(progress, indent=2))
+
+    # Create best_result.json (used by get_session_state for completion detection)
+    best_result = {
+        "task_name": task_name,
+        "speedup": round(final_speedup, 3),
+        "iteration": final_iteration,
+        "strategy": final_strategy,
+        "completed_at": datetime.now().isoformat()
+    }
+    best_result_file.write_text(json.dumps(best_result, indent=2))
+
+    # Remove in_progress marker
+    if marker_file.exists():
+        try:
+            marker_file.unlink()
+        except Exception:
+            pass
+
+    logger.info(f"[kernel-bench] Task completed: {task_name} - {final_speedup:.2f}x "
+               f"(iter {final_iteration}, {final_strategy})")
+
+    return {
+        "success": True,
+        "task_name": task_name,
+        "final_speedup": final_speedup,
+        "final_iteration": final_iteration,
+        "final_strategy": final_strategy
+    }
+
+
+@mcp_tool()
+async def get_task_progress(
+    session_id: str,
+    task_name: str
+) -> dict:
+    """
+    Get detailed progress for a single task.
+
+    Returns all iteration results, current status, and best result.
+
+    Args:
+        session_id: Session identifier
+        task_name: Name of the task
+
+    Returns:
+        Dict with full task progress including all iterations
+    """
+    output_base = Path(config["output"]["base_dir"])
+    task_dir = output_base / session_id / task_name
+    progress_file = task_dir / "progress.json"
+
+    if not task_dir.exists():
+        return {
+            "task_name": task_name,
+            "status": "pending",
+            "iterations_planned": 3,
+            "iterations_done": 0,
+            "iterations": [],
+            "best": None
+        }
+
+    # Check for completion
+    if (task_dir / "best_result.json").exists():
+        try:
+            best_result = json.loads((task_dir / "best_result.json").read_text())
+        except json.JSONDecodeError:
+            best_result = {}
+
+        progress = {}
+        if progress_file.exists():
+            try:
+                progress = json.loads(progress_file.read_text())
+            except json.JSONDecodeError:
+                pass
+
+        return {
+            "task_name": task_name,
+            "status": "completed",
+            "worker_id": progress.get("worker_id"),
+            "started_at": progress.get("started_at"),
+            "completed_at": progress.get("completed_at") or best_result.get("completed_at"),
+            "iterations_planned": progress.get("config", {}).get("max_iterations", 3),
+            "iterations_done": len(progress.get("iterations", [])),
+            "iterations": progress.get("iterations", []),
+            "best": {
+                "iteration": best_result.get("iteration"),
+                "strategy": best_result.get("strategy"),
+                "speedup": best_result.get("speedup")
+            }
+        }
+
+    # Check if in progress
+    marker_file = task_dir / ".in_progress"
+    worker_id = None
+    started_at = None
+
+    if marker_file.exists():
+        try:
+            marker_data = json.loads(marker_file.read_text())
+            if not _is_marker_stale(marker_data):
+                worker_id = marker_data.get("worker")
+                started_at = marker_data.get("started_at")
+        except json.JSONDecodeError:
+            pass
+
+    # Load progress file
+    progress = {}
+    if progress_file.exists():
+        try:
+            progress = json.loads(progress_file.read_text())
+        except json.JSONDecodeError:
+            pass
+
+    iterations = progress.get("iterations", [])
+
+    # Determine status
+    if worker_id:
+        status = "in_progress"
+    elif iterations:
+        status = "incomplete"
+    else:
+        status = "pending"
+
+    return {
+        "task_name": task_name,
+        "status": status,
+        "worker_id": worker_id or progress.get("worker_id"),
+        "started_at": started_at or progress.get("started_at"),
+        "completed_at": None,
+        "iterations_planned": progress.get("config", {}).get("max_iterations", 3),
+        "iterations_done": len(iterations),
+        "iterations": iterations,
+        "best": progress.get("best")
+    }
+
+
+@mcp_tool()
+async def get_batch_progress(
+    session_id: str,
+    include_iterations: bool = False
+) -> dict:
+    """
+    Get progress summary for all tasks in a session.
+
+    Provides a high-level overview of batch progress with per-task status
+    and iteration counts. Use include_iterations=True for detailed iteration
+    data per task (larger response).
+
+    Args:
+        session_id: Session identifier
+        include_iterations: If True, include full iteration details per task
+
+    Returns:
+        Dict with summary stats and per-task progress
+    """
+    output_base = Path(config["output"]["base_dir"])
+    session_dir = output_base / session_id
+    manifest_file = session_dir / "session_manifest.json"
+
+    if not manifest_file.exists():
+        return {"error": f"Session not found: {session_id}"}
+
+    try:
+        manifest = json.loads(manifest_file.read_text())
+    except json.JSONDecodeError:
+        return {"error": f"Corrupted manifest for session: {session_id}"}
+
+    all_tasks = manifest.get("tasks", [])
+
+    # Collect task progress
+    tasks_progress = []
+    completed_count = 0
+    in_progress_count = 0
+    failed_count = 0
+    pending_count = 0
+    all_speedups = []
+
+    for task_name in all_tasks:
+        task_dir = session_dir / task_name
+        progress_file = task_dir / "progress.json"
+
+        task_info = {
+            "name": task_name,
+            "status": "pending",
+            "worker": None,
+            "iterations_planned": 3,
+            "iterations_done": 0,
+            "best_speedup": None,
+            "last_iteration": None
+        }
+
+        if not task_dir.exists():
+            pending_count += 1
+            tasks_progress.append(task_info)
+            continue
+
+        # Load progress
+        progress = {}
+        if progress_file.exists():
+            try:
+                progress = json.loads(progress_file.read_text())
+            except json.JSONDecodeError:
+                pass
+
+        iterations = progress.get("iterations", [])
+        task_info["worker"] = progress.get("worker_id")
+        task_info["iterations_planned"] = progress.get("config", {}).get("max_iterations", 3)
+        task_info["iterations_done"] = len(iterations)
+
+        if include_iterations:
+            task_info["iterations"] = iterations
+
+        if iterations:
+            task_info["last_iteration"] = {
+                "compiled": iterations[-1].get("compiled"),
+                "correct": iterations[-1].get("correct"),
+                "speedup": iterations[-1].get("speedup"),
+                "error": iterations[-1].get("error")
+            }
+
+        best = progress.get("best")
+        if best:
+            task_info["best_speedup"] = best.get("speedup")
+
+        # Determine status
+        if (task_dir / "best_result.json").exists():
+            task_info["status"] = "completed"
+            completed_count += 1
+            if task_info["best_speedup"]:
+                all_speedups.append(task_info["best_speedup"])
+        else:
+            # Check in-progress marker
+            marker_file = task_dir / ".in_progress"
+            if marker_file.exists():
+                try:
+                    marker_data = json.loads(marker_file.read_text())
+                    if not _is_marker_stale(marker_data):
+                        task_info["status"] = "in_progress"
+                        task_info["worker"] = marker_data.get("worker")
+                        in_progress_count += 1
+                    else:
+                        # Stale - check for failures
+                        if iterations and all(not it.get("correct") for it in iterations):
+                            task_info["status"] = "failed"
+                            failed_count += 1
+                        else:
+                            task_info["status"] = "incomplete"
+                            pending_count += 1  # Incomplete counts as pending for work
+                except json.JSONDecodeError:
+                    task_info["status"] = "incomplete"
+                    pending_count += 1
+            elif iterations:
+                # Has work but no marker - incomplete
+                if all(not it.get("correct") for it in iterations) and len(iterations) >= 3:
+                    task_info["status"] = "failed"
+                    failed_count += 1
+                else:
+                    task_info["status"] = "incomplete"
+                    pending_count += 1
+            else:
+                pending_count += 1
+
+        tasks_progress.append(task_info)
+
+    # Sort by status priority: in_progress > incomplete > pending > failed > completed
+    status_order = {"in_progress": 0, "incomplete": 1, "pending": 2, "failed": 3, "completed": 4}
+    tasks_progress.sort(key=lambda x: (status_order.get(x["status"], 5), x["name"]))
+
+    avg_speedup = sum(all_speedups) / len(all_speedups) if all_speedups else 0
+
+    return {
+        "session_id": session_id,
+        "level": manifest.get("level"),
+        "summary": {
+            "total": len(all_tasks),
+            "completed": completed_count,
+            "in_progress": in_progress_count,
+            "failed": failed_count,
+            "pending": pending_count,
+            "avg_speedup": round(avg_speedup, 3)
+        },
+        "tasks": tasks_progress
     }
 
 
