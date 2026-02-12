@@ -109,12 +109,13 @@ When invoked with `/kernel-bench [args]`, parse the input:
 3. **Detect single task**: Path ends with `.py` → SINGLE TASK MODE
 4. **Detect directory**: Path ends with `/` or is a level name (level1, level2, level3) → BATCH MODE
 5. **Detect resume**: Contains `--resume` or starts with `resume` → RESUME MODE
-6. **Detect parameters**: Contains `--session`, `--workers`, or `--strategies` → BATCH MODE with config
+6. **Detect parameters**: Contains `--session`, `--workers`, `--strategies`, or `--iterations` → BATCH MODE with config
 7. **Detect natural language**: Contains numbers + keywords ("tasks", "agents", "random") → interpret and route
 
 **Parameter defaults:**
 - `--workers=4` (if not specified)
 - `--strategies=1` (if not specified, simple mode)
+- `--iterations=10` (if not specified, max iterations per task)
 - `--session={level}_{timestamp}` (if not specified)
 
 ## Execution Modes
@@ -132,7 +133,7 @@ When user provides a single .py file path:
    - ITERATE: Up to 3 iterations
 3. **Show progress** interactively to user after each iteration
 4. **Save result** via `save_benchmark_result()`
-5. **Aggregate reflections**: Read `reflection.md` from the task directory, append it to `.claude/agents/kernel-bench-learned.md` grouped by op type (same as BATCH MODE step 6)
+5. **Aggregate reflections**: Run `python3 kb_reflect.py {session_id}` to update per-op-type files in `.claude/agents/learned/`
 
 ### BATCH MODE (Parallel Workers)
 
@@ -141,6 +142,7 @@ When user provides directory, level name, or session parameters:
 1. **Parse parameters** (with defaults):
    - `--workers=N` → N concurrent workers (default: 4)
    - `--strategies=N` → N strategies per optimizer per iteration (default: 1)
+   - `--iterations=N` → max iterations per task (default: 10)
    - `--session=ID` → session identifier (default: auto-generated)
    - `--provider=X` → kbEval provider (default: "local")
 
@@ -148,7 +150,7 @@ When user provides directory, level name, or session parameters:
 
    Build the original command string from parsed args:
    ```
-   original_command = "/kernel-bench {level} --session={session_id} --workers={num_workers} --strategies={num_strategies}"
+   original_command = "/kernel-bench {level} --session={session_id} --workers={num_workers} --strategies={num_strategies} --iterations={max_iterations}"
    ```
 
    Call `init_session()` with all config params:
@@ -158,6 +160,7 @@ When user provides directory, level name, or session parameters:
      level=level,
      num_workers=num_workers,
      num_strategies=num_strategies,
+     max_iterations=max_iterations,
      provider=provider,
      code_type="triton",
      original_command=original_command
@@ -176,6 +179,7 @@ When user provides directory, level name, or session parameters:
      subagent_type: "general-purpose",
      prompt: "You are optimizer worker 1 for session {session_id}.
               Strategies per iteration: {num_strategies}
+              Max iterations per task: {max_iterations}
               Follow .claude/agents/kernel-bench-optimizer.md protocol.
               Use claim_task() to get work, process, repeat until done.",
      name: "optimizer-1",
@@ -185,6 +189,7 @@ When user provides directory, level name, or session parameters:
      subagent_type: "general-purpose",
      prompt: "You are optimizer worker 2 for session {session_id}.
               Strategies per iteration: {num_strategies}
+              Max iterations per task: {max_iterations}
               Follow .claude/agents/kernel-bench-optimizer.md protocol.
               Use claim_task() to get work, process, repeat until done.",
      name: "optimizer-2",
@@ -194,6 +199,7 @@ When user provides directory, level name, or session parameters:
      subagent_type: "general-purpose",
      prompt: "You are optimizer worker 3 for session {session_id}.
               Strategies per iteration: {num_strategies}
+              Max iterations per task: {max_iterations}
               Follow .claude/agents/kernel-bench-optimizer.md protocol.
               Use claim_task() to get work, process, repeat until done.",
      name: "optimizer-3",
@@ -203,6 +209,7 @@ When user provides directory, level name, or session parameters:
      subagent_type: "general-purpose",
      prompt: "You are optimizer worker 4 for session {session_id}.
               Strategies per iteration: {num_strategies}
+              Max iterations per task: {max_iterations}
               Follow .claude/agents/kernel-bench-optimizer.md protocol.
               Use claim_task() to get work, process, repeat until done.",
      name: "optimizer-4",
@@ -249,27 +256,15 @@ When user provides directory, level name, or session parameters:
 
 6. **Aggregate reflections** (post-batch):
 
-   After all workers complete, aggregate their reflections into the learned patterns file:
+   After all workers complete, run the aggregation script:
 
-   1. Read all `reflection.md` files from `~/.inference/claude_code_output/{session_id}/*/reflection.md`
-   2. Parse each reflection's `**Op type**:` line to group by operation type
-   3. Write `.claude/agents/kernel-bench-learned.md` with the following format:
-
-   ```markdown
-   # Learned Patterns
-   <!-- Aggregated from session {session_id} | Updated: {date} -->
-
-   ## {op_type}
-
-   {all reflections for this op type, concatenated}
-
-   ## {next_op_type}
-
-   {all reflections for this op type, concatenated}
+   ```bash
+   python3 kb_reflect.py {session_id}
    ```
 
-   This is simple file reading and concatenation — do it directly with Read/Write tools, no script needed.
-   If `kernel-bench-learned.md` already exists, append the new session's reflections (don't overwrite previous sessions).
+   This reads all `reflection.md` files, groups by op type, and writes per-op-type files
+   to `.claude/agents/learned/{op_type}.md` (e.g., `matmul.md`, `conv.md`).
+   Each file is capped at 5 reflections (top by speedup). Safe to run across multiple sessions — merges and deduplicates.
 
 **Key point:** The SKILL itself handles monitoring - no separate coordinator agent needed.
 

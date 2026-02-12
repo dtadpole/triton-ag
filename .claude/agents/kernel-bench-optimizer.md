@@ -8,6 +8,7 @@ You receive:
 - `session_id`: Session to work in
 - `worker_id`: Your worker identifier (e.g., "optimizer-1")
 - `num_strategies`: Number of parallel sub-agents per task (1 = simple mode, 3 = exploration mode)
+- `max_iterations`: Maximum iterations per task (default: 10)
 
 ## Main Loop
 
@@ -52,7 +53,7 @@ Use the **first match** in the table (matmul > conv > normalization > reduction 
 
 **CRITICAL for num_strategies=3: ALL 3 Task calls MUST be in a SINGLE message.**
 
-Each sub-agent runs the **full 10-iteration optimization loop** independently. The sub-agent owns the entire write → eval → reflect → fix cycle, including calling `update_task_progress()` and `complete_task_progress()`.
+Each sub-agent runs the **full optimization loop** (up to `max_iterations` iterations) independently. The sub-agent owns the entire write → eval → reflect → fix cycle, including calling `update_task_progress()` and `complete_task_progress()`.
 
 **Sub-agent prompt template:**
 
@@ -66,13 +67,14 @@ Task(subagent_type="general-purpose",
              it has the top learnings from previous runs for this op type.
 
              You are optimizing a kernel for this task. Run the FULL iteration loop
-             (up to 10 iterations) as described in strategy.md.
+             (up to {max_iterations} iterations) as described in strategy.md.
 
              Task path: {task_path}
              Task name: {task_name}
              Session: {session_id}
              Provider: {provider}
              Initial strategy: {strategy_name}
+             Max iterations: {max_iterations}
 
              PyTorch code to optimize:
              ```python
@@ -80,11 +82,11 @@ Task(subagent_type="general-purpose",
              ```
 
              CRITICAL RULES:
-             - You MUST complete ALL 10 iterations (0-9) unless speedup >= 1.3x
+             - You MUST complete ALL {max_iterations} iterations (0-{max_iterations-1}) unless speedup >= 1.3x
              - Use task_name (NOT task_path) for update_task_progress() and complete_task_progress()
              - Pass provider='{provider}' to every eval_kernel() call
              - After EVERY eval_kernel(), call update_task_progress() to record the result
-             - When done (target hit OR iteration 9), call complete_task_progress()
+             - When done (target hit OR last iteration), call complete_task_progress()
              - NEVER stop early because speedup is low — low speedup means try harder
              - After completing, you MUST write a reflection.md file (see Step 4b in strategy.md) BEFORE returning
 
@@ -109,12 +111,12 @@ If a sub-agent crashes or returns without completing progress tracking, call `co
 
 ### Enforcing Iteration Count
 
-**After a sub-agent returns, check its result.** If `iterations_completed < 10` AND `best_speedup < 1.3x`, the sub-agent quit early in violation of the rules. You MUST re-spawn a new sub-agent to continue:
+**After a sub-agent returns, check its result.** If `iterations_completed < max_iterations` AND `best_speedup < 1.3x`, the sub-agent quit early in violation of the rules. You MUST re-spawn a new sub-agent to continue:
 
 ```
 result = sub_agent_result
-if result.iterations_completed < 10 and result.best_speedup < 1.3:
-    remaining = 10 - result.iterations_completed
+if result.iterations_completed < max_iterations and result.best_speedup < 1.3:
+    remaining = max_iterations - result.iterations_completed
     # Re-spawn with continuation context
     spawn sub-agent with prompt:
         "... (same as original prompt, including Provider: {provider}) ...

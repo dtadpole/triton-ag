@@ -444,15 +444,26 @@ async def _auto_update_progress(
     should_complete = False
     completion_reason = None
 
-    # Condition 1: Target speedup reached (1.5x by default)
+    # Read max_iterations from session config
+    max_iterations = DEFAULT_MAX_ITERATIONS
+    output_base = Path(config["output"]["base_dir"])
+    manifest_file = output_base / session_id / "session_manifest.json"
+    if manifest_file.exists():
+        try:
+            manifest = json.loads(manifest_file.read_text())
+            max_iterations = manifest.get("config", {}).get("max_iterations", DEFAULT_MAX_ITERATIONS)
+        except (json.JSONDecodeError, Exception):
+            pass
+
+    # Condition 1: Target speedup reached
     if speedup >= DEFAULT_TARGET_SPEEDUP:
         should_complete = True
         completion_reason = f"target_reached ({speedup:.2f}x >= {DEFAULT_TARGET_SPEEDUP}x)"
 
-    # Condition 2: Max iterations reached (iteration is 0-indexed, so >= 9 means 10 iterations)
-    elif iteration >= DEFAULT_MAX_ITERATIONS - 1:
+    # Condition 2: Max iterations reached (iteration is 0-indexed)
+    elif iteration >= max_iterations - 1:
         should_complete = True
-        completion_reason = f"max_iterations ({iteration + 1} >= {DEFAULT_MAX_ITERATIONS})"
+        completion_reason = f"max_iterations ({iteration + 1} >= {max_iterations})"
 
     # Auto-complete if conditions met
     if should_complete and current_best:
@@ -888,6 +899,7 @@ async def init_session(
     # Explicit config params for resume support
     num_workers: int = None,
     num_strategies: int = None,
+    max_iterations: int = None,
     provider: str = None,
     code_type: str = None,
     original_command: str = None
@@ -907,6 +919,7 @@ async def init_session(
         config_override: Optional config overrides dict (legacy, prefer explicit params)
         num_workers: Number of parallel workers (for resume)
         num_strategies: Strategy mode (1=simple, 3=exploration) (for resume)
+        max_iterations: Max iterations per task (default: 10)
         provider: kbEval provider (for resume)
         code_type: "triton" or "cuda" (for resume)
         original_command: The original command that started the session (for resume)
@@ -955,6 +968,10 @@ async def init_session(
         session_config["code_type"] = code_type
     if original_command is not None:
         session_config["original_command"] = original_command
+    if max_iterations is not None:
+        session_config["max_iterations"] = max_iterations
+    elif "max_iterations" not in session_config:
+        session_config["max_iterations"] = DEFAULT_MAX_ITERATIONS
 
     manifest = {
         "session_id": session_id,
@@ -1472,6 +1489,42 @@ async def complete_task_progress(
     progress_file = task_dir / "progress.json"
     best_result_file = task_dir / "best_result.json"
     marker_file = task_dir / ".in_progress"
+
+    # Guard: reject early completion if iterations < max and speedup < target
+    # Read max_iterations from session config if available
+    max_iterations = DEFAULT_MAX_ITERATIONS
+    manifest_file = output_base / session_id / "session_manifest.json"
+    if manifest_file.exists():
+        try:
+            manifest = json.loads(manifest_file.read_text())
+            max_iterations = manifest.get("config", {}).get("max_iterations", DEFAULT_MAX_ITERATIONS)
+        except (json.JSONDecodeError, Exception):
+            pass
+
+    # Count actual iterations from progress.json
+    iterations_done = 0
+    if progress_file.exists():
+        try:
+            existing_progress = json.loads(progress_file.read_text())
+            iterations_done = len(existing_progress.get("iterations", []))
+        except (json.JSONDecodeError, Exception):
+            pass
+
+    if iterations_done < max_iterations and final_speedup < DEFAULT_TARGET_SPEEDUP:
+        remaining = max_iterations - iterations_done
+        logger.warning(f"[kernel-bench] Rejected early completion of {task_name}: "
+                      f"only {iterations_done}/{max_iterations} iterations done, "
+                      f"speedup {final_speedup:.2f}x < {DEFAULT_TARGET_SPEEDUP}x target")
+        return {
+            "success": False,
+            "error": f"Cannot complete: only {iterations_done}/{max_iterations} iterations done "
+                     f"and speedup {final_speedup:.2f}x is below {DEFAULT_TARGET_SPEEDUP}x target. "
+                     f"You MUST continue iterating — {remaining} iterations remaining. "
+                     f"Do NOT call complete_task_progress() until you reach iteration {max_iterations - 1} or speedup >= {DEFAULT_TARGET_SPEEDUP}x.",
+            "iterations_done": iterations_done,
+            "remaining": remaining,
+            "task_name": task_name
+        }
 
     # Update progress.json
     progress = {}

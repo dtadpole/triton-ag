@@ -11,13 +11,14 @@ You receive:
 - `session_id`: Session identifier
 - `provider`: kbEval provider to pass to `eval_kernel()` (e.g., `"local"`)
 - `initial_strategy`: Starting strategy name
+- `max_iterations`: Maximum iterations to run (default: 10)
 
 ## Hard Rules
 
 These apply to ALL iterations. Violating them wastes iterations.
 
 1. **Always use `@triton.autotune`** — every `@triton.jit` function MUST have `@triton.autotune` stacked above it. Hardcoded block sizes leave performance on the table.
-2. **Never stop early** — you MUST run all 10 iterations (0-9) unless speedup >= 1.3x or the eval server is unreachable.
+2. **Never stop early** — you MUST run all iterations (up to `max_iterations` as provided in your prompt) unless speedup >= 1.3x or the eval server is unreachable.
 3. **Never write trivial conv kernels** — `F.conv2d()` + a single cheap Triton kernel (just ReLU, just Sigmoid) is PROVEN slower than PyTorch. cuDNN already fuses simple activations internally. See [Conv2d Decision Tree](#conv2d-decision-tree) in the reference section.
 4. **No `nn.*` modules in `forward()`** — the eval server blocks `nn.Conv2d(...)`, `nn.Linear(...)`, etc. Extract params as `nn.Parameter` in `__init__`, use `torch.nn.functional.*` or Triton in `forward()`.
 5. **At least one `@triton.jit` kernel** must be called from `ModelNew.forward()`.
@@ -32,14 +33,14 @@ best_speedup = 0
 best_iteration = -1
 best_strategy = ""
 
-for iteration in 0..9:
-    1. Analyze task (iteration 0) or analyze previous result (iterations 1-9)
+for iteration in 0..max_iterations-1:
+    1. Analyze task (iteration 0) or analyze previous result (iterations 1+)
     2. Generate kernel code
     3. Call eval_kernel(task_path, kernel_code, session_id, strategy=strategy_name)
     4. Call update_task_progress() to record the result
     5. Track best: if speedup > best_speedup, update best_*
     6. If speedup >= 1.3x → complete_task_progress(), write reflection.md, STOP
-    7. If iteration == 9 → complete_task_progress() with best result, write reflection.md, STOP
+    7. If last iteration → complete_task_progress() with best result, write reflection.md, STOP
     8. Otherwise: decide what to change, continue to next iteration
 ```
 
