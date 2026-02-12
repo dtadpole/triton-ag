@@ -6,6 +6,17 @@ You are an optimizer worker generating optimized CUDA/Triton kernels for kernel_
 
 Claim tasks, run deep optimization with configurable strategy count, save results. Repeat until no tasks remain.
 
+## CRITICAL RULE: NEVER STOP EARLY
+
+You MUST complete ALL 10 iterations (iteration 0 through 9) for every task unless speedup >= 1.3x.
+
+- **NEVER** call `complete_task_progress()` before iteration 9 unless speedup >= 1.3x
+- **NEVER** skip remaining iterations because speedup is low — low speedup means you need MORE iterations, not fewer
+- **NEVER** give up on a task before 10 iterations — even 0.3x speedup at iteration 2 can become 1.5x by iteration 9
+- The ONLY two valid reasons to stop before iteration 9 are:
+  1. Speedup >= 1.3x (target reached)
+  2. The eval server is unreachable after retries
+
 ## Context
 
 You receive:
@@ -284,8 +295,8 @@ Generate ONE kernel directly, evaluate it, iterate if needed:
 1. Pick the BEST strategy from Phase 2 based on operation type
 2. Generate kernel code using that strategy
 3. Call eval_kernel() to evaluate
-4. If speedup >= 1.5x: DONE
-5. If failed or speedup < target: USE THE ERROR to inform next iteration (see Error-Driven Iteration below)
+4. If speedup >= 1.3x: DONE (target reached)
+5. If failed or speedup < 1.3x: USE THE ERROR to inform next iteration (see Error-Driven Iteration below)
 ```
 
 No sub-agents spawned. You generate and evaluate directly.
@@ -379,33 +390,32 @@ Task(subagent_type="general-purpose", name="strategy-C", run_in_background=false
 
 ### Phase 5: ITERATE OR FINALIZE
 
-**Complexity-aware stopping criteria:**
+**Stopping criteria (uniform across all levels):**
 
 ```
-Level 1 tasks (simple ops):
-- Target: 1.5x speedup
-- Acceptable: 1.3x after 5 iterations
-- Max iterations: 10
-- If not beating PyTorch (1.0x): likely a Triton overhead issue, try larger input sizes
+Target: 1.3x speedup (applies to ALL levels: L1, L2, L3)
+Max iterations: 10 (iterations 0 through 9)
 
-Level 2 tasks (fused ops, attention):
-- Target: 2.0x speedup (fusion should give big wins!)
-- Acceptable: 1.3x after 5 iterations
-- Max iterations: 10 (these need more exploration)
-- Key insight: If not getting fusion benefits, re-analyze computation graph
+You MUST keep iterating until one of these conditions is met:
+1. speedup >= 1.3x → call complete_task_progress() and DONE
+2. iteration == 9 (all 10 iterations exhausted) → call complete_task_progress() with best result
 
-Level 3 tasks (complex components):
-- Target: 1.5x speedup (these are hard!)
-- Acceptable: 1.2x after 5 iterations
-- Max iterations: 10 (complex tasks need patience)
-- Consider: Partial optimization (optimize the bottleneck sub-component)
+There is NO "acceptable" early exit. There is NO "good enough" shortcut.
+Low speedup at iteration 2 is NOT a reason to stop — it is a reason to try harder.
+```
+
+**Guidance per level (for strategy selection, NOT for stopping):**
+```
+Level 1 (simple ops): Focus on vectorization, block tuning, memory coalescing
+Level 2 (fused ops): Focus on fusion opportunities, computation graph optimization
+Level 3 (complex components): Consider multi-kernel decomposition, partial optimization
 ```
 
 Decision tree:
-- IF best_speedup >= target for complexity level: Save and DONE (excellent)
-- IF best_speedup >= acceptable AND iteration >= 2: Save and DONE (good enough)
-- IF all strategies failed to compile after max iterations: Log failure with error details, release_task(), move to next task
-- ELSE: **Feed back ALL intermediate results** (see below), generate NEW refined strategies, loop back to Phase 3
+- IF best_speedup >= 1.3x: Save and DONE (target reached)
+- IF iteration == 9: Save best result and DONE (max iterations exhausted)
+- IF all 10 iterations failed to compile: Log failure with error details, release_task(), move to next task
+- ELSE: **You MUST continue.** Feed back ALL intermediate results (see below), generate NEW refined strategies, loop back to Phase 3
 
 ### Intermediate Result Feedback (CRITICAL)
 
@@ -459,12 +469,11 @@ New strategy: block_1024_unroll_8_prefetch
 |---------------|--------------|
 | < 0.8x | Major issue: kernel launch overhead, wrong algorithm, or severe inefficiency |
 | 0.8x - 1.0x | Minor issue: Triton overhead, suboptimal tiling, could match with tuning |
-| 1.0x - 1.3x | On track: Basic approach works, needs refinement (block size, unroll, memory) |
-| 1.3x - 1.5x | Close: Fine-tuning territory (occupancy, cache, vectorization width) |
-| 1.5x - 2.0x | Good: Fusion/algorithm benefits showing |
+| 1.0x - 1.3x | Close: Basic approach works, needs refinement (block size, unroll, memory) |
+| >= 1.3x | Target reached: Save and DONE |
 | > 2.0x | Excellent: Significant algorithmic improvement (eliminated memory, better algorithm) |
 
-**Max iterations: 10 for all levels.**
+**Max iterations: 10 for all levels. You MUST use all 10 unless speedup >= 1.3x.**
 
 **When iterating, your next attempt MUST reference what went wrong AND what worked:**
 ```
@@ -586,7 +595,7 @@ complete_task_progress(
 - **Claim rejected**: Silently try next task
 - **Compile error**: Extract full error message, analyze root cause, fix in next iteration
 - **Correctness error**: Check output shape, dtype, numerical precision - fix in next iteration
-- **All strategies fail after 3 iterations**: release_task() with concatenated error log
+- **All strategies fail to compile after 10 iterations**: release_task() with concatenated error log
 - **GPU server unavailable**: Retry with exponential backoff (1s, 2s, 4s), then skip
 
 **Remember: Errors are valuable feedback. Always use them to improve the next iteration.**

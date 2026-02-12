@@ -93,7 +93,7 @@ _iteration_counter: dict[tuple[str, str], int] = {}
 _best_result_tracker: dict[tuple[str, str], dict] = {}
 
 # Default completion thresholds
-DEFAULT_TARGET_SPEEDUP = 1.5
+DEFAULT_TARGET_SPEEDUP = 1.3
 DEFAULT_MAX_ITERATIONS = 10
 
 
@@ -509,7 +509,7 @@ async def eval_kernel(
     for real-time visibility via get_batch_progress().
 
     **Auto-completion**: Tasks are automatically marked complete when:
-    - Speedup >= 1.5x (target reached), OR
+    - Speedup >= 1.3x (target reached), OR
     - 10 iterations completed (max iterations)
 
     Args:
