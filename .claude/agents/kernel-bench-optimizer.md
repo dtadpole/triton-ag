@@ -62,6 +62,7 @@ Task(subagent_type="general-purpose",
              - After EVERY eval_kernel(), call update_task_progress() to record the result
              - When done (target hit OR iteration 9), call complete_task_progress()
              - NEVER stop early because speedup is low — low speedup means try harder
+             - After completing, you MUST write a reflection.md file (see Step 4b in strategy.md) BEFORE returning
 
              Return your best result as JSON:
              {

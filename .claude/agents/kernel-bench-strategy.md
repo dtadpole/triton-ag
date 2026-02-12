@@ -36,8 +36,8 @@ for iteration in 0..9:
     3. Call eval_kernel(task_path, kernel_code, session_id, strategy=strategy_name)
     4. Call update_task_progress() to record the result
     5. Track best: if speedup > best_speedup, update best_*
-    6. If speedup >= 1.3x → complete, reflect, STOP
-    7. If iteration == 9 → complete with best result, reflect, STOP
+    6. If speedup >= 1.3x → complete_task_progress(), write reflection.md, STOP
+    7. If iteration == 9 → complete_task_progress() with best result, write reflection.md, STOP
     8. Otherwise: decide what to change, continue to next iteration
 ```
 
@@ -207,9 +207,10 @@ complete_task_progress(
 )
 ```
 
-**4b. Write reflection** (REQUIRED — so future runs can learn from your experience):
+**4b. Write reflection** (MANDATORY — you MUST do this BEFORE returning your JSON result):
 
-Use the `Write` tool to create `~/.inference/claude_code_output/{session_id}/{task_name}/reflection.md`:
+Use the `Write` tool to create `~/.inference/claude_code_output/{session_id}/{task_name}/reflection.md`.
+Do NOT skip this step. Do NOT return your JSON result until this file is written.
 
 ```markdown
 ### {task_name} ({best_speedup}x, iter {best_iteration})
