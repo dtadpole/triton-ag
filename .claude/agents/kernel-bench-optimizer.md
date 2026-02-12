@@ -18,10 +18,30 @@ while True:
     3. Call claim_task(session_id, task_name, worker_id)
     4. If claim fails (another worker got it): go to step 1
     5. Call get_task_details(task_path) to read PyTorch source code
-    6. Spawn sub-agent(s) for the claimed task (see below)
-    7. Collect result(s), handle any fallback progress tracking
-    8. Repeat
+       - If get_task_details fails: call release_task(session_id, task_name, error=str(error)) and go to step 1
+    6. Extract task_name from the task path (filename without .py, e.g., "level1/19_ReLU.py" → "19_ReLU")
+    7. Detect the dominant op type from the PyTorch code (see below)
+    8. Spawn sub-agent(s) for the claimed task (see below)
+    9. Collect result(s), handle any fallback progress tracking
+    10. Repeat
 ```
+
+## Detecting Op Type
+
+Before spawning sub-agents, scan the PyTorch code for the dominant operation to determine which learned file to pass:
+
+| Keywords in code | Op type |
+|---|---|
+| `nn.Linear`, `F.linear`, `matmul`, `mm`, `bmm`, `Gemm` | `matmul` |
+| `nn.Conv`, `F.conv` | `conv` |
+| `LayerNorm`, `BatchNorm`, `GroupNorm`, `RMSNorm`, `InstanceNorm` | `normalization` |
+| `cross_entropy`, `nll_loss`, `mse_loss`, `kl_div`, `bce_loss`, `hinge`, `margin` | `loss` |
+| `max_pool`, `avg_pool`, `adaptive_pool`, `F.pool`, `MaxPool`, `AvgPool` | `pooling` |
+| `sum`, `mean`, `max`, `min`, `softmax`, `logsumexp` (without matmul) | `reduction` |
+| `relu`, `sigmoid`, `gelu`, `silu`, `tanh` (without matmul/conv) | `element_wise` |
+| None of the above | `other` |
+
+Use the **first match** in the table (matmul > conv > normalization > reduction > element_wise).
 
 ## Spawning Sub-agents
 
@@ -42,14 +62,16 @@ Task(subagent_type="general-purpose",
              strategy knowledge, code templates, autotune configs, iteration loop
              instructions, and rules you need.
 
-             Also read .claude/agents/kernel-bench-learned.md if it exists —
-             it has learnings and insights from previous optimization runs.
+             Also read .claude/agents/learned/{op_type}.md if it exists —
+             it has the top learnings from previous runs for this op type.
 
              You are optimizing a kernel for this task. Run the FULL iteration loop
              (up to 10 iterations) as described in strategy.md.
 
              Task path: {task_path}
+             Task name: {task_name}
              Session: {session_id}
+             Provider: {provider}
              Initial strategy: {strategy_name}
 
              PyTorch code to optimize:
@@ -59,6 +81,8 @@ Task(subagent_type="general-purpose",
 
              CRITICAL RULES:
              - You MUST complete ALL 10 iterations (0-9) unless speedup >= 1.3x
+             - Use task_name (NOT task_path) for update_task_progress() and complete_task_progress()
+             - Pass provider='{provider}' to every eval_kernel() call
              - After EVERY eval_kernel(), call update_task_progress() to record the result
              - When done (target hit OR iteration 9), call complete_task_progress()
              - NEVER stop early because speedup is low — low speedup means try harder
@@ -83,6 +107,27 @@ After sub-agent(s) return:
 
 If a sub-agent crashes or returns without completing progress tracking, call `complete_task_progress()` with whatever best result you have.
 
+### Enforcing Iteration Count
+
+**After a sub-agent returns, check its result.** If `iterations_completed < 10` AND `best_speedup < 1.3x`, the sub-agent quit early in violation of the rules. You MUST re-spawn a new sub-agent to continue:
+
+```
+result = sub_agent_result
+if result.iterations_completed < 10 and result.best_speedup < 1.3:
+    remaining = 10 - result.iterations_completed
+    # Re-spawn with continuation context
+    spawn sub-agent with prompt:
+        "... (same as original prompt, including Provider: {provider}) ...
+         CONTINUATION: Previous sub-agent ran {result.iterations_completed} iterations
+         but quit early. Best speedup so far: {result.best_speedup}x.
+         You MUST start from iteration {result.iterations_completed} and continue
+         to iteration 9. You have {remaining} iterations remaining.
+         Previous results: {result.all_results}
+         Try DIFFERENT strategies than what was already attempted."
+```
+
+Only allow ONE re-spawn per task (to avoid infinite loops). If the second sub-agent also quits early, accept the result and move on.
+
 ## MCP Tools Available
 
 - `get_pending_tasks(session_id)`: List available tasks
@@ -94,5 +139,6 @@ If a sub-agent crashes or returns without completing progress tracking, call `co
 ## Error Handling
 
 - **Claim rejected**: Silently try next task
+- **`get_task_details` fails after claim**: Call `release_task(session_id, task_name, error=str(error))` so another worker can retry, then try next task
 - **Sub-agent crashes**: Call `complete_task_progress()` with best result if any iterations succeeded, or `release_task()` with error if none completed
 - **No pending tasks**: Report completion and EXIT

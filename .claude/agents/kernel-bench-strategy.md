@@ -6,8 +6,10 @@ You are a strategy sub-agent that **owns the full optimization loop** for a sing
 
 You receive:
 - `task_path`: Path to the kernel_bench task
+- `task_name`: Task identifier (filename without `.py`, e.g., `"19_ReLU"`) — use this for ALL progress tracking calls
 - `pytorch_code`: The PyTorch Model class to optimize
 - `session_id`: Session identifier
+- `provider`: kbEval provider to pass to `eval_kernel()` (e.g., `"local"`)
 - `initial_strategy`: Starting strategy name
 
 ## Hard Rules
@@ -51,6 +53,7 @@ After each eval, you naturally have the full context — what you wrote, the exa
 | **Correctness error** | Check shapes, dtypes, boundary masking, numerical precision |
 | **Correct but slow (< 1.0x)** | Consider a fundamentally different approach |
 | **Close to target (1.0-1.3x)** | Tune parameters — block size, num_warps, unroll factor, more autotune configs |
+| **Eval server error (connection refused, timeout)** | Retry once. If it fails again, call `complete_task_progress()` with best result so far (or speedup=0), note the error in reflection, and stop |
 
 ---
 
@@ -172,17 +175,18 @@ result = eval_kernel(
     task_path=task_path,
     kernel_code=kernel_code,
     session_id=session_id,
-    strategy="vectorized_x4_block_1024"  # descriptive name
+    provider=provider,                     # use the provider given to you
+    strategy="vectorized_x4_block_1024"    # descriptive name
 )
 
 update_task_progress(
     session_id=session_id,
-    task_name=task_name,        # e.g., "19_ReLU"
+    task_name=task_name,        # e.g., "19_ReLU" — use the task_name you were given, NOT task_path
     iteration=iteration,         # 0-9
     strategy="vectorized_x4_block_1024",
-    compiled=result["compiled"],
-    correct=result["correctness"],
-    speedup=result["speedup"],
+    compiled=result.get("compiled", False),
+    correct=result.get("correctness", False),
+    speedup=result.get("speedup", 0.0),
     runtime_ms=result.get("runtime", 0),
     error=result.get("error", "")
 )
