@@ -12,25 +12,25 @@ Optimize CUDA/Triton kernels for kernel_bench tasks with crash recovery and **pa
 **CRITICAL: Parallel execution is the default and expected behavior.**
 
 - **Default workers**: 4 concurrent workers (configurable via `--workers=N`)
-- **Default strategies**: 1 strategy per optimizer per iteration (configurable via `--strategies=N`)
+- **Default strategies**: 1 sub-agent per task (configurable via `--strategies=N`)
 - **Parallel spawning**: ALL workers MUST be spawned in a SINGLE message with multiple Task tool calls
 - **Concurrent tasks**: Each worker claims and processes tasks independently in parallel
 
 ## Strategy Modes
 
-Each optimizer worker can explore 1 or more strategies per iteration:
+Each optimizer worker dispatches tasks to sub-agents that run the full optimization loop (up to 10 iterations each):
 
 | Mode | Flag | Behavior | Use Case |
 |------|------|----------|----------|
-| **Simple (default)** | `--strategies=1` | 1 optimizer → 1 strategy per iteration | Fast, lower cost |
-| **Exploration** | `--strategies=3` | 1 optimizer → 3 parallel strategies per iteration | Better coverage, higher cost |
+| **Simple (default)** | `--strategies=1` | 1 optimizer → 1 sub-agent per task (runs full 10-iteration loop) | Fast, lower cost |
+| **Exploration** | `--strategies=3` | 1 optimizer → 3 independent sub-agents per task (each runs full loop) | Better coverage, higher cost |
 
 ### Simple Mode (1:1 ratio) - DEFAULT
 ```
 /kernel-bench level1 --session=my_run
 /kernel-bench level1 --session=my_run --strategies=1
 ```
-Each optimizer generates ONE kernel per iteration, evaluates it, then iterates if needed.
+Each optimizer spawns ONE sub-agent per task. The sub-agent runs the full write → eval → fix loop for up to 10 iterations.
 - Faster per-task completion
 - Lower API cost
 - Good for simple operations (element-wise, basic reductions)
@@ -39,9 +39,9 @@ Each optimizer generates ONE kernel per iteration, evaluates it, then iterates i
 ```
 /kernel-bench level1 --session=my_run --strategies=3
 ```
-Each optimizer spawns 3 strategy sub-agents IN PARALLEL per iteration, picks the best result.
+Each optimizer spawns 3 independent sub-agents per task IN PARALLEL. Each sub-agent runs its own full optimization loop with a different initial strategy. The optimizer takes the best result.
 - Better chance of finding optimal kernel
-- Higher API cost (3x more generations per iteration)
+- Higher API cost (3x more generations per task)
 - Recommended for complex operations (matmul, attention, fused ops)
 
 ## Input Styles (all supported)
@@ -132,6 +132,7 @@ When user provides a single .py file path:
    - ITERATE: Up to 3 iterations
 3. **Show progress** interactively to user after each iteration
 4. **Save result** via `save_benchmark_result()`
+5. **Aggregate reflections**: Read `reflection.md` from the task directory, append it to `.claude/agents/kernel-bench-learned.md` grouped by op type (same as BATCH MODE step 6)
 
 ### BATCH MODE (Parallel Workers)
 
@@ -246,6 +247,30 @@ When user provides directory, level name, or session parameters:
    print(f"Top performer: {summary.top_performers[0]}")
    ```
 
+6. **Aggregate reflections** (post-batch):
+
+   After all workers complete, aggregate their reflections into the learned patterns file:
+
+   1. Read all `reflection.md` files from `~/.inference/claude_code_output/{session_id}/*/reflection.md`
+   2. Parse each reflection's `**Op type**:` line to group by operation type
+   3. Write `.claude/agents/kernel-bench-learned.md` with the following format:
+
+   ```markdown
+   # Learned Patterns
+   <!-- Aggregated from session {session_id} | Updated: {date} -->
+
+   ## {op_type}
+
+   {all reflections for this op type, concatenated}
+
+   ## {next_op_type}
+
+   {all reflections for this op type, concatenated}
+   ```
+
+   This is simple file reading and concatenation — do it directly with Read/Write tools, no script needed.
+   If `kernel-bench-learned.md` already exists, append the new session's reflections (don't overwrite previous sessions).
+
 **Key point:** The SKILL itself handles monitoring - no separate coordinator agent needed.
 
 ### RESUME MODE
@@ -359,6 +384,7 @@ Best: iteration {N}, {speedup}x ({strategy})
 ### SERVER MODE
 
 When user says "server", "server --list", or provides server configuration parameters:
+
 
 **Architecture Note:** The kbEval server runs on a remote GPU machine. You access it via SSH tunnel,
 so from kernel-bench's perspective, **all servers are localhost** - the remote hostname is implicit
@@ -497,7 +523,7 @@ Spawning 4 workers in parallel... [ALL spawned in single message]
   - optimizer-3: running in background
   - optimizer-4: running in background
 
-Progress: 25/100 (avg 1.28x)  [4 workers, each trying 1 strategy per iteration]
+Progress: 25/100 (avg 1.28x)  [each worker dispatches tasks to sub-agents]
 Progress: 50/100 (avg 1.31x)
 Progress: 75/100 (avg 1.33x)
 
@@ -517,15 +543,15 @@ Initializing session "explore_run"...
 Config: workers=4, strategies=3 (exploration mode)
 Found 100 tasks in level1.
 Spawning 4 workers in parallel...
-  Each worker will spawn 3 strategy sub-agents per iteration
+  Each worker spawns 3 independent sub-agents per task (each runs full loop)
 
-Progress: 15/100 (avg 1.41x)  [higher speedups due to exploration]
+Progress: 15/100 (avg 1.41x)  [higher speedups due to parallel exploration]
 Progress: 30/100 (avg 1.45x)
 ...
 
 === Session Complete ===
 Completed: 98/100 (98%)
-Average speedup: 1.47x  [better coverage from 3 strategies]
+Average speedup: 1.47x  [better coverage from 3 independent sub-agents]
 ```
 
 **Example 4: Custom worker count with exploration**
