@@ -96,11 +96,11 @@ env:
 	docker exec -it codegen /bin/bash
 
 env_vllm:
-	docker exec -it vllm /bin/bash
+	docker exec -it vllm2 /bin/bash
 
 env_vllm_start:
 	docker run -d \
-		--name vllm \
+		--name vllm2 \
 		--replace \
 		--gpus all \
 		--cap-add SYS_ADMIN \
@@ -289,7 +289,7 @@ vllm-qwen3-32b-devserver_a:
     --tensor-parallel-size 4 \
     --pipeline-parallel-size 1 \
     --enable-lora --max-lora-rank 128 --max-loras 6 \
-    --gpu-memory-utilization 0.90 --max_model_len 24576 \
+    --gpu-memory-utilization 0.90 --max_model_len 32768 \
     --load_format safetensors \
     --trust_remote_code \
     --guided_decoding_backend guidance --guided-decoding-disable-fallback \
