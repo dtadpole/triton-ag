@@ -26,6 +26,21 @@ These ensure your kernel code is correct, performant, and properly evaluated. Vi
 5. **At least one `@triton.jit` kernel** must be called from `ModelNew.forward()`.
 6. **Strategy names must be descriptive** — NEVER use generic names like `"triton"`, `"cuda"`, `"v1"`. Use names like `"tiled_64x64x32"`, `"fused_relu_bias"`, `"welford_single_pass"`.
 
+### Legitimate: Algebraic Complexity Reduction
+
+Algebraic complexity reduction is a **legitimate and encouraged** optimization technique. If you can mathematically prove that an operation chain can be simplified to a lower-complexity algorithm (e.g., converting O(M*N*K) matmul + sum into O(M*K) matvec), that is genuine optimization — not gaming.
+
+**Requirements for algebraic shortcuts:**
+- The simplification must be **mathematically correct for ALL possible inputs**, not just specific values or random seeds. Verify your algebra carefully — the eval system tests with multiple different random inputs.
+- The simplified kernel must still use `@triton.jit` for the core computation (rule 5 still applies).
+- Document the algebraic reasoning in code comments so the proof is clear.
+
+Examples of legitimate algebraic optimizations:
+- `sum(X @ W, dim=1) = X @ W.sum(dim=0)` — distributes reduction into weight precomputation
+- `x * scale + x = x * (scale + 1)` — fuses residual into single multiply
+- Diagonal matmul `diag(A) @ B` → row scaling — exploits known matrix structure
+- Detecting that an operation chain always produces zeros/constants for any input
+
 ### Reward Hacking Bans
 
 The techniques below **game the evaluation system** instead of demonstrating real kernel optimization skill. They produce artificially inflated speedups that don't reflect genuine Triton kernel writing ability. They are **strictly banned** — using any of them is considered cheating.
@@ -78,7 +93,7 @@ Before writing any GPU code, do two things: check for algebraic shortcuts, then 
 
 ### Algebraic Reasoning (do this FIRST)
 
-Trace shapes through `forward()` and check for mathematical simplifications. This produces the HIGHEST speedups (10-100x) when applicable.
+Trace shapes through `forward()` and check for mathematical simplifications. This is a **legitimate optimization technique** that produces the highest speedups (10-100x) when applicable. Reducing algorithmic complexity is real optimization, not reward hacking.
 
 ```
 Input: x with shape (batch_size, features) = (128, 4096)
@@ -97,6 +112,11 @@ op3: linear2(op2) → (128, 1) @ (1, 4096).T → (128, 4096)  ← rank-1 outer p
 | Associative reorder | Can matmuls be reordered? | `(A @ B) @ v` → `A @ (B @ v)` reduces FLOPs |
 | Canceling ops | Do operations cancel out? | `exp(log(x))` = `x` |
 | Trivial reduction | Reduction over size-1 dimension? | `sum(x, dim=-1)` where dim has size 1 → squeeze |
+
+**Correctness reliability:** Your algebraic simplification MUST hold for ALL possible input values, not just specific random seeds or value ranges. The eval system tests with multiple different random inputs. Before submitting, verify:
+- The mathematical identity holds universally (not just for positive values, or small values, etc.)
+- Edge cases like zeros, negative values, and large magnitudes don't break the simplification
+- Document the algebraic proof in comments so the reasoning is transparent
 
 If any simplification is found, implement it as iteration 0. Even if it doesn't hit 1.3x, it gives you a better baseline to optimize further.
 

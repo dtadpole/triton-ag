@@ -37,7 +37,7 @@ The following techniques produced good speedup numbers but are **reward hacking*
 
 ## Decision Framework for Matmul Tasks
 
-1. **Check algebraic simplification first**: If a reduction (sum/mean) follows matmul, distribute it into weights. This gives 20-50x.
+1. **Check algebraic simplification first** (legitimate optimization): If a reduction (sum/mean) follows matmul, distribute it into weights. This gives 20-50x. **Verify the identity holds for ALL inputs** — document the proof in comments.
 2. **Check for dead code**: Return values may not use all computed tensors (e.g., unused FC layers). Skip them.
 3. **Matmul epilogue fusion**: The default strategy for Gemm + 2+ pointwise ops. Use the standard tiled matmul template with super-blocking. Fuse bias + activations into the epilogue. Expect 3-7x for medium matrices.
 4. **fp16 for large GEMMs (>1024x1024)**: Only when reference output dtype matches. Explicit .half() casting preferred over autocast for short-runtime tasks.

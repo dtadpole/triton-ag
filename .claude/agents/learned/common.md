@@ -62,7 +62,7 @@
 - **Matmul epilogue fusion**: For Gemm + pointwise ops, fuse bias/activation/scaling into the Triton matmul epilogue. Consistently gives 2-10x for medium-to-large GEMMs.
   (Source: L2: 22_Matmul at 6.56x, 30_Gemm at 7.12x, and 13+ other tasks)
 
-- **Algebraic simplification before writing any kernel**: Check for: (1) sum/mean after matmul distributes into weights, (2) dead code elimination (unused return values), (3) reorder linear ops (AvgPool before Conv1x1 when both are linear), (4) scale+residual = single multiply.
+- **Algebraic simplification before writing any kernel**: A legitimate and encouraged optimization. Check for: (1) sum/mean after matmul distributes into weights, (2) dead code elimination (unused return values), (3) reorder linear ops (AvgPool before Conv1x1 when both are linear), (4) scale+residual = single multiply. **Correctness requirement:** the simplification must hold for ALL possible input values, not just specific random seeds — verify the mathematical identity is universal and document the proof in comments.
   (Source: L2: 14_Gemm at 40x, 51_Gemm at 49.5x; L3: 13_DenseNet121TransitionLayer at 1.75x, 36_LSTMHn at 4.08x)
 
 - **torch.cuda.device(device) context manager**: Essential wrapper around any forward() that uses Triton kernels. Ensures Triton pointers resolve to the correct GPU.
