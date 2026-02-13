@@ -14,7 +14,7 @@ import traceback
 from threading import Timer
 from pydantic import BaseModel
 from torch import nn
-from kbEvalUtil import KernelExecResult, from_kbEval_yaml, format_exception, CorrectnessResult, CorrectnessError, CorrectnessProcessingError, CompileError, CompileInstantiationError, CompileRuntimeError
+from kbEvalUtil import KernelExecResult, from_kbEval_yaml, format_exception, CorrectnessResult, CorrectnessError, CorrectnessProcessingError, CompileError, CompileInstantiationError, CompileRuntimeError, CompileResolveComponentError
 from kbEvalUtil import CorrectnessShapeMismatchError, CorrectnessValueMismatchError, set_seed, get_timing_stats, time_execution_with_cuda_event, load_model_and_inputs, load_custom_model, graceful_eval_cleanup, on_critical_alarm, on_critical_timeout, on_process_timeout, resolve_triton_code
 from kbEvalUtil import get_cache_build_directory, generate_cache_hash, resolve_custom_cuda_kernel
 from kbEvalUtil import get_or_compile_aoti_model, compile_model_torch_compile
@@ -30,6 +30,101 @@ import random
 from configEndpoints import FileLock, cleanup_lockfile
 from util import KB_EVAL_DIR
 # from filelock import FileLock, Timeout
+import torch.nn.functional as _F_module  # for runtime violation checking
+
+
+class FunctionalAPIViolationChecker:
+    """
+    Context manager that patches disallowed F.* and torch.* functions to detect
+    runtime violations. Functions still execute normally (so correctness can be
+    checked), but violations are recorded.
+
+    Usage:
+        checker = FunctionalAPIViolationChecker()
+        with checker:
+            model_new(*inputs)  # patches active, violations recorded
+        # patches removed on exit
+        if checker.violations:
+            raise CompileResolveComponentError(...)
+    """
+
+    # (module_object, attribute_name, display_name) for each function to patch
+    _FUNCTIONS_TO_PATCH = [
+        # F.conv*
+        (_F_module, 'conv1d', 'F.conv1d'),
+        (_F_module, 'conv2d', 'F.conv2d'),
+        (_F_module, 'conv3d', 'F.conv3d'),
+        (_F_module, 'conv_transpose1d', 'F.conv_transpose1d'),
+        (_F_module, 'conv_transpose2d', 'F.conv_transpose2d'),
+        (_F_module, 'conv_transpose3d', 'F.conv_transpose3d'),
+        # F.linear
+        (_F_module, 'linear', 'F.linear'),
+        (_F_module, 'bilinear', 'F.bilinear'),
+        # F.norm*
+        (_F_module, 'batch_norm', 'F.batch_norm'),
+        (_F_module, 'layer_norm', 'F.layer_norm'),
+        (_F_module, 'group_norm', 'F.group_norm'),
+        (_F_module, 'instance_norm', 'F.instance_norm'),
+        # F.pool*
+        (_F_module, 'max_pool1d', 'F.max_pool1d'),
+        (_F_module, 'max_pool2d', 'F.max_pool2d'),
+        (_F_module, 'max_pool3d', 'F.max_pool3d'),
+        (_F_module, 'avg_pool1d', 'F.avg_pool1d'),
+        (_F_module, 'avg_pool2d', 'F.avg_pool2d'),
+        (_F_module, 'avg_pool3d', 'F.avg_pool3d'),
+        (_F_module, 'adaptive_avg_pool1d', 'F.adaptive_avg_pool1d'),
+        (_F_module, 'adaptive_avg_pool2d', 'F.adaptive_avg_pool2d'),
+        (_F_module, 'adaptive_avg_pool3d', 'F.adaptive_avg_pool3d'),
+        # F.activations
+        (_F_module, 'relu', 'F.relu'),
+        (_F_module, 'gelu', 'F.gelu'),
+        (_F_module, 'silu', 'F.silu'),
+        (_F_module, 'sigmoid', 'F.sigmoid'),
+        (_F_module, 'tanh', 'F.tanh'),
+        (_F_module, 'softmax', 'F.softmax'),
+        (_F_module, 'mish', 'F.mish'),
+        # F.dropout
+        (_F_module, 'dropout', 'F.dropout'),
+        (_F_module, 'dropout2d', 'F.dropout2d'),
+        (_F_module, 'dropout3d', 'F.dropout3d'),
+        # F.embedding
+        (_F_module, 'embedding', 'F.embedding'),
+        # F.attention
+        (_F_module, 'scaled_dot_product_attention', 'F.scaled_dot_product_attention'),
+        # F.interpolate
+        (_F_module, 'interpolate', 'F.interpolate'),
+        # torch.* matmul ops
+        (torch, 'matmul', 'torch.matmul'),
+        (torch, 'mm', 'torch.mm'),
+        (torch, 'bmm', 'torch.bmm'),
+        (torch, 'addmm', 'torch.addmm'),
+        (torch, 'einsum', 'torch.einsum'),
+    ]
+
+    def __init__(self):
+        self.violations = []
+        self._originals = {}
+
+    def __enter__(self):
+        for module_obj, attr_name, display_name in self._FUNCTIONS_TO_PATCH:
+            original = getattr(module_obj, attr_name, None)
+            if original is None:
+                continue
+            self._originals[(id(module_obj), attr_name)] = (module_obj, original)
+
+            def make_checker(orig_fn, name):
+                def checking_fn(*args, **kwargs):
+                    self.violations.append(name)
+                    return orig_fn(*args, **kwargs)
+                return checking_fn
+
+            setattr(module_obj, attr_name, make_checker(original, display_name))
+        return self
+
+    def __exit__(self, *args):
+        for (mod_id, attr_name), (module_obj, original) in self._originals.items():
+            setattr(module_obj, attr_name, original)
+        self._originals.clear()
 
 
 def verify_correctness(
@@ -305,6 +400,17 @@ def eval_kernel_custom(
                             except Exception as e:
                                 raise CompileInstantiationError(f"Error in instantiating custom model: [{type(e)}] [{e}]") from e
 
+                            # Wrap custom_model.forward with runtime violation checker
+                            # Only ModelNew.forward is wrapped — reference model runs unpatched
+                            violation_checker = FunctionalAPIViolationChecker()
+                            original_forward = custom_model.forward
+
+                            def checked_forward(*args, **kwargs):
+                                with violation_checker:
+                                    return original_forward(*args, **kwargs)
+
+                            custom_model.forward = checked_forward
+
                             correctness_result = verify_correctness(
                                 original_model,
                                 custom_model,
@@ -313,6 +419,14 @@ def eval_kernel_custom(
                                 seed=seed_num,
                                 device=device,
                             )
+
+                            # Check for runtime violations after correctness trials
+                            if violation_checker.violations:
+                                unique_violations = sorted(set(violation_checker.violations))
+                                raise CompileResolveComponentError(
+                                    f"Code calls disallowed PyTorch operations at runtime: {', '.join(unique_violations[:5])}. "
+                                    "Write the computation in Triton instead."
+                                )
                             if correctness_result.passed_trials == num_verify_trials:
                                 correctness = True
                             else:

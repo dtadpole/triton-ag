@@ -21,8 +21,23 @@ These ensure your kernel code is correct, performant, and properly evaluated. Vi
 
 1. **Always use `@triton.autotune`** — every `@triton.jit` function MUST have `@triton.autotune` stacked above it. Hardcoded block sizes leave performance on the table.
 2. **Never stop early** — you MUST run all iterations (up to `max_iterations` as provided in your prompt) unless speedup >= 1.3x or the eval server is unreachable.
-3. **Never write trivial conv kernels** — `F.conv2d()` + a single cheap Triton kernel (just ReLU, just Sigmoid) is PROVEN slower than PyTorch. cuDNN already fuses simple activations internally. See [Conv2d Decision Tree](#conv2d-decision-tree) in the reference section.
-4. **No `nn.*` modules in `forward()`** — the eval server blocks `nn.Conv2d(...)`, `nn.Linear(...)`, etc. via source code string matching. Extract params as `nn.Parameter` in `__init__`, use `torch.nn.functional.*` or Triton in `forward()`.
+3. **Never write trivial conv kernels** — a Triton kernel for just 1-2 cheap activations (ReLU, Sigmoid) after convolution is PROVEN slower than PyTorch's cuDNN, which already fuses simple activations internally. For conv tasks, focus on algebraic elimination or substantial post-op fusion. See [Conv2d Decision Tree](#conv2d-decision-tree) in the reference section.
+4. **ALL computation in `forward()` must be Triton kernels** — the ONLY PyTorch operations allowed in `forward()` are:
+   - **Tensor creation**: `torch.empty`, `torch.zeros`, `torch.ones`, `torch.full`, `torch.arange`, `torch.linspace`
+   - **Shape/memory manipulation**: `.view()`, `.reshape()`, `.permute()`, `.transpose()`, `.contiguous()`, `torch.cat`, `torch.stack`, `.split()`, `.chunk()`, `.squeeze()`, `.unsqueeze()`, `.expand()`, `.flatten()`, `.narrow()`, `.select()`
+   - **Type/device casting**: `.to()`, `.float()`, `.half()`, `.cuda()`, `.to(device)`
+   - **Triton kernel launches**: your `@triton.jit` functions
+
+   **Everything else is BANNED** — this includes ANY PyTorch function that performs GPU computation (convolution, matrix multiplication, normalization, activation functions, pooling, dropout, embedding lookup, loss computation, interpolation, etc.). This ban applies regardless of how the function is accessed:
+   - `nn.Conv2d(...)`, `nn.Linear(...)`, etc. — blocked by string matching
+   - `torch.nn.functional.conv2d(...)`, `F.linear(...)`, `F.batch_norm(...)` — blocked
+   - `torch.matmul(...)`, `torch.mm(...)`, `torch.bmm(...)`, `torch.einsum(...)` — blocked
+   - `torch.relu(...)`, `torch.sigmoid(...)`, `torch.tanh(...)`, `torch.softmax(...)` — blocked
+   - Renaming imports does NOT help (e.g., `import torch.nn.functional as G; G.conv2d(...)`) — the eval server patches the actual function objects at runtime, not just string names
+   - `getattr(nn, ...)` dynamic construction — blocked
+   - `torch._VF.*` internal ops — blocked
+
+   These all call the same cuDNN/cuBLAS GPU kernels. Using them means PyTorch is doing the computation, not your Triton kernel. Extract weights as `nn.Parameter` in `__init__()`, then write the computation in `@triton.jit` kernels.
 5. **At least one `@triton.jit` kernel** must be called from `ModelNew.forward()`.
 6. **Strategy names must be descriptive** — NEVER use generic names like `"triton"`, `"cuda"`, `"v1"`. Use names like `"tiled_64x64x32"`, `"fused_relu_bias"`, `"welford_single_pass"`.
 
@@ -45,7 +60,7 @@ Examples of legitimate algebraic optimizations:
 
 The techniques below **game the evaluation system** instead of demonstrating real kernel optimization skill. They produce artificially inflated speedups that don't reflect genuine Triton kernel writing ability. They are **strictly banned** — using any of them is considered cheating.
 
-7. **No `getattr(nn, ...)` bypass** — do NOT use `getattr(nn, 'Conv' + '2d')` or similar string concatenation to circumvent the eval server's nn.* module check. This dodges a safety check rather than solving the problem (use `nn.Parameter` + functional API instead).
+7. **No `getattr(nn, ...)` bypass** — do NOT use `getattr(nn, 'Conv' + '2d')` or similar string concatenation to circumvent the eval server's nn.* module check. This dodges a safety check rather than solving the problem. Write the computation in Triton instead (rule 4).
 8. **No `torch.compile` / `torch.jit`** — `torch.compile()`, `torch.jit.script()`, and `torch.jit.trace()` are banned. These delegate optimization to PyTorch's compiler. The benchmark measures YOUR Triton kernel writing, not PyTorch's JIT.
 9. **No CUDA Graphs** — `torch.cuda.CUDAGraph`, `torch.cuda.graph()`, `graph.replay()` are banned. CUDA Graphs reduce kernel launch overhead without writing any actual kernel optimization — they inflate speedup by amortizing Python/driver overhead.
 10. **No identity/noop Triton kernels** — every `@triton.jit` kernel must perform meaningful computation (arithmetic, reductions, etc.), not just load-and-store or touch a single element. A Triton kernel that exists only to satisfy rule 5 while PyTorch builtins do the real work is cheating.
@@ -563,33 +578,48 @@ def fused_sigmoid_sum_kernel(x_ptr, out_ptr, M, D, stride_m, stride_d,
 
 ## Conv2d Decision Tree
 
-**Case 1: Trivial post-conv (1-2 cheap ops like ReLU, Sigmoid, clamp)**
-- DO NOT write a Triton kernel for just the activation
-- Use `F.conv2d()` and apply activation via `torch.relu()` — let cuDNN handle fusion
+**Note:** All PyTorch compute operations including `F.conv2d`, `F.conv_transpose2d`, `torch.matmul`, etc. are banned in `forward()` (rule 4). All convolution computation must be implemented in Triton.
 
-**Case 2: Substantial post-conv (3+ ops, norms, reductions, complex chains)**
-- Use `F.conv2d()` for the convolution (cuDNN is hard to beat)
-- Write ONE Triton kernel fusing ALL post-conv ops
-- Use 2D grid scheduling (channels x spatial)
+**Case 1: Conv can be eliminated algebraically (check FIRST)**
+- Spatial mean/sum after conv distributes into weights (7-14x speedup)
+- AvgPool commutes with affine transforms
+- Dead code elimination (output not used, or collapses to constant)
+- See algebraic reasoning section above
+
+**Case 2: Direct Triton convolution (im2col + matmul)**
+- Use im2col to unfold input, then Triton tiled matmul on the unfolded matrix
+- Fuse bias + activation into the matmul epilogue
+- Best for tasks where post-conv ops are substantial enough to offset the im2col overhead
 
 ```python
 class ModelNew(torch.nn.Module):
-    def __init__(self, in_ch, out_ch, kernel_size, num_groups):
+    def __init__(self, in_ch, out_ch, kernel_size, padding=0):
         super().__init__()
-        conv = torch.nn.Conv2d(in_ch, out_ch, kernel_size, padding=kernel_size//2)
-        self.conv_weight = torch.nn.Parameter(conv.weight.data.clone())
-        self.conv_bias = torch.nn.Parameter(conv.bias.data.clone())
-        gn = torch.nn.GroupNorm(num_groups, out_ch)
-        self.gn_weight = torch.nn.Parameter(gn.weight.data.clone())
-        self.gn_bias = torch.nn.Parameter(gn.bias.data.clone())
-        self.num_groups = num_groups
+        conv = torch.nn.Conv2d(in_ch, out_ch, kernel_size, padding=padding)
+        self.weight = torch.nn.Parameter(conv.weight.data.clone())  # (out_ch, in_ch, kH, kW)
+        self.bias = torch.nn.Parameter(conv.bias.data.clone())
+        self.padding = padding
+        self.kernel_size = kernel_size
 
     def forward(self, x):
-        x = F.conv2d(x, self.conv_weight, self.conv_bias, padding=1)
-        return fused_groupnorm_silu_kernel(x, self.gn_weight, self.gn_bias, self.num_groups)
+        B, C_in, H, W = x.shape
+        C_out, _, kH, kW = self.weight.shape
+        H_out = H + 2 * self.padding - kH + 1
+        W_out = W + 2 * self.padding - kW + 1
+        # im2col via torch.as_strided or a Triton kernel to unfold patches
+        # Reshape weight to (C_out, C_in*kH*kW) and do Triton matmul
+        w_col = self.weight.view(C_out, -1)  # (C_out, C_in*kH*kW)
+        # ... Triton matmul with epilogue fusion for bias + activation
 ```
 
-**Case 3: Conv + Matmul combos** — focus on optimizing the matmul side with epilogue fusion.
+**Case 3: Sliding-window Triton kernel (small kernels)**
+- For small kernel sizes (1x1, 3x3), write a direct Triton kernel that computes convolution
+- Each program handles one output spatial position, iterates over input channels and kernel elements
+- Can fuse ALL post-ops into the same kernel
+
+**Case 4: Conv + Matmul combos** — focus on optimizing the matmul side with epilogue fusion.
+
+**Reality check:** Pure Triton convolution is significantly harder to optimize than cuDNN. For conv-dominated tasks with minimal post-ops, achieving 1.3x speedup may not be feasible. Focus effort on tasks where algebraic elimination or substantial post-op fusion is possible.
 
 ## Reference: Analysis Techniques (L2/L3)
 

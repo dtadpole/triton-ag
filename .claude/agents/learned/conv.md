@@ -1,42 +1,38 @@
 # conv patterns
-<!-- Updated: 2026-02-12 | Source: 0212_v3_l3, merged with 0212_l2 -->
+<!-- Updated: 2026-02-13 | Source: 0212_v8_l2, merged with 0212_v3_l3+0212_l2 -->
 
 ## What Works
 
-### 13_DenseNet121TransitionLayer (1.746x, iter 9) -- Algebraic reordering
-**Key insight**: Reordering AvgPool before Conv1x1 (legal since both are linear) reduces conv computation by 4x. Fusing BN affine+ReLU+AvgPool into one Triton kernel avoids materializing a 256M-element intermediate.
-**What worked**: Pre-compute BN scale/offset from batch stats, then fuse affine+ReLU+2x2 avgpool into single Triton kernel. Conv1x1 then operates on 4x smaller input. Demonstrates that algebraic reordering applies to conv tasks too, not just matmul.
+### 42_ConvTranspose2d_GlobalAvgPool... (14.424x, iter 0) -- Algebraic elimination
+**Key insight**: When spatial mean/sum follows conv_transpose, the entire convolution can be eliminated algebraically: mean_spatial(conv_transpose(x)) = (1/(OH*OW)) * x_sum @ w_sum + bias. Converts massive 2D transposed conv to tiny matmul.
+**What worked**: Spatial sum of input, summed weights, small matmul. Post-ops fused into Triton kernel on tiny output. Also works with stride>1 (44_ConvTranspose2d at 7.68x). Always check if spatial reduction distributes into conv weights.
 
-### L2: 42_ConvTranspose2d_GlobalAvgPool... (13.177x, iter 2) -- Algebraic elimination
-**Key insight**: When post-conv ops include spatial mean/sum, the entire ConvTranspose2d can be eliminated algebraically: mean_spatial(conv_transpose(x)) distributes to sum_ic(weight_sum * spatial_sum(input)) / (OH*OW).
-**What worked**: Three-step pipeline reducing a massive conv to a tiny matmul. Always check for algebraic elimination before writing kernels.
+### 72_ConvTranspose3d_BatchNorm_AvgPool_AvgPool (4.162x, iter 5) -- BN+Pool commutativity
+**Key insight**: AvgPool commutes with BN affine transform since both are linear. Pool BEFORE applying BN affine avoids materializing full BN output (256M elements). Three-kernel pipeline: (K1) per-channel sums for BN stats, (K2) batch stats + running mean/var update, (K3) vectorized pool4 + BN affine from conv output directly. fp16 conv + fused AvgPool(2)+AvgPool(2) into single Pool(4).
+**What worked**: Algebraic BN elimination + pool commutativity saved ~0.5GB memory bandwidth = ~10ms. Reading conv output twice (stats + pool+affine) is much cheaper than materializing full BN output then pooling.
+
+### 13_ConvTranspose3d_Mean_Add_Softmax_Tanh_Scaling (9.051x, iter 6) -- Algebraic decomposition
+**Key insight**: Mean over depth after ConvTranspose3d decomposes into three 2D convolutions: mean_d(conv3d(x,w)) = (1/D)*[conv2d(sum_d(x), sum_kd(w)) - boundary corrections]. Three 2D convs on (B,16,128,128) are much cheaper than one 3D conv on (B,16,32,128,128).
+**What worked**: Derived algebraic identity eliminating 3D conv entirely. Post-conv ops (bias+softmax+tanh+scale) fused into single Triton kernel.
 
 ## What Fails
 
-### 17_SqueezeNetFireModule (1.0x, iter 19) -- Can't beat cuDNN
-**Key insight**: SqueezeNet Fire Module (3 convs + 3 relus) is tightly optimized by cuDNN/AOTI. No Triton kernel or fp16 can beat it.
-**Why it failed**: F.conv2d extracts different cuDNN algorithms than nn.Conv2d modules (correctness issues). fp16 autocast caused CUDA illegal memory access. Triton ReLU breaks cuDNN internal fusion. The module is small enough that cuDNN perfectly saturates the GPU.
-**Better approach**: For small, simple conv+relu architectures with AOTI-compiled reference, accept ~1.0x parity.
+### 34_ConvTranspose3d_LayerNorm_GELU_Scaling (0.665x, iter 11) -- Conv dominated, no algebraic shortcut
+**Key insight**: ConvTranspose3d with large outputs (268M elements) and fast reference (<6ms) are structurally infeasible when all conv operations must be written in Triton.
+**Why it failed**: Triton convolution cannot match cuDNN for this shape. Conv dominates ~80% of runtime. Even fused Triton LN+GELU+Scale cannot compensate.
+**Better approach**: Accept failure for conv_transpose-dominated tasks with large outputs. Focus optimization effort on tasks where algebraic elimination is possible.
 
-### 41_GRUBidirectional (0.914x, iter 1) -- cuDNN RNN unbeatable
-**Key insight**: Bidirectional multi-layer GRU cannot be matched with functional API. The nn.GRU cuDNN path is ~10-15ms faster, creating an unrecoverable gap.
-**Why it failed**: Manual GRU (0.034x), fp16 (0.742x), torch._VF.gru (0.694x) -- no approach matches cuDNN's fused bidirectional path.
-**Better approach**: Accept ~0.9x for bidirectional GRU. Focus optimization effort elsewhere.
-
-## Banned Reward Hacking Techniques
-
-The following techniques produced good speedup numbers but are **reward hacking** — they game the evaluation system rather than demonstrating real Triton kernel writing. They are banned by the strategy hard rules. Do NOT use them.
-
-- **CUDA Graphs** (banned, rule 9): Gave 3-4x for ResNet18, EfficientNetB0. Inflates speedup by amortizing kernel launch overhead, not by writing better kernels.
-- **torch.compile + fp16** (banned, rule 8): Gave 1.4-3.2x for SwinMLP, GoogleNet. Delegates to PyTorch's compiler instead of writing Triton kernels.
-- **torch.jit.script** (banned, rule 8): Gave 1.5-1.7x for ResNet101, MobileNetV1. Same problem — compiler delegation, not kernel writing.
-- **getattr(nn, ...) bypass** (banned, rule 7): Circumvented the eval server's nn.* string check via string concatenation. Use nn.Parameter + functional API instead.
+### 21_Conv2d_Add_Scale_Sigmoid_GroupNorm (0.878x, iter 18) -- Conv + GroupNorm both need Triton
+**Key insight**: Conv2d + GroupNorm tasks require writing both operations in Triton, which is fundamentally harder than when cuDNN conv was available.
+**Why it failed**: Writing both conv and GroupNorm in Triton introduces overhead on both operations vs cuDNN.
+**Better approach**: For Conv + GroupNorm, write custom two-kernel Triton GroupNorm (stats kernel + apply kernel) and im2col+matmul Triton conv.
 
 ## Decision Framework for Conv Tasks
 
-1. **Check if conv can be eliminated algebraically** (e.g., spatial sum/mean after conv distributes into weights). If yes, massive speedup possible (10-50x).
-2. **Check if algebraic reordering applies**: AvgPool before Conv1x1, dead code elimination, linear op reordering.
-3. **If conv dominates (>85% of runtime)**: Use fp16 conv for tensor cores (only if reference outputs fp16) + fuse all post-ops into ONE Triton kernel. Target 1.1-1.3x.
-4. **If post-ops are just 1-2 cheap activations**: Do NOT write a Triton kernel for just the activation. cuDNN fuses these internally. Focus on other optimizations.
-5. **Always**: F.conv* without bias + fuse bias in Triton. Set cudnn.benchmark=True. Wrap forward() in torch.cuda.device(x.device).
-6. **Use nn.Parameter + nn.init + functional API** to extract weights from blocked nn modules. Do NOT use getattr bypass (reward hacking, rule 7).
+1. **Check if conv can be eliminated algebraically** (e.g., spatial sum/mean after conv distributes into weights). If yes, massive speedup possible (7-14x).
+2. **Check if algebraic reordering applies**: AvgPool before Conv1x1, AvgPool commutes with BN affine, dead code elimination (min(x,0)+clamp(0,1)=0), additive constants eliminated by LayerNorm.
+3. **If conv cannot be eliminated**: Write im2col + Triton matmul (with epilogue fusion for bias + post-ops). Use `torch.as_strided` for im2col unfolding (shape manipulation, not compute). For small kernels (1x1, 3x3), consider direct sliding-window Triton kernel.
+4. **If post-ops are just 1-2 cheap activations**: Conv tasks with only trivial post-ops will be harder since cuDNN fuses these internally. Focus on algebraic elimination or accept lower speedup.
+5. **Always**: Wrap forward() in `torch.cuda.device(x.device)`. Use ParamHolder module to match state_dict keys. Cache fp16 weights in `__init__` when using tensor cores.
+6. **Online softmax for conv + softmax tasks**: 2-pass algorithm with BLOCK_SIZE=8192, num_warps=16. Fuse bias+clamp+softmax+post-ops into single kernel. Recompute from fp16 input rather than storing intermediates.
+7. **Conv_transpose tasks**: Write transposed convolution in Triton (im2col approach with transposed weight layout). Accept that these are structurally harder without cuDNN.

@@ -467,15 +467,20 @@ def resolve_custom_cuda_kernel(code: str):
 
 def check_triton_disallowed_nn_modules(code: str) -> list[str]:
     """
-    Check for disallowed torch.nn module usage in Triton code.
+    Check for disallowed torch.nn module, functional API, and torch.* operation usage in Triton code.
 
     Allowed exceptions:
     - nn.Parameter / Parameter
     - Containers: nn.Module, nn.ModuleList, nn.ModuleDict, nn.Sequential, nn.ParameterList, nn.ParameterDict
     - Initialization: nn.init.*
+    - Tensor creation: torch.empty, torch.zeros, torch.ones, torch.full, torch.arange, torch.linspace
+    - Shape manipulation: view, reshape, permute, transpose, contiguous, cat, stack, split, chunk,
+      squeeze, unsqueeze, expand, flatten
+    - Type casting: .to(), .float(), .half()
+    - Device operations: .cuda(), .to(device)
 
     Returns:
-        List of found disallowed nn module usages
+        List of found disallowed module/function usages
     """
     # Disallowed nn modules (heavy PyTorch operations)
     disallowed_nn_modules = [
@@ -559,10 +564,91 @@ def check_triton_disallowed_nn_modules(code: str) -> list[str]:
         'nn.ChannelShuffle',
     ]
 
+    # Disallowed functional API operations (F.* — same cuDNN/cuBLAS kernels as nn.* modules)
+    disallowed_functional = [
+        # Convolution
+        'F.conv1d', 'F.conv2d', 'F.conv3d',
+        'F.conv_transpose1d', 'F.conv_transpose2d', 'F.conv_transpose3d',
+
+        # Pooling
+        'F.max_pool1d', 'F.max_pool2d', 'F.max_pool3d',
+        'F.avg_pool1d', 'F.avg_pool2d', 'F.avg_pool3d',
+        'F.adaptive_avg_pool1d', 'F.adaptive_avg_pool2d', 'F.adaptive_avg_pool3d',
+        'F.adaptive_max_pool1d', 'F.adaptive_max_pool2d', 'F.adaptive_max_pool3d',
+        'F.lp_pool1d', 'F.lp_pool2d',
+
+        # Activation
+        'F.relu', 'F.leaky_relu', 'F.gelu', 'F.silu', 'F.mish',
+        'F.sigmoid', 'F.tanh', 'F.softmax', 'F.log_softmax',
+        'F.elu', 'F.selu', 'F.prelu', 'F.softplus', 'F.softsign',
+        'F.hardtanh', 'F.hardsigmoid', 'F.hardswish',
+        'F.relu6', 'F.rrelu', 'F.celu', 'F.glu',
+        'F.softmin', 'F.tanhshrink', 'F.softshrink', 'F.hardshrink',
+        'F.threshold',
+
+        # Normalization
+        'F.batch_norm', 'F.layer_norm', 'F.group_norm', 'F.instance_norm',
+        'F.local_response_norm',
+
+        # Linear
+        'F.linear', 'F.bilinear',
+
+        # Dropout
+        'F.dropout', 'F.dropout1d', 'F.dropout2d', 'F.dropout3d',
+        'F.alpha_dropout', 'F.feature_alpha_dropout',
+
+        # Embedding
+        'F.embedding', 'F.embedding_bag',
+
+        # Loss
+        'F.cross_entropy', 'F.nll_loss', 'F.mse_loss', 'F.l1_loss',
+        'F.smooth_l1_loss', 'F.binary_cross_entropy', 'F.binary_cross_entropy_with_logits',
+        'F.kl_div', 'F.cosine_embedding_loss', 'F.ctc_loss',
+        'F.huber_loss', 'F.poisson_nll_loss', 'F.gaussian_nll_loss',
+        'F.hinge_embedding_loss', 'F.margin_ranking_loss', 'F.multi_margin_loss',
+        'F.multilabel_margin_loss', 'F.multilabel_soft_margin_loss',
+        'F.soft_margin_loss', 'F.triplet_margin_loss', 'F.triplet_margin_with_distance_loss',
+
+        # Upsampling/Interpolation
+        'F.interpolate', 'F.upsample',
+
+        # Fold/Unfold
+        'F.fold', 'F.unfold',
+
+        # Padding
+        'F.pad',
+
+        # Attention
+        'F.scaled_dot_product_attention',
+        'F.multi_head_attention_forward',
+    ]
+
+    # Disallowed torch.* operations (cuBLAS, cuDNN, or heavy compute)
+    disallowed_torch_ops = [
+        # cuBLAS matmul operations
+        'torch.matmul', 'torch.mm', 'torch.bmm',
+        'torch.addmm', 'torch.addmv', 'torch.baddbmm',
+        'torch.einsum',
+
+        # Activations (call same CUDA kernels as F.* versions)
+        'torch.relu', 'torch.sigmoid', 'torch.tanh', 'torch.softmax',
+
+        # Internal cuDNN RNN ops
+        'torch._VF',
+    ]
+
     found_disallowed = []
     for module in disallowed_nn_modules:
         if module in code:
             found_disallowed.append(module)
+
+    for func in disallowed_functional:
+        if func in code:
+            found_disallowed.append(func)
+
+    for op in disallowed_torch_ops:
+        if op in code:
+            found_disallowed.append(op)
 
     return found_disallowed
 
