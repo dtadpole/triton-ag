@@ -223,6 +223,8 @@ Do NOT skip this step. Do NOT return your JSON result until this file is written
 **Key insight**: One sentence — the single most transferable lesson.
 **What worked**: 1-2 sentences on the winning approach and why.
 **What failed**: 1-2 sentences on approaches that didn't work and why.
+**Environment gotcha** (optional): Any Triton API, device, or server issue encountered (e.g., "tl.math.tanh doesn't exist", "cpu tensor pointer error on cuda:1").
+**Anti-pattern** (optional): Any approach that is PROVEN to never work for this op type (e.g., "Triton conv kernel for simple conv+relu is always slower than cuDNN").
 ```
 
 Focus on **generalizable** insights:
@@ -230,6 +232,8 @@ Focus on **generalizable** insights:
 - GOOD: "Fusing the chain of pointwise ops into one kernel eliminated memory round-trips"
 - BAD: "Tried 5 iterations to get it working"
 - GOOD: "Diagonal matrix times dense is just row scaling — no matmul needed"
+- GOOD (gotcha): "tl.math.tanh doesn't exist — must compute as (exp(2x)-1)/(exp(2x)+1)"
+- GOOD (anti-pattern): "Writing a trivial Triton kernel for conv + single activation is always slower than cuDNN"
 
 **4c. Return result** as JSON:
 ```json

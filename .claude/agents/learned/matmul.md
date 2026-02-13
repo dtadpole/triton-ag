@@ -1,32 +1,41 @@
 # matmul patterns
-<!-- Updated: 2026-02-12 | Top 5 by speedup -->
+<!-- Updated: 2026-02-12 | Source: 0212_l2, merged with prior sessions -->
+
+## What Works
 
 ### 51_Gemm_Subtract_GlobalAvgPool_LogSumExp_GELU_ResidualAdd (49.508x, iter 1)
-**Op type**: matmul
-**Key insight**: mean(Linear(x) - subtract, dim=1) = x @ W.sum(0)/N + mean(bias) - mean(subtract). This converts a full O(M*N*K) matmul into a O(M*K) matvec — a ~4000x FLOP reduction for M=2048, N=K=8192. The LogSumExp of a (2048,1) tensor is a no-op (single element per row).
-**What worked**: Algebraic simplification exploiting the linearity of mean: mean(Wx + b - s) = x @ mean_of_W_columns + mean(b) - mean(s). Precomputed w_sum = W.sum(dim=0) in __init__. Single Triton kernel does matvec dot product, GELU (tanh approximation using exp), and broadcast residual add in one fused pass.
-**What failed**: First attempt failed because tl.math.tanh doesn't exist in the Triton version on the server. Fixed by computing tanh manually as (exp(2x)-1)/(exp(2x)+1).
+**Key insight**: mean(Linear(x) - subtract, dim=1) = x @ W.sum(0)/N + mean(bias) - mean(subtract). Converts O(M*N*K) matmul to O(M*K) matvec -- ~4000x FLOP reduction for M=2048, N=K=8192.
+**What worked**: Algebraic simplification exploiting linearity of mean. Precomputed w_sum = W.sum(dim=0) in __init__. Single Triton kernel does matvec + GELU + residual add. Always check if a post-matmul reduction (sum/mean) can be distributed into weights.
 
-### 14_Gemm_Divide_Sum_Scaling (40.207x, iter 3)
-**Op type**: matmul
-**Key insight**: When matmul output is immediately summed along one dimension, the sum can be distributed into the weight matrix first (sum(x @ W.T, dim=1) = x @ sum(W, dim=0)), reducing a full matmul to a matvec -- ~8192x fewer FLOPs for hidden_size=8192.
-**What worked**: Algebraic simplification reduced (1024, 8192) @ (8192, 8192) matmul to (1024, 8192) @ (8192,) matvec using torch.mv, then a trivial Triton kernel fused the divide-by-2 and scaling into a single multiply. The 40x speedup comes entirely from the math simplification, not from kernel optimization.
-**What failed**: First 3 iterations hit "cpu tensor" Triton errors on non-default CUDA devices (cuda:1, cuda:2). The workaround was using torch.mv for the matvec and only using Triton for the trivial scale operation, which avoided device context issues with Triton pointer arguments.
+### 14_Gemm_Divide_Sum_Scaling (44.773x, iter 1)
+**Key insight**: sum(x @ W.T, dim=1) = x @ W.sum(dim=0), reducing a full matmul to a matvec. Same algebraic pattern as task 51.
+**What worked**: Precomputed w_sum in __init__, torch.mv for matvec (avoids Triton device issues), trivial Triton scale kernel. 44.7x speedup entirely from math simplification.
 
-### 30_Gemm_GroupNorm_Hardtanh (7.118x, iter 3)
-**Op type**: matmul
-**Key insight**: Triton matmul with super-blocking and bias epilogue fusion dramatically outperforms F.linear + separate PyTorch ops, even on large square matrices (8192x8192). The key is avoiding multiple kernel launches and memory round-trips.
-**What worked**: Two-kernel approach: (1) Triton matmul with fused bias add in epilogue, (2) Fused GroupNorm (Welford single-pass) + HardTanh kernel. Using torch.cuda.device(device) context manager fixed the Triton "cpu tensor" error on non-default CUDA devices (cuda:1,2,3).
-**What failed**: F.linear + fused GroupNorm+HardTanh only achieved 1.13x because F.linear was slower than the Triton matmul. The "cpu tensor" error on non-cuda:0 devices was fixed by wrapping forward() in torch.cuda.device(device) context.
+### 30_Gemm_GroupNorm_Hardtanh (10.176x, iter 4) / 64_Gemm_LogSumExp (10.252x, iter 0)
+**Key insight**: fp16 autocast for large GEMMs (>1024x1024) enables tensor cores, giving ~10x speedup over fp32 cuBLAS. This dominates any kernel fusion benefit.
+**What worked**: `torch.amp.autocast(device_type='cuda', dtype=torch.float16)` around the matmul + Triton kernel for post-ops. The GEMM goes from ~8ms (fp32) to ~0.6ms (fp16 tensor cores).
 
-### 22_Matmul_Scale_ResidualAdd_Clamp_LogSumExp_Mish (6.563x, iter 4)
-**Op type**: matmul
-**Key insight**: For matmul followed by pointwise ops then reduction, a Triton matmul kernel with fused epilogue (bias+scale+clamp in registers) dramatically outperforms PyTorch's separate kernel launches. The key win is avoiding writing the large (1024, 8192) intermediate to global memory.
-**What worked**: Triton matmul with super-blocking for L2 locality, fusing bias add, 4x scaling (2x from scale_factor * 2x from x+x), and clamping into the epilogue. A separate logsumexp+mish kernel handles the reduction. This achieved 6.56x by eliminating 3 memory round-trips for the 64MB intermediate.
-**What failed**: Using F.linear for matmul + Triton only for post-ops gave only 1.05x since the matmul dominated and the post-ops saved minimal memory traffic. The eval server blocks nn.Linear even as temporary objects in __init__. tl.math.tanh doesn't exist -- must compute tanh manually via exp.
+### Epilogue Fusion Pattern (3-7x, used in 13+ tasks)
+**Key insight**: For Gemm + pointwise chain, fuse bias/activation/scaling into the Triton matmul epilogue -- compute in registers after tile accumulation, before writing to global memory. Eliminates N memory round-trips.
+**What worked**: Standard tiled matmul with super-blocking (GROUP_M=8), autotune with 7 configs covering 32x32 to 128x128 tiles with K=32/64. In the epilogue: load bias, apply chain (scale, clamp, activation) all in-register. Reliable 3-7x for medium-to-large GEMMs. First-try success rate: ~60% (tasks 39, 40, 45, 63, 75, 94, 98, 99 all hit on iter 0).
 
-### 59_Matmul_Swish_Scaling (5.452x, iter 8)
-**Op type**: matmul
-**Key insight**: For asymmetric matmul shapes (M=128, N=K=32768), the Triton autotune config set matters enormously -- adding BLOCK_N=256 with BLOCK_K=64 configs turned a 0.76x slowdown into a 5.5x speedup by letting autotune find the optimal tile shape for this small-M, large-N workload.
-**What worked**: Triton tiled matmul with fused Swish+scale epilogue, using autotune configs with wide BLOCK_N (128, 256) and deep BLOCK_K (64) options. Pre-transposing the weight matrix in __init__ to avoid runtime transpose. Using torch.cuda.set_device(x.device) for multi-GPU compatibility.
-**What failed**: (1) cuBLAS via torch.addmm/F.linear only reached ~1.18x -- PyTorch's own matmul for this shape is slow because it doesn't tune for the highly asymmetric M<<N shape. (2) Initial Triton matmul with standard configs (32-128 block sizes) was 0.76x slower. (3) In-place kernel modification caused non-deterministic correctness failures (2/3 trials). (4) Cached weight transpose with torch.addmm was ~1.19x but couldn't break 1.3x.
+## What Fails
+
+### 12_Gemm_Multiply_LeakyReLU (0.967x, iter 6)
+**Key insight**: For extremely large square GEMMs (8192x8192), cuBLAS is near-optimal and a custom Triton matmul barely matches it. When the pointwise epilogue (multiply + LeakyReLU) is trivially cheap, the kernel launch overhead makes the combined approach slightly slower.
+**Why it failed**: The matmul itself is >99% of the compute. The epilogue fusion saves negligible memory traffic compared to the matmul cost. In-place modification of F.linear output caused correctness failures.
+**Better approach**: For very large square GEMMs where the post-ops are trivially cheap (1-2 simple activations), use fp16 autocast with F.linear + a separate tiny Triton pointwise kernel. The fp16 tensor core speedup (~10x on the matmul) will dominate. Do NOT write a custom Triton matmul for these shapes unless you also fuse non-trivial post-ops.
+
+### 55_Matmul_MaxPool_Sum_Scale (1.012x, iter 0) / 66_Matmul_Dropout_Softmax (1.033x, iter 5)
+**Key insight**: When a single very large matmul (128x32768x32768 or 128x16384x16384) is >95% of runtime, no post-op fusion can reach 1.3x. Custom Triton matmul was 30% slower than cuBLAS for these shapes.
+**Why it failed**: cuBLAS is extremely well-tuned for large square matmuls. The post-ops operate on the full output tensor but are pure memory-bandwidth-bound with trivial arithmetic, offering <5% potential savings.
+**Better approach**: Focus on fp16 autocast for the matmul itself. If the matmul is already using tensor cores (or the task specifically uses fp32), there is no optimization path available for single-matmul-dominated tasks with large square shapes.
+
+## Decision Framework for Matmul Tasks
+
+1. **Check for algebraic simplification first**: If a reduction (sum/mean) follows matmul, distribute it into weights. This gives 20-50x and should be checked BEFORE writing any kernel.
+2. **Check if fp16 autocast helps**: For large square GEMMs (>2048x2048), fp16 tensor cores give ~10x. Try this before custom Triton matmul.
+3. **Matmul epilogue fusion**: The default strategy for Gemm + 2+ pointwise ops. Use the standard tiled matmul template with super-blocking. Fuse bias + activations into the epilogue. Expect 3-7x for medium matrices, less for very large ones.
+4. **GroupNorm after matmul**: If group_size matches BLOCK_N, fuse into epilogue. Otherwise, use a separate Welford single-pass Triton kernel or F.group_norm.
+5. **Autotune configs for asymmetric shapes**: For small-M, large-N (e.g., 128x32768), add BLOCK_N=256 with BLOCK_K=64 configs. Default configs assume roughly square tiles and miss optimal shapes.
+6. **Never**: Write custom Triton matmul for very large square shapes (>8192x8192) unless you fuse significant post-ops. cuBLAS is near-optimal for these.

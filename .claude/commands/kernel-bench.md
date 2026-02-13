@@ -133,7 +133,7 @@ When user provides a single .py file path:
    - ITERATE: Up to 3 iterations
 3. **Show progress** interactively to user after each iteration
 4. **Save result** via `save_benchmark_result()`
-5. **Aggregate reflections**: Run `python3 kb_reflect.py {session_id}` to update per-op-type files in `.claude/agents/learned/`
+5. **Aggregate reflections**: Run `python3 kb_reflect.py {session_id}` to collect reflections, then spawn the learning agent (see BATCH MODE Step 6b) to update `.claude/agents/learned/`
 
 ### BATCH MODE (Parallel Workers)
 
@@ -256,15 +256,35 @@ When user provides directory, level name, or session parameters:
 
 6. **Aggregate reflections** (post-batch):
 
-   After all workers complete, run the aggregation script:
+   After all workers complete, run the two-step learning pipeline:
 
+   **Step 6a: Collect reflections**
    ```bash
    python3 kb_reflect.py {session_id}
    ```
+   This concatenates all `reflection.md` files into `~/.inference/claude_code_output/{session_id}/all_reflections.md`.
 
-   This reads all `reflection.md` files, groups by op type, and writes per-op-type files
-   to `.claude/agents/learned/{op_type}.md` (e.g., `matmul.md`, `conv.md`).
-   Each file is capped at 5 reflections (top by speedup). Safe to run across multiple sessions — merges and deduplicates.
+   **Step 6b: Spawn learning agent**
+   ```
+   Task(
+     subagent_type: "general-purpose",
+     prompt: "Read .claude/agents/kernel-bench-learner.md — it contains your full instructions.
+
+              You are the learning agent for session '{session_id}'.
+              Reflections file: ~/.inference/claude_code_output/{session_id}/all_reflections.md
+              Output directory: .claude/agents/learned/
+
+              Read ALL reflections, identify cross-cutting patterns, and produce:
+              - learned/common.md (environment constraints, anti-patterns, universal techniques)
+              - learned/{op_type}.md for each op type (top 3 successes + top 2 failures)
+
+              If existing learned files exist, merge with them (keep best from both).
+              Return a summary of what you wrote."
+   )
+   ```
+   The learning agent reads all reflections (~26KB for 50 tasks) and produces distilled
+   knowledge files. This replaces the old mechanical top-5-by-speedup aggregation with
+   intelligent pattern identification that captures failures, anti-patterns, and cross-cutting insights.
 
 **Key point:** The SKILL itself handles monitoring - no separate coordinator agent needed.
 

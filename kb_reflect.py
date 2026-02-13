@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """
-Aggregate reflection.md files from kernel-bench sessions into per-op-type learned files.
+Aggregate and collect reflection.md files from kernel-bench sessions.
 
 Usage:
-    python kb_reflect.py <session_id>       # Aggregate one session
-    python kb_reflect.py                    # Uses most recent session
+    python kb_reflect.py <session_id>             # Collect reflections for learning agent
+    python kb_reflect.py collect <session_id>      # Same as above (explicit)
+    python kb_reflect.py aggregate <session_id>    # Legacy: mechanical top-5-by-speedup aggregation
 
-Output:
-    .claude/agents/learned/{op_type}.md     # One file per op type
-    Each file capped at MAX_PER_OP reflections, keeping highest speedup.
+The default mode ('collect') concatenates all reflection.md files into
+all_reflections.md for the learning agent to process. The 'aggregate' mode
+is the legacy mechanical aggregation (top-5-by-speedup per op type).
 
-Merges with existing files — safe to run multiple times across sessions.
+Output (collect mode):
+    ~/.inference/claude_code_output/{session_id}/all_reflections.md
+
+Output (aggregate mode):
+    .claude/agents/learned/{op_type}.md
 """
 
 import sys
@@ -19,7 +24,7 @@ import re
 from pathlib import Path
 from datetime import datetime
 
-MAX_PER_OP = 5  # Max reflections kept per op type
+MAX_PER_OP = 5  # Max reflections kept per op type (aggregate mode only)
 
 
 def get_output_base():
@@ -73,7 +78,36 @@ def split_into_entries(text):
     return [e.strip() for e in entries if e.strip()]
 
 
+def collect(session_id):
+    """Concatenate all reflection.md files into all_reflections.md for learning agent."""
+    session_dir = get_output_base() / session_id
+    if not session_dir.exists():
+        print(f"Session not found: {session_id}")
+        sys.exit(1)
+
+    # Find all reflection.md files
+    reflection_files = sorted(session_dir.glob("*/reflection.md"))
+    if not reflection_files:
+        print(f"No reflection.md files found in {session_id}")
+        sys.exit(1)
+
+    # Concatenate all reflections
+    all_reflections = []
+    for path in reflection_files:
+        raw = path.read_text().strip()
+        if raw:
+            all_reflections.append(raw)
+
+    output_path = session_dir / "all_reflections.md"
+    header = f"# All Reflections — {session_id}\n<!-- {len(reflection_files)} reflection files, collected {datetime.now().strftime('%Y-%m-%d %H:%M')} -->\n"
+    output_path.write_text(header + "\n" + "\n\n---\n\n".join(all_reflections) + "\n")
+
+    print(f"Collected {len(reflection_files)} reflections → {output_path}")
+    return str(output_path)
+
+
 def aggregate(session_id):
+    """Legacy: mechanical top-5-by-speedup aggregation into per-op-type files."""
     session_dir = get_output_base() / session_id
     if not session_dir.exists():
         print(f"Session not found: {session_id}")
@@ -142,16 +176,33 @@ def aggregate(session_id):
 
 
 def main():
-    if len(sys.argv) > 1:
-        session_id = sys.argv[1]
-    else:
+    args = sys.argv[1:]
+
+    if not args:
         session_id = get_most_recent_session()
         if not session_id:
             print("No sessions found.")
             sys.exit(1)
         print(f"Using most recent session: {session_id}")
+        collect(session_id)
+        return
 
-    aggregate(session_id)
+    # Check for subcommand
+    if args[0] == "collect":
+        session_id = args[1] if len(args) > 1 else get_most_recent_session()
+        if not session_id:
+            print("No sessions found.")
+            sys.exit(1)
+        collect(session_id)
+    elif args[0] == "aggregate":
+        session_id = args[1] if len(args) > 1 else get_most_recent_session()
+        if not session_id:
+            print("No sessions found.")
+            sys.exit(1)
+        aggregate(session_id)
+    else:
+        # Default: treat first arg as session_id, default to collect mode
+        collect(args[0])
 
 
 if __name__ == "__main__":

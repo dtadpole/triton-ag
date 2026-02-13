@@ -63,8 +63,10 @@ Task(subagent_type="general-purpose",
              strategy knowledge, code templates, autotune configs, iteration loop
              instructions, and rules you need.
 
-             Also read .claude/agents/learned/{op_type}.md if it exists —
-             it has the top learnings from previous runs for this op type.
+             Also read .claude/agents/learned/common.md if it exists —
+             it has environment constraints and anti-patterns that apply to ALL tasks.
+             Then read .claude/agents/learned/{op_type}.md if it exists —
+             it has success/failure patterns specific to this op type.
 
              You are optimizing a kernel for this task. Run the FULL iteration loop
              (up to {max_iterations} iterations) as described in strategy.md.
