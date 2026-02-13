@@ -23,14 +23,14 @@
 **Why it failed**: Manual GRU (0.034x), fp16 (0.742x), torch._VF.gru (0.694x) -- no approach matches cuDNN's fused bidirectional path.
 **Better approach**: Accept ~0.9x for bidirectional GRU. Focus optimization effort elsewhere.
 
-## Previously Effective Techniques (NOW BANNED)
+## Banned Reward Hacking Techniques
 
-The following techniques produced good results historically but are now banned by Hard Rules 7-9. They are listed here only as documentation -- do NOT use them.
+The following techniques produced good speedup numbers but are **reward hacking** — they game the evaluation system rather than demonstrating real Triton kernel writing. They are banned by the strategy hard rules. Do NOT use them.
 
-- **CUDA Graphs** (banned, rule 9): Gave 3-4x for ResNet18, EfficientNetB0 by eliminating kernel launch overhead. No longer allowed.
-- **torch.compile + fp16** (banned, rule 8): Gave 1.4-3.2x for SwinMLP, GoogleNet. No longer allowed.
-- **torch.jit.script** (banned, rule 8): Gave 1.5-1.7x for ResNet101, MobileNetV1. No longer allowed.
-- **getattr(nn, ...) bypass** (banned, rule 7): Used to preserve cuDNN optimizations. No longer allowed -- use nn.Parameter + functional API.
+- **CUDA Graphs** (banned, rule 9): Gave 3-4x for ResNet18, EfficientNetB0. Inflates speedup by amortizing kernel launch overhead, not by writing better kernels.
+- **torch.compile + fp16** (banned, rule 8): Gave 1.4-3.2x for SwinMLP, GoogleNet. Delegates to PyTorch's compiler instead of writing Triton kernels.
+- **torch.jit.script** (banned, rule 8): Gave 1.5-1.7x for ResNet101, MobileNetV1. Same problem — compiler delegation, not kernel writing.
+- **getattr(nn, ...) bypass** (banned, rule 7): Circumvented the eval server's nn.* string check via string concatenation. Use nn.Parameter + functional API instead.
 
 ## Decision Framework for Conv Tasks
 
@@ -39,4 +39,4 @@ The following techniques produced good results historically but are now banned b
 3. **If conv dominates (>85% of runtime)**: Use fp16 conv for tensor cores (only if reference outputs fp16) + fuse all post-ops into ONE Triton kernel. Target 1.1-1.3x.
 4. **If post-ops are just 1-2 cheap activations**: Do NOT write a Triton kernel for just the activation. cuDNN fuses these internally. Focus on other optimizations.
 5. **Always**: F.conv* without bias + fuse bias in Triton. Set cudnn.benchmark=True. Wrap forward() in torch.cuda.device(x.device).
-6. **Use nn.Parameter + nn.init + functional API** to extract weights from blocked nn modules. Do NOT use getattr bypass.
+6. **Use nn.Parameter + nn.init + functional API** to extract weights from blocked nn modules. Do NOT use getattr bypass (reward hacking, rule 7).

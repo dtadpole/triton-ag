@@ -10,7 +10,7 @@
 - **Triton "cpu tensor" pointer error on non-cuda:0 devices**: Triton kernels fail with "Pointer argument cannot be accessed from Triton (cpu tensor?)" when the eval server assigns cuda:1/2/3. Fix: wrap the forward method with `with torch.cuda.device(x.device):` or call `torch.cuda.set_device(x.device)` before any Triton kernel launch. This is critical -- 50-80% of eval attempts land on non-cuda:0.
   (Source: nearly every task; most severely L2: 84_Gemm_BatchNorm)
 
-- **Eval server blocks nn.* module strings via source code string matching**: Blocks nn.Conv2d, nn.Linear, nn.BatchNorm2d, nn.ReLU, nn.ReLU6, nn.Dropout, nn.LayerNorm, nn.GELU, nn.Softmax, nn.MaxPool2d, nn.AvgPool2d, nn.AdaptiveAvgPool1d, nn.Sequential, nn.Identity, nn.LSTM, nn.GRU, nn.TransformerEncoderLayer, nn.TransformerEncoder, nn.MultiheadAttention -- even in comments or unused variable names. Workaround: use nn.Parameter + nn.init + functional API instead. (`getattr(nn, ...)` bypass is banned — see strategy hard rules.)
+- **Eval server blocks nn.* module strings via source code string matching**: Blocks nn.Conv2d, nn.Linear, nn.BatchNorm2d, nn.ReLU, nn.ReLU6, nn.Dropout, nn.LayerNorm, nn.GELU, nn.Softmax, nn.MaxPool2d, nn.AvgPool2d, nn.AdaptiveAvgPool1d, nn.Sequential, nn.Identity, nn.LSTM, nn.GRU, nn.TransformerEncoderLayer, nn.TransformerEncoder, nn.MultiheadAttention -- even in comments or unused variable names. Workaround: use nn.Parameter + nn.init + functional API instead. (Do NOT use `getattr(nn, ...)` string concatenation to bypass this check — that is reward hacking, banned by rule 7.)
   (Source: L3: every task; the list grows with each new task)
 
 - **Eval server runs models in training mode**: The server does NOT call `.eval()`. For BatchNorm, `F.batch_norm(training=False)` causes correctness failures (max_diff ~10.0). Must use `F.batch_norm(training=self.training)` to match reference behavior with batch statistics.
@@ -27,6 +27,9 @@
 
 - **Correctness can be device-dependent**: Same code may pass on cuda:0 but fail on cuda:2 due to cuDNN algorithm differences on multi-GPU servers.
   (Source: L3: 16_DenseNet201)
+
+- **torch.compile crashes with BatchNorm in training mode**: Crashes with "CUDAGraphs overwritten" error. Additionally, torch.compile is reward hacking (banned, rule 8) — it delegates to PyTorch's compiler instead of writing Triton kernels.
+  (Source: L3: 25_ShuffleNetUnit, 6_GoogleNetInceptionModule)
 
 ## Anti-Patterns (Never Do This)
 
@@ -45,9 +48,6 @@
 - **Manual GRU/LSTM implementation with Python loops over timesteps**: 20-30x slower than cuDNN which fuses all layers and timesteps into one optimized kernel. Use nn.Parameter + functional API to extract and use RNN weights directly.
   (Source: L3: 39_GRU at 0.05x, 41_GRUBidirectional at 0.034x)
 
-- **torch.compile is banned** (Hard Rule 8): Previously crashed with "CUDAGraphs overwritten" error when used with BatchNorm in training mode. Now fully banned — write Triton kernels directly.
-  (Source: L3: 25_ShuffleNetUnit, 6_GoogleNetInceptionModule)
-
 - **fp16 autocast for small-batch RNNs (batch<=10, hidden<=256)**: cuDNN RNN is already optimized for fp32 and the dtype conversion overhead exceeds any tensor core benefit at these sizes.
   (Source: L3: 38_LSTMBidirectional, 39_GRU, 40_GRUHidden)
 
@@ -56,7 +56,7 @@
 
 ## Universal Techniques
 
-- **fp16 for tensor cores on large GEMMs/convolutions** (only when reference model outputs fp16): Enables tensor cores giving ~2-10x speedup. Two approaches: (a) `model.half()` + `x.half()` for full pipeline fp16 (better for deep models -- avoids per-op dtype management), (b) `torch.amp.autocast` for mixed precision (simpler but adds context manager overhead). Model.half() >> autocast for transformer models with many linear layers. **Output dtype must match reference** — do NOT use fp16 if the reference outputs fp32.
+- **fp16 for tensor cores on large GEMMs/convolutions** (only when reference model outputs fp16): Enables tensor cores giving ~2-10x speedup. Two approaches: (a) `model.half()` + `x.half()` for full pipeline fp16 (better for deep models -- avoids per-op dtype management), (b) `torch.amp.autocast` for mixed precision (simpler but adds context manager overhead). Model.half() >> autocast for transformer models with many linear layers. **Output dtype must match reference** — using fp16 when the reference outputs fp32 is reward hacking (banned, rule 11).
   (Source: L2: 64_Gemm at 10.25x; L3: 1_MLP at 3.6x, 11_VGG16 at 1.58x, 29_SwinMLP at 3.19x)
 
 - **Matmul epilogue fusion**: For Gemm + pointwise ops, fuse bias/activation/scaling into the Triton matmul epilogue. Consistently gives 2-10x for medium-to-large GEMMs.

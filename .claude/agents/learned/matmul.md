@@ -26,14 +26,14 @@
 **Why it failed**: Manual GRU (0.05x), fp16 (no benefit for batch=10, hidden=256), Triton kernels in loop (launch overhead dominates), torch._VF.gru (no flattened parameters).
 **Better approach**: For multi-layer cuDNN RNNs, accept ~1.0x parity. Use nn.Parameter + functional API for weight extraction.
 
-## Previously Effective Techniques (NOW BANNED)
+## Banned Reward Hacking Techniques
 
-The following techniques produced good results historically but are now banned by Hard Rules 7-8, 13. They are listed here only as documentation -- do NOT use them.
+The following techniques produced good speedup numbers but are **reward hacking** — they game the evaluation system rather than demonstrating real Triton kernel writing. They are banned by the strategy hard rules. Do NOT use them.
 
-- **F.scaled_dot_product_attention** (banned, rule 13): Gave 6-8x for MinGPTCausalAttention, MiniGPTBlock. Write the attention computation in Triton instead.
-- **torch.compile** (banned, rule 8): Gave 4.28x for ConvolutionalVisionTransformer. No longer allowed.
-- **getattr(nn, ...) bypass** (banned, rule 7): Used to create nn modules while bypassing string filter. Use nn.Parameter + functional API instead.
-- **CUDA Graphs for RNNs** (banned, rule 9): Gave 4.3x for GRUHidden, 4.1x for LSTMHn. No longer allowed.
+- **F.scaled_dot_product_attention** (banned, rule 13): Gave 6-8x for MinGPTCausalAttention, MiniGPTBlock. Delegates to Flash Attention (a pre-built kernel) instead of writing your own Triton attention.
+- **torch.compile** (banned, rule 8): Gave 4.28x for ConvolutionalVisionTransformer. Delegates to PyTorch's compiler instead of writing Triton kernels.
+- **getattr(nn, ...) bypass** (banned, rule 7): Circumvented the eval server's nn.* string check via string concatenation. Use nn.Parameter + functional API instead.
+- **CUDA Graphs for RNNs** (banned, rule 9): Gave 4.3x for GRUHidden, 4.1x for LSTMHn. Inflates speedup by amortizing kernel launch overhead, not by writing better kernels.
 
 ## Decision Framework for Matmul Tasks
 

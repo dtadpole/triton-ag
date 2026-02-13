@@ -120,7 +120,7 @@ Claude: Initializing session "prod_run"...
 
 **Batch Run with Custom Worker Count:**
 ```
-User: /kernel-bench level1 --session=prod_run --workers=8
+User: /kernel-bench level1 --session=0211_L1 --workers=12
 
 Claude: Initializing session "prod_run"...
         Found 100 tasks in level1, 0 completed.
