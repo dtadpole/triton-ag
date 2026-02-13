@@ -23,6 +23,13 @@ These apply to ALL iterations. Violating them wastes iterations.
 4. **No `nn.*` modules in `forward()`** — the eval server blocks `nn.Conv2d(...)`, `nn.Linear(...)`, etc. Extract params as `nn.Parameter` in `__init__`, use `torch.nn.functional.*` or Triton in `forward()`.
 5. **At least one `@triton.jit` kernel** must be called from `ModelNew.forward()`.
 6. **Strategy names must be descriptive** — NEVER use generic names like `"triton"`, `"cuda"`, `"v1"`. Use names like `"tiled_64x64x32"`, `"fused_relu_bias"`, `"welford_single_pass"`.
+7. **No `getattr(nn, ...)` bypass** — do NOT use `getattr(nn, 'Conv' + '2d')` or similar string concatenation to bypass the nn.* module check. This is reward hacking.
+8. **No `torch.compile` / `torch.jit`** — `torch.compile()`, `torch.jit.script()`, and `torch.jit.trace()` are banned. Write real Triton kernels.
+9. **No CUDA Graphs** — `torch.cuda.CUDAGraph`, `torch.cuda.graph()`, `graph.replay()` are banned. They don't demonstrate kernel optimization skill.
+10. **No identity/noop Triton kernels** — every `@triton.jit` kernel must perform meaningful computation (arithmetic, reductions, etc.), not just load-and-store or touch a single element. A Triton kernel that exists only to satisfy rule 5 while PyTorch builtins do the real work is reward hacking.
+11. **Output dtype must match reference** — your ModelNew output must have the same dtype as the reference Model output. Do NOT use `.half()`, `autocast`, or `float16` to change precision unless the reference model already uses that dtype. (FP16 casts that produce the same dtype as the reference ARE allowed.)
+12. **No reference `Model` instantiation** — do NOT instantiate or call the reference `Model` class inside `ModelNew`. Write your own implementation.
+13. **No `F.scaled_dot_product_attention`** — this delegates to Flash Attention instead of demonstrating Triton kernel writing. Write the attention computation in Triton.
 
 ## Iteration Loop
 

@@ -91,6 +91,12 @@ def verify_correctness(
                 if output.shape != output_new.shape:
                     raise CorrectnessShapeMismatchError(f"Output shape mismatch: Expected {output.shape}, got {output_new.shape}")
 
+                # Check output dtype matches reference
+                if output.dtype != output_new.dtype:
+                    raise CorrectnessShapeMismatchError(
+                        f"Output dtype mismatch: Expected {output.dtype}, got {output_new.dtype}"
+                    )
+
                 # check output value difference
                 if torch.allclose(
                     output, output_new, atol=1e-02, rtol=1e-02

@@ -14,6 +14,7 @@ import numpy as np
 import sys
 import subprocess
 import ast
+import re
 import signal
 import argparse
 from collections import defaultdict
@@ -609,6 +610,84 @@ def resolve_triton_code(code: str):
             "Only nn.Parameter, nn.Module containers, and nn.init are allowed."
         )
     logger.info(f"No disallowed torch.nn modules found in Triton code")
+
+    # === Reward hacking detection checks ===
+
+    # Check for getattr(nn, ...) bypass for disallowed modules
+    getattr_nn_pattern = re.compile(r'getattr\s*\(\s*(?:nn|torch\.nn)\s*,')
+    if getattr_nn_pattern.search(code):
+        raise CompileResolveComponentError(
+            "Code uses getattr(nn, ...) to bypass module restrictions. "
+            "Use nn.Parameter + functional API instead."
+        )
+
+    # Check for torch.compile / torch.jit
+    compile_pattern = re.compile(r'torch\.compile|torch\.jit\.script|torch\.jit\.trace')
+    if compile_pattern.search(code):
+        raise CompileResolveComponentError(
+            "Code uses torch.compile or torch.jit which is not allowed. Write Triton kernels directly."
+        )
+
+    # Check for CUDA Graphs
+    cuda_graph_pattern = re.compile(r'CUDAGraph|cuda\.graph\s*\(|graph\.replay\s*\(|cuda_graph')
+    if cuda_graph_pattern.search(code):
+        raise CompileResolveComponentError(
+            "Code uses CUDA Graphs which is not allowed. Optimize with Triton kernels instead."
+        )
+
+    # Check for noop/identity Triton kernels (conservative: only catches pure load-store)
+    def _check_triton_kernels_have_computation(source_tree):
+        """Check that @triton.jit kernels have real computation, not just load/store."""
+        for node in ast.walk(source_tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            # Check if this function has @triton.jit decorator
+            is_triton_jit = False
+            for dec in node.decorator_list:
+                if isinstance(dec, ast.Attribute) and \
+                   isinstance(dec.value, ast.Name) and \
+                   dec.value.id == 'triton' and dec.attr == 'jit':
+                    is_triton_jit = True
+                    break
+            if not is_triton_jit:
+                continue
+            # Dump the body AST and check for compute operations
+            body_src = ast.dump(node)
+            has_compute = bool(re.search(
+                r'tl\.(dot|sum|max|min|exp|sigmoid|where|sqrt|log|abs|zeros|full|cdiv|math)',
+                body_src
+            ))
+            has_binop = 'BinOp' in body_src
+            if not has_compute and not has_binop:
+                return False, node.name
+        return True, None
+
+    has_computation, noop_func_name = _check_triton_kernels_have_computation(tree)
+    if not has_computation:
+        raise CompileResolveComponentError(
+            f"Triton kernel '{noop_func_name}' appears to be a noop/identity kernel "
+            "(no arithmetic or compute operations found). Every @triton.jit kernel must "
+            "perform meaningful computation."
+        )
+
+    # Check for reference Model(...) instantiation (not ModelNew)
+    model_instantiation_pattern = re.compile(r'(?<!\w)Model\s*\(')
+    for match in model_instantiation_pattern.finditer(code):
+        line_num = code[:match.start()].count('\n')
+        line_text = code.split('\n')[line_num]
+        if 'class ' not in line_text and 'ModelNew' not in line_text:
+            raise CompileResolveComponentError(
+                "Code instantiates the reference Model class. Write your own implementation."
+            )
+
+    # Check for F.scaled_dot_product_attention
+    if 'scaled_dot_product_attention' in code:
+        raise CompileResolveComponentError(
+            "Code uses F.scaled_dot_product_attention which delegates to Flash Attention. "
+            "Write the attention computation in Triton."
+        )
+
+    # === End reward hacking detection checks ===
 
     # check ModelNew.forward calls at least one triton.jit function, using call_graph
     forward_method = "__global__.ModelNew.forward"
