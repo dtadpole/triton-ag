@@ -116,3 +116,85 @@ Write `semantic_verification.md` to the session directory with:
 - Focus on the most informative tasks (highest speedup, most iterations, WARN status)
 - Limit spot-check (code alignment) to 10 tasks max to avoid excessive reads
 - Be honest — if a task legitimately has weak exploration because it hit target on first try, note it as N/A not BAD
+
+---
+
+## Cross-Batch Semantic Checks (Chain Mode)
+
+When invoked with `verify chain_id --semantic`, perform chain-aware semantic analysis
+in addition to per-session checks. The chain_manifest.json in the chain directory
+provides the list of batches and their session IDs.
+
+### Additional Checks for Chain Mode
+
+1. **Strategy Non-Repetition Across Batches**
+   For tasks that appear in multiple batches, compare strategy names across batches.
+   - Read `progress.json` for the same task in each batch session
+   - Extract strategy name sets (stripping explore_/exploit_/revert_ prefixes)
+   - Flag if >50% of strategies in batch N+1 overlap with batch N
+   - A good retry batch should try fundamentally different approaches
+   - Check if `task_histories.json` was used: did batch N+1 avoid strategies listed in histories?
+
+2. **Knowledge Growth Quality**
+   Compare reference files between batches to assess learning effectiveness.
+   - Read `reference/common.md` and `reference/{op_type}.md` files
+   - Check git diff or mtime to see if files changed between batches
+   - Flag if no meaningful changes after a batch with ≥20 completed tasks
+   - Quality check: are new entries tier-classified? Do they have speedup evidence?
+
+3. **History Utilization**
+   Verify optimizers acted on task_histories.json in retry batches.
+   - For 5-10 retry tasks, read the task history entry and the batch N+1 progress
+   - Check: did the optimizer avoid strategies listed in `strategies_tried`?
+   - Check: if `previous_best_speedup` was close to 1.3x, did optimizer focus on tuning?
+   - Flag tasks where optimizer ignored the history entirely (repeated same strategies)
+
+4. **Diminishing Returns Coherence**
+   Check that declining success rates in later batches are explainable.
+   - Read reflections for tasks that failed across multiple batches
+   - Are failure reasons consistent? (e.g., "infeasible — Triton BN too slow" across all batches)
+   - Flag tasks that report different root causes in each batch (inconsistent analysis)
+
+5. **Cumulative Best Accuracy**
+   Spot-check 10 tasks to verify cumulative best speedup matches chain_manifest.json.
+   - Pick 5 tasks that improved across batches + 5 that didn't
+   - Read `best_result.json` from each batch session for each task
+   - Verify the cumulative best is the max across all batches
+   - Flag any discrepancies with chain_manifest cumulative stats
+
+### Chain Semantic Report Format
+
+Write `chain_semantic_verification.md` to the chain directory:
+
+```markdown
+# Chain Semantic Verification Report
+
+**Chain:** {chain_id}
+**Batches analyzed:** {N}
+
+## Strategy Non-Repetition
+- {N} tasks checked across {M} batches
+- {X} tasks had >50% strategy overlap (expected: 0)
+- Examples: {task_name}: batch 0 tried [A, B, C], batch 1 tried [A, B, D] (67% overlap)
+
+## Knowledge Growth
+- Reference files modified: {list}
+- New entries added: {count}
+- Quality: {GOOD|WEAK|NONE}
+
+## History Utilization
+- {N} tasks checked
+- {X}/{N} utilized history (avoided prior strategies)
+- {Y}/{N} ignored history (repeated strategies)
+
+## Diminishing Returns
+- {N} multi-batch failures analyzed
+- {X} consistent (same root cause) — genuine infeasibility
+- {Y} inconsistent (different reasons) — analysis instability
+
+## Cumulative Accuracy
+- {N} tasks spot-checked
+- {X}/{N} cumulative best correct
+- Discrepancies: {list or "none"}
+```
+

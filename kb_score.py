@@ -5,9 +5,11 @@ Kernel Bench Progress Reporter.
 Generates progress summary and detailed markdown reports for kernel bench sessions.
 
 Usage:
-    python kb_progress.py <session_id>
-    python kb_progress.py <session_id> <task_name>
-    python kb_progress.py  # Uses most recent session
+    python kb_score.py <session_id>
+    python kb_score.py <session_id> <task_name>
+    python kb_score.py                          # Uses most recent session
+    python kb_score.py --chain <chain_id>       # Chain cross-batch report
+    python kb_score.py <chain_id>               # Auto-detect chain
 """
 
 import sys
@@ -332,7 +334,7 @@ def generate_markdown_report(session_data: dict, summary: dict) -> str:
 
 def print_console_summary(session_id: str, summary: dict):
     """Print a quick console summary."""
-    print(f"\n   ═══ Session: {session_id} ═══\n")
+    print(f"\n   === Session: {session_id} ===\n")
     print(f"     Total:         {summary['total']}")
     print(f"     Completed:     {summary['completed']}")
     print(f"     In Progress:   {summary['in_progress']}")
@@ -341,14 +343,221 @@ def print_console_summary(session_id: str, summary: dict):
     print(f"     Failed:        {summary['failed']}")
     print(f"     Avg Speedup:   {summary['avg_speedup']:.3f}x")
     print()
-    print(f"   ─── Key Metrics ───")
+    print(f"   --- Key Metrics ---")
     print(f"     Correctness:   {summary['correctness_ratio']:.1%} ({summary['correct_count']}/{summary['total']})")
-    print(f"     Fast (≥1.3x):  {summary['fast_1_3_ratio']:.1%} ({summary['fast_1_3_count']}/{summary['total']})")
+    print(f"     Fast (>=1.3x): {summary['fast_1_3_ratio']:.1%} ({summary['fast_1_3_count']}/{summary['total']})")
     print()
+
+
+# ─── Chain Reporting ───
+
+
+def load_chain_manifest(chain_id):
+    """Load chain_manifest.json for a chain."""
+    base = get_output_base()
+    chain_dir = base / chain_id
+    manifest_file = chain_dir / "chain_manifest.json"
+    if not manifest_file.exists():
+        return None
+    try:
+        return json.loads(manifest_file.read_text())
+    except json.JSONDecodeError:
+        return None
+
+
+def compute_chain_summary(manifest):
+    """Compute cross-batch stats from chain manifest and session data."""
+    batches = manifest.get("batches", [])
+    base = get_output_base()
+
+    # Compute cumulative best per task across all batches
+    all_best = {}
+    batch_summaries = []
+
+    for b in batches:
+        sid = b.get("session_id", "")
+        session_data = load_session_data(sid)
+        if "error" in session_data:
+            batch_summaries.append({
+                "batch_index": b.get("batch_index", 0),
+                "level": b.get("level", "?"),
+                "task_count": b.get("task_count", 0),
+                "passed": 0,
+                "rate": 0,
+                "status": b.get("status", "?"),
+            })
+            continue
+
+        batch_summary = compute_summary(session_data)
+
+        # Update cumulative best
+        for t in session_data.get("tasks", []):
+            name = t["name"]
+            speedup = t.get("best_speedup") or 0
+            if name not in all_best or speedup > all_best[name]:
+                all_best[name] = speedup
+
+        cumulative_total = len(all_best)
+        cumulative_passing = sum(1 for s in all_best.values() if s >= 1.3)
+        cumulative_rate = cumulative_passing / cumulative_total if cumulative_total > 0 else 0
+
+        batch_summaries.append({
+            "batch_index": b.get("batch_index", 0),
+            "level": b.get("level", "?"),
+            "task_count": b.get("task_count", 0),
+            "passed": batch_summary.get("fast_1_3_count", 0),
+            "rate": batch_summary.get("fast_1_3_ratio", 0),
+            "avg_speedup": batch_summary.get("avg_speedup", 0),
+            "cumulative_total": cumulative_total,
+            "cumulative_passing": cumulative_passing,
+            "cumulative_rate": cumulative_rate,
+            "status": b.get("status", "?"),
+        })
+
+    return batch_summaries, all_best
+
+
+def print_chain_summary(chain_id, manifest, batch_summaries):
+    """Print cross-batch improvement table."""
+    print(f"\n   === Chain: {chain_id} ===\n")
+
+    print("   Batch  Level    Tasks  Passed  Rate     Cumulative  Delta")
+    print("   -----  ------   -----  ------  ------   ----------  ------")
+
+    prev_cumulative = 0
+    for bs in batch_summaries:
+        cum_rate = bs.get("cumulative_rate", 0)
+        cum_passing = bs.get("cumulative_passing", 0)
+        cum_total = bs.get("cumulative_total", 0)
+
+        if bs["batch_index"] == 0:
+            delta_str = "  --"
+        else:
+            delta_pp = (cum_rate - prev_cumulative) * 100
+            delta_str = f"+{delta_pp:.1f}pp" if delta_pp >= 0 else f"{delta_pp:.1f}pp"
+
+        status_marker = "" if bs["status"] == "completed" else f" [{bs['status']}]"
+
+        print(f"   {bs['batch_index']:5d}  {bs['level']:<7s}  {bs['task_count']:5d}  {bs['passed']:6d}  "
+              f"{bs['rate']:5.1%}    "
+              f"{cum_passing}/{cum_total} ({cum_rate:.1%})  {delta_str}{status_marker}")
+
+        prev_cumulative = cum_rate
+
+    print()
+
+    # Final cumulative stats
+    cumulative = manifest.get("cumulative", {})
+    if cumulative:
+        print(f"   Overall: {cumulative.get('tasks_passing', 0)}/{cumulative.get('tasks_total', 0)} "
+              f"({cumulative.get('cumulative_success_rate', 0):.1%}), "
+              f"avg speedup {cumulative.get('avg_speedup', 0):.3f}x")
+        print()
+
+
+def find_improved_tasks(manifest, all_best):
+    """Find tasks that improved across batches."""
+    base = get_output_base()
+    batches = manifest.get("batches", [])
+    improvements = []
+
+    # For each task that appears in multiple batches, find improvement
+    task_history = {}  # task_name -> [(batch_index, speedup)]
+    for b in batches:
+        sid = b.get("session_id", "")
+        session_data = load_session_data(sid)
+        if "error" in session_data:
+            continue
+        for t in session_data.get("tasks", []):
+            name = t["name"]
+            speedup = t.get("best_speedup") or 0
+            if name not in task_history:
+                task_history[name] = []
+            task_history[name].append((b.get("batch_index", 0), speedup))
+
+    for name, history in task_history.items():
+        if len(history) < 2:
+            continue
+        first_speedup = history[0][1]
+        last_speedup = history[-1][1]
+        if last_speedup > first_speedup and last_speedup >= 1.3 and first_speedup < 1.3:
+            improvements.append({
+                "name": name,
+                "first": first_speedup,
+                "final": last_speedup,
+                "batches": len(history),
+            })
+
+    improvements.sort(key=lambda x: x["final"] - x["first"], reverse=True)
+    return improvements
+
+
+def generate_chain_report(chain_id, manifest, batch_summaries, all_best):
+    """Generate chain progress markdown report."""
+    lines = []
+    lines.append("# Chain Progress Report")
+    lines.append("")
+    lines.append(f"**Chain:** `{chain_id}`")
+    lines.append(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"**Batches:** {len(batch_summaries)}")
+    lines.append("")
+
+    # Cross-batch improvement table
+    lines.append("## Cross-Batch Improvement")
+    lines.append("")
+    lines.append("| Batch | Level | Tasks | Passed | Rate | Cumulative | Delta |")
+    lines.append("|-------|-------|-------|--------|------|------------|-------|")
+
+    prev_cumulative = 0
+    for bs in batch_summaries:
+        cum_rate = bs.get("cumulative_rate", 0)
+        cum_passing = bs.get("cumulative_passing", 0)
+        cum_total = bs.get("cumulative_total", 0)
+
+        if bs["batch_index"] == 0:
+            delta_str = "--"
+        else:
+            delta_pp = (cum_rate - prev_cumulative) * 100
+            delta_str = f"+{delta_pp:.1f}pp" if delta_pp >= 0 else f"{delta_pp:.1f}pp"
+
+        lines.append(f"| {bs['batch_index']} | {bs['level']} | {bs['task_count']} | "
+                     f"{bs['passed']} | {bs['rate']:.1%} | "
+                     f"{cum_passing}/{cum_total} ({cum_rate:.1%}) | {delta_str} |")
+        prev_cumulative = cum_rate
+
+    lines.append("")
+
+    # Task improvements
+    improvements = find_improved_tasks(manifest, all_best)
+    if improvements:
+        lines.append("## Tasks That Improved Across Batches")
+        lines.append("")
+        lines.append("| Task | First Speedup | Final Speedup | Batches |")
+        lines.append("|------|---------------|---------------|---------|")
+        for imp in improvements[:20]:
+            lines.append(f"| {imp['name']} | {imp['first']:.2f}x | {imp['final']:.2f}x | {imp['batches']} |")
+        lines.append("")
+
+    # Overall stats
+    cumulative = manifest.get("cumulative", {})
+    lines.append("## Overall Stats")
+    lines.append("")
+    lines.append(f"- **Total tasks:** {cumulative.get('tasks_total', 0)}")
+    lines.append(f"- **Passing (>=1.3x):** {cumulative.get('tasks_passing', 0)}")
+    lines.append(f"- **Success rate:** {cumulative.get('cumulative_success_rate', 0):.1%}")
+    lines.append(f"- **Avg speedup:** {cumulative.get('avg_speedup', 0):.3f}x")
+    lines.append("")
+
+    return "\n".join(lines)
 
 
 def main():
     args = sys.argv[1:]
+
+    # Check for --chain flag
+    is_chain = "--chain" in args
+    if is_chain:
+        args = [a for a in args if a != "--chain"]
 
     # Parse arguments
     if not args:
@@ -361,6 +570,41 @@ def main():
         sys.exit(0)
     else:
         session_id = args[0]
+
+    # Auto-detect chain: check for chain_manifest.json
+    base = get_output_base()
+    chain_dir = base / session_id
+    if not is_chain and (chain_dir / "chain_manifest.json").exists():
+        is_chain = True
+
+    if is_chain:
+        # Chain reporting mode
+        manifest = load_chain_manifest(session_id)
+        if not manifest:
+            print(f"Chain not found or corrupted: {session_id}")
+            sys.exit(1)
+
+        batch_summaries, all_best = compute_chain_summary(manifest)
+        print_chain_summary(session_id, manifest, batch_summaries)
+
+        # Show task improvements
+        improvements = find_improved_tasks(manifest, all_best)
+        if improvements:
+            print(f"   --- Tasks Improved Across Batches ({len(improvements)}) ---")
+            for imp in improvements[:10]:
+                print(f"     {imp['name']}: {imp['first']:.2f}x -> {imp['final']:.2f}x")
+            if len(improvements) > 10:
+                print(f"     ... and {len(improvements) - 10} more")
+            print()
+
+        # Generate and save report
+        report = generate_chain_report(session_id, manifest, batch_summaries, all_best)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_file = chain_dir / f"chain_progress_{timestamp}.md"
+        report_file.write_text(report)
+        print(f"   Detailed report: {report_file}")
+        print()
+        sys.exit(0)
 
     task_name = args[1] if len(args) > 1 else None
 
@@ -417,7 +661,7 @@ def main():
     report_file = session_dir / f"progress_{timestamp}.md"
     report_file.write_text(report)
 
-    print(f"   📄 Detailed report: {report_file}")
+    print(f"   Detailed report: {report_file}")
     print()
 
 

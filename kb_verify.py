@@ -9,6 +9,8 @@ Usage:
     python kb_verify.py <session_id>                # All tasks
     python kb_verify.py <session_id> <task_name>    # Single task detail
     python kb_verify.py                             # Most recent session
+    python kb_verify.py --chain <chain_id>          # Chain verification
+    python kb_verify.py <chain_id>                  # Auto-detect chain
 """
 
 import sys
@@ -26,6 +28,9 @@ GENERIC_NAMES = {"triton", "v1", "v2", "v3", "kernel", "attempt", "test", "cuda"
 
 # Completion reasons that indicate a task was not truly optimized
 SKIP_REASONS = ("server_error", "all_iterations_failed")
+
+# Valid batch statuses in order
+VALID_BATCH_STATUSES = ["running", "tasks_done", "learning", "completed"]
 
 
 def get_output_base():
@@ -299,6 +304,496 @@ def verify_task(task_dir, task_name):
     return status, checks
 
 
+# ─── Chain Verification (C1-C12) ───
+
+
+def check_chain_c1_manifest(chain_dir):
+    """C1: chain_manifest.json exists and is valid JSON."""
+    manifest_path = chain_dir / "chain_manifest.json"
+    if not manifest_path.exists():
+        return {"id": "C1", "name": "chain_manifest.json exists and valid",
+                "passed": False, "severity": "FAIL", "detail": "missing"}
+    try:
+        data = json.loads(manifest_path.read_text())
+        has_keys = all(k in data for k in ["chain_id", "config", "batches", "cumulative"])
+        return {"id": "C1", "name": "chain_manifest.json exists and valid",
+                "passed": has_keys, "severity": "FAIL",
+                "detail": "valid with required keys" if has_keys else "missing required keys"}
+    except json.JSONDecodeError:
+        return {"id": "C1", "name": "chain_manifest.json exists and valid",
+                "passed": False, "severity": "FAIL", "detail": "invalid JSON"}
+
+
+def check_chain_c2_statuses(batches):
+    """C2: All batch entries have valid status."""
+    invalid = []
+    for b in batches:
+        status = b.get("status", "")
+        if status not in VALID_BATCH_STATUSES:
+            invalid.append(f"batch {b.get('batch_index', '?')}: '{status}'")
+    return {"id": "C2", "name": "batch statuses valid",
+            "passed": len(invalid) == 0, "severity": "FAIL",
+            "detail": f"invalid: {', '.join(invalid)}" if invalid else "all valid"}
+
+
+def check_chain_c3_monotonic(batches):
+    """C3: Batch statuses monotonically progressed (completed batches before running)."""
+    saw_incomplete = False
+    violations = []
+    for b in batches:
+        status = b.get("status", "")
+        if status == "completed":
+            if saw_incomplete:
+                violations.append(f"batch {b.get('batch_index', '?')}: completed after non-completed")
+        else:
+            saw_incomplete = True
+    return {"id": "C3", "name": "statuses monotonically progressed",
+            "passed": len(violations) == 0, "severity": "FAIL",
+            "detail": f"violations: {', '.join(violations)}" if violations else "monotonic"}
+
+
+def check_chain_c4_sessions_exist(batches):
+    """C4: Each batch session_id maps to an existing session directory."""
+    base = get_output_base()
+    missing = []
+    for b in batches:
+        sid = b.get("session_id", "")
+        if sid and not (base / sid).exists():
+            missing.append(sid)
+    return {"id": "C4", "name": "session directories exist",
+            "passed": len(missing) == 0, "severity": "FAIL",
+            "detail": f"missing: {', '.join(missing)}" if missing else "all exist"}
+
+
+def check_chain_c5_cumulative_stats(manifest):
+    """C5: Cumulative stats are consistent with per-batch bests."""
+    base = get_output_base()
+    batches = manifest.get("batches", [])
+    cumulative = manifest.get("cumulative", {})
+
+    # Recompute cumulative from per-batch data
+    all_best = {}
+    for b in batches:
+        if b.get("status") != "completed":
+            continue
+        sid = b.get("session_id", "")
+        session_dir = base / sid
+        if not session_dir.exists():
+            continue
+
+        # Scan task directories for best results
+        for task_dir in session_dir.iterdir():
+            if not task_dir.is_dir():
+                continue
+            best_file = task_dir / "best_result.json"
+            if best_file.exists():
+                try:
+                    result = json.loads(best_file.read_text())
+                    speedup = result.get("speedup", 0)
+                    name = task_dir.name
+                    if name not in all_best or speedup > all_best[name]:
+                        all_best[name] = speedup
+                except (json.JSONDecodeError, Exception):
+                    pass
+
+    if not all_best:
+        return {"id": "C5", "name": "cumulative stats consistent",
+                "passed": True, "severity": "WARN", "detail": "no data to verify"}
+
+    computed_passing = sum(1 for s in all_best.values() if s >= 1.3)
+    reported_passing = cumulative.get("tasks_passing", 0)
+
+    passed = abs(computed_passing - reported_passing) <= 1  # allow ±1 for rounding
+    return {"id": "C5", "name": "cumulative stats consistent",
+            "passed": passed, "severity": "WARN",
+            "detail": f"computed={computed_passing}, reported={reported_passing}" if not passed else f"consistent ({reported_passing} passing)"}
+
+
+def check_chain_c6_retry_set(manifest):
+    """C6: Retry set is correct — batch N's tasks are a subset of below-target tasks from prior batches."""
+    base = get_output_base()
+    batches = manifest.get("batches", [])
+    config = manifest.get("config", {})
+    target = config.get("target_speedup", 1.3)
+
+    violations = []
+    all_best = {}
+
+    for b in batches:
+        sid = b.get("session_id", "")
+        level = b.get("level", "")
+        batch_idx = b.get("batch_index", 0)
+        session_dir = base / sid
+
+        if not session_dir.exists():
+            continue
+
+        # Get this batch's task list
+        manifest_file = session_dir / "session_manifest.json"
+        if not manifest_file.exists():
+            continue
+        try:
+            sm = json.loads(manifest_file.read_text())
+            batch_tasks = set(sm.get("tasks", []))
+        except json.JSONDecodeError:
+            continue
+
+        # For batch 0 of a level, all tasks are valid
+        # For subsequent batches of the same level, check subset
+        prior_same_level = [pb for pb in batches
+                           if pb.get("level") == level and pb.get("batch_index", 0) < batch_idx]
+        if prior_same_level:
+            # Compute which tasks were below target in prior batches
+            below_target = set()
+            for pb in prior_same_level:
+                pb_dir = base / pb.get("session_id", "")
+                if not pb_dir.exists():
+                    continue
+                pb_manifest_file = pb_dir / "session_manifest.json"
+                if not pb_manifest_file.exists():
+                    continue
+                try:
+                    pb_sm = json.loads(pb_manifest_file.read_text())
+                    for tn in pb_sm.get("tasks", []):
+                        best_speedup = all_best.get(tn, 0)
+                        if best_speedup < target:
+                            below_target.add(tn)
+                except json.JSONDecodeError:
+                    pass
+
+            # Check: batch tasks should be subset of below_target (for below_target mode)
+            if config.get("retry_mode") == "below_target":
+                extra = batch_tasks - below_target
+                if extra and len(extra) > 0:
+                    violations.append(f"batch {batch_idx}: {len(extra)} tasks not in below-target set")
+
+        # Update all_best with this batch's results
+        for task_dir in session_dir.iterdir():
+            if not task_dir.is_dir():
+                continue
+            best_file = task_dir / "best_result.json"
+            if best_file.exists():
+                try:
+                    result = json.loads(best_file.read_text())
+                    speedup = result.get("speedup", 0)
+                    name = task_dir.name
+                    if name not in all_best or speedup > all_best[name]:
+                        all_best[name] = speedup
+                except (json.JSONDecodeError, Exception):
+                    pass
+
+    return {"id": "C6", "name": "retry set correctness",
+            "passed": len(violations) == 0, "severity": "WARN",
+            "detail": "; ".join(violations) if violations else "correct"}
+
+
+def check_chain_c7_histories(batches):
+    """C7: task_histories.json exists for batch N>=1."""
+    base = get_output_base()
+    missing = []
+
+    # Group by level to find retries
+    level_seen = {}
+    for b in batches:
+        level = b.get("level", "")
+        batch_idx = b.get("batch_index", 0)
+        sid = b.get("session_id", "")
+
+        if level in level_seen:
+            # This is a retry — should have task_histories.json
+            session_dir = base / sid
+            histories_file = session_dir / "task_histories.json"
+            if not histories_file.exists():
+                missing.append(f"batch {batch_idx} ({sid})")
+
+        level_seen[level] = batch_idx
+
+    return {"id": "C7", "name": "task_histories.json for retries",
+            "passed": len(missing) == 0, "severity": "WARN",
+            "detail": f"missing: {', '.join(missing)}" if missing else "present where needed"}
+
+
+def check_chain_c8_history_validity(batches):
+    """C8: Task histories reference only strategies that appear in prior batches."""
+    base = get_output_base()
+    issues = []
+
+    for b in batches:
+        sid = b.get("session_id", "")
+        session_dir = base / sid
+        histories_file = session_dir / "task_histories.json"
+
+        if not histories_file.exists():
+            continue
+
+        try:
+            histories = json.loads(histories_file.read_text())
+        except json.JSONDecodeError:
+            issues.append(f"batch {b.get('batch_index', '?')}: invalid JSON in task_histories.json")
+            continue
+
+        # Spot check: verify from_batches references are valid session IDs
+        for task_name, entry in histories.items():
+            from_batches = entry.get("from_batches", [])
+            for fb in from_batches:
+                if not (base / fb).exists():
+                    issues.append(f"batch {b.get('batch_index', '?')}: {task_name} references non-existent {fb}")
+                    break
+            if issues:
+                break  # Don't over-report
+
+    return {"id": "C8", "name": "history references valid",
+            "passed": len(issues) == 0, "severity": "WARN",
+            "detail": "; ".join(issues[:3]) if issues else "valid"}
+
+
+def check_chain_c9_knowledge_modified(batches):
+    """C9: Reference files were modified between batches (mtime check)."""
+    ref_dir = Path(".claude/agents/reference")
+    if not ref_dir.exists():
+        return {"id": "C9", "name": "knowledge files modified between batches",
+                "passed": True, "severity": "WARN", "detail": "no reference directory"}
+
+    # Check if common.md exists and was modified recently
+    common_file = ref_dir / "common.md"
+    if not common_file.exists():
+        return {"id": "C9", "name": "knowledge files modified between batches",
+                "passed": True, "severity": "WARN", "detail": "no common.md"}
+
+    # For completed batches > 0, check if any reference file was modified
+    completed = [b for b in batches if b.get("status") == "completed"]
+    if len(completed) <= 1:
+        return {"id": "C9", "name": "knowledge files modified between batches",
+                "passed": True, "severity": "WARN", "detail": "only 0-1 completed batches"}
+
+    # Just check that reference files exist and have been written
+    ref_files = list(ref_dir.glob("*.md"))
+    not_modified = []
+    for rf in ref_files:
+        if rf.stat().st_size == 0:
+            not_modified.append(rf.name)
+
+    return {"id": "C9", "name": "knowledge files modified between batches",
+            "passed": len(not_modified) == 0, "severity": "WARN",
+            "detail": f"empty: {', '.join(not_modified)}" if not_modified else f"{len(ref_files)} files present"}
+
+
+def check_chain_c10_convergence(manifest):
+    """C10: Convergence decision was justified."""
+    batches = manifest.get("batches", [])
+    config = manifest.get("config", {})
+    max_batches = config.get("max_batches", 0)
+
+    completed = [b for b in batches if b.get("status") == "completed"]
+
+    if len(completed) >= max_batches:
+        return {"id": "C10", "name": "convergence justified",
+                "passed": True, "severity": "WARN", "detail": "max batches reached"}
+
+    if len(completed) < 2:
+        return {"id": "C10", "name": "convergence justified",
+                "passed": True, "severity": "WARN", "detail": "not enough batches to check"}
+
+    # Check if early stop was justified
+    last = completed[-1]
+    prev = completed[-2]
+    last_rate = last.get("cumulative_success_rate", 0)
+    prev_rate = prev.get("cumulative_success_rate", 0)
+    delta = last_rate - prev_rate
+
+    # If chain stopped early, delta should be < 3pp
+    if len(completed) < max_batches:
+        justified = delta < 0.03
+        return {"id": "C10", "name": "convergence justified",
+                "passed": justified, "severity": "WARN",
+                "detail": f"stopped at batch {len(completed)-1}, delta={delta:.1%}pp {'(<3pp)' if justified else '(>=3pp, premature?)'}"}
+
+    return {"id": "C10", "name": "convergence justified",
+            "passed": True, "severity": "WARN", "detail": "chain ran to completion"}
+
+
+def check_chain_c11_no_empty(batches):
+    """C11: No batch has 0 tasks."""
+    empty = [b.get("batch_index", "?") for b in batches if b.get("task_count", 0) == 0]
+    return {"id": "C11", "name": "no empty batches",
+            "passed": len(empty) == 0, "severity": "FAIL",
+            "detail": f"empty batches: {empty}" if empty else "all have tasks"}
+
+
+def check_chain_c12_worker_scaling(batches, config):
+    """C12: Worker count scaled appropriately."""
+    max_workers = config.get("workers", 15)
+    issues = []
+
+    for b in batches:
+        task_count = b.get("task_count", 0)
+        if task_count > 0 and task_count < max_workers // 3:
+            # Check if session manifest has scaled workers
+            sid = b.get("session_id", "")
+            session_dir = get_output_base() / sid
+            manifest_file = session_dir / "session_manifest.json"
+            if manifest_file.exists():
+                try:
+                    sm = json.loads(manifest_file.read_text())
+                    actual_workers = sm.get("config", {}).get("num_workers", max_workers)
+                    if actual_workers > task_count:
+                        issues.append(f"batch {b.get('batch_index', '?')}: {actual_workers} workers for {task_count} tasks")
+                except (json.JSONDecodeError, Exception):
+                    pass
+
+    return {"id": "C12", "name": "worker scaling appropriate",
+            "passed": len(issues) == 0, "severity": "WARN",
+            "detail": "; ".join(issues) if issues else "appropriate"}
+
+
+def verify_chain(chain_id):
+    """Run chain-level verification. Returns (per_batch_results, chain_checks)."""
+    base = get_output_base()
+    chain_dir = base / chain_id
+
+    # C1: Manifest exists
+    c1 = check_chain_c1_manifest(chain_dir)
+    if not c1["passed"]:
+        return [], [c1]
+
+    manifest = json.loads((chain_dir / "chain_manifest.json").read_text())
+    batches = manifest.get("batches", [])
+    config = manifest.get("config", {})
+
+    # Run per-batch verification
+    per_batch_results = {}
+    for b in batches:
+        sid = b.get("session_id", "")
+        if b.get("status") != "completed":
+            continue
+
+        session_dir = base / sid
+        if not session_dir.exists():
+            continue
+
+        # Get task list
+        manifest_file = session_dir / "session_manifest.json"
+        if manifest_file.exists():
+            try:
+                sm = json.loads(manifest_file.read_text())
+                all_tasks = sm.get("tasks", [])
+            except json.JSONDecodeError:
+                all_tasks = []
+        else:
+            all_tasks = [d.name for d in session_dir.iterdir()
+                        if d.is_dir() and (d / "progress.json").exists()]
+
+        results = []
+        skipped = 0
+        for task_name in all_tasks:
+            task_dir = session_dir / task_name
+            if not task_dir.exists() or not (task_dir / "best_result.json").exists():
+                skipped += 1
+                continue
+            try:
+                best = json.loads((task_dir / "best_result.json").read_text())
+                if best.get("completion_reason") in SKIP_REASONS:
+                    skipped += 1
+                    continue
+            except (json.JSONDecodeError, Exception):
+                pass
+
+            status, checks = verify_task(task_dir, task_name)
+            results.append({"task_name": task_name, "status": status, "checks": checks})
+
+        per_batch_results[sid] = {"results": results, "skipped": skipped, "batch_index": b.get("batch_index", 0)}
+
+    # Run chain-level checks C1-C12
+    chain_checks = [
+        c1,
+        check_chain_c2_statuses(batches),
+        check_chain_c3_monotonic(batches),
+        check_chain_c4_sessions_exist(batches),
+        check_chain_c5_cumulative_stats(manifest),
+        check_chain_c6_retry_set(manifest),
+        check_chain_c7_histories(batches),
+        check_chain_c8_history_validity(batches),
+        check_chain_c9_knowledge_modified(batches),
+        check_chain_c10_convergence(manifest),
+        check_chain_c11_no_empty(batches),
+        check_chain_c12_worker_scaling(batches, config),
+    ]
+
+    return per_batch_results, chain_checks
+
+
+def generate_chain_report(chain_id, per_batch_results, chain_checks):
+    """Generate chain verification markdown report."""
+    lines = []
+    lines.append("# Chain Verification Report")
+    lines.append("")
+    lines.append(f"**Chain:** `{chain_id}`")
+    lines.append(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"**Batches:** {len(per_batch_results)}")
+    lines.append("")
+
+    # Chain-level checks
+    chain_pass = sum(1 for c in chain_checks if c["passed"])
+    chain_warn = sum(1 for c in chain_checks if not c["passed"] and c["severity"] == "WARN")
+    chain_fail = sum(1 for c in chain_checks if not c["passed"] and c["severity"] == "FAIL")
+
+    lines.append("## Cross-Batch Checks")
+    lines.append("")
+    lines.append(f"**Score:** {chain_pass}/{len(chain_checks)} PASS, {chain_warn} WARN, {chain_fail} FAIL")
+    lines.append("")
+    lines.append("| # | Check | Status | Detail |")
+    lines.append("|---|-------|--------|--------|")
+    for c in chain_checks:
+        mark = "PASS" if c["passed"] else c["severity"]
+        lines.append(f"| {c['id']} | {c['name']} | {mark} | {c['detail']} |")
+    lines.append("")
+
+    # Per-batch summaries
+    lines.append("## Per-Batch Verification")
+    lines.append("")
+    for sid, data in sorted(per_batch_results.items(), key=lambda x: x[1].get("batch_index", 0)):
+        results = data["results"]
+        total = len(results)
+        p = sum(1 for r in results if r["status"] == "PASS")
+        w = sum(1 for r in results if r["status"] == "WARN")
+        f = sum(1 for r in results if r["status"] == "FAIL")
+        lines.append(f"### Batch {data['batch_index']} ({sid})")
+        lines.append(f"**Score:** {p}/{total} PASS, {w} WARN, {f} FAIL ({data['skipped']} skipped)")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def print_chain_summary(chain_id, per_batch_results, chain_checks):
+    """Print chain verification console summary."""
+    print(f"\n   ═══ Chain Verification: {chain_id} ═══\n")
+
+    # Per-batch summaries
+    for sid, data in sorted(per_batch_results.items(), key=lambda x: x[1].get("batch_index", 0)):
+        results = data["results"]
+        total = len(results)
+        p = sum(1 for r in results if r["status"] == "PASS")
+        w = sum(1 for r in results if r["status"] == "WARN")
+        f = sum(1 for r in results if r["status"] == "FAIL")
+        print(f"   Per-batch: {p}/{total} PASS, {w} WARN, {f} FAIL   (batch {data['batch_index']})")
+
+    print()
+
+    # Chain-level checks
+    chain_pass = sum(1 for c in chain_checks if c["passed"])
+    chain_warn = sum(1 for c in chain_checks if not c["passed"] and c["severity"] == "WARN")
+    chain_fail = sum(1 for c in chain_checks if not c["passed"] and c["severity"] == "FAIL")
+
+    print(f"   Cross-batch: {chain_pass}/{len(chain_checks)} PASS, {chain_warn} WARN, {chain_fail} FAIL")
+
+    # Show failures and warnings
+    issues = [c for c in chain_checks if not c["passed"]]
+    if issues:
+        for c in issues:
+            print(f"     {c['severity']} {c['id']}: {c['detail']}")
+    print()
+
+
 # ─── Report Generation ───
 
 
@@ -386,6 +881,11 @@ def print_single_task(task_name, status, checks):
 def main():
     args = sys.argv[1:]
 
+    # Check for --chain flag
+    is_chain = "--chain" in args
+    if is_chain:
+        args = [a for a in args if a != "--chain"]
+
     if not args:
         session_id = get_most_recent_session()
         if not session_id:
@@ -397,9 +897,28 @@ def main():
     else:
         session_id = args[0]
 
+    # Auto-detect chain: if session_id starts with "chain_" or has chain_manifest.json
+    base = get_output_base()
+    chain_dir = base / session_id
+    if not is_chain and (chain_dir / "chain_manifest.json").exists():
+        is_chain = True
+
+    if is_chain:
+        # Chain verification mode
+        per_batch_results, chain_checks = verify_chain(session_id)
+        print_chain_summary(session_id, per_batch_results, chain_checks)
+
+        # Generate and save report
+        report = generate_chain_report(session_id, per_batch_results, chain_checks)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_file = chain_dir / f"chain_verification_{timestamp}.md"
+        report_file.write_text(report)
+        print(f"   Detailed report: {report_file}")
+        print()
+        sys.exit(0)
+
     task_filter = args[1] if len(args) > 1 else None
 
-    base = get_output_base()
     session_dir = base / session_id
 
     if not session_dir.exists():

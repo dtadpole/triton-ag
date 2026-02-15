@@ -25,6 +25,21 @@ In batch mode, you run a **claim → optimize → complete → claim next** loop
 
        pytorch_code = get_task_details(task_path)
 
+       # ── Cross-batch task history check (chain mode) ──
+       # After claiming, check if task_histories.json exists in session dir.
+       # This file is written by the chain orchestrator for batch N>=1.
+       session_dir = ~/.inference/claude_code_output/{session_id}
+       Read {session_dir}/task_histories.json (if it exists)
+       If it contains an entry for this task_name:
+         - Read the "strategies_tried" list — DO NOT repeat any strategy from it
+         - Use "reflection_summary" to inform Phase A analysis
+         - Start from a fundamentally different approach than "previous_best_strategy"
+         - If all Tier 1-2 strategies were exhausted in previous attempts,
+           focus on Tier 3-4 deep tuning of the highest-speedup previous approach
+         - If "previous_best_speedup" is close to 1.3x (>= 1.1x), prioritize
+           targeted tuning over broad exploration
+       # ── End task history check ──
+
        Run Phase A: Analyze (detect ops, load reference files, generate strategy list)
        Run Phase B: Explore (try 2-3 strategies, pick winner)
        Run Phase C: Exploit (deep-tune winner)

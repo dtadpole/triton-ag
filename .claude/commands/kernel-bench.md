@@ -87,6 +87,29 @@ Each optimizer runs the full optimization loop (up to 20 iterations) per task. I
 ```
 → Run learning on completed session (kernel knowledge + algorithm improvement)
 
+### Style 10: Chain (multi-level sequence)
+```
+/kernel-bench chain level1,level2,level3
+/kernel-bench chain level1,level1,level2 --workers=8
+```
+→ Sequential multi-batch chain with learning between each batch
+
+### Style 11: Multi-batch (same level repeated)
+```
+/kernel-bench level1 --batches=3
+/kernel-bench level2 --batches=5 --retry=all --workers=8
+```
+→ Equivalent to `chain level1,level1,level1` — same level repeated N times
+
+**Chain options:**
+- `--batches=N` — number of batches (default for chain: length of level list)
+- `--retry=below_target|failed|all` — which tasks to retry (default: `below_target`)
+  - `below_target`: re-run tasks with speedup < 1.3x
+  - `failed`: only tasks with 0x (compile/correctness/server error)
+  - `all`: re-run every task
+- `--workers=N` — max workers per batch (default: 15, scaled down for smaller retry sets)
+- `--iterations=N` — max iterations per task (default: 20)
+
 ## Parsing Logic
 
 When invoked with `/kernel-bench [args]`, parse the input:
@@ -97,11 +120,19 @@ When invoked with `/kernel-bench [args]`, parse the input:
 2. **Detect progress query**: Starts with `progress` OR user just says "progress" → **PROGRESS MODE** (run the script!)
 3. **Detect verify**: Starts with `verify` → **VERIFY MODE** (run kb_verify.py!)
 3b. **Detect learn**: Starts with `learn` → **LEARN MODE**
+3c. **Detect chain**: Starts with `chain ` → **CHAIN MODE**
+3d. **Detect --batches**: Contains `--batches=N` → **CHAIN MODE** (same level repeated N times)
 4. **Detect single task**: Path ends with `.py` → SINGLE TASK MODE
 5. **Detect directory**: Path ends with `/` or is a level name (level1, level2, level3) → BATCH MODE
-6. **Detect resume**: Contains `--resume` or starts with `resume` → RESUME MODE
+6. **Detect resume**: Contains `--resume` or starts with `resume` → RESUME MODE (check for chain resume — see below)
 7. **Detect parameters**: Contains `--session`, `--workers`, or `--iterations` → BATCH MODE with config
 8. **Detect natural language**: Contains numbers + keywords ("tasks", "agents", "random") → interpret and route
+
+**Chain parsing details:**
+- `chain level1,level2,level3` → `levels = ["level1","level2","level3"]`, `max_batches = 3`
+- `level1 --batches=3` → `levels = ["level1","level1","level1"]`, `max_batches = 3`
+- Extract `--retry=below_target|failed|all` (default: `below_target`)
+- Extract `--workers=N`, `--iterations=N` (same defaults as batch mode)
 
 **Parameter defaults:**
 - `--workers=15` (if not specified)
@@ -399,6 +430,17 @@ When user provides directory, level name, or session parameters:
 
 When user provides `--resume my_session`:
 
+**First, detect if this is a chain resume:**
+```
+chain_dir = ~/.inference/claude_code_output/{my_session}
+if chain_manifest.json exists in chain_dir → CHAIN RESUME (see below)
+else → SINGLE SESSION RESUME (existing logic below)
+```
+
+Also support explicit: `/kernel-bench --resume chain_XXXXXX`
+
+#### Single Session Resume
+
 1. **Get session state** to show user what's resuming:
 
    ```
@@ -429,11 +471,105 @@ When user provides `--resume my_session`:
 
 4. **Wait loop + Finalize**: Same as BATCH MODE steps 4-6.
 
+#### Chain Resume
+
+When `chain_manifest.json` exists in the session directory:
+
+1. **Read chain manifest:**
+   ```
+   chain_manifest = Read chain_dir/chain_manifest.json
+   config = chain_manifest["config"]
+   levels = [b["level"] for b in chain_manifest["batches"]]
+   max_batches = config["max_batches"]
+   workers = config["workers"]
+   max_iterations = config.get("iterations", 20)
+   retry_mode = config["retry_mode"]
+   ```
+
+2. **Check for chain extension:**
+   ```
+   # If user specified --batches=N on resume, extend the chain
+   if --batches=N provided:
+       max_batches = len(chain_manifest["batches"]) + N
+       config["max_batches"] = max_batches
+       Write chain_manifest.json
+   ```
+
+3. **Find last batch and determine resume action:**
+   ```
+   last_batch = chain_manifest["batches"][-1]
+
+   if last_batch["status"] == "running":
+       # Mid-batch crash. Delegate to single session resume for this batch.
+       Resume session last_batch["session_id"] using Single Session Resume above.
+       # After session completes, update status
+       Update last_batch["status"] to "tasks_done" in chain_manifest.json
+
+   if last_batch["status"] == "tasks_done":
+       # Tasks done but learning never started. Run full learning pipeline.
+       Update last_batch["status"] to "learning" in chain_manifest.json
+       Run finalize steps 5a-5f from BATCH MODE.
+       Update last_batch["status"] to "completed" in chain_manifest.json
+
+   elif last_batch["status"] == "learning":
+       # Partial learning. Detect what finished, re-run missing.
+       session_dir = ~/.inference/claude_code_output/{last_batch["session_id"]}
+
+       # Check which artifacts exist:
+       missing_learners = []
+       if all_reflections.md NOT in session_dir → re-run kb_reflect.py
+       if all_algo_traces.md NOT in session_dir → re-run kb_reflect.py collect_traces
+       if algorithm_changelog.md NOT in session_dir → re-spawn algorithm learner
+       if reference/common.md mtime < session start → re-spawn common learner
+       # For each op type with reflections, check reference/{op}.md mtime
+
+       # Re-run only missing learners
+       if missing_learners:
+           Spawn missing learner agents (same prompts as BATCH MODE finalize)
+           Wait for completion
+       Update last_batch["status"] to "completed" in chain_manifest.json
+
+   # last_batch["status"] is now "completed"
+   ```
+
+4. **Continue chain from next batch:**
+   ```
+   next_batch_index = last_batch["batch_index"] + 1
+
+   # Rebuild all_best_results from all completed batches
+   for batch in chain_manifest["batches"]:
+       if batch["status"] == "completed":
+           batch_progress = get_batch_progress(batch["session_id"])
+           for task in batch_progress["tasks"]:
+               name = task["task_name"]
+               speedup = task.get("best", {}).get("speedup", 0) if task.get("best") else 0
+               if name not in all_best_results or speedup > all_best_results[name]:
+                   all_best_results[name] = speedup
+
+   # Re-derive levels list for remaining batches
+   # If --batches was used, extend levels list to match max_batches
+   # Then continue the CHAIN MODE batch loop from next_batch_index
+
+   if next_batch_index < max_batches:
+       Continue CHAIN MODE batch loop from batch_index = next_batch_index
+   else:
+       Print chain summary table
+   ```
+
 ### PROGRESS MODE
 
 **⚠️ MANDATORY: You MUST run the progress script - do NOT just call MCP tools directly!**
 
 When user says "progress", "progress {session_id}", or just asks about progress:
+
+**First, detect if this is a chain session:**
+```
+If session_id starts with "chain_":
+    chain_dir = ~/.inference/claude_code_output/{session_id}
+    if chain_manifest.json exists in chain_dir → run chain progress (see below)
+```
+
+#### Single Session Progress
 
 **STEP 1 (REQUIRED): Run the progress script via Bash:**
 ```bash
@@ -488,6 +624,27 @@ Status: {status} | Worker: {worker} | Iterations: {done}/{planned}
 (all iterations with full details)
 
 Best: iteration {N}, {speedup}x ({strategy})
+```
+
+#### Chain Progress
+
+When session_id is a chain (starts with `chain_` and has `chain_manifest.json`):
+
+```bash
+python3 kb_score.py --chain {chain_id}
+```
+
+This displays the cross-batch improvement table. If the script doesn't support `--chain` yet,
+read `chain_manifest.json` directly and print the table:
+
+```
+Chain: {chain_id}
+
+Batch  Level   Tasks  Passed  Rate    Cumulative  Δ
+─────  ──────  ─────  ──────  ──────  ──────────  ──────
+  0    level1   100     45    45.0%     45.0%      —
+  1    level1    55     21    38.2%     66.0%    +21.0pp
+  2    level1    34     10    29.4%     76.0%    +10.0pp
 ```
 
 ### SERVER MODE
@@ -582,9 +739,15 @@ python3 kb_server.py add local http://localhost:{port}
 
 When user says "verify", "verify {session_id}", or "verify {session_id} --semantic":
 
+**Chain detection:** If session_id starts with `chain_` or `chain_manifest.json` exists
+in the session directory, run `python3 kb_verify.py --chain {session_id}` instead.
+This runs 12 chain-level checks (C1-C12) in addition to per-batch task verification.
+
 **STEP 1 (REQUIRED): Run the verification script via Bash:**
 ```bash
 python3 kb_verify.py {session_id}
+# OR for chains:
+python3 kb_verify.py --chain {chain_id}
 ```
 
 This script:
@@ -757,6 +920,255 @@ When user says "learn {session_id}" or provides learning flags:
    Print: "Algorithm learner: done"                         # if not --kernel-only
    Print: "Changelog: {session_dir}/algorithm_changelog.md" # if not --kernel-only
    ```
+
+### CHAIN MODE (Multi-Batch Orchestration)
+
+When user provides `chain level1,level2,...` or `level1 --batches=N`:
+
+**CHAIN MODE automates the batch → learn → retry loop. Each batch spawns fresh agents
+that read the latest reference files from disk. No restart needed between batches.**
+
+#### Chain Initialization
+
+1. **Generate chain ID and directory:**
+   ```
+   chain_id = "chain_{YYYYMMDD_HHMMSS}"
+   chain_dir = ~/.inference/claude_code_output/{chain_id}
+   Bash: mkdir -p {chain_dir}
+   ```
+
+2. **Write initial chain manifest:**
+   ```json
+   {
+     "chain_id": "{chain_id}",
+     "config": {
+       "retry_mode": "{retry_mode}",
+       "target_speedup": 1.3,
+       "max_batches": {max_batches},
+       "workers": {workers},
+       "iterations": {max_iterations},
+       "original_command": "/kernel-bench {original args}"
+     },
+     "batches": [],
+     "cumulative": {
+       "tasks_total": 0,
+       "tasks_passing": 0,
+       "cumulative_success_rate": 0,
+       "avg_speedup": 0
+     }
+   }
+   ```
+   Write to `{chain_dir}/chain_manifest.json`.
+
+3. **Initialize tracking:**
+   ```
+   all_best_results = {}  # task_name → best speedup across all batches
+   ```
+
+#### Batch Loop
+
+For each `batch_index` in `range(max_batches)`:
+
+**IMPORTANT: Be deliberately terse between batches. No verbose summaries. Re-read
+chain_manifest.json from disk at each batch start — it is the ground truth, not
+conversation memory. All state is computed from files.**
+
+1. **Determine level and task set:**
+   ```
+   level = levels[batch_index]   # from parsed level list
+
+   # Get all tasks for this level
+   level_tasks = list_kernel_bench_tasks(level)
+
+   # Check if this level appeared in a prior batch
+   prior_sessions_for_level = [b["session_id"] for b in chain_manifest["batches"]
+                                if b["level"] == level and b["status"] == "completed"]
+
+   if not prior_sessions_for_level:
+       # First appearance — run all tasks
+       task_names = None
+       task_count = len(level_tasks)
+   else:
+       # Level seen before — compute retry set
+       # Union best speedups per task across all prior batches of this level
+       for prior_sid in prior_sessions_for_level:
+           batch_progress = get_batch_progress(prior_sid)
+           for task in batch_progress["tasks"]:
+               name = task["task_name"]
+               speedup = task.get("best", {}).get("speedup", 0) if task.get("best") else 0
+               if name not in all_best_results or speedup > all_best_results[name]:
+                   all_best_results[name] = speedup
+
+       # Filter by retry mode
+       if retry_mode == "below_target":
+           retry_set = [t["name"] for t in level_tasks
+                       if all_best_results.get(t["name"], 0) < 1.3]
+       elif retry_mode == "failed":
+           retry_set = [t["name"] for t in level_tasks
+                       if all_best_results.get(t["name"], 0) == 0]
+       elif retry_mode == "all":
+           retry_set = [t["name"] for t in level_tasks]
+
+       if len(retry_set) == 0:
+           Print: "All {level} tasks pass. Skipping batch {batch_index}."
+           continue  # skip to next batch in chain
+
+       task_names = retry_set
+       task_count = len(retry_set)
+   ```
+
+2. **Convergence check** (only for same-level retries, batch_index >= 2):
+   ```
+   if prior_sessions_for_level and batch_index >= 2:
+       prev_batch = chain_manifest["batches"][-1]
+       prev_cumulative_rate = prev_batch.get("cumulative_success_rate", 0)
+       current_cumulative_rate = chain_manifest["cumulative"]["cumulative_success_rate"]
+
+       delta_pp = current_cumulative_rate - prev_cumulative_rate
+       # Also check avg speedup delta (compute from all_best_results)
+
+       if delta_pp < 0.03:
+           Print: f"Converged after batch {batch_index-1} (Δ={delta_pp:.1%}pp). Stopping chain."
+           break
+   ```
+
+3. **Scale workers:**
+   ```
+   effective_workers = min(workers, max(4, task_count // 3))
+   ```
+
+4. **Session setup:**
+   ```
+   session_id = "{chain_id}_b{batch_index}"
+   session_dir = ~/.inference/claude_code_output/{session_id}
+
+   init_session(
+     session_id=session_id,
+     level=level,
+     task_names=task_names,    # null for first appearance = all tasks
+     num_workers=effective_workers,
+     max_iterations=max_iterations,
+     provider=provider,
+     code_type="triton",
+     original_command=chain_manifest["config"]["original_command"]
+   )
+   ```
+
+5. **Write task histories** (for batch_index >= 1, only if level was seen before):
+   ```
+   if prior_sessions_for_level and task_names:
+       Bash: python3 kb_history.py {chain_dir} {batch_index} {session_id}
+   ```
+
+6. **Write-ahead: mark batch as running:**
+   ```
+   batch_entry = {
+     "batch_index": batch_index,
+     "session_id": session_id,
+     "level": level,
+     "task_count": task_count,
+     "status": "running"
+   }
+   # Append to chain_manifest.batches, save to disk
+   Read chain_manifest.json → append batch_entry → Write chain_manifest.json
+   ```
+
+7. **Run batch** (reuse BATCH MODE steps 3-4):
+   ```
+   Spawn effective_workers optimizers + 1 monitor in ONE message.
+   Same prompt template as BATCH MODE step 3.
+   Same wait loop with recovery as BATCH MODE step 4.
+   ```
+
+8. **Finalize batch** (reuse BATCH MODE step 5):
+   ```
+   # Write-ahead: tasks_done
+   Update batch_entry status to "tasks_done" in chain_manifest.json
+
+   # Write-ahead: learning
+   Update batch_entry status to "learning" in chain_manifest.json
+
+   # Run finalize: reflections → classify → learners (same as BATCH MODE step 5)
+   # 5a-5f from BATCH MODE finalize
+
+   # Write-ahead: completed
+   Update batch_entry status to "completed" in chain_manifest.json
+   ```
+
+9. **Update cumulative stats:**
+   ```
+   # Get results from this batch
+   batch_progress = get_batch_progress(session_id)
+
+   # Update all_best_results with this batch's results
+   for task in batch_progress["tasks"]:
+       name = task["task_name"]
+       speedup = task.get("best", {}).get("speedup", 0) if task.get("best") else 0
+       if name not in all_best_results or speedup > all_best_results[name]:
+           all_best_results[name] = speedup
+
+   # Compute cumulative stats
+   tasks_total = len(all_best_results)
+   tasks_passing = sum(1 for s in all_best_results.values() if s >= 1.3)
+   cumulative_success_rate = tasks_passing / tasks_total if tasks_total > 0 else 0
+   all_speedups = [s for s in all_best_results.values() if s > 0]
+   avg_speedup = sum(all_speedups) / len(all_speedups) if all_speedups else 0
+
+   # Compute this batch's stats
+   batch_speedups = []
+   batch_passing = 0
+   for task in batch_progress["tasks"]:
+       s = task.get("best", {}).get("speedup", 0) if task.get("best") else 0
+       if s > 0:
+           batch_speedups.append(s)
+       if s >= 1.3:
+           batch_passing += 1
+
+   batch_success_rate = batch_passing / task_count if task_count > 0 else 0
+   batch_avg_speedup = sum(batch_speedups) / len(batch_speedups) if batch_speedups else 0
+
+   # Update manifest
+   batch_entry["success_rate"] = round(batch_success_rate, 3)
+   batch_entry["avg_speedup"] = round(batch_avg_speedup, 3)
+   batch_entry["cumulative_success_rate"] = round(cumulative_success_rate, 3)
+   batch_entry["completed_at"] = current_timestamp_iso
+
+   chain_manifest["cumulative"] = {
+     "tasks_total": tasks_total,
+     "tasks_passing": tasks_passing,
+     "cumulative_success_rate": round(cumulative_success_rate, 3),
+     "avg_speedup": round(avg_speedup, 3)
+   }
+
+   # Save updated manifest
+   Write chain_manifest.json
+   ```
+
+10. **Print terse batch summary:**
+    ```
+    Print: f"Batch {batch_index}: {batch_passing}/{task_count} passed ({batch_success_rate:.1%}), cumulative {tasks_passing}/{tasks_total} ({cumulative_success_rate:.1%})"
+    ```
+
+#### Chain Summary
+
+After loop ends (max batches, convergence, or all pass), print cross-batch improvement table:
+
+```
+Chain: {chain_id}
+
+Batch  Level   Tasks  Passed  Rate    Cumulative  Δ
+─────  ──────  ─────  ──────  ──────  ──────────  ──────
+  0    level1   100     45    45.0%     45.0%      —
+  1    level1    55     21    38.2%     66.0%    +21.0pp
+  2    level1    34     10    29.4%     76.0%    +10.0pp
+
+Chain complete: {cumulative_success_rate:.1%} overall ({tasks_passing}/{tasks_total})
+```
+
+Also run the score report for the final batch:
+```
+Bash: python3 kb_score.py {final_session_id}
+```
 
 ## Output Format
 

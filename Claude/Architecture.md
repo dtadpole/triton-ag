@@ -3,7 +3,7 @@
 > **Living document.** This is the authoritative, always-current reference for the kernel-bench multi-agent system. Update this file whenever the architecture changes.
 
 **Last updated:** 2026-02-15
-**Current phase:** Phase 9 (iterative algorithm learning — mutable optimizer sections, parallel learner agents, LEARN mode)
+**Current phase:** Phase 10 (cross-batch learning — chain orchestration, task histories, convergence detection)
 
 ---
 
@@ -1094,6 +1094,7 @@ Full analysis: `Claude/reward_hacking_analysis_0212_v3.md`
 python3 kb_score.py {session_id}           # Session summary + markdown report
 python3 kb_score.py {session_id} {task}    # Single task detail with iteration table
 python3 kb_score.py                        # Uses most recent session
+python3 kb_score.py --chain {chain_id}     # Chain cross-batch report
 ```
 
 **Output:**
@@ -1163,7 +1164,9 @@ The verifier reconstructs the full phase timeline from these names without readi
 
 ### 12.2 Layer 2: Mechanical Verification (`kb_verify.py`)
 
-A Python script (same pattern as `kb_score.py`) that runs 17 structural checks per task:
+A Python script (same pattern as `kb_score.py`) that runs 17 structural checks per task, plus 12 chain-level checks for multi-batch chains:
+
+**Per-task checks:**
 
 | Category | Checks | Severity |
 |----------|--------|----------|
@@ -1213,13 +1216,125 @@ An LLM agent (`kernel-bench-verifier.md`) spawned on demand via `/kernel-bench v
         └── File: semantic_verification.md
 ```
 
+**Chain-level checks** (C1-C12, run with `kb_verify.py --chain {chain_id}`):
+
+| Check | Description | Severity |
+|-------|-------------|----------|
+| C1 | chain_manifest.json exists and valid | FAIL |
+| C2 | All batch statuses valid | FAIL |
+| C3 | Statuses monotonically progressed | FAIL |
+| C4 | Session directories exist | FAIL |
+| C5 | Cumulative stats consistent | WARN |
+| C6 | Retry set correctness (subset check) | WARN |
+| C7 | task_histories.json exists for retries | WARN |
+| C8 | History references valid strategies | WARN |
+| C9 | Reference files modified between batches | WARN |
+| C10 | Convergence decision justified | WARN |
+| C11 | No empty batches | FAIL |
+| C12 | Worker scaling appropriate | WARN |
+
 ---
 
-## 13. Production Results (Historical, Pre-Ban)
+## 13. Cross-Batch Learning (Phase 10)
+
+Phase 10 adds automated multi-batch chaining to the kernel-bench system. A chain runs multiple batch sessions sequentially, with learning and retry computation between each batch.
+
+### 13.1 Chain Orchestration
+
+The skill controller (`kernel-bench.md`) now supports two new input styles:
+- `chain level1,level2,level3` — sequential multi-level chain
+- `level1 --batches=3` — same level repeated N times
+
+The chain orchestrator manages the full batch → learn → retry cycle:
+
+```
+Batch 0 (all tasks) → Learn → Compute retry set
+    → Batch 1 (below-target tasks) → Learn → Compute retry set
+        → Batch 2 (still-failing tasks) → Learn
+            → Convergence check → Stop or continue
+```
+
+### 13.2 Chain Manifest
+
+All chain state lives in `chain_manifest.json`, stored in a dedicated chain directory:
+
+```json
+{
+  "chain_id": "chain_20260215_143022",
+  "config": {
+    "retry_mode": "below_target",
+    "target_speedup": 1.3,
+    "max_batches": 3,
+    "workers": 15
+  },
+  "batches": [
+    {
+      "batch_index": 0,
+      "session_id": "chain_20260215_143022_b0",
+      "level": "level1",
+      "task_count": 100,
+      "status": "completed",
+      "success_rate": 0.45,
+      "cumulative_success_rate": 0.45
+    }
+  ],
+  "cumulative": {
+    "tasks_total": 100,
+    "tasks_passing": 66,
+    "cumulative_success_rate": 0.66,
+    "avg_speedup": 2.15
+  }
+}
+```
+
+### 13.3 Batch Status State Machine
+
+```
+running → tasks_done → learning → completed
+```
+
+Each transition is write-ahead: the manifest is updated **before** the corresponding work begins. This enables crash-safe resume from any state.
+
+### 13.4 Task Histories
+
+For retry batches (batch N≥1 of the same level), `kb_history.py` generates `task_histories.json` containing:
+- Strategies tried in prior batches (to avoid repetition)
+- Best speedup and strategy achieved
+- Reflection summaries from prior attempts
+
+Optimizers check this file after claiming a task and use it to inform Phase A analysis.
+
+### 13.5 Convergence Detection
+
+The chain stops when:
+1. All tasks pass (≥1.3x) — retry set is empty
+2. Max batches reached
+3. Cumulative success rate delta < 3pp between consecutive batches (diminishing returns)
+
+### 13.6 Session Directory Layout
+
+```
+~/.inference/claude_code_output/
+├── chain_20260215_143022/           ← chain dir (manifest only)
+│   └── chain_manifest.json
+├── chain_20260215_143022_b0/        ← batch 0 session (sibling, not nested)
+│   ├── session_manifest.json
+│   └── {task_name}/...
+├── chain_20260215_143022_b1/        ← batch 1 session
+│   ├── session_manifest.json
+│   ├── task_histories.json          ← from prior batches
+│   └── {task_name}/...
+```
+
+Full design: `Claude/10 - Phase 10 - Cross-Batch Learning.md`
+
+---
+
+## 14. Production Results (Historical, Pre-Ban)
 
 > **Note:** These results are from session 0212_v3, run before Rules 7-13 were implemented. They include gaming-inflated metrics. Post-ban sessions will have lower headline success rates but more honest speedups.
 
-### 13.1 Representative Session Metrics (0212_v3)
+### 14.1 Representative Session Metrics (0212_v3)
 
 Across 183 tasks (35 L1 + 99 L2 + 49 L3):
 
@@ -1231,7 +1346,7 @@ Across 183 tasks (35 L1 + 99 L2 + 49 L3):
 | **Corrected avg speedup** (gaming removed) | 4.86x |
 | **Clean-only avg speedup** | 6.36x |
 
-### 13.2 Top Clean Successes
+### 14.2 Top Clean Successes
 
 | Task | Speedup | Technique |
 |------|---------|-----------|
@@ -1243,7 +1358,7 @@ Across 183 tasks (35 L1 + 99 L2 + 49 L3):
 | L2: 22_Matmul | 6.56x | Triton matmul epilogue fusion |
 | L3: 9_ResNet18 | 4.34x | CUDA Graph capture/replay |
 
-### 13.3 Key Learnings from Production
+### 14.3 Key Learnings from Production
 
 **What consistently works:**
 - Algebraic simplification (10-50x when applicable)
@@ -1259,7 +1374,7 @@ Across 183 tasks (35 L1 + 99 L2 + 49 L3):
 - `channels_last` memory format conversion (overhead exceeds benefit)
 - `torch.compile(mode='reduce-overhead')` with BatchNorm in training mode (crashes)
 
-### 13.4 Environment Ceiling Effects
+### 14.4 Environment Ceiling Effects
 
 Some tasks hit hard performance ceilings due to the strict Triton-only requirement (Rule 4):
 
@@ -1276,7 +1391,7 @@ These ceilings are the cost of honest benchmarking — the optimizer must beat P
 
 ## Appendix A: Skill Input Styles
 
-The `/kernel-bench` command supports 9 input styles:
+The `/kernel-bench` command supports 11 input styles:
 
 | Style | Example | Mode |
 |-------|---------|------|
@@ -1289,8 +1404,10 @@ The `/kernel-bench` command supports 9 input styles:
 | Server config | `/kernel-bench server --port=5676` | Manage eval server |
 | Verify | `/kernel-bench verify test1` | Protocol compliance (runs `kb_verify.py`) |
 | Learn | `/kernel-bench learn test1` | Run learning on completed session |
+| Chain | `/kernel-bench chain level1,level2` | Sequential multi-batch with learning |
+| Multi-batch | `/kernel-bench level1 --batches=3` | Same level repeated N times |
 
-**Parameter defaults:** `--workers=4`, `--iterations=20`, `--session={level}_{timestamp}`
+**Parameter defaults:** `--workers=15`, `--iterations=20`, `--session={level}_{timestamp}`
 
 ## Appendix B: File Index
 
@@ -1319,7 +1436,8 @@ The `/kernel-bench` command supports 9 input styles:
 | `kbEvalUtil.py` | Eval server utilities (string filtering at lines 467-566, 1048-1330) |
 | `kbEvalServer.py` | Remote GPU eval server (stateless FastAPI) |
 | `kbEval.yaml` | Provider configuration (URLs, timeouts, API key paths) |
-| `kb_score.py` | Progress reporting script |
-| `kb_verify.py` | Algorithm verification script (17 mechanical checks per task) |
+| `kb_score.py` | Progress reporting script (single session + chain cross-batch) |
+| `kb_verify.py` | Algorithm verification script (17 per-task checks + 12 chain-level checks) |
 | `kb_reflect.py` | Reflection collection script |
 | `kb_server.py` | Eval server configuration script |
+| `kb_history.py` | Task history generator for chain mode (prior batch → task_histories.json) |
