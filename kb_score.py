@@ -240,7 +240,6 @@ def generate_markdown_report(session_data: dict, summary: dict) -> str:
         if config.get("original_command"):
             lines.append(f"**Command:** `{config['original_command']}`")
         lines.append(f"- Workers: {config.get('num_workers', 'N/A')}")
-        lines.append(f"- Strategies: {config.get('num_strategies', 'N/A')}")
         lines.append(f"- Provider: {config.get('provider', 'N/A')}")
         lines.append("")
 

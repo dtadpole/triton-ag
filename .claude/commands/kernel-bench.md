@@ -11,38 +11,11 @@ Optimize CUDA/Triton kernels for kernel_bench tasks with crash recovery and **pa
 
 **CRITICAL: Parallel execution is the default and expected behavior.**
 
-- **Default workers**: 4 concurrent workers (configurable via `--workers=N`)
-- **Default strategies**: 1 optimizer per task (configurable via `--strategies=N`)
-- **Parallel spawning**: ALL workers MUST be spawned in a SINGLE message with multiple Task tool calls
-- **Concurrent tasks**: Each worker claims and processes tasks independently in parallel
+- **Default workers**: 4 concurrent optimizers (configurable via `--workers=N`)
+- **Parallel spawning**: ALL optimizers + monitor MUST be spawned in a SINGLE message with multiple Task tool calls
+- **Concurrent tasks**: Each optimizer claims and processes tasks independently via claim loop
 
-## Strategy Modes
-
-Each worker dispatches tasks to optimizer agents that run the full optimization loop (up to 20 iterations each):
-
-| Mode | Flag | Behavior | Use Case |
-|------|------|----------|----------|
-| **Simple (default)** | `--strategies=1` | 1 worker → 1 optimizer per task (runs full optimization loop) | Fast, lower cost |
-| **Exploration** | `--strategies=3` | 1 worker → 3 independent optimizers per task (each runs full loop) | Better coverage, higher cost |
-
-### Simple Mode (1:1 ratio) - DEFAULT
-```
-/kernel-bench level1 --session=my_run
-/kernel-bench level1 --session=my_run --strategies=1
-```
-Each worker spawns ONE optimizer per task. The optimizer runs the full write → eval → fix loop for up to 20 iterations.
-- Faster per-task completion
-- Lower API cost
-- Good for simple operations (element-wise, basic reductions)
-
-### Exploration Mode (1:3 ratio)
-```
-/kernel-bench level1 --session=my_run --strategies=3
-```
-Each worker spawns 3 independent optimizer agents per task IN PARALLEL. Each optimizer runs its own full optimization loop with a different initial strategy. The worker takes the best result.
-- Better chance of finding optimal kernel
-- Higher API cost (3x more generations per task)
-- Recommended for complex operations (matmul, attention, fused ops)
+Each optimizer runs the full optimization loop (up to 20 iterations) per task. In batch mode, optimizers run a claim loop processing multiple tasks sequentially.
 
 ## Input Styles (all supported)
 
@@ -58,14 +31,14 @@ Each worker spawns 3 independent optimizer agents per task IN PARALLEL. Each opt
 /kernel-bench level1/
 /kernel-bench kernel_bench/level2/
 ```
-→ Spawns **4 parallel workers** directly
+→ Spawns **4 parallel optimizers** + monitor directly
 
 ### Style 3: Full Parameters
 ```
-/kernel-bench level1 --session=te --workers=4 --strategies=3 --resume
-/kernel-bench level1 my_run --workers=8 --strategies=1
+/kernel-bench level1 --session=te --workers=4 --resume
+/kernel-bench level1 my_run --workers=8
 ```
-→ Batch mode with explicit session ID, worker count, and strategy mode
+→ Batch mode with explicit session ID and worker count
 
 ### Style 4: Quick Parallel (ad-hoc)
 ```
@@ -98,6 +71,14 @@ Each worker spawns 3 independent optimizer agents per task IN PARALLEL. Each opt
 ```
 → View or update kbEval server configuration (always localhost via SSH tunnel)
 
+### Style 8: Verify Session
+```
+/kernel-bench verify test1
+/kernel-bench verify test1 --semantic
+/kernel-bench verify test1 19_ReLU
+```
+→ Run protocol compliance verification on completed session
+
 ## Parsing Logic
 
 When invoked with `/kernel-bench [args]`, parse the input:
@@ -106,15 +87,15 @@ When invoked with `/kernel-bench [args]`, parse the input:
 
 1. **Detect server config**: Starts with `server` → **SERVER MODE**
 2. **Detect progress query**: Starts with `progress` OR user just says "progress" → **PROGRESS MODE** (run the script!)
-3. **Detect single task**: Path ends with `.py` → SINGLE TASK MODE
-4. **Detect directory**: Path ends with `/` or is a level name (level1, level2, level3) → BATCH MODE
-5. **Detect resume**: Contains `--resume` or starts with `resume` → RESUME MODE
-6. **Detect parameters**: Contains `--session`, `--workers`, `--strategies`, or `--iterations` → BATCH MODE with config
-7. **Detect natural language**: Contains numbers + keywords ("tasks", "agents", "random") → interpret and route
+3. **Detect verify**: Starts with `verify` → **VERIFY MODE** (run kb_verify.py!)
+4. **Detect single task**: Path ends with `.py` → SINGLE TASK MODE
+5. **Detect directory**: Path ends with `/` or is a level name (level1, level2, level3) → BATCH MODE
+6. **Detect resume**: Contains `--resume` or starts with `resume` → RESUME MODE
+7. **Detect parameters**: Contains `--session`, `--workers`, or `--iterations` → BATCH MODE with config
+8. **Detect natural language**: Contains numbers + keywords ("tasks", "agents", "random") → interpret and route
 
 **Parameter defaults:**
 - `--workers=4` (if not specified)
-- `--strategies=1` (if not specified, simple mode)
 - `--iterations=20` (if not specified, max iterations per task)
 - `--session={level}_{timestamp}` (if not specified)
 
@@ -133,149 +114,221 @@ When user provides a single .py file path:
    - ITERATE: Up to 3 iterations
 3. **Show progress** interactively to user after each iteration
 4. **Save result** via `save_benchmark_result()`
-5. **Aggregate reflections**: Run `python3 kb_reflect.py {session_id}` to collect reflections, then spawn the learning agent (see supervisor protocol) to update `.claude/agents/learned/`
+5. **Aggregate reflections**: Run `python3 kb_reflect.py {session_id}` to collect reflections, then spawn the learning agent to update `.claude/agents/reference/`
 
-### BATCH MODE (Supervisor-Managed)
+### BATCH MODE (Flat Spawning: Optimizers + Monitor)
 
 When user provides directory, level name, or session parameters:
 
 1. **Parse parameters** (with defaults):
-   - `--workers=N` → N concurrent workers (default: 4)
-   - `--strategies=N` → N strategies per worker per task (default: 1)
+   - `--workers=N` → N concurrent optimizers (default: 4)
    - `--iterations=N` → max iterations per task (default: 20)
    - `--session=ID` → session identifier (default: auto-generated)
    - `--provider=X` → kbEval provider (default: "local")
 
-2. **Spawn supervisor** (handles the entire session lifecycle):
+2. **Initialize session:**
 
    ```
+   init_session(
+     session_id=session_id,
+     level=level,
+     num_workers=num_workers,
+     max_iterations=max_iterations,
+     provider=provider,
+     code_type="triton",
+     original_command="/kernel-bench {original args}"
+   )
+   ```
+
+3. **Spawn optimizers + monitor** (ALL in ONE message — critical for parallelism):
+
+   ```
+   # Spawn N optimizer agents — each runs a claim loop
+   For i in 1..num_workers:
+       Task(
+         subagent_type="general-purpose",
+         description="kernel-bench optimizer {i}",
+         prompt="Read .claude/agents/kernel-bench-optimizer.md — it contains your full protocol,
+                 rules, templates, and iteration loop instructions.
+
+                 Also read these reference files at startup (if they exist):
+                 - .claude/agents/reference/common.md
+                 - .claude/agents/reference/optimizer_algorithm.md
+
+                 You are optimizer-{i} operating in BATCH MODE.
+                 Run the claim loop described in optimizer.md:
+                 get_pending_tasks → claim_task → optimize → complete → repeat
+
+                 Session: {session_id}
+                 Provider: {provider}
+                 Max iterations: {max_iterations}
+                 Worker ID: optimizer-{i}
+
+                 When no tasks remain, print '[optimizer-{i}] No more tasks. Exiting.' and stop.",
+         run_in_background=true
+       )
+
+   # Spawn 1 monitor agent
    Task(
      subagent_type="general-purpose",
-     description="kernel-bench supervisor",
-     prompt="Read .claude/agents/kernel-bench-supervisor.md — it contains your full protocol.
+     description="kernel-bench monitor",
+     prompt="Read .claude/agents/kernel-bench-monitor.md — it contains your full protocol.
 
-             Mode: batch
              Session: {session_id}
-             Level: {level}
-             Workers: {num_workers}
-             Strategies: {num_strategies}
-             Max iterations: {max_iterations}
-             Provider: {provider}",
+             Total tasks: {total_tasks}
+             Expected optimizers: {num_workers}
+
+             Poll session state every ~30s and print [progress] lines.
+             Exit with [monitor] ALL_DONE, LOW_ACTIVE, or STALL.",
      run_in_background=true
    )
    ```
 
-3. **Control loop** (monitor → verify → correct):
+   Save the monitor's `output_file` path for the wait loop.
 
-   This is a unified loop that handles monitoring, stall detection, supervisor restart,
-   and post-completion verification. It only exits when the session is fully verified.
+4. **Wait loop** (read monitor output, recover if needed):
+
+   Optimizers running claim loops will commonly hit context limits and exit after
+   processing some tasks. The monitor detects this (LOW_ACTIVE) or detects zero
+   progress (STALL). The skill spawns replacement optimizers for each recovery round.
+
+   Recovery continues as long as each round makes forward progress. It stops when:
+   - All tasks are done (ALL_DONE)
+   - A round made zero progress (true stall — the problem isn't transient)
+   - Max 5 recovery rounds (safety cap)
 
    ```
-   max_supervisor_attempts = 2   # original + 1 restart
-   supervisor_attempts = 1
+   max_rounds = 5
+   round = 1
+   completed_before_round = 0  # track per-round progress
 
    while true:
-       # ═══ MONITOR PHASE (while supervisor is running) ═══
-       last_output_length = 0
-       stale_reads = 0
-       last_completed_count = 0
-       stall_checks_without_progress = 0
+       # ─── POLL MONITOR OUTPUT ───
+       while true:
+           content = Read(monitor_output_file)
 
-       while supervisor is running:
-           content = Read(output_file)
-           if len(content) > last_output_length:
-               Display new lines to user
-               last_output_length = len(content)
-               stale_reads = 0
-           else:
-               stale_reads += 1
+           # Exit signal: all tasks done
+           if content contains "[monitor] ALL_DONE":
+               break  # proceed to finalize
 
-           if stale_reads >= 10:
+           # Exit signal: monitor detected a problem
+           if content contains "[monitor] STALL" or "[monitor] LOW_ACTIVE":
                state = get_session_state(session_id)
+               remaining = state.pending + len(state.in_progress) + len(state.incomplete)
 
-               if state.pending == 0 and len(state.in_progress) == 0:
-                   break  # All tasks done, fall through to verify
+               # Actually done? (race between monitor exit and last task completing)
+               if remaining == 0:
+                   break  # proceed to finalize
 
-               if state.completed == last_completed_count:
-                   stall_checks_without_progress += 1
-               else:
-                   stall_checks_without_progress = 0
-                   last_completed_count = state.completed
+               # Did this round make progress?
+               round_progress = state.completed - completed_before_round
+               if round_progress == 0:
+                   print(f"Round {round} made no progress. {remaining} tasks remain. Stopping.")
+                   break  # true stall — don't retry
 
-               if stall_checks_without_progress >= 2:
-                   print("Supervisor stalled (0 progress across 2 checks).")
-                   TaskStop(supervisor_task_id)  # best-effort
-                   break  # Fall through to verify → restart
-               else:
-                   stale_reads = 0  # give supervisor time
+               # Hit safety cap?
+               if round >= max_rounds:
+                   print(f"Max recovery rounds ({max_rounds}) reached. {remaining} tasks remain.")
+                   break
 
-       # ═══ VERIFY PHASE ═══
-       state = get_session_state(session_id)
-       session_dir = ~/.inference/claude_code_output/{session_id}/
+               # ─── SPAWN RECOVERY ───
+               print(f"Round {round}: completed {round_progress} tasks, {remaining} remaining. Spawning recovery...")
+               completed_before_round = state.completed
+               recovery_workers = min(remaining, num_workers)
+               round += 1
 
-       # Check 1: Tasks complete?
-       remaining = state.pending + len(state.in_progress) + len(state.incomplete)
-       if remaining > 0 and supervisor_attempts < max_supervisor_attempts:
-           restart_workers = min(remaining, num_workers)
-           print(f"Tasks incomplete ({remaining} remaining). Restarting supervisor with {restart_workers} workers...")
+               # Spawn recovery_workers optimizers + new monitor (ONE message)
+               # Same prompt template as step 3, with:
+               #   - recovery_workers optimizer agents
+               #   - monitor with expected_optimizers = recovery_workers
+               # Save new monitor's output_file for next iteration of outer loop
+               continue outer loop
 
-           supervisor_task = Task(
-             subagent_type="general-purpose",
-             description="kernel-bench supervisor (recovery)",
-             prompt="Read .claude/agents/kernel-bench-supervisor.md — it contains your full protocol.
-                     Mode: resume
-                     Session: {session_id}
-                     Workers: {restart_workers}
-                     Strategies: {num_strategies}
-                     Max iterations: {max_iterations}
-                     Provider: {provider}",
-             run_in_background=true
-           )
-           supervisor_attempts += 1
-           continue  # Back to monitor phase for the new supervisor
+           # Not done yet — wait before reading again
+           Bash: sleep 30
 
-       # If we get here, either all tasks are done OR we've exhausted restart attempts.
-       # Report any remaining failures to user.
-       if remaining > 0:
-           print(f"Warning: {remaining} tasks still incomplete after {supervisor_attempts} supervisor attempts.")
-
-       # Check 2: Reflections collected?
-       # Use Bash: test -s {session_dir}/all_reflections.md
-       if all_reflections.md does NOT exist or is empty:
-           print("Reflections missing. Collecting...")
-           Run: python3 kb_reflect.py {session_id}
-
-       # Check 3: Learning ran?
-       # Use Bash: stat -f %m .claude/agents/learned/common.md (macOS) to get mtime
-       # Compare with session_manifest.json created_at timestamp
-       if learned/common.md was NOT modified after session start:
-           print("Learning not run. Spawning learner...")
-           Task(
-             subagent_type="general-purpose",
-             description="kernel-bench learner (corrective)",
-             prompt="Read .claude/agents/kernel-bench-learner.md — it contains your full instructions.
-                     You are the learning agent for session '{session_id}'.
-                     Reflections file: {session_dir}/all_reflections.md
-                     Output directory: .claude/agents/learned/
-                     Read ALL reflections, identify cross-cutting patterns, and produce:
-                     - learned/common.md (environment constraints, anti-patterns, universal techniques)
-                     - learned/{op_type}.md for each op type (top 3 successes + top 2 failures)
-                     If existing learned files exist, merge with them (keep best from both).
-                     Return a summary of what you wrote.",
-             run_in_background=false  # BLOCKING
-           )
-
-       # Check 4: Score report generated?
-       # Use Bash: ls {session_dir}/progress_*.md 2>/dev/null
-       if no progress_*.md report exists in session_dir:
-           print("Score report missing. Generating...")
-           Run: python3 kb_score.py {session_id}
-
-       print("All checks passed.")
-       break  # Exit control loop
+       break  # Exit wait loop
    ```
 
-4. **Display final summary** from session state.
+   **End-to-end example (100 tasks, 4 optimizers, ~15 tasks/optimizer before context limit):**
+
+   ```
+   Round 1: Spawn 4 optimizers + monitor
+     optimizer-1: 14 tasks → context full → exits
+     optimizer-2: 12 tasks → exits
+     optimizer-3: 15 tasks → exits
+     optimizer-4: 13 tasks → exits
+     Monitor: 54/100 done, 0 active, 46 pending → [monitor] LOW_ACTIVE
+     Skill: round_progress=54, remaining=46 → spawn recovery
+
+   Round 2: Spawn 4 recovery optimizers + monitor
+     ~48 more tasks processed, covers remaining 46
+     Monitor: 100/100 done → [monitor] ALL_DONE
+     Skill: → finalize ✓
+   ```
+
+   **Worse case (flaky, ~8 tasks/optimizer):**
+
+   ```
+   Round 1: 32/100 done → LOW_ACTIVE → recovery (progress=32)
+   Round 2: 64/100 done → LOW_ACTIVE → recovery (progress=32)
+   Round 3: 96/100 done → LOW_ACTIVE → recovery (progress=32)
+   Round 4: 100/100 done → ALL_DONE ✓
+   ```
+
+   **True stall (eval server down):**
+
+   ```
+   Round 1: 0/100 done → STALL → recovery (progress=0) → STOP
+   Skill: "Round 1 made no progress. 100 tasks remain. Stopping."
+   → finalize with 0 completed
+   ```
+
+5. **Finalize** (ALWAYS runs):
+
+   ```
+   session_dir = ~/.inference/claude_code_output/{session_id}/
+
+   # 5a. Collect reflections and algorithm traces
+   if all_reflections.md does NOT exist or is empty:
+       Run: python3 kb_reflect.py {session_id}
+
+   # 5a2. Collect algo traces (Phase 8: algorithm execution traces)
+   if all_algo_traces.md does NOT exist or is empty:
+       Run: python3 kb_reflect.py collect_traces {session_id}
+       # This concatenates {task_name}/algo_trace.md files into all_algo_traces.md
+       # If kb_reflect.py doesn't support collect_traces yet, do it manually:
+       # Bash: cat {session_dir}/*/algo_trace.md > {session_dir}/all_algo_traces.md 2>/dev/null || true
+
+   # 5b. Spawn learning agent (BLOCKING)
+   # Check if reference files were modified after session start
+   if reference/common.md was NOT modified after session start:
+       Task(
+         subagent_type="general-purpose",
+         description="kernel-bench learner",
+         prompt="Read .claude/agents/kernel-bench-learner.md — it contains your full instructions.
+                 You are the learning agent for session '{session_id}'.
+                 Reflections file: {session_dir}/all_reflections.md
+                 Algo traces file: {session_dir}/all_algo_traces.md
+                 Output directory: .claude/agents/reference/
+                 Read ALL reflections, identify cross-cutting patterns, and produce:
+                 - reference/common.md (environment constraints, anti-patterns, universal techniques,
+                   composite patterns, strategy selection heuristics)
+                 - reference/{op_type}.md for each op type (tier-based: Tier 1/2/3-4/Anti-Patterns/Decision Tree)
+                 - reference/optimizer_algorithm.md (process meta-learnings from algo traces)
+                 If existing reference files exist, merge with them (keep best from both).
+                 IMPORTANT: Preserve the Code Templates section in each file — do not delete or modify it.
+                 IMPORTANT: Classify each entry by tier using the rules in learner.md.
+                 Return a summary of what you wrote.",
+         run_in_background=false  # BLOCKING
+       )
+
+   # 5c. Generate score report
+   if no progress_*.md report exists in session_dir:
+       Run: python3 kb_score.py {session_id}
+   ```
+
+6. **Display final summary** from session state.
 
 ### RESUME MODE
 
@@ -288,40 +341,28 @@ When user provides `--resume my_session`:
 
    print(f"Resuming session '{my_session}'...")
    print(f"Original command: {state.config.original_command}")
-   print(f"Config: workers={state.config.num_workers}, strategies={state.config.num_strategies}")
+   print(f"Config: workers={state.config.num_workers}")
    print(f"Progress: {state.completed}/{state.total} completed, {state.pending} remaining")
    ```
 
 2. **Extract config** from session state:
    ```
    num_workers = state.config.get("num_workers", 4)
-   num_strategies = state.config.get("num_strategies", 1)
    provider = state.config.get("provider", "local")
-   max_iterations = state.config.get("max_iterations", 20)  # fallback matches --iterations default above
+   max_iterations = state.config.get("max_iterations", 20)
    ```
 
-3. **Spawn supervisor** in resume mode with scaled workers:
+3. **Spawn optimizers + monitor** (same as BATCH MODE step 3):
 
    ```
    remaining = state.pending + len(state.incomplete)
    resume_workers = min(remaining, num_workers)
 
-   Task(
-     subagent_type="general-purpose",
-     description="kernel-bench supervisor (resume)",
-     prompt="Read .claude/agents/kernel-bench-supervisor.md — it contains your full protocol.
-
-             Mode: resume
-             Session: {session_id}
-             Workers: {resume_workers}
-             Strategies: {num_strategies}
-             Max iterations: {max_iterations}
-             Provider: {provider}",
-     run_in_background=true
-   )
+   # Spawn resume_workers optimizers + 1 monitor in ONE message
+   # Same prompt template as BATCH MODE step 3
    ```
 
-4. **Control loop**: Same as BATCH MODE step 3 — monitor, verify, correct.
+4. **Wait loop + Finalize**: Same as BATCH MODE steps 4-6.
 
 ### PROGRESS MODE
 
@@ -470,6 +511,54 @@ When only `--port` is provided, update the default `local` provider:
 python3 kb_server.py add local http://localhost:{port}
 ```
 
+### VERIFY MODE
+
+**Run protocol compliance checks on a completed (or in-progress) session.**
+
+When user says "verify", "verify {session_id}", or "verify {session_id} --semantic":
+
+**STEP 1 (REQUIRED): Run the verification script via Bash:**
+```bash
+python3 kb_verify.py {session_id}
+```
+
+This script:
+- Checks 17 structural compliance items per task (file existence, strategy naming convention,
+  phase ordering, reflection/algo_trace content sections, speedup consistency)
+- Outputs a quick summary to stdout (display to the user)
+- Generates a detailed `verification_YYYYMMDD_HHMMSS.md` report in the session directory
+
+**STEP 2: Display the script output** directly to the user.
+
+**STEP 3 (if `--semantic` specified): Spawn semantic verifier agent:**
+```
+Task(
+  subagent_type="general-purpose",
+  description="kernel-bench verifier",
+  prompt="Read .claude/agents/kernel-bench-verifier.md — it contains your full protocol.
+
+          Session: {session_id}
+          Session directory: ~/.inference/claude_code_output/{session_id}
+          Verification report: (path from kb_verify.py output)
+
+          Run semantic quality checks on all tasks marked PASS or WARN.
+          Focus on: strategy diversity, diagnosis coherence, reflection quality.
+          Write semantic_verification.md to the session directory.
+          Return summary of findings.",
+  run_in_background=false
+)
+```
+
+**Single task detail:** `verify {session_id} {task_name}`
+```bash
+python3 kb_verify.py {session_id} {task_name}
+```
+
+**If no session_id is provided**, use the most recent session:
+```bash
+python3 kb_verify.py
+```
+
 ## Output Format
 
 All skill invocations return structured JSON for consistency:
@@ -498,7 +587,7 @@ All skill invocations return structured JSON for consistency:
 
 ## Examples
 
-**Example 1: Single task (uses simple mode by default)**
+**Example 1: Single task**
 ```
 User: /kernel-bench level1/19_ReLU.py
 
@@ -512,79 +601,56 @@ Iteration 2 complete. Best: 1.31x
 Target reached (>= 1.3x). Saved.
 ```
 
-**Example 2: Batch run with simple mode (default: --strategies=1)**
+**Example 2: Batch run**
 ```
 User: /kernel-bench level1 --session=prod_run
 
 Response:
 Initializing session "prod_run"...
-Config: workers=4, strategies=1 (simple mode)
+Config: workers=4
 Found 100 tasks in level1.
-Spawning supervisor...
-[init] Session prod_run: 100 tasks, 4 workers, strategies=1
+Spawning 4 optimizers + monitor...
 [progress] 25/100 completed, 4 active, avg 1.28x
 [progress] 50/100 completed, 4 active, avg 1.31x
-[progress] 75/100 completed, 4 active, avg 1.33x
-[workers] All workers finished (round 1)
-[evaluate] No retryable tasks
+[progress] 75/100 completed, 3 active, avg 1.33x
+[monitor] ALL_DONE 100/100 completed
 [finalize] Collecting reflections...
 [finalize] Learning agent completed
 [finalize] Score report generated
-[complete] Session prod_run done: 97/100, avg 1.34x
 
-Verifying post-batch outcomes...
-  Session complete: 97/100 done, 0 pending, 0 in progress
-  Reflections: all_reflections.md exists
-  Learning: learned/common.md updated
-  Score report: progress_20260214_153022.md generated
+Session prod_run complete: 97/100, avg 1.34x
 All checks passed.
 ```
 
-**Example 3: Batch run with exploration mode (--strategies=3)**
+**Example 3: Custom worker count**
 ```
-User: /kernel-bench level1 --session=explore_run --strategies=3
-
-Response:
-Initializing session "explore_run"...
-Config: workers=4, strategies=3 (exploration mode)
-Found 100 tasks in level1.
-Spawning supervisor...
-  Each worker spawns 3 independent optimizers per task (each runs full loop)
-
-[progress] 15/100 completed, 4 active, avg 1.41x  [higher speedups due to parallel exploration]
-[progress] 30/100 completed, 4 active, avg 1.45x
-...
-[complete] Session explore_run done: 98/100, avg 1.47x
-```
-
-**Example 4: Custom worker count with exploration**
-```
-User: /kernel-bench level1 --session=prod_run --workers=8 --strategies=3
+User: /kernel-bench level1 --session=prod_run --workers=8
 
 Response:
 Initializing session "prod_run"...
-Config: workers=8, strategies=3 (exploration mode)
-Spawning supervisor with 8 workers...
+Config: workers=8
+Spawning 8 optimizers + monitor...
 ...
 ```
 
-**Example 5: Resume (config restored from session)**
+**Example 4: Resume (config restored from session)**
 ```
 User: /kernel-bench --resume prod_run
 
 Response:
 Resuming session "prod_run"...
-Original command: /kernel-bench level1 --session=prod_run --workers=4 --strategies=3
-Config restored: workers=4, strategies=3, provider=local
+Original command: /kernel-bench level1 --session=prod_run --workers=4
+Config restored: workers=4, provider=local
 Progress: 50/100 completed, 2 stale (cleaned), 48 pending.
-Spawning supervisor in resume mode...
-[resume] Session prod_run: 50/100 done, 48 remaining
+Spawning 4 optimizers + monitor...
 [progress] 55/100 completed, 4 active, avg 1.38x
 ...
-[complete] Session prod_run done: 98/100, avg 1.41x
+[monitor] ALL_DONE 98/100 completed
+
+Session prod_run complete: 98/100, avg 1.41x
 ```
 
-**Example 6: Query batch progress**
+**Example 5: Query batch progress**
 ```
 User: /kernel-bench progress test1
 
@@ -593,21 +659,21 @@ Response:
 Progress: 25/100 completed, 12 in progress, 3 failed, 60 pending
 Average speedup: 1.34x
 
-| Task                | Status      | Worker      | Iter | Best   | Last Result           |
-|---------------------|-------------|-------------|------|--------|-----------------------|
-| 19_ReLU             | in_progress | worker-3    | 2/3  | 1.12x  | ✓ compiled, ✓ correct |
-| 23_Softmax          | in_progress | worker-7    | 1/3  | -      | ✗ compile error       |
-| 88_MinGPTNewGelu    | completed   | worker-2    | 2/3  | 2.1x   | ✓ done                |
+| Task                | Status      | Worker        | Iter | Best   | Last Result           |
+|---------------------|-------------|---------------|------|--------|-----------------------|
+| 19_ReLU             | in_progress | optimizer-3   | 2/3  | 1.12x  | compiled, correct     |
+| 23_Softmax          | in_progress | optimizer-1   | 1/3  | -      | compile error         |
+| 88_MinGPTNewGelu    | completed   | optimizer-2   | 2/3  | 2.1x   | done                  |
 ```
 
-**Example 7: Query single task detail**
+**Example 6: Query single task detail**
 ```
 User: /kernel-bench progress test1 19_ReLU
 
 Response:
 === Task: 19_ReLU ===
 Status: in_progress
-Worker: worker-3
+Worker: optimizer-3
 Started: 2026-02-04T22:16:26
 Iterations: 2/3
 
@@ -619,7 +685,7 @@ Iterations: 2/3
 Best: iteration 1, 1.31x (block_tuning_512)
 ```
 
-**Example 8: Configure eval server port**
+**Example 7: Configure eval server port**
 ```
 User: /kernel-bench server --port=8082 --provider=gpu_cluster
 
@@ -637,7 +703,7 @@ Note: This assumes you have an SSH tunnel forwarding localhost:8082 to your GPU 
 To use: /kernel-bench level1 --session=test --provider=gpu_cluster
 ```
 
-**Example 9: List available servers**
+**Example 8: List available servers**
 ```
 User: /kernel-bench server
 
@@ -656,7 +722,7 @@ Note: All providers use localhost - remote servers are accessed via SSH tunnel.
 API Key: test_key...2345 (/Users/user/.keys/kbeval.api.key)
 ```
 
-**Example 10: Set API key and test connection**
+**Example 9: Set API key and test connection**
 ```
 User: /kernel-bench server key --set=my_secret_key
 
@@ -666,7 +732,7 @@ Response:
 API key saved to /Users/user/.keys/kbeval.api.key
 ```
 
-**Example 11: SSH tunnel helper**
+**Example 10: SSH tunnel helper**
 ```
 User: /kernel-bench server tunnel user@gpu-server.example.com:8082
 
@@ -682,4 +748,39 @@ Command: ssh -N -L 5676:localhost:8082 user@gpu-server.example.com
 Starting tunnel (Ctrl+C to stop)...
 
 Note: After tunnel is running, kernel-bench accesses localhost:5676 to reach the remote GPU server.
+```
+
+**Example 11: Verify session compliance**
+```
+User: /kernel-bench verify test1
+
+Response:
+[Runs: python3 kb_verify.py test1]
+
+   ═══ Verification: test1 ═══
+
+     Verified:    95 tasks (5 skipped)
+     PASS:        72
+     WARN:        18
+     FAIL:        5
+
+     Score: 72/95 PASS, 18 WARN, 5 FAIL
+
+   ─── Top Issues ───
+      5x  [FAIL] reflection.md exists and non-empty
+      8x  [WARN] >=2 distinct explore strategies
+      7x  [WARN] algo_trace Phase C
+
+   Detailed report: ~/.inference/claude_code_output/test1/verification_20260214_153000.md
+```
+
+**Example 12: Verify with semantic analysis**
+```
+User: /kernel-bench verify test1 --semantic
+
+Response:
+[Runs: python3 kb_verify.py test1]
+(mechanical results displayed)
+[Spawns semantic verifier agent...]
+Semantic verification complete. Report: ~/.inference/claude_code_output/test1/semantic_verification.md
 ```

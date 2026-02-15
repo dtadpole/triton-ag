@@ -3,7 +3,7 @@
 > **Living document.** This is the authoritative, always-current reference for the kernel-bench multi-agent system. Update this file whenever the architecture changes.
 
 **Last updated:** 2026-02-14
-**Current phase:** Phase 5 (controller pattern — skill agent verifies supervisor outcomes)
+**Current phase:** Phase 8 (optimizer core algorithm — Phase A/B/C optimization protocol + algorithm verification)
 
 ---
 
@@ -26,7 +26,7 @@ Kernel-bench is a multi-agent system that takes PyTorch models and produces opti
 | **Speedup target** | ≥1.3x over PyTorch reference (per task) |
 | **Completion rate** | ≥95% of tasks produce a valid result |
 | **Resilience** | Resume after crashes; no lost work across 200+ task runs |
-| **Scale** | 4-8 concurrent workers processing tasks in parallel |
+| **Scale** | 4-8 concurrent optimizers processing tasks in parallel |
 | **Learning** | Accumulate optimization knowledge across sessions |
 | **Simple invocation** | Single `/kernel-bench` command handles all use cases |
 
@@ -46,10 +46,10 @@ Kernel-bench is a multi-agent system that takes PyTorch models and produces opti
 
 A single agent cannot handle a 200-task batch: it would exceed context limits, couldn't parallelize, and a single crash would lose all progress. The multi-agent design solves this:
 
-- **Parallel execution** — N workers process tasks concurrently (default: 4)
-- **Isolated failure** — one worker crash doesn't affect others; claimed tasks get re-released
-- **Context efficiency** — each optimizer only holds one task's context (PyTorch code + iteration history)
-- **Separation of concerns** — orchestration (worker) is separate from optimization (optimizer)
+- **Parallel execution** — N optimizers process tasks concurrently (default: 4)
+- **Isolated failure** — one optimizer crash doesn't affect others; claimed tasks get re-released
+- **Context efficiency** — each optimizer holds task context for its current optimization loop
+- **Flat spawning** — skill controller spawns all agents directly (no intermediate supervisor/worker layers)
 
 ### 2.2 Why Sub-Agents Own the Full Loop?
 
@@ -70,11 +70,12 @@ Session state uses JSON files on the local filesystem instead of a database or i
 
 ### 2.4 Why Mandatory Reflections?
 
-Every optimizer agent must write a `reflection.md` before returning. These reflections feed the learning pipeline:
+Every optimizer agent must write a `reflection.md` and an `algo_trace.md` before returning. These feed the learning pipeline:
 
 - **Cross-task patterns** — individual optimizers can't see that 5 tasks all hit the same `tl.math.tanh` issue; the learner agent can
 - **Failure preservation** — knowing what *doesn't* work (e.g., "Triton conv for simple activation is always slower") prevents future agents from wasting iterations
 - **Accumulation** — learned files merge across sessions, building institutional knowledge
+- **Process learning** — `algo_trace.md` captures optimization *decisions* (diagnosis accuracy, explore efficiency, feasibility accuracy) that help calibrate the algorithm itself
 
 ### 2.5 Why Agents Are Defined in Markdown?
 
@@ -96,16 +97,14 @@ graph TB
     subgraph local["Claude Code Session (macOS)"]
         subgraph agents["Agents (Markdown-defined)"]
             skill["Skill Controller<br/>.claude/commands/kernel-bench.md"]
-            supervisor["Supervisor<br/>.claude/agents/kernel-bench-supervisor.md"]
-            worker["Workers<br/>.claude/agents/kernel-bench-worker.md"]
-            optimizer["Optimizers<br/>.claude/agents/kernel-bench-optimizer.md"]
+            optimizer["Optimizers (claim loop)<br/>.claude/agents/kernel-bench-optimizer.md"]
+            monitor["Monitor<br/>.claude/agents/kernel-bench-monitor.md"]
             learner["Learner Agent<br/>.claude/agents/kernel-bench-learner.md"]
-            learned[("Learned Knowledge<br/>learned/{common,conv,matmul,other}.md")]
+            learned[("Reference Knowledge<br/>reference/{common,conv,matmul,...}.md<br/>reference/optimizer_algorithm.md")]
 
-            skill -->|"launch + monitor + restart"| supervisor
-            supervisor --> worker
-            supervisor -.->|post-batch| learner
-            worker --> optimizer
+            skill -->|"spawn (background)"| optimizer
+            skill -->|"spawn (background)"| monitor
+            skill -.->|"post-batch (blocking)"| learner
             learned -.->|read at spawn| optimizer
             learner -.->|writes| learned
         end
@@ -121,8 +120,8 @@ graph TB
 
         subgraph state["Local File State<br/>~/.inference/claude_code_output/"]
             manifest["session_manifest.json"]
-            taskdir["{task_name}/<br/>.in_progress, progress.json,<br/>iteration_*.py, best_result.json,<br/>reflection.md"]
-            reflections["all_reflections.md"]
+            taskdir["{task_name}/<br/>.in_progress, progress.json,<br/>iteration_*.py, best_result.json,<br/>reflection.md, algo_trace.md"]
+            reflections["all_reflections.md<br/>all_algo_traces.md"]
         end
 
         agents -->|MCP tool calls| mcp
@@ -140,43 +139,36 @@ graph TB
 
 ```mermaid
 graph TB
-    skill["Skill Controller<br/>(parse, launch, control loop)"]
+    skill["Skill Controller<br/>(parse, spawn, wait loop, finalize, verify)"]
 
-    skill -->|"spawn (background)"| supervisor["Supervisor<br/>(init, workers, monitor, retry, finalize)"]
-    skill -.->|"monitor<br/>(relay output, query state)"| supervisor
-    skill -.->|"restart if stalled<br/>(resume, workers=min(remaining,N))"| supervisor
+    skill -->|"spawn N (background, ONE message)"| o1["Optimizer 1<br/>(claim loop)"]
+    skill -->|" "| o2["Optimizer 2<br/>(claim loop)"]
+    skill -->|" "| on["Optimizer N<br/>(claim loop)"]
+    skill -->|"spawn 1 (background)"| monitor["Monitor<br/>(poll progress)"]
 
-    supervisor -->|"spawn workers<br/>(single message)"| w1["Worker 1"]
-    supervisor -->|" "| w2["Worker 2"]
-    supervisor -->|" "| wn["Worker N"]
-
-    w1 -->|"per task: 1 or 3 optimizers<br/>(in one message)"| o1["Optimizer<br/>(10-20 iterations)"]
-    w2 --> o2["Optimizer"]
-    wn --> on["Optimizer"]
-
-    o1 --> eval["eval_kernel()<br/>MCP, SSH, GPU<br/>(semaphore-gated)"]
+    o1 -->|"per task: full iteration loop<br/>(10-20 iterations)"| eval["eval_kernel()<br/>MCP, SSH, GPU<br/>(semaphore-gated)"]
     o2 --> eval
     on --> eval
 
-    supervisor -.->|"finalize (primary)"| learner["Learner"]
-    skill -.->|"correct if missed"| learner
+    skill -.->|"read output → detect ALL_DONE/STALL"| monitor
+    skill -.->|"finalize (blocking)"| learner["Learner"]
+    skill -.->|"verify (on demand)"| verifier["Verifier<br/>(semantic checks)"]
 ```
 
-**The skill controller manages the supervisor through a unified control loop.** Rather than treating monitoring and verification as separate steps, the controller runs a single loop that transitions between monitoring (while the supervisor is active) and verification (after the supervisor exits):
+**The skill controller spawns all agents directly (flat spawning).** There are no intermediate supervisor or worker layers. The skill:
 
-1. **Launch** — Spawn the supervisor in the background with session config.
-2. **Monitor** — Relay supervisor output to the user. Periodically query `get_session_state()` to detect stalls (2 consecutive checks with zero progress change).
-3. **Intervene** — If stalled or incomplete, restart the supervisor in resume mode with a scaled worker count: `workers = min(remaining_tasks, original_N)`. At most 2 supervisor attempts total (original + 1 restart).
-4. **Verify** — After the supervisor exits, check 4 outcomes (tasks complete, reflections collected, learning ran, score report generated). If tasks are still incomplete, restart feeds back to step 2. If post-batch steps are missing, run them directly.
+1. **Spawn** — In ONE message, spawn N optimizer agents (each runs a claim loop) + 1 monitor agent (polls progress).
+2. **Wait** — Read the monitor's output file periodically. The monitor prints `[progress]` lines and exits with `[monitor] ALL_DONE` or `[monitor] STALL`.
+3. **Recover** — If the monitor reports LOW_ACTIVE (optimizers exited while tasks remain) or STALL (zero progress), spawn replacement optimizers + a new monitor. Recovery continues as long as each round makes forward progress, up to 5 rounds. Stops immediately if a round makes zero progress (true stall).
+4. **Finalize** — After all tasks complete: collect reflections, spawn learner (blocking), generate score report.
+5. **Verify** — Check that all post-batch artifacts exist; run any missing steps directly.
 
-The supervisor owns the primary execution lifecycle (worker spawning, monitoring, retrying, finalizing). The controller ensures the supervisor's outcomes are correct and intervenes when the supervisor stalls or fails. On restart, the controller scales the worker count to match remaining work — no wasted agents for a few leftover tasks.
-
-**Parallelism is achieved by spawning multiple Task tool calls in a single message.** Workers are spawned in one message; optimizers within each worker are spawned in one message.
+**Parallelism is achieved by spawning multiple Task tool calls in a single message.** Each optimizer runs a claim loop, processing tasks sequentially but independently from other optimizers.
 
 | Level | Component | Parallelism |
 |-------|-----------|-------------|
-| Session | Workers | N workers in 1 message (default: 4) |
-| Task | Optimizer agents | 1 or 3 per task (configurable via `--strategies`) |
+| Session | Optimizers | N optimizers in 1 message (default: 4) |
+| Task | Iteration loop | Sequential within each optimizer |
 | GPU | `eval_kernel()` calls | Bounded by adaptive semaphore (= GPU count) |
 
 ---
@@ -213,7 +205,7 @@ The MCP server (`claudeCodeKernelBenchServer.py`) is a **stdio-based subprocess*
 
 | Tool | Purpose |
 |------|---------|
-| `init_session(session_id, level, num_workers, num_strategies, ...)` | Create session manifest with config and task list |
+| `init_session(session_id, level, num_workers, ...)` | Create session manifest with config and task list |
 | `get_session_state(session_id)` | Full progress scan with stale marker cleanup |
 | `get_pending_tasks(session_id, limit)` | List tasks available for claiming |
 | `claim_task(session_id, task_name, worker_id)` | Atomic claim via exclusive file creation |
@@ -256,7 +248,7 @@ sequenceDiagram
     MCP-->>Agent: {compiled, correctness, speedup, ...}
 ```
 
-Both reference runtime measurement and kernel evaluation are gated by this semaphore. With 4 workers × 3 optimizers = 12 potential concurrent evals, but only N GPU slots, the semaphore queues excess requests.
+Both reference runtime measurement and kernel evaluation are gated by this semaphore. With 4 optimizers concurrently evaluating, but only N GPU slots, the semaphore queues excess requests.
 
 ### 4.4 `eval_kernel` Flow
 
@@ -298,27 +290,66 @@ Reference model runtimes are cached in `_ref_runtime_cache` (per-process dict ke
 
 ## 5. Multi-Turn Optimization Loop
 
-### 5.1 Iteration Protocol
+### 5.1 Three-Phase Protocol (Phase A/B/C)
 
-Each optimizer agent owns the full optimization loop. The loop runs **inside the optimizer's context** — no hand-offs between agents.
+Each optimizer agent runs a structured three-phase protocol per task, replacing the previous flat iteration loop:
 
 ```
-best_speedup = 0
-best_iteration = -1
-best_strategy = ""
+Phase A: Analyze (1 step, no eval)
+  - Algebraic reasoning (check for mathematical shortcuts)
+  - Computation graph decomposition (ops, shapes, fusion groups, bottleneck)
+  - Multi-pattern matching → load 2-3 relevant reference files
+  - Feasibility assessment → set iteration budget
+  - Generate ranked strategy list (2-4 candidates at Tier 1-2 level)
 
-for iteration in 0..max_iterations-1:
-    Step 1: Analyze task (iter 0) or analyze previous result (iter 1+)
-    Step 2: Generate kernel code (with @triton.autotune, always)
-    Step 3: eval_kernel(task_path, kernel_code, session_id, provider, strategy)
-    Step 4: update_task_progress(session_id, task_name, iteration, ...)
-    Step 5: Track best: if speedup > best_speedup → update
-    Step 6: If speedup >= 1.3x → complete_task_progress(), write reflection.md, STOP
-    Step 7: If last iteration → complete_task_progress() with best, write reflection.md, STOP
-    Step 8: Decide what to change, continue
+Phase B: Explore (first K iterations)
+  - Try top 2-3 fundamentally different strategies (Tier 1-2 differences)
+  - Max 2 evals per strategy (generate + quick fix if compile error)
+  - Bottleneck diagnosis after each eval
+  - If any strategy hits >= 1.3x → DONE
+  - Select winner strategy (highest speedup among correct results)
+
+Phase C: Exploit (remaining iterations)
+  - Deep-tune winner strategy using Tier 3-4 actions
+  - Guided by bottleneck diagnosis from Phase B
+  - Revert mechanism: revert to best after 2 consecutive regressions
+  - Strategy switch: try next explore candidate after 3+ non-improvements
 ```
 
-### 5.2 Algebraic Reasoning (Iteration 0)
+**Iteration budget allocation** (default `max_iterations=20`):
+
+| Scenario | Phase A | Phase B | Phase C |
+|----------|---------|---------|---------|
+| High-confidence strategy (algebraic shortcut) | 1 | 0 (skip) | 19 |
+| Standard task (1 dominant op) | 1 | 4 (2×2) | 15 |
+| Complex L2/L3 (multiple approaches) | 1 | 6 (3×2) | 13 |
+| Known-infeasible | 1 | 2 (1 best-effort) | 2 |
+
+### 5.2 Strategy Taxonomy (4 Tiers)
+
+Strategies are classified into tiers that determine when they're tried:
+
+```
+Tier 1: Algorithm change — fundamentally different approach
+  → Phase B explore: try 2-3 Tier 1 strategies
+  Examples: algebraic elimination, flash attention, torch.convolution delegation
+
+Tier 2: Architecture change — same algorithm, different decomposition
+  → Phase B explore: try as variant of Tier 1
+  Examples: epilogue fusion vs two-kernel, single-pass vs multi-pass
+
+Tier 3: Parameter change — same architecture, different config
+  → Phase C exploit: systematic sweep
+  Examples: BLOCK_SIZE, num_warps, autotune configs
+
+Tier 4: Micro-optimization — within a kernel
+  → Phase C exploit: late-stage polish
+  Examples: unrolled loops, vectorized loads, register blocking
+```
+
+**Rule:** Phase B explores Tier 1-2 differences. Phase C tunes Tier 3-4 within the winner.
+
+### 5.3 Algebraic Reasoning (Phase A, Step 1)
 
 Before writing any GPU code, the optimizer traces shapes through `forward()` and checks for mathematical simplifications. This produces the highest speedups (10-100x) when applicable.
 
@@ -334,16 +365,38 @@ Before writing any GPU code, the optimizer traces shapes through `forward()` and
 
 Production examples: L2 task 51 (49.5x via matmul→matvec), L2 task 14 (40x), L3 task 36 (4.08x via dead code elimination).
 
-### 5.3 Mandatory Autotune
+### 5.4 Multi-Pattern Matching (Phase A, Step 3)
 
-Every `@triton.jit` kernel **must** have `@triton.autotune` stacked above it. Hardcoded block sizes are a protocol violation. Strategy.md provides copy-paste autotune config blocks for:
+The optimizer matches against multiple patterns and loads up to 3 reference files per task:
+
+1. **Primary op detection** — keyword-based (unchanged), loads `reference/{primary_op}.md`
+2. **Secondary pattern scan** — checks for normalization, pooling, attention, loss, etc. in the computation graph
+3. **Composite pattern matching** — checks full op sequence against known multi-op strategies (e.g., matmul→pointwise→epilogue_fusion)
+4. **Select top 3 files** — primary + highest-scoring secondaries (common.md read at startup, not counted)
+
+### 5.5 Bottleneck Diagnosis (Phase B/C)
+
+After each eval, the optimizer diagnoses the bottleneck to guide next actions:
+
+| Result | Diagnosis | Phase C Action |
+|--------|-----------|----------------|
+| >= 1.3x | DONE | Complete |
+| 1.0-1.3x, correct | Needs tuning | Parameter sweep (Tier 3-4) |
+| 0.5-1.0x, correct | Wrong approach or bad memory access | May need different strategy variant |
+| < 0.5x, correct | Strategy unsuitable | Skip, try next explore candidate |
+| Correctness failure | Bug classification | Fix shapes/masking/precision |
+| Compile error | API/shape/OOM classification | Fix with env constraints |
+
+### 5.6 Mandatory Autotune
+
+Every `@triton.jit` kernel **must** have `@triton.autotune` stacked above it. Hardcoded block sizes are a protocol violation. The reference files provide copy-paste autotune config blocks for:
 
 - **Pointwise**: 5 configs from BLOCK_SIZE=256 to 4096
 - **Matmul**: 7 configs covering 32×32 to 128×128 tiles with K=32/64 and super-blocking (GROUP_M=8)
 - **Reduction**: 4 configs from BLOCK_SIZE=256 to 2048
 - **2D Spatial**: 3 configs varying BLOCK_C and BLOCK_HW
 
-### 5.4 Result-Based Decision Making
+### 5.7 Result-Based Decision Making
 
 | Result | Action |
 |--------|--------|
@@ -353,14 +406,14 @@ Every `@triton.jit` kernel **must** have `@triton.autotune` stacked above it. Ha
 | Close to target (1.0-1.3x) | Tune parameters: block size, num_warps, more autotune configs |
 | Eval server error | Retry once; if persistent, complete with best result and note in reflection |
 
-### 5.5 Early-Stop Rules
+### 5.8 Early-Stop Rules
 
 - **Stop if speedup ≥ 1.3x** — target reached
 - **Stop if max iterations exhausted** — complete with best result
 - **Stop if eval server unreachable** — complete with best result (or 0), note in reflection
 - **Never stop because speedup is low** — low speedup means try harder, not give up
 
-### 5.6 Hard Rules
+### 5.9 Hard Rules
 
 These are enforced across all iterations:
 
@@ -373,80 +426,79 @@ These are enforced across all iterations:
 
 ---
 
-## 6. Multi-Agent Dispatch Flow
+## 6. Optimizer Claim Loop and Dispatch
 
-### 6.1 Worker → Optimizer Spawning
+### 6.1 Optimizer Claim Loop
 
-The worker is a **pure dispatcher**. It never generates kernel code.
+Each optimizer runs a **claim → optimize → complete → claim next** loop. The optimizer handles both task dispatch (previously the worker's job) and kernel optimization.
 
 ```python
-# Worker main loop (simplified)
+# Optimizer main loop (simplified)
 while True:
-    pending = get_pending_tasks(session_id)
+    pending = get_pending_tasks(session_id, limit=5)
     if not pending:
+        print("[optimizer-N] No more tasks. Exiting.")
         exit()
 
-    task = claim_task(session_id, task_name, worker_id)
+    task = claim_task(session_id, task_name, worker_id="optimizer-N")
     if not task.success:
-        continue
+        continue  # Another optimizer claimed it first
 
     pytorch_code = get_task_details(task_path)
     op_type = detect_op_type(pytorch_code)  # keyword matching
 
-    # Spawn optimizer(s)
-    if num_strategies == 1:
-        result = Task(subagent_type="general-purpose", prompt=...)  # 1 optimizer
-    elif num_strategies == 3:
-        # ALL 3 in ONE message (critical for parallelism)
-        result_a, result_b, result_c = Task(...), Task(...), Task(...)
+    # Phase A: Analyze — algebraic reasoning, computation graph,
+    #   multi-pattern matching (load 2-3 reference files), feasibility, strategy list
+    strategies = phase_a_analyze(pytorch_code, op_type)
 
-    # Collect results, take best
-    best = max(results, key=lambda r: r.best_speedup)
+    # Phase B: Explore — try 2-3 Tier 1-2 strategies, max 2 evals each
+    winner, explore_results = phase_b_explore(strategies, task_path, session_id)
 
-    # Enforce iteration count (see 6.2)
-    ...
+    # Phase C: Exploit — deep-tune winner with Tier 3-4 actions
+    best_speedup = phase_c_exploit(winner, task_path, session_id, max_iterations)
+
+    complete_task_progress(session_id, task_name, best_speedup, ...)
+    write_reflection()    # Enhanced format with exploration summary + bottleneck
+    write_algo_trace()    # Algorithm execution trace (Phase A/B/C decisions)
+    # Loop back: claim next task
 ```
 
-The optimizer prompt includes:
-1. Instructions to read `kernel-bench-optimizer.md` (protocol)
-2. Instructions to read `learned/common.md` (universal constraints)
-3. Instructions to read `learned/{op_type}.md` (op-specific patterns)
-4. The PyTorch source code to optimize
-5. Session/task identifiers, provider, initial strategy name, max iterations
+The optimizer prompt includes instructions to:
+1. Read `kernel-bench-optimizer.md` (protocol, templates, hard rules, Phase A/B/C algorithm)
+2. Read `reference/common.md` (universal constraints, composite patterns, strategy heuristics)
+3. Read `reference/optimizer_algorithm.md` (process meta-learnings: diagnosis calibration, explore budgets)
+4. Read `reference/{op_type}.md` (op-specific patterns, loaded per-task based on detection; tier-organized)
+5. Read up to 2 additional `reference/{secondary_op}.md` files based on multi-pattern matching
+6. The PyTorch source code is obtained per-task via `get_task_details()`
 
-### 6.2 Iteration Enforcement and Re-Spawn Logic
+### 6.2 Op-Type Detection
 
-Optimizer agents sometimes quit early (LLM non-determinism). The worker has a guard:
-
-1. Check if `iterations_completed < max_iterations` AND `best_speedup < 1.3`
-2. If true → optimizer violated the protocol → re-spawn with continuation context
-3. Continuation optimizer starts from the iteration where the previous one stopped
-4. Receives prior iteration results so it can try different strategies
-5. Maximum **one** re-spawn per task (prevents infinite loops)
-
-### 6.3 Op-Type Detection
-
-Before spawning, the optimizer scans PyTorch code for keywords to select the right learned file:
+Before optimizing each task, the optimizer scans PyTorch code for keywords to select the right learned file and strategy:
 
 | Priority | Keywords | Op Type | Learned File |
 |----------|----------|---------|-------------|
-| 1 | `nn.Linear`, `matmul`, `mm`, `bmm` | `matmul` | `learned/matmul.md` |
-| 2 | `nn.Conv`, `F.conv` | `conv` | `learned/conv.md` |
-| 3 | `LayerNorm`, `BatchNorm`, `GroupNorm`, `RMSNorm` | `normalization` | `learned/other.md` |
-| 4 | `cross_entropy`, `mse_loss`, `kl_div` | `loss` | `learned/other.md` |
-| 5 | `max_pool`, `avg_pool`, `adaptive_pool` | `pooling` | `learned/other.md` |
-| 6 | `sum`, `mean`, `max`, `softmax` (no matmul) | `reduction` | `learned/other.md` |
-| 7 | `relu`, `sigmoid`, `gelu`, `silu` (no matmul/conv) | `element_wise` | `learned/other.md` |
-| 8 | None of the above | `other` | `learned/other.md` |
+| 1 | `nn.Linear`, `matmul`, `mm`, `bmm` | `matmul` | `reference/matmul.md` |
+| 2 | `nn.Conv`, `F.conv` | `conv` | `reference/conv.md` |
+| 3 | `LayerNorm`, `BatchNorm`, `GroupNorm`, `RMSNorm` | `normalization` | `reference/normalization.md` |
+| 4 | `cross_entropy`, `mse_loss`, `kl_div` | `loss` | `reference/loss.md` |
+| 5 | `max_pool`, `avg_pool`, `adaptive_pool` | `pooling` | `reference/pooling.md` |
+| 6 | `sum`, `mean`, `max`, `softmax` (no matmul) | `reduction` | `reference/reduction.md` |
+| 7 | `relu`, `sigmoid`, `gelu`, `silu` (no matmul/conv) | `element_wise` | `reference/pointwise.md` |
+| 8 | None of the above | `other` | `reference/other.md` |
 
 First match wins (matmul > conv > normalization > ...).
 
-### 6.4 Strategy Modes
+### 6.3 Strategy Selection
 
-| Mode | Flag | Sub-agents/task | Behavior |
-|------|------|----------------|----------|
-| **Simple** (default) | `--strategies=1` | 1 | One optimizer runs the full optimization loop |
-| **Exploration** | `--strategies=3` | 3 in parallel | Three independent optimizers, each with a different initial strategy; worker takes best |
+The optimizer uses the Phase A analysis to generate a ranked strategy list with 2-4 candidates at Tier 1-2 level. Strategy selection is guided by:
+
+1. **Algebraic reasoning** — if a mathematical shortcut exists, it becomes strategy #1 (highest priority)
+2. **Computation graph decomposition** — identifies fusion groups and dominant bottleneck
+3. **Multi-pattern matching** — loads primary + up to 2 secondary reference files; consults Tier 1-2 sections
+4. **Composite pattern table** — matches multi-op sequences against known best strategies
+5. **Feasibility assessment** — consults L1/L2/L3 feasibility guides in common.md
+
+Phase B explores Tier 1-2 differences (fundamentally different approaches). Phase C tunes Tier 3-4 within the winner (parameters, layouts, micro-optimizations).
 
 ---
 
@@ -458,70 +510,120 @@ The learning system has three stages:
 
 ```mermaid
 flowchart LR
-    subgraph stage1["Stage 1: Optimizer Reflection (per task)"]
-        sa["Optimizer agent"] -->|writes| ref["reflection.md<br/>(op type, insight,<br/>what worked/failed)"]
+    subgraph stage1["Stage 1: Optimizer Output (per task)"]
+        sa["Optimizer agent"] -->|writes| ref["reflection.md<br/>(enhanced: op type, bottleneck,<br/>exploration summary,<br/>Phase C tuning details)"]
+        sa -->|writes| trace["algo_trace.md<br/>(Phase A/B/C decisions,<br/>diagnosis accuracy,<br/>meta-observations)"]
     end
 
     subgraph stage2["Stage 2: Collection (per session)"]
-        script["kb_reflect.py"] -->|concatenates all| allref["all_reflections.md"]
+        script["kb_reflect.py"] -->|concatenates| allref["all_reflections.md"]
+        script -->|concatenates| alltrace["all_algo_traces.md"]
     end
 
     subgraph stage3["Stage 3: Distillation (cross-session)"]
-        learner["Learner Agent"] -->|categorizes, deduplicates,<br/>selects top 3+2 per type| learned["learned/{common,<br/>conv,matmul,other}.md"]
+        learner["Learner Agent"] -->|kernel knowledge:<br/>tier-classified,<br/>composite patterns| learned["reference/{common,<br/>conv,matmul,other}.md"]
+        learner -->|process knowledge:<br/>diagnosis calibration,<br/>explore budgets| algo["reference/<br/>optimizer_algorithm.md"]
     end
 
     ref --> script
+    trace --> script
     allref --> learner
+    alltrace --> learner
     learned -.->|"read at spawn<br/>(next session)"| sa
+    algo -.->|"read at startup<br/>(next session)"| sa
 ```
 
-### 7.2 Learned File Structure
+### 7.2 Reference File Structure
 
 ```
-.claude/agents/learned/
-├── common.md       # ~3KB — cross-cutting knowledge
+.claude/agents/reference/
+├── common.md       # Cross-cutting knowledge + L2/L3 analysis techniques
+│   ├── Code Templates             (analysis techniques, memory hierarchy planning)
 │   ├── Environment Constraints    (Triton API quirks, server behavior)
 │   ├── Anti-Patterns              (approaches proven to never work)
-│   └── Universal Techniques       (fp16, CUDA Graphs, torch.compile, etc.)
+│   ├── Universal Techniques       (fp16, algebraic simplification, etc.)
+│   ├── Feasibility Guides         (L1, L2, L3 structural feasibility)
+│   ├── Composite Patterns         (multi-op sequences with known best strategies)
+│   └── Strategy Selection Heuristics (cross-cutting bottleneck→strategy lessons)
 │
-├── conv.md         # ~3KB — convolution patterns
-│   ├── What Works     (top 3: CUDA Graphs, torch.compile+fp16, algebraic reorder)
-│   ├── What Fails     (top 2: can't beat cuDNN, bidirectional GRU)
-│   └── Decision Framework for L3 Conv Tasks
+├── optimizer_algorithm.md  # Process meta-learnings (NEW in Phase 8)
+│   ├── Diagnosis Calibration      (corrections to bottleneck diagnosis)
+│   ├── Explore Budget Heuristics  (how many strategies by task type)
+│   ├── Feasibility Corrections    (where guides are wrong)
+│   ├── High-Value Tuning Actions  (Tier 3-4 actions ranked by impact)
+│   ├── Process Anti-Patterns      (common causes of wasted iterations)
+│   └── Revert & Switch Effectiveness (when to revert vs switch vs persist)
 │
-├── matmul.md       # ~3KB — matmul/linear/attention patterns
-│   ├── What Works     (Flash Attention, fp16, epilogue fusion, algebraic reduction)
-│   ├── What Fails     (cuDNN RNN is optimal, loop bottlenecks)
-│   └── Decision Framework for L3 Matmul Tasks
+├── matmul.md       # Matmul/linear/attention patterns + templates
+│   ├── Code Templates     (autotune config, epilogue fusion template)
+│   ├── Tier 1: Algorithm Alternatives  (algebraic elimination, flash attention)
+│   ├── Tier 2: Architecture Variants   (epilogue fusion, two-kernel, tiled matmul)
+│   ├── Tier 3-4: Tuning Guide         (fp16, implicit transpose, autotune budget)
+│   ├── Anti-Patterns                   (bandwidth-bound matvec, medium GEMM)
+│   └── Decision Tree
 │
-└── other.md        # ~3KB — RNN, mixed op types
-    ├── What Works     (CUDA Graphs for RNN, dead code elimination)
-    ├── What Fails     (bidirectional GRU, cuDNN optimal cases)
-    └── Decision Framework for RNN/Other Tasks
+├── reduction.md    # Reduction patterns + templates
+│   ├── Code Templates     (autotune config, logsumexp, welford, fused chain)
+│   ├── Tier 1: Algorithm Alternatives  (online softmax)
+│   ├── Tier 2: Architecture Variants   (fused mask+cumsum)
+│   ├── Tier 3-4: Tuning Guide         (coalesced tiling, unroll)
+│   ├── Anti-Patterns                   (bandwidth ceiling, sequential dependency)
+│   └── Decision Tree
+│
+├── conv.md         # Convolution patterns + templates
+│   ├── Code Templates     (2D spatial autotune, conv2d decision tree)
+│   ├── Tier 1: Algorithm Alternatives  (algebraic elimination, depthwise, cuDNN delegation)
+│   ├── Tier 2: Architecture Variants   (implicit GEMM, NCHW-direct, fused conv+pool)
+│   ├── Tier 3-4: Tuning Guide         (NHWC layout, fp16 strategy, weight layout)
+│   ├── Anti-Patterns                   (large C_in ConvTranspose, stride-2 3D)
+│   └── Decision Tree
+│
+├── pointwise.md    # Element-wise patterns + templates
+│   ├── Code Templates     (pointwise autotune config)
+│   ├── Tier 1: Algorithm Alternatives  (GELU approximate)
+│   ├── Tier 2: Architecture Variants   (exclusive cumsum fusion)
+│   ├── Tier 3-4: Tuning Guide         (MinGPTNewGelu)
+│   ├── Anti-Patterns                   (bandwidth-bound activations, cumsum)
+│   └── Decision Tree
+│
+├── normalization.md  # Normalization patterns
+├── loss.md           # Loss function patterns
+├── pooling.md        # Pooling patterns
+└── other.md          # RNN, SSM, mixed op type patterns
 ```
+
+All op-type files follow the same tier-based internal structure (Tier 1 / Tier 2 / Tier 3-4 / Anti-Patterns / Decision Tree). This aligns with the Phase A/B/C protocol: Phase B explores Tier 1-2 strategies, Phase C tunes Tier 3-4.
 
 ### 7.3 Cross-Session Accumulation
 
-Each batch run produces new reflections. The learner agent **merges** with existing learned files:
+Each batch run produces new reflections and algorithm traces. The learner agent **merges** with existing learned files:
 
-1. Reads existing `common.md` / `{op_type}.md`
-2. Reads new reflections from the batch
-3. Deduplicates (same task → keep higher speedup)
-4. Keeps best entries from both old and new
-5. Enforces ~3KB size budget per file
-6. Writes updated files
+1. Reads existing `common.md` / `{op_type}.md` / `optimizer_algorithm.md`
+2. Reads new reflections from the batch (kernel knowledge)
+3. Reads new algo traces from the batch (process knowledge)
+4. Deduplicates (same task → keep higher speedup)
+5. Classifies entries by tier (Tier 1 / Tier 2 / Tier 3-4 / Anti-Pattern)
+6. Extracts composite patterns and strategy heuristics → `common.md`
+7. Extracts process meta-learnings → `optimizer_algorithm.md`
+8. Enforces ~3KB size budget per file
+9. Writes updated files
 
 Learned files accumulate knowledge across sessions. The merge is additive — a new session can only add entries or replace entries with better results, never delete existing knowledge.
 
-### 7.4 How Optimizers Consume Learned Knowledge
+### 7.4 How Optimizers Consume Reference Knowledge
 
-When the worker spawns an optimizer, the prompt includes instructions to read:
+When the skill spawns an optimizer in batch mode, the prompt includes instructions to read at **startup** (once per optimizer lifecycle):
 
-1. `kernel-bench-optimizer.md` — protocol, templates, hard rules
-2. `learned/common.md` — universal constraints and anti-patterns
-3. `learned/{op_type}.md` — op-specific success/failure patterns
+1. `kernel-bench-optimizer.md` — protocol, hard rules, Phase A/B/C algorithm
+2. `reference/common.md` — universal constraints, anti-patterns, analysis techniques, composite patterns, strategy heuristics
+3. `reference/optimizer_algorithm.md` — process meta-learnings (diagnosis calibration, explore budgets, feasibility corrections)
 
-This gives each optimizer the accumulated knowledge of all previous sessions before it writes its first line of code.
+And **per-task** (loaded during Phase A multi-pattern matching):
+
+4. `reference/{primary_op_type}.md` — op-specific code templates, Tier 1-2 strategies (for Phase B), Tier 3-4 tuning guide (for Phase C), anti-patterns
+5. `reference/{secondary_op_type}.md` — 0-2 additional files based on secondary pattern matching (e.g., pooling.md for a conv task with MaxPool)
+
+This gives each optimizer both the accumulated kernel knowledge and the accumulated process knowledge from all previous sessions before it writes its first line of code.
 
 ---
 
@@ -574,7 +676,7 @@ _Conv2d = getattr(nn, 'Conv' + '2d')
 self.conv = _Conv2d(...)         # No blocked string present → accepted
 ```
 
-This workaround is used in 54% of all tasks (99/183). It is documented as an official technique in `learned/common.md` because the alternative (manual weight init + functional API) has performance penalties:
+This workaround is used in 54% of all tasks (99/183). It is documented as an official technique in `reference/common.md` because the alternative (manual weight init + functional API) has performance penalties:
 
 - `F.batch_norm(training=True)` is slower than `nn.BatchNorm2d` (lacks cuDNN fused path)
 - `F.conv_transpose2d/3d` is slower than `nn.ConvTranspose*` (lacks cuDNN algorithm caching)
@@ -598,7 +700,7 @@ This workaround is used in 54% of all tasks (99/183). It is documented as an off
 ```mermaid
 stateDiagram-v2
     [*] --> INIT: init_session()
-    INIT --> RUNNING: workers spawned
+    INIT --> RUNNING: optimizers spawned
     RUNNING --> RUNNING: claim → eval → progress
     RUNNING --> COMPLETE: all pending=0, in_progress=0
 
@@ -630,13 +732,13 @@ stateDiagram-v2
 
 ### 9.3 Atomic Task Claiming
 
-Workers compete for tasks using atomic file creation (`open(path, 'x')` — exclusive create, POSIX-atomic):
+Optimizers compete for tasks using atomic file creation (`open(path, 'x')` — exclusive create, POSIX-atomic):
 
 ```python
-# Two workers calling simultaneously: exactly one succeeds, one gets FileExistsError
+# Two optimizers calling simultaneously: exactly one succeeds, one gets FileExistsError
 with open(marker, 'x') as f:
     json.dump({
-        "worker": worker_id,
+        "worker": worker_id,  # e.g., "optimizer-1"
         "started_at": datetime.now().isoformat(),
         "pid": os.getpid(),
         "hostname": socket.gethostname()
@@ -658,9 +760,9 @@ with open(marker, 'x') as f:
 
 1. `get_session_state(session_id)` → returns config + progress
 2. Stale markers auto-cleaned during scan
-3. Config restored from `session_manifest.json` (workers, strategies, provider)
-4. Workers spawned with stored config (same worker count, same strategy mode)
-5. Workers see remaining pending + incomplete tasks
+3. Config restored from `session_manifest.json` (workers, provider)
+4. Optimizers spawned with stored config (same worker count)
+5. Optimizers see remaining pending + incomplete tasks
 
 ### 9.5 Session Config Persistence
 
@@ -672,9 +774,8 @@ with open(marker, 'x') as f:
   "level": "level1",
   "created_at": "2026-02-12T...",
   "config": {
-    "original_command": "/kernel-bench level1 --session=my_run --workers=4 --strategies=3",
+    "original_command": "/kernel-bench level1 --session=my_run --workers=4",
     "num_workers": 4,
-    "num_strategies": 3,
     "provider": "local",
     "code_type": "triton"
   },
@@ -801,9 +902,83 @@ flowchart LR
 
 ---
 
-## 12. Production Results
+## 12. Verification System
 
-### 12.1 Representative Session Metrics (0212_v3)
+The verification system checks that optimizer agents actually follow the Phase A/B/C protocol. It uses a three-layer approach: breadcrumbs embedded in strategy names, mechanical checks via script, and optional semantic analysis via agent.
+
+### 12.1 Layer 1: Strategy Name Breadcrumbs
+
+Strategy names in `progress.json` encode which phase produced them. Since `progress.json` is auto-recorded by the MCP server after every `eval_kernel()` call, the optimizer cannot fake or forget these entries. The naming convention:
+
+| Phase | Format | Examples |
+|-------|--------|----------|
+| Phase B (explore) | `explore_{N}_{name}` | `explore_1_epilogue_fusion`, `explore_2_two_kernel` |
+| Phase C (exploit) | `exploit_{N}_{name}` | `exploit_3_fp16_tensor_cores` |
+| Revert | `revert_{N}` | `revert_5` |
+| Strategy switch | `switch_{N}_to_{name}` | `switch_6_to_explore_2_two_kernel` |
+| Algebraic shortcut | `algebraic_{name}` | `algebraic_diagonal_scaling` |
+
+Banned generic names: `triton`, `v1`, `v2`, `kernel`, `attempt`, `test`, `cuda`.
+
+The verifier reconstructs the full phase timeline from these names without reading `algo_trace.md`.
+
+### 12.2 Layer 2: Mechanical Verification (`kb_verify.py`)
+
+A Python script (same pattern as `kb_score.py`) that runs 17 structural checks per task:
+
+| Category | Checks | Severity |
+|----------|--------|----------|
+| **File existence** | progress.json, best_result.json exist | FAIL |
+| **File existence** | reflection.md non-empty | FAIL |
+| **File existence** | algo_trace.md non-empty | WARN |
+| **Phase compliance** | ≥2 distinct explore strategies, explore before exploit ordering, no generic names, ≥2 iterations | WARN |
+| **Cross-check** | best_result.json speedup matches progress.json best | WARN |
+| **Reflection content** | Contains "Op type:", "Bottleneck:", "Exploration summary" | WARN |
+| **Algo trace content** | Contains "Phase A", "Phase B", "Phase C", "Meta-Observations" sections | WARN |
+| **Effort check** | If ≥5 iters and <1.3x: at least 2 distinct explore strategies | WARN |
+
+**Output:** Console summary + `verification_YYYYMMDD_HHMMSS.md` report in session directory.
+
+**Score:** `{pass_count}/{total} PASS, {warn_count} WARN, {fail_count} FAIL`
+
+### 12.3 Layer 3: Semantic Verification (Verifier Agent)
+
+An LLM agent (`kernel-bench-verifier.md`) spawned on demand via `/kernel-bench verify {session} --semantic`. Performs deep quality checks:
+
+1. **Strategy diversity** — Are explore strategies actually Tier 1-2 different? (Not just block size variations)
+2. **Diagnosis coherence** — Does bottleneck diagnosis match speedup pattern?
+3. **Reflection quality** — Is the key insight transferable? (Not just "I used block 1024")
+4. **Strategy-code alignment** — Does the strategy name match what the code does? (spot-checked on up to 10 tasks)
+
+**Output:** `semantic_verification.md` in session directory.
+
+### 12.4 Verification Flow
+
+```
+/kernel-bench verify {session_id}
+    │
+    ├── python3 kb_verify.py {session_id}
+    │   ├── For each completed task:
+    │   │   ├── Check files exist
+    │   │   ├── Parse strategy names from progress.json
+    │   │   ├── Verify explore/exploit phase markers
+    │   │   ├── Check reflection.md + algo_trace.md sections
+    │   │   └── Cross-check speedup consistency
+    │   ├── Console: summary (PASS/WARN/FAIL counts, top issues)
+    │   └── File: verification_YYYYMMDD_HHMMSS.md
+    │
+    └── (if --semantic) Spawn verifier agent
+        ├── Read verification report
+        ├── Check strategy diversity, diagnosis coherence, reflection quality
+        ├── Spot-check code alignment (up to 10 tasks)
+        └── File: semantic_verification.md
+```
+
+---
+
+## 13. Production Results
+
+### 13.1 Representative Session Metrics (0212_v3)
 
 Across 183 tasks (35 L1 + 99 L2 + 49 L3):
 
@@ -815,7 +990,7 @@ Across 183 tasks (35 L1 + 99 L2 + 49 L3):
 | **Corrected avg speedup** (gaming removed) | 4.86x |
 | **Clean-only avg speedup** | 6.36x |
 
-### 12.2 Top Clean Successes
+### 13.2 Top Clean Successes
 
 | Task | Speedup | Technique |
 |------|---------|-----------|
@@ -827,7 +1002,7 @@ Across 183 tasks (35 L1 + 99 L2 + 49 L3):
 | L2: 22_Matmul | 6.56x | Triton matmul epilogue fusion |
 | L3: 9_ResNet18 | 4.34x | CUDA Graph capture/replay |
 
-### 12.3 Key Learnings from Production
+### 13.3 Key Learnings from Production
 
 **What consistently works:**
 - Algebraic simplification (10-50x when applicable)
@@ -843,7 +1018,7 @@ Across 183 tasks (35 L1 + 99 L2 + 49 L3):
 - `channels_last` memory format conversion (overhead exceeds benefit)
 - `torch.compile(mode='reduce-overhead')` with BatchNorm in training mode (crashes)
 
-### 12.4 Environment Ceiling Effects
+### 13.4 Environment Ceiling Effects
 
 Some tasks hit hard performance ceilings due to eval server constraints:
 
@@ -863,33 +1038,41 @@ The `/kernel-bench` command supports 7 input styles:
 | Style | Example | Mode |
 |-------|---------|------|
 | Single task | `/kernel-bench level1/19_ReLU.py` | Interactive |
-| Directory batch | `/kernel-bench level1/` | Supervisor-managed parallel |
-| Full parameters | `/kernel-bench level1 --session=x --workers=4 --strategies=3` | Supervisor with config |
+| Directory batch | `/kernel-bench level1/` | Optimizer-managed parallel |
+| Full parameters | `/kernel-bench level1 --session=x --workers=4` | Optimizers with config |
 | Natural language | `/kernel-bench 4 random tasks from level1` | Interpreted |
 | Resume | `/kernel-bench --resume my_run` | Continue session |
 | Progress | `/kernel-bench progress test1` | Query (runs `kb_score.py`) |
 | Server config | `/kernel-bench server --port=5676` | Manage eval server |
+| Verify | `/kernel-bench verify test1` | Protocol compliance (runs `kb_verify.py`) |
 
-**Parameter defaults:** `--workers=4`, `--strategies=1`, `--iterations=20`, `--session={level}_{timestamp}`
+**Parameter defaults:** `--workers=4`, `--iterations=20`, `--session={level}_{timestamp}`
 
 ## Appendix B: File Index
 
 | File | Role |
 |------|------|
-| `.claude/commands/kernel-bench.md` | Skill controller (input parsing, mode routing, control loop: launch → monitor → verify → correct) |
-| `.claude/agents/kernel-bench-supervisor.md` | Supervisor protocol (session lifecycle: init → workers → monitor → evaluate → retry → finalize) |
-| `.claude/agents/kernel-bench-worker.md` | Worker protocol (claim → dispatch optimizers → enforce → loop) |
-| `.claude/agents/kernel-bench-optimizer.md` | Optimizer protocol (analyze → code → eval → fix → reflect; deep 10-20 iteration loop) |
-| `.claude/agents/kernel-bench-learner.md` | Learning agent protocol (read reflections → distill → write learned/) |
-| `.claude/agents/learned/common.md` | Accumulated environment constraints, anti-patterns, universal techniques |
-| `.claude/agents/learned/conv.md` | Conv-specific success/failure patterns |
-| `.claude/agents/learned/matmul.md` | Matmul-specific success/failure patterns |
-| `.claude/agents/learned/other.md` | RNN/mixed-type success/failure patterns |
+| `.claude/commands/kernel-bench.md` | Skill controller (input parsing, mode routing, spawn optimizers + monitor, wait loop, finalize, verify) |
+| `.claude/agents/kernel-bench-optimizer.md` | Optimizer protocol (claim loop in batch mode; Phase A analyze → Phase B explore → Phase C exploit → reflect; up to 20 iterations per task) |
+| `.claude/agents/kernel-bench-monitor.md` | Monitor protocol (poll session state, print progress, detect ALL_DONE/STALL/STUCK) |
+| `.claude/agents/kernel-bench-learner.md` | Learning agent protocol (read reflections + algo traces → tier-classify → write reference/ + optimizer_algorithm.md) |
+| `.claude/agents/kernel-bench-verifier.md` | Semantic verifier agent (strategy diversity, diagnosis coherence, reflection quality, code alignment checks) |
+| `.claude/agents/reference/common.md` | Accumulated environment constraints, anti-patterns, universal techniques, composite patterns, strategy heuristics, L2/L3 analysis techniques |
+| `.claude/agents/reference/optimizer_algorithm.md` | Process meta-learnings: diagnosis calibration, explore budgets, feasibility corrections, tuning action ranking |
+| `.claude/agents/reference/conv.md` | Conv-specific templates, tier-organized success/failure patterns |
+| `.claude/agents/reference/matmul.md` | Matmul-specific templates, epilogue fusion, tier-organized success/failure patterns |
+| `.claude/agents/reference/reduction.md` | Reduction templates (logsumexp, welford, fused chain), tier-organized patterns |
+| `.claude/agents/reference/pointwise.md` | Pointwise autotune config, tier-organized element-wise patterns |
+| `.claude/agents/reference/normalization.md` | Normalization tier-organized patterns |
+| `.claude/agents/reference/loss.md` | Loss function tier-organized patterns |
+| `.claude/agents/reference/pooling.md` | Pooling tier-organized patterns |
+| `.claude/agents/reference/other.md` | RNN/mixed-type tier-organized patterns |
 | `claudeCodeKernelBenchServer.py` | MCP server (stdio, 14 tools, semaphore, auto-save/complete) |
 | `kbEvalClient.py` | HTTP client for remote kbEval server |
 | `kbEvalUtil.py` | Eval server utilities (string filtering at lines 467-566, 1048-1330) |
 | `kbEvalServer.py` | Remote GPU eval server (stateless FastAPI) |
 | `kbEval.yaml` | Provider configuration (URLs, timeouts, API key paths) |
 | `kb_score.py` | Progress reporting script |
+| `kb_verify.py` | Algorithm verification script (17 mechanical checks per task) |
 | `kb_reflect.py` | Reflection collection script |
 | `kb_server.py` | Eval server configuration script |

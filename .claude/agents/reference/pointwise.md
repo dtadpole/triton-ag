@@ -1,21 +1,42 @@
-# element_wise patterns
+# Pointwise / Element-wise Reference
 <!-- Updated: 2026-02-14 | Source: 0212_v10_l1 -->
 
-## What Works
+## Code Templates
+
+### Pointwise / Element-wise Autotune Config
+
+```python
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_SIZE': 256}, num_warps=2),
+        triton.Config({'BLOCK_SIZE': 512}, num_warps=4),
+        triton.Config({'BLOCK_SIZE': 1024}, num_warps=4),
+        triton.Config({'BLOCK_SIZE': 2048}, num_warps=8),
+        triton.Config({'BLOCK_SIZE': 4096}, num_warps=8),
+    ],
+    key=['n_elements'],
+)
+```
+
+## Tier 1: Algorithm Alternatives
 
 ### L1: 26_GELU (1.95x, iter 1) -- Approximate tanh formula beats exact erf
 **Key insight**: Triton GELU using approximate tanh formula (via sigmoid-based workaround since tl.math.tanh missing) is 2x faster than PyTorch's exact erf-based GELU. Large block sizes (8192) with 16 warps are critical.
 **What worked**: `0.5*x*(1+tanh(z))` = `x*sigmoid(2z)` using tl.sigmoid. The approximation trades slight precision for significant compute reduction. Autotune needed 8192 block option.
 
-### L1: 88_MinGPTNewGelu (1.23x, iter 1) -- tl.sigmoid as core primitive
-**Key insight**: For tanh-approximation GELU, use identity `0.5*x*(1+tanh(z)) = x*sigmoid(2z)`. tl.sigmoid is significantly faster than manual `1/(1+exp(-z))` or `(exp(2z)-1)/(exp(2z)+1)`.
-**What worked**: Fused single kernel with tl.sigmoid. BLOCK_SIZE=2048-8192, moderate warps. Manual exp-based tanh was 30-40% slower.
+## Tier 2: Architecture Variants
 
 ### L1: 92_cumsum_exclusive (1.52x, iter 1) -- Fusion eliminates intermediate allocations
 **Key insight**: Exclusive cumsum = inclusive cumsum with output shifted right by 1 + zero prepended. Single kernel avoids reference's torch.cat + slice + cumsum (2 extra allocations + memory passes).
 **What worked**: Single Triton kernel with tl.cumsum, writing results at offset+1. Also: 93_masked_cumsum (1.45x, fuse mask*x + cumsum into single kernel).
 
-## What Fails
+## Tier 3-4: Tuning Guide
+
+### L1: 88_MinGPTNewGelu (1.23x, iter 1) -- tl.sigmoid as core primitive
+**Key insight**: For tanh-approximation GELU, use identity `0.5*x*(1+tanh(z)) = x*sigmoid(2z)`. tl.sigmoid is significantly faster than manual `1/(1+exp(-z))` or `(exp(2z)-1)/(exp(2z)+1)`.
+**What worked**: Fused single kernel with tl.sigmoid. BLOCK_SIZE=2048-8192, moderate warps. Manual exp-based tanh was 30-40% slower.
+
+## Anti-Patterns
 
 ### L1: 19_ReLU through 32_HardTanh (all ~1.0x) -- Pure bandwidth-bound activations
 **Key insight**: ALL pure single-op element-wise activations on very large tensors (4096x393216 = 1.6B elements, ~6GB data) are completely memory-bandwidth bound. PyTorch's CUDA kernels already saturate HBM bandwidth. No Triton kernel can beat the fundamental 8 bytes/element I/O requirement.
@@ -27,10 +48,10 @@
 **Why it fails**: PyTorch's CUB implementation is near-optimal. Single-pass sequential scan with tl.cumsum is the only working approach, giving at most ~5% improvement.
 **Better approach**: Accept ~1.05x ceiling for pure cumsum. Focus on fusing with pre/post operations (e.g., masked_cumsum 1.45x, exclusive_cumsum 1.52x).
 
-## Decision Framework for Element-wise Tasks
+## Decision Tree
 
-1. **Pure single-op activation on large tensor (>1B elements)**: Skip optimization entirely. Always ~1.0x. Not feasible.
-2. **GELU (approximate)**: Use x*sigmoid(2z) formula. ~2.0x because PyTorch uses exact erf. Large block sizes (8192).
-3. **Multi-op element-wise chains**: Fuse into single kernel to eliminate intermediate allocations. Expect 1.2-1.5x.
-4. **Prefix scans (cumsum/cumprod)**: Single-pass sequential scan only. Fusion with pre/post ops is the path to speedup (1.4-1.5x). tl.cumsum works; tl.cumprod does not exist (use exp(cumsum(log(x)))).
-5. **When approximate formulas beat exact**: GELU approximate > exact erf. tanh via sigmoid > exact tanh. These approximation gaps are the only way to beat PyTorch on element-wise ops.
+1. **Pure single-op activation on large tensor (>1B elements)** (Anti-Pattern): Skip optimization entirely. Always ~1.0x. Not feasible.
+2. **GELU (approximate)** (Tier 1): Use x*sigmoid(2z) formula. ~2.0x because PyTorch uses exact erf. Large block sizes (8192).
+3. **Multi-op element-wise chains** (Tier 2): Fuse into single kernel to eliminate intermediate allocations. Expect 1.2-1.5x.
+4. **Prefix scans (cumsum/cumprod)** (Anti-Pattern): Single-pass sequential scan only. Fusion with pre/post ops is the path to speedup (1.4-1.5x). tl.cumsum works; tl.cumprod does not exist (use exp(cumsum(log(x)))).
+5. **When approximate formulas beat exact** (Tier 1): GELU approximate > exact erf. tanh via sigmoid > exact tanh. These approximation gaps are the only way to beat PyTorch on element-wise ops.

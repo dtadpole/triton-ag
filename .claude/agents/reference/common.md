@@ -1,5 +1,41 @@
-# Common Patterns
+# Common Reference
 <!-- Updated: 2026-02-14 | Source: 0212_v10_l1+0212_v10_l2+0212_v10_l3+0212_v10_l3_retry+0212_v8_l2+0212_v3_l3+0212_l2 -->
+
+## Code Templates
+
+### Analysis Techniques (L2/L3)
+
+Use these for multi-operation tasks where simple strategy selection isn't enough.
+
+#### Computation Graph Analysis
+
+Trace through `forward()` and build a mental computation graph:
+
+1. List all operations in order with shapes
+2. Identify fusion opportunities (which ops can share registers?)
+3. Find the largest intermediate tensor (can you avoid materializing it?)
+4. Map data flow dependencies (what's the critical path?)
+
+#### Why PyTorch is Slow (identify the opportunity)
+
+- **Multiple kernel launches**: PyTorch launches separate CUDA kernels per op (~5-10us overhead each). Your fused kernel eliminates this.
+- **Memory round-trips**: PyTorch writes intermediates to global memory between ops. Your kernel keeps values in registers.
+- **Bottleneck type**: Memory-bandwidth limited → reduce global memory accesses. Compute limited → use tensor cores. Latency limited → increase occupancy.
+
+#### Multi-Kernel Decomposition (L3)
+
+Use a single kernel when all ops fit in shared memory with linear data flow. Use multiple kernels when intermediates exceed shared memory or stages need different parallelization. Split at natural boundaries where data must go through global memory anyway.
+
+#### Memory Hierarchy Planning
+
+```
+Registers: ~255 per thread (<64 for good occupancy) — accumulators, current tile
+Shared memory: 48-164KB — tiles of A, B for matmul
+L2 cache: implicit — proper tiling improves reuse
+Global memory: input/output tensors — minimize traffic
+```
+
+Choose tile sizes to balance occupancy vs cache reuse. For matmul: BLOCK_M=128, BLOCK_N=128, BLOCK_K=32 uses ~16KB shared memory per tile pair.
 
 ## Environment Constraints
 
@@ -247,3 +283,45 @@
 | Deep CNN (VGG, ResNet) | NO | 0.04-0.4x | cuDNN too fast, precision compounds |
 | Bidirectional RNN | NO | 0.04-0.3x | Python loop overhead, cuDNN fusion |
 | Complex transformers | NO | 0.3-0.7x | Many medium matmuls, cuBLAS unbeatable |
+
+## Composite Patterns
+<!-- Multi-op sequences with known best strategies. Extracted from exploration summaries by the learner agent. -->
+
+- **matmul → pointwise(1-3)** → epilogue_fusion (4-12x). Fusing activation into matmul tile registers eliminates intermediate global memory write. Alternatives tried: two_kernel (2-5x) — intermediate write costs 40-60% of runtime.
+  (Source: L2: 59_Matmul, 55_Matmul, 56_Matmul, 94_Gemm, 66_Matmul, 12_Gemm, 99_Matmul, 95_Matmul)
+
+- **matmul → norm → activation** → two_kernel: matmul+bias epilogue + fused norm-act kernel (5-12x). BN/GN needs all values before normalizing, cannot fuse into matmul epilogue.
+  (Source: L2: 30_Gemm 11.7x, 37_Matmul 5.5x, 62_Matmul 8.3x, 88_Gemm 5.2x)
+
+- **matmul → reduction(sum/mean)** → algebraic_distribute: distribute reduction into weights, collapse matmul to matvec or constant (20-74x). Always check before writing any kernel.
+  (Source: L2: 14_Gemm 61x, 18_Matmul 61x, 51_Gemm 70x, 80_Gemm 73.5x)
+
+- **conv(C_in<=16) → post-ops** → torch.convolution fp16 + fused Triton post-ops (1.3-2.5x). cuDNN conv is near-optimal for small C_in; Triton handles post-ops only.
+  (Source: L1: 70_conv 1.89x, 73_conv 1.53x, 80_conv 1.81x)
+
+- **conv → pool** → fuse pool into conv kernel, avoid materializing full conv output (1.5-2.9x).
+  (Source: L2: 82_Conv2d 2.93x, 50_ConvTranspose3d 1.45x)
+
+- **reshape → matmul → softmax → matmul** → flash_attention for T>=1024 (2-8x); three-kernel decomposition for small T.
+  (Source: L3: 31_VisionAttention 8.1x, L1: 97_ScaledDotProduct 1.97x)
+
+- **pointwise(3+) → reduction** → single fused kernel. Fusing eliminates intermediate writes; individual ops are bandwidth-bound at ~1.0x.
+  (Source: L1: 93_masked_cumsum 1.45x, L1: 92_cumsum_exclusive 1.52x)
+
+## Strategy Selection Heuristics
+<!-- Cross-cutting lessons about when to use which strategy class. Extracted from bottleneck + result data by the learner agent. -->
+
+- **compute-bound + matmul chain** → prefer epilogue fusion over multi-kernel. Epilogue fusion wins 8/10 tasks because intermediate writes dominate at large GEMM sizes.
+  (Source: L2: 12_Gemm 7.1x, 59_Matmul 11.9x, 55_Matmul 11.1x)
+
+- **memory-bound + element-wise chain (3+ ops)** → prefer single fused kernel. Fusing 3+ pointwise ops is the ONLY way to beat PyTorch; individual ops are bandwidth-bound at ~1.0x.
+  (Source: L1: 26_GELU 1.95x, L1: 92_cumsum_exclusive 1.52x)
+
+- **infeasible pattern (deep CNN, bidir RNN)** → skip after 2 iterations. Spending 20 iterations on VGG16 or bidirectional GRU yields <0.4x every time.
+  (Source: L3: 10_ResNet101 0.04x, 11_VGG16 0.4x, 15_GRU 0.04x)
+
+- **conv with C_in<=16** → try full Triton first (single-pass implicit GEMM). For C_in>=32, prefer torch.convolution + Triton post-ops.
+  (Source: L1: 54_conv 3.31x Triton, L1: 70_conv 1.89x cuDNN)
+
+- **pure single-op element-wise on large tensors** → do not optimize. Bandwidth ceiling at ~1.0x. Only path to >1.0x is fusing with adjacent ops.
+  (Source: L1: 19_ReLU through 32_HardTanh, all ~1.0x)

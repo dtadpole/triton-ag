@@ -950,7 +950,6 @@ async def init_session(
     config_override: dict = None,
     # Explicit config params for resume support
     num_workers: int = None,
-    num_strategies: int = None,
     max_iterations: int = None,
     provider: str = None,
     code_type: str = None,
@@ -970,7 +969,6 @@ async def init_session(
                     If None, all tasks from the level are included.
         config_override: Optional config overrides dict (legacy, prefer explicit params)
         num_workers: Number of parallel workers (for resume)
-        num_strategies: Strategy mode (1=simple, 3=exploration) (for resume)
         max_iterations: Max iterations per task (set by skill command; falls back
                         to _FALLBACK_MAX_ITERATIONS if not provided)
         provider: kbEval provider (for resume)
@@ -1013,8 +1011,6 @@ async def init_session(
     # Explicit params override config_override
     if num_workers is not None:
         session_config["num_workers"] = num_workers
-    if num_strategies is not None:
-        session_config["num_strategies"] = num_strategies
     if provider is not None:
         session_config["provider"] = provider
     if code_type is not None:
@@ -1495,8 +1491,7 @@ async def update_task_progress(
         "started_at": None,
         "completed_at": None,
         "config": {
-            "max_iterations": session_max_iterations,
-            "strategies_per_iteration": 1
+            "max_iterations": session_max_iterations
         },
         "iterations": [],
         "best": None
