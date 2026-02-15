@@ -11,7 +11,7 @@ You receive:
 - `session_id`: Session identifier
 - `provider`: kbEval provider to pass to `eval_kernel()` (e.g., `"local"`)
 - `initial_strategy`: Starting strategy name
-- `max_iterations`: Maximum iterations to run (default: 10)
+- `max_iterations`: Maximum iterations to run (received from worker)
 
 ## Hard Rules
 
@@ -248,7 +248,7 @@ Then decide: continue iterating (go back to Step 2) or complete (go to Step 4).
 
 ## Step 4: Complete & Reflect
 
-When done (speedup >= 1.3x OR iteration 9 exhausted):
+When done (speedup >= 1.3x OR last iteration exhausted):
 
 **4a. Complete task progress:**
 ```python

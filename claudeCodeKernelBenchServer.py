@@ -94,10 +94,34 @@ _best_result_tracker: dict[tuple[str, str], dict] = {}
 
 # Default completion thresholds
 DEFAULT_TARGET_SPEEDUP = 1.3
-DEFAULT_MAX_ITERATIONS = 10
+
+# Safety-net fallback for max_iterations when the session manifest is missing or
+# corrupted. The authoritative default lives in the skill command (kernel-bench.md,
+# --iterations=20). This value is deliberately conservative (10) and visually
+# distinct so that sessions running on the fallback are obvious in reports.
+_FALLBACK_MAX_ITERATIONS = 10
 
 # Completion reasons that indicate a task should be retryable on resume
 RETRYABLE_REASONS = ("server_error", "all_iterations_failed")
+
+
+def _get_session_max_iterations(session_id: str) -> int:
+    """Read max_iterations from session manifest (single source of truth).
+
+    Falls back to _FALLBACK_MAX_ITERATIONS with a warning when the manifest
+    is missing or unreadable.
+    """
+    output_base = Path(config["output"]["base_dir"])
+    manifest_file = output_base / session_id / "session_manifest.json"
+    if manifest_file.exists():
+        try:
+            manifest = json.loads(manifest_file.read_text())
+            return manifest.get("config", {}).get("max_iterations", _FALLBACK_MAX_ITERATIONS)
+        except (json.JSONDecodeError, Exception):
+            pass
+    logger.warning(f"[kernel-bench] Could not read max_iterations from manifest for session "
+                   f"'{session_id}', falling back to {_FALLBACK_MAX_ITERATIONS}")
+    return _FALLBACK_MAX_ITERATIONS
 
 
 def _infer_completion_reason(speedup: float, strategy: str, iterations_done: int, max_iterations: int) -> str:
@@ -472,15 +496,7 @@ async def _auto_update_progress(
     completion_reason = None
 
     # Read max_iterations from session config
-    max_iterations = DEFAULT_MAX_ITERATIONS
-    output_base = Path(config["output"]["base_dir"])
-    manifest_file = output_base / session_id / "session_manifest.json"
-    if manifest_file.exists():
-        try:
-            manifest = json.loads(manifest_file.read_text())
-            max_iterations = manifest.get("config", {}).get("max_iterations", DEFAULT_MAX_ITERATIONS)
-        except (json.JSONDecodeError, Exception):
-            pass
+    max_iterations = _get_session_max_iterations(session_id)
 
     # Condition 1: Target speedup reached
     if speedup >= DEFAULT_TARGET_SPEEDUP:
@@ -557,7 +573,7 @@ async def eval_kernel(
 
     **Auto-completion**: Tasks are automatically marked complete when:
     - Speedup >= 1.3x (target reached), OR
-    - 10 iterations completed (max iterations)
+    - max_iterations reached (as configured in session manifest)
 
     Args:
         task_path: Path to the original task file (contains reference Model)
@@ -955,7 +971,8 @@ async def init_session(
         config_override: Optional config overrides dict (legacy, prefer explicit params)
         num_workers: Number of parallel workers (for resume)
         num_strategies: Strategy mode (1=simple, 3=exploration) (for resume)
-        max_iterations: Max iterations per task (default: 10)
+        max_iterations: Max iterations per task (set by skill command; falls back
+                        to _FALLBACK_MAX_ITERATIONS if not provided)
         provider: kbEval provider (for resume)
         code_type: "triton" or "cuda" (for resume)
         original_command: The original command that started the session (for resume)
@@ -1007,7 +1024,9 @@ async def init_session(
     if max_iterations is not None:
         session_config["max_iterations"] = max_iterations
     elif "max_iterations" not in session_config:
-        session_config["max_iterations"] = DEFAULT_MAX_ITERATIONS
+        logger.warning(f"[kernel-bench] No max_iterations provided for session '{session_id}', "
+                       f"falling back to {_FALLBACK_MAX_ITERATIONS}")
+        session_config["max_iterations"] = _FALLBACK_MAX_ITERATIONS
 
     manifest = {
         "session_id": session_id,
@@ -1465,6 +1484,9 @@ async def update_task_progress(
 
     task_dir.mkdir(parents=True, exist_ok=True)
 
+    # Read max_iterations from session manifest (single source of truth)
+    session_max_iterations = _get_session_max_iterations(session_id)
+
     # Load existing progress or create new
     progress = {
         "task_name": task_name,
@@ -1473,7 +1495,7 @@ async def update_task_progress(
         "started_at": None,
         "completed_at": None,
         "config": {
-            "max_iterations": 10,
+            "max_iterations": session_max_iterations,
             "strategies_per_iteration": 1
         },
         "iterations": [],
@@ -1581,15 +1603,7 @@ async def complete_task_progress(
     marker_file = task_dir / ".in_progress"
 
     # Guard: reject early completion if iterations < max and speedup < target
-    # Read max_iterations from session config if available
-    max_iterations = DEFAULT_MAX_ITERATIONS
-    manifest_file = output_base / session_id / "session_manifest.json"
-    if manifest_file.exists():
-        try:
-            manifest = json.loads(manifest_file.read_text())
-            max_iterations = manifest.get("config", {}).get("max_iterations", DEFAULT_MAX_ITERATIONS)
-        except (json.JSONDecodeError, Exception):
-            pass
+    max_iterations = _get_session_max_iterations(session_id)
 
     # Count actual iterations from progress.json
     iterations_done = 0
@@ -1689,11 +1703,14 @@ async def get_task_progress(
     task_dir = output_base / session_id / task_name
     progress_file = task_dir / "progress.json"
 
+    # Read max_iterations from session manifest (single source of truth)
+    max_iterations = _get_session_max_iterations(session_id)
+
     if not task_dir.exists():
         return {
             "task_name": task_name,
             "status": "pending",
-            "iterations_planned": 10,
+            "iterations_planned": max_iterations,
             "iterations_done": 0,
             "iterations": [],
             "best": None
@@ -1719,7 +1736,7 @@ async def get_task_progress(
             "worker_id": progress.get("worker_id"),
             "started_at": progress.get("started_at"),
             "completed_at": progress.get("completed_at") or best_result.get("completed_at"),
-            "iterations_planned": progress.get("config", {}).get("max_iterations", 10),
+            "iterations_planned": max_iterations,
             "iterations_done": len(progress.get("iterations", [])),
             "iterations": progress.get("iterations", []),
             "best": {
@@ -1767,7 +1784,7 @@ async def get_task_progress(
         "worker_id": worker_id or progress.get("worker_id"),
         "started_at": started_at or progress.get("started_at"),
         "completed_at": None,
-        "iterations_planned": progress.get("config", {}).get("max_iterations", 10),
+        "iterations_planned": max_iterations,
         "iterations_done": len(iterations),
         "iterations": iterations,
         "best": progress.get("best")
@@ -1806,6 +1823,7 @@ async def get_batch_progress(
         return {"error": f"Corrupted manifest for session: {session_id}"}
 
     all_tasks = manifest.get("tasks", [])
+    max_iterations = manifest.get("config", {}).get("max_iterations", _FALLBACK_MAX_ITERATIONS)
 
     # Collect task progress
     tasks_progress = []
@@ -1823,7 +1841,7 @@ async def get_batch_progress(
             "name": task_name,
             "status": "pending",
             "worker": None,
-            "iterations_planned": 10,
+            "iterations_planned": max_iterations,
             "iterations_done": 0,
             "best_speedup": None,
             "last_iteration": None
@@ -1844,7 +1862,7 @@ async def get_batch_progress(
 
         iterations = progress.get("iterations", [])
         task_info["worker"] = progress.get("worker_id")
-        task_info["iterations_planned"] = progress.get("config", {}).get("max_iterations", 10)
+        task_info["iterations_planned"] = max_iterations
         task_info["iterations_done"] = len(iterations)
 
         if include_iterations:
@@ -1891,7 +1909,7 @@ async def get_batch_progress(
                     pending_count += 1
             elif iterations:
                 # Has work but no marker - incomplete
-                if all(not it.get("correct") for it in iterations) and len(iterations) >= 10:
+                if all(not it.get("correct") for it in iterations) and len(iterations) >= max_iterations:
                     task_info["status"] = "failed"
                     failed_count += 1
                 else:

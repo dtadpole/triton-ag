@@ -30,6 +30,7 @@ def get_batch_progress(session_id: str) -> tuple[dict, Path]:
         sys.exit(1)
 
     all_tasks = manifest.get("tasks", [])
+    max_iterations = manifest.get("config", {}).get("max_iterations", 20)
 
     tasks_progress = []
     completed_count = 0
@@ -46,7 +47,7 @@ def get_batch_progress(session_id: str) -> tuple[dict, Path]:
             "name": task_name,
             "status": "pending",
             "worker": None,
-            "iterations_planned": 3,
+            "iterations_planned": max_iterations,
             "iterations_done": 0,
             "best_speedup": None,
             "last_iteration": None,
@@ -67,7 +68,7 @@ def get_batch_progress(session_id: str) -> tuple[dict, Path]:
 
         iterations = progress.get("iterations", [])
         task_info["worker"] = progress.get("worker_id")
-        task_info["iterations_planned"] = progress.get("config", {}).get("max_iterations", 3)
+        task_info["iterations_planned"] = progress.get("config", {}).get("max_iterations", max_iterations)
         task_info["iterations_done"] = len(iterations)
         task_info["iterations"] = iterations
 
@@ -107,7 +108,7 @@ def get_batch_progress(session_id: str) -> tuple[dict, Path]:
                     task_info["status"] = "incomplete"
                     pending_count += 1
             elif iterations:
-                if all(not it.get("correct") for it in iterations) and len(iterations) >= 3:
+                if all(not it.get("correct") for it in iterations) and len(iterations) >= max_iterations:
                     task_info["status"] = "failed"
                     failed_count += 1
                 else:
@@ -203,7 +204,7 @@ def generate_markdown_report(data: dict, session_id: str, session_dir: Path) -> 
             name = t["name"]
             worker = t.get("worker") or "-"
             iters_done = t.get("iterations_done", 0)
-            iters_planned = t.get("iterations_planned", 3)
+            iters_planned = t.get("iterations_planned", 20)
             last = t.get("last_iteration", {})
             if last:
                 if last.get("compiled") and last.get("correct"):

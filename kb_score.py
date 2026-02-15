@@ -19,6 +19,12 @@ from datetime import datetime
 # Completion reasons that indicate a task should be retryable on resume
 RETRYABLE_REASONS = ("server_error", "all_iterations_failed")
 
+# Safety-net fallback for max_iterations when session manifest is missing or
+# corrupted. The authoritative default lives in the skill command (kernel-bench.md,
+# --iterations=20). This value is deliberately conservative (10) and visually
+# distinct so that sessions running on the fallback are obvious in reports.
+_FALLBACK_MAX_ITERATIONS = 10
+
 
 def _is_task_retryable(result: dict) -> bool:
     """Check if a completed task should be treated as retryable on resume."""
@@ -141,6 +147,7 @@ def compute_summary(session_data: dict) -> dict:
     """Compute summary statistics for the session."""
     tasks = session_data.get("tasks", [])
     total = len(tasks)
+    max_iterations = session_data.get("config", {}).get("max_iterations", _FALLBACK_MAX_ITERATIONS)
 
     if total == 0:
         return {
@@ -170,11 +177,11 @@ def compute_summary(session_data: dict) -> dict:
     speedups = [t["best_speedup"] for t in tasks if t["best_speedup"] and t["best_speedup"] > 0]
     avg_speedup = sum(speedups) / len(speedups) if speedups else 0.0
 
-    # Failed = all iterations failed OR incomplete with 10+ failed iterations
+    # Failed = all iterations failed OR incomplete with max_iterations+ failed iterations
     failed = 0
     for t in tasks:
         if t["iterations"] and not t["has_correct_result"]:
-            if len(t["iterations"]) >= 10:
+            if len(t["iterations"]) >= max_iterations:
                 failed += 1
 
     return {
@@ -198,6 +205,7 @@ def generate_markdown_report(session_data: dict, summary: dict) -> str:
     level = session_data.get("level", "unknown")
     config = session_data.get("config", {})
     tasks = session_data.get("tasks", [])
+    max_iterations = config.get("max_iterations", _FALLBACK_MAX_ITERATIONS)
 
     lines = []
 
@@ -249,7 +257,7 @@ def generate_markdown_report(session_data: dict, summary: dict) -> str:
         lines.append("|------|--------|------------|--------------|")
         for t in in_progress_tasks:
             speedup_str = f"{t['best_speedup']:.2f}x" if t["best_speedup"] else "-"
-            lines.append(f"| {t['name']} | {t['worker'] or '-'} | {len(t['iterations'])}/10 | {speedup_str} |")
+            lines.append(f"| {t['name']} | {t['worker'] or '-'} | {len(t['iterations'])}/{max_iterations} | {speedup_str} |")
         lines.append("")
 
     # Completed Tasks (sorted by speedup)
@@ -288,7 +296,7 @@ def generate_markdown_report(session_data: dict, summary: dict) -> str:
         lines.append("")
 
     # Failed Tasks
-    failed_tasks = [t for t in sorted_tasks if t["status"] == "incomplete" and not t["has_correct_result"] and len(t["iterations"]) >= 10]
+    failed_tasks = [t for t in sorted_tasks if t["status"] == "incomplete" and not t["has_correct_result"] and len(t["iterations"]) >= max_iterations]
     if failed_tasks:
         lines.append("## Failed Tasks")
         lines.append("")
@@ -366,13 +374,14 @@ def main():
 
     # Single task detail
     if task_name:
+        max_iterations = session_data.get("config", {}).get("max_iterations", _FALLBACK_MAX_ITERATIONS)
         task = next((t for t in session_data["tasks"] if t["name"] == task_name), None)
         if not task:
             print(f"Task not found: {task_name}")
             sys.exit(1)
 
         print(f"\n=== Task: {task_name} ===")
-        print(f"Status: {task['status']} | Worker: {task['worker'] or '-'} | Iterations: {len(task['iterations'])}/10")
+        print(f"Status: {task['status']} | Worker: {task['worker'] or '-'} | Iterations: {len(task['iterations'])}/{max_iterations}")
         print()
 
         if task["iterations"]:

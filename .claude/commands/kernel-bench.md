@@ -18,11 +18,11 @@ Optimize CUDA/Triton kernels for kernel_bench tasks with crash recovery and **pa
 
 ## Strategy Modes
 
-Each worker dispatches tasks to optimizer agents that run the full optimization loop (up to 10 iterations each):
+Each worker dispatches tasks to optimizer agents that run the full optimization loop (up to 20 iterations each):
 
 | Mode | Flag | Behavior | Use Case |
 |------|------|----------|----------|
-| **Simple (default)** | `--strategies=1` | 1 worker → 1 optimizer per task (runs full 10-iteration loop) | Fast, lower cost |
+| **Simple (default)** | `--strategies=1` | 1 worker → 1 optimizer per task (runs full optimization loop) | Fast, lower cost |
 | **Exploration** | `--strategies=3` | 1 worker → 3 independent optimizers per task (each runs full loop) | Better coverage, higher cost |
 
 ### Simple Mode (1:1 ratio) - DEFAULT
@@ -30,7 +30,7 @@ Each worker dispatches tasks to optimizer agents that run the full optimization 
 /kernel-bench level1 --session=my_run
 /kernel-bench level1 --session=my_run --strategies=1
 ```
-Each worker spawns ONE optimizer per task. The optimizer runs the full write → eval → fix loop for up to 10 iterations.
+Each worker spawns ONE optimizer per task. The optimizer runs the full write → eval → fix loop for up to 20 iterations.
 - Faster per-task completion
 - Lower API cost
 - Good for simple operations (element-wise, basic reductions)
@@ -115,7 +115,7 @@ When invoked with `/kernel-bench [args]`, parse the input:
 **Parameter defaults:**
 - `--workers=4` (if not specified)
 - `--strategies=1` (if not specified, simple mode)
-- `--iterations=10` (if not specified, max iterations per task)
+- `--iterations=20` (if not specified, max iterations per task)
 - `--session={level}_{timestamp}` (if not specified)
 
 ## Execution Modes
@@ -142,7 +142,7 @@ When user provides directory, level name, or session parameters:
 1. **Parse parameters** (with defaults):
    - `--workers=N` → N concurrent workers (default: 4)
    - `--strategies=N` → N strategies per worker per task (default: 1)
-   - `--iterations=N` → max iterations per task (default: 10)
+   - `--iterations=N` → max iterations per task (default: 20)
    - `--session=ID` → session identifier (default: auto-generated)
    - `--provider=X` → kbEval provider (default: "local")
 
@@ -297,7 +297,7 @@ When user provides `--resume my_session`:
    num_workers = state.config.get("num_workers", 4)
    num_strategies = state.config.get("num_strategies", 1)
    provider = state.config.get("provider", "local")
-   max_iterations = state.config.get("max_iterations", 10)
+   max_iterations = state.config.get("max_iterations", 20)  # fallback matches --iterations default above
    ```
 
 3. **Spawn supervisor** in resume mode with scaled workers:

@@ -12,7 +12,7 @@ You receive:
 - `level`: Kernel bench level (e.g., `"level1"`, `"level2"`, `"level3"`)
 - `num_workers`: Number of parallel workers to spawn (default: 4)
 - `num_strategies`: Strategy mode per task — 1 (simple) or 3 (exploration)
-- `max_iterations`: Max iterations per task (default: 10)
+- `max_iterations`: Max iterations per task (received from skill command)
 - `provider`: kbEval provider (e.g., `"local"`)
 
 ## Phase 1: Initialize

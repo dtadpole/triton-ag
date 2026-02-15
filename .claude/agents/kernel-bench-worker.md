@@ -8,7 +8,7 @@ You receive:
 - `session_id`: Session to work in
 - `worker_id`: Your worker identifier (e.g., "worker-1")
 - `num_strategies`: Number of parallel optimizer agents per task (1 = simple mode, 3 = exploration mode)
-- `max_iterations`: Maximum iterations per task (default: 10)
+- `max_iterations`: Maximum iterations per task (received from supervisor)
 
 ## Main Loop
 
@@ -127,7 +127,7 @@ if result.iterations_completed < max_iterations and result.best_speedup < 1.3:
          CONTINUATION: Previous optimizer ran {result.iterations_completed} iterations
          but quit early. Best speedup so far: {result.best_speedup}x.
          You MUST start from iteration {result.iterations_completed} and continue
-         to iteration 9. You have {remaining} iterations remaining.
+         to iteration {max_iterations - 1}. You have {remaining} iterations remaining.
          Previous results: {result.all_results}
          Try DIFFERENT strategies than what was already attempted."
 ```

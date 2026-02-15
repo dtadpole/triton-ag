@@ -52,7 +52,7 @@ A single agent cannot handle a 200-task batch: it would exceed context limits, c
 
 ### 2.2 Why Sub-Agents Own the Full Loop?
 
-The optimizer agent runs the complete write → eval → fix cycle for up to 10 iterations within its own context. This is better than handing off between agents because:
+The optimizer agent runs the complete write → eval → fix cycle for up to 20 iterations within its own context. This is better than handing off between agents because:
 
 - **No context loss** — the optimizer sees its own code, the exact error message, and what it already tried
 - **Faster iteration** — no inter-agent serialization or prompt reconstruction
@@ -437,7 +437,7 @@ First match wins (matmul > conv > normalization > ...).
 
 | Mode | Flag | Sub-agents/task | Behavior |
 |------|------|----------------|----------|
-| **Simple** (default) | `--strategies=1` | 1 | One optimizer runs the full 10-iteration loop |
+| **Simple** (default) | `--strategies=1` | 1 | One optimizer runs the full optimization loop |
 | **Exploration** | `--strategies=3` | 3 in parallel | Three independent optimizers, each with a different initial strategy; worker takes best |
 
 ---
@@ -862,7 +862,7 @@ The `/kernel-bench` command supports 7 input styles:
 | Progress | `/kernel-bench progress test1` | Query (runs `kb_score.py`) |
 | Server config | `/kernel-bench server --port=5676` | Manage eval server |
 
-**Parameter defaults:** `--workers=4`, `--strategies=1`, `--iterations=10`, `--session={level}_{timestamp}`
+**Parameter defaults:** `--workers=4`, `--strategies=1`, `--iterations=20`, `--session={level}_{timestamp}`
 
 ## Appendix B: File Index
 
