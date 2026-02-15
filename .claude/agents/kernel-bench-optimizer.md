@@ -103,6 +103,9 @@ Before writing any code, perform these steps in order:
 
 Trace shapes through `forward()` and check for mathematical simplifications. This produces the highest speedups (10-100x) when applicable.
 
+<!-- MUTABLE: algebraic_patterns -->
+<!-- Version: 1 | Updated: 2026-02-15 | Source: initial -->
+
 | Pattern | Check | Example |
 |---------|-------|---------|
 | Degenerate dimension | Does any intermediate reduce to size 1? | `matmul (B, 4096) @ (4096, 1)` → matvec, 10-30x faster |
@@ -111,6 +114,8 @@ Trace shapes through `forward()` and check for mathematical simplifications. Thi
 | Associative reorder | Can matmuls be reordered? | `(A @ B) @ v` → `A @ (B @ v)` reduces FLOPs |
 | Canceling ops | Do operations cancel out? | `exp(log(x))` = `x` |
 | Dead code | Is any computation unused in the return? | FC layer output not returned → skip it |
+
+<!-- /MUTABLE: algebraic_patterns -->
 
 **Requirements:** Simplification MUST hold for ALL possible input values, not just specific random seeds. Verify universally (including zeros, negatives, large magnitudes) and document the proof in comments.
 
@@ -151,17 +156,25 @@ Check `common.md § Composite Patterns` for multi-op strategy hints.
 
 Consult `common.md` feasibility guides (L1/L2/L3 Structural Feasibility Guide):
 
+<!-- MUTABLE: feasibility_actions -->
+<!-- Version: 1 | Updated: 2026-02-15 | Source: initial -->
+
 | Class | Action |
 |-------|--------|
 | **YES** | Full explore + exploit budget |
 | **MAYBE** | Allocate explore budget to test viability |
 | **NO** | Try 1 best-effort strategy. Complete early if <1.0x after 2 iterations |
 
+<!-- /MUTABLE: feasibility_actions -->
+
 Also check `optimizer_algorithm.md § Feasibility Corrections` for known guide inaccuracies.
 
 **A5. Generate Ranked Strategy List**
 
 Produce 2-4 strategies ranked by expected value. Read Tier 1 and Tier 2 sections of the primary reference file for candidates.
+
+<!-- MUTABLE: strategy_generation_rules -->
+<!-- Version: 1 | Updated: 2026-02-15 | Source: initial -->
 
 ```
 Diversification rules:
@@ -178,7 +191,12 @@ How many strategies:
 - NO feasibility → 1 (best-effort only)
 ```
 
+<!-- /MUTABLE: strategy_generation_rules -->
+
 **Composite patterns (multi-op → strategy hint):**
+
+<!-- MUTABLE: composite_pattern_table -->
+<!-- Version: 1 | Updated: 2026-02-15 | Source: initial -->
 
 ```
 matmul → pointwise(1-3)           → epilogue_fusion          (4-12x)
@@ -192,7 +210,12 @@ pointwise(3+) → reduction         → single_fused_kernel       (1.3-1.5x)
 diagonal_matmul → anything        → row_scaling_fused         (10-100x)
 ```
 
+<!-- /MUTABLE: composite_pattern_table -->
+
 **Set iteration budget:**
+
+<!-- MUTABLE: iteration_budget_table -->
+<!-- Version: 1 | Updated: 2026-02-15 | Source: initial -->
 
 | Scenario | Phase B (explore) | Phase C (exploit) |
 |----------|-------------------|-------------------|
@@ -201,9 +224,14 @@ diagonal_matmul → anything        → row_scaling_fused         (10-100x)
 | Complex L2/L3 (3 strategies) | 6 (3 × 2 iters) | remaining |
 | NO feasibility | 2 (1 × 2 iters) | 2 (minimal) |
 
+<!-- /MUTABLE: iteration_budget_table -->
+
 ### Phase B: Explore
 
 Try each strategy from the ranked list with minimal iteration investment. Goal: find which strategy class has the highest ceiling.
+
+<!-- MUTABLE: explore_protocol -->
+<!-- Version: 1 | Updated: 2026-02-15 | Source: initial -->
 
 ```
 for each strategy in strategy_list[:num_explore]:
@@ -223,7 +251,12 @@ After all explore iterations:
 
 **Key rule:** Each explore strategy gets at most 2 eval calls (initial + one fix). No deep debugging in explore.
 
+<!-- /MUTABLE: explore_protocol -->
+
 **Bottleneck Diagnosis (after each eval):**
+
+<!-- MUTABLE: bottleneck_diagnosis -->
+<!-- Version: 1 | Updated: 2026-02-15 | Source: initial -->
 
 ```
 >= 1.3x, correct        → DONE. Complete task.
@@ -234,18 +267,28 @@ correctness failure      → FIX: shapes? masking? precision? dtype?
 compile error            → FIX: Triton API? BLOCK_SIZE power-of-2? constexpr?
 ```
 
+<!-- /MUTABLE: bottleneck_diagnosis -->
+
 **Winner selection (after explore):**
+
+<!-- MUTABLE: winner_selection -->
+<!-- Version: 1 | Updated: 2026-02-15 | Source: initial -->
 
 1. Highest speedup among correct results
 2. If no correct result: highest speedup among compiled (correctness bugs are fixable)
 3. If nothing compiled: most fixable compile error
 4. If all < 0.5x: task likely infeasible. Try one algebraic analysis. If still < 0.5x, complete early.
 
+<!-- /MUTABLE: winner_selection -->
+
 ### Phase C: Exploit
 
 Deep-tune the winning strategy. Read the Tier 3-4 section of the primary reference file for tuning knobs. Check `optimizer_algorithm.md § High-Value Tuning Actions` for ranked actions by bottleneck.
 
 **Tuning actions by bottleneck:**
+
+<!-- MUTABLE: exploit_tuning_actions -->
+<!-- Version: 1 | Updated: 2026-02-15 | Source: initial -->
 
 ```
 COMPUTE-BOUND: fp16 tensor cores → expand autotune configs → increase BLOCK_K → try GROUP_M values
@@ -255,7 +298,12 @@ CORRECTNESS:   fix masking → fix pointer arithmetic → fp32 accumulator → m
 COMPILATION:   check Triton API constraints → power-of-2 BLOCK → replace missing functions → fix constexpr
 ```
 
+<!-- /MUTABLE: exploit_tuning_actions -->
+
 **Iteration decision tree:**
+
+<!-- MUTABLE: exploit_decision_tree -->
+<!-- Version: 1 | Updated: 2026-02-15 | Source: initial -->
 
 ```
 After eval result for iteration i:
@@ -278,6 +326,8 @@ if NOT compiled:
 
 if last iteration → DONE with best result.
 ```
+
+<!-- /MUTABLE: exploit_decision_tree -->
 
 **Eval server error:** Retry once. If it fails again, call `complete_task_progress()` with best result so far (or speedup=0), note the error in reflection, and stop.
 

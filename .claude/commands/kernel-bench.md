@@ -79,6 +79,14 @@ Each optimizer runs the full optimization loop (up to 20 iterations) per task. I
 ```
 → Run protocol compliance verification on completed session
 
+### Style 9: Learn from Session
+```
+/kernel-bench learn test1
+/kernel-bench learn test1 --kernel-only
+/kernel-bench learn test1 --algo-only
+```
+→ Run learning on completed session (kernel knowledge + algorithm improvement)
+
 ## Parsing Logic
 
 When invoked with `/kernel-bench [args]`, parse the input:
@@ -88,6 +96,7 @@ When invoked with `/kernel-bench [args]`, parse the input:
 1. **Detect server config**: Starts with `server` → **SERVER MODE**
 2. **Detect progress query**: Starts with `progress` OR user just says "progress" → **PROGRESS MODE** (run the script!)
 3. **Detect verify**: Starts with `verify` → **VERIFY MODE** (run kb_verify.py!)
+3b. **Detect learn**: Starts with `learn` → **LEARN MODE**
 4. **Detect single task**: Path ends with `.py` → SINGLE TASK MODE
 5. **Detect directory**: Path ends with `/` or is a level name (level1, level2, level3) → BATCH MODE
 6. **Detect resume**: Contains `--resume` or starts with `resume` → RESUME MODE
@@ -289,41 +298,85 @@ When user provides directory, level name, or session parameters:
    ```
    session_dir = ~/.inference/claude_code_output/{session_id}/
 
-   # 5a. Collect reflections and algorithm traces
+   # 5a. Collect reflections, traces, and classify
    if all_reflections.md does NOT exist or is empty:
        Run: python3 kb_reflect.py {session_id}
 
-   # 5a2. Collect algo traces (Phase 8: algorithm execution traces)
    if all_algo_traces.md does NOT exist or is empty:
        Run: python3 kb_reflect.py collect_traces {session_id}
-       # This concatenates {task_name}/algo_trace.md files into all_algo_traces.md
-       # If kb_reflect.py doesn't support collect_traces yet, do it manually:
-       # Bash: cat {session_dir}/*/algo_trace.md > {session_dir}/all_algo_traces.md 2>/dev/null || true
 
-   # 5b. Spawn learning agent (BLOCKING)
+   # Classify reflections by op type for parallel learning
+   Run: python3 kb_reflect.py classify {session_id}
+   # Parse output to get POPULATED_OPS line (e.g., "POPULATED_OPS: matmul,conv,reduction")
+   # Extract populated_op_types list from this line
+
+   # 5b. Snapshot optimizer.md (for algorithm learning rollback)
+   Bash: cp .claude/agents/kernel-bench-optimizer.md \
+         {session_dir}/optimizer_snapshot.md
+
+   # 5c. Spawn ALL learner agents in ONE message (background)
    # Check if reference files were modified after session start
    if reference/common.md was NOT modified after session start:
+
+       # All agents spawned in a SINGLE message for maximum parallelism:
+
+       # Kernel learner: common patterns
        Task(
          subagent_type="general-purpose",
-         description="kernel-bench learner",
-         prompt="Read .claude/agents/kernel-bench-learner.md — it contains your full instructions.
-                 You are the learning agent for session '{session_id}'.
+         description="kernel learner common",
+         prompt="Read .claude/agents/kernel-bench-learner-common.md — your full instructions.
+
+                 Session: {session_id}
                  Reflections file: {session_dir}/all_reflections.md
-                 Algo traces file: {session_dir}/all_algo_traces.md
                  Output directory: .claude/agents/reference/
-                 Read ALL reflections, identify cross-cutting patterns, and produce:
-                 - reference/common.md (environment constraints, anti-patterns, universal techniques,
-                   composite patterns, strategy selection heuristics)
-                 - reference/{op_type}.md for each op type (tier-based: Tier 1/2/3-4/Anti-Patterns/Decision Tree)
-                 - reference/optimizer_algorithm.md (process meta-learnings from algo traces)
-                 If existing reference files exist, merge with them (keep best from both).
-                 IMPORTANT: Preserve the Code Templates section in each file — do not delete or modify it.
-                 IMPORTANT: Classify each entry by tier using the rules in learner.md.
+                 Read ALL reflections, identify cross-cutting patterns, and write
+                 reference/common.md. Merge with existing if present.
+                 IMPORTANT: Preserve the Code Templates section.
                  Return a summary of what you wrote.",
-         run_in_background=false  # BLOCKING
+         run_in_background=true
        )
 
-   # 5c. Generate score report
+       # Kernel learner: per-op-type (one per populated op type)
+       for each op_type in populated_op_types:
+           Task(
+             subagent_type="general-purpose",
+             description="kernel learner {op_type}",
+             prompt="Read .claude/agents/kernel-bench-learner-op.md — your full instructions.
+
+                     Op type: {op_type}
+                     Reflections: {session_dir}/reflections_by_op/{op_type}.md
+                     Existing reference: .claude/agents/reference/{op_type}.md
+                     Output: .claude/agents/reference/{op_type}.md
+
+                     Classify entries by tier, merge with existing, write updated file.
+                     IMPORTANT: Preserve the Code Templates section.
+                     Return a summary of what you wrote.",
+             run_in_background=true
+           )
+
+       # Algorithm learner
+       Task(
+         subagent_type="general-purpose",
+         description="algorithm learner",
+         prompt="Read .claude/agents/kernel-bench-learner-algo.md — your full instructions.
+
+                 Session: {session_id}
+                 Session directory: {session_dir}
+                 Algo traces file: {session_dir}/all_algo_traces.md
+                 Optimizer file: .claude/agents/kernel-bench-optimizer.md
+                 Learned directory: .claude/agents/reference/
+
+                 Analyze algorithm traces, update mutable sections of optimizer.md,
+                 write algorithm_changelog.md to session directory,
+                 and update reference/optimizer_algorithm.md.
+                 Return a summary of what was changed.",
+         run_in_background=true
+       )
+
+   # 5d. Wait for ALL learner agents to complete
+   # Read each agent's output_file until complete
+
+   # 5e. Generate score report
    if no progress_*.md report exists in session_dir:
        Run: python3 kb_score.py {session_id}
    ```
@@ -559,6 +612,120 @@ python3 kb_verify.py {session_id} {task_name}
 python3 kb_verify.py
 ```
 
+### LEARN MODE
+
+**Run learning on a completed session to update reference files and algorithm.**
+
+When user says "learn {session_id}" or provides learning flags:
+
+1. **Parse session_id and flags:**
+   - `--kernel-only`: only run kernel knowledge learning (skip algorithm learning)
+   - `--algo-only`: only run algorithm learning (skip kernel knowledge learning)
+
+2. **Validate session:**
+   ```
+   state = get_session_state(session_id)
+   if state.completed == 0:
+       "No completed tasks in session '{session_id}'. Nothing to learn from."
+       exit
+   ```
+
+3. **Collect artifacts** (if not already present):
+   ```
+   session_dir = ~/.inference/claude_code_output/{session_id}
+
+   if --algo-only is NOT set:
+       if all_reflections.md does NOT exist:
+           Run: python3 kb_reflect.py {session_id}
+       Run: python3 kb_reflect.py classify {session_id}
+       # Parse output to get POPULATED_OPS line
+       # Extract populated_op_types list
+
+   if --kernel-only is NOT set:
+       if all_algo_traces.md does NOT exist:
+           Run: python3 kb_reflect.py collect_traces {session_id}
+   ```
+
+4. **Snapshot optimizer.md** (if algorithm learning will run):
+   ```
+   if --kernel-only is NOT set:
+       Bash: cp .claude/agents/kernel-bench-optimizer.md \
+             {session_dir}/optimizer_snapshot.md
+   ```
+
+5. **Spawn learner agents** (ALL in ONE message, background):
+   ```
+   agents = []
+
+   if --algo-only is NOT set:
+       # Kernel learner: common patterns
+       agents.append(Task(
+         subagent_type="general-purpose",
+         description="kernel learner common",
+         prompt="Read .claude/agents/kernel-bench-learner-common.md — your full instructions.
+
+                 Session: {session_id}
+                 Reflections file: {session_dir}/all_reflections.md
+                 Output directory: .claude/agents/reference/
+                 Read ALL reflections, identify cross-cutting patterns, and write
+                 reference/common.md. Merge with existing if present.
+                 IMPORTANT: Preserve the Code Templates section.
+                 Return a summary of what you wrote.",
+         run_in_background=true
+       ))
+
+       # Kernel learner: per-op-type (only for op-types with reflections)
+       for each op_type in populated_op_types:
+           agents.append(Task(
+             subagent_type="general-purpose",
+             description="kernel learner {op_type}",
+             prompt="Read .claude/agents/kernel-bench-learner-op.md — your full instructions.
+
+                     Op type: {op_type}
+                     Reflections: {session_dir}/reflections_by_op/{op_type}.md
+                     Existing reference: .claude/agents/reference/{op_type}.md
+                     Output: .claude/agents/reference/{op_type}.md
+
+                     Classify entries by tier, merge with existing, write updated file.
+                     IMPORTANT: Preserve the Code Templates section.
+                     Return a summary of what you wrote.",
+             run_in_background=true
+           ))
+
+   if --kernel-only is NOT set:
+       # Algorithm learner
+       agents.append(Task(
+         subagent_type="general-purpose",
+         description="algorithm learner",
+         prompt="Read .claude/agents/kernel-bench-learner-algo.md — your full instructions.
+
+                 Session: {session_id}
+                 Session directory: {session_dir}
+                 Algo traces file: {session_dir}/all_algo_traces.md
+                 Optimizer file: .claude/agents/kernel-bench-optimizer.md
+                 Learned directory: .claude/agents/reference/
+
+                 Analyze algorithm traces, update mutable sections of optimizer.md,
+                 write algorithm_changelog.md to session directory,
+                 and update reference/optimizer_algorithm.md.
+                 Return a summary of what was changed.",
+         run_in_background=true
+       ))
+
+   Spawn all agents in ONE message (background)
+   ```
+
+6. **Wait for all agents to complete:**
+   Read each agent's output_file until all are done.
+
+7. **Display summary:**
+   ```
+   Print: "Learning complete for session '{session_id}'."
+   Print: "Kernel learners: {N} (common + {M} op-types)"  # if not --algo-only
+   Print: "Algorithm learner: done"                         # if not --kernel-only
+   Print: "Changelog: {session_dir}/algorithm_changelog.md" # if not --kernel-only
+   ```
+
 ## Output Format
 
 All skill invocations return structured JSON for consistency:
@@ -783,4 +950,33 @@ Response:
 (mechanical results displayed)
 [Spawns semantic verifier agent...]
 Semantic verification complete. Report: ~/.inference/claude_code_output/test1/semantic_verification.md
+```
+
+**Example 13: Learn from session (full)**
+```
+User: /kernel-bench learn test1
+
+Response:
+Collecting reflections... 95 reflections collected.
+Collecting algo traces... 92 traces collected.
+Classifying by op type... matmul(32), conv(28), reduction(15), pointwise(10), normalization(5), other(5)
+Snapshotting optimizer.md...
+Spawning 8 learner agents (common + 6 op-types + algorithm)...
+[waiting for agents...]
+Learning complete for session 'test1'.
+Kernel learners: 7 (common + 6 op-types)
+Algorithm learner: done — 2 sections updated (iteration_budget_table v1→v2, exploit_decision_tree v1→v2)
+Changelog: ~/.inference/claude_code_output/test1/algorithm_changelog.md
+```
+
+**Example 14: Learn algorithm only**
+```
+User: /kernel-bench learn test1 --algo-only
+
+Response:
+Collecting algo traces... 92 traces collected.
+Snapshotting optimizer.md...
+Spawning algorithm learner...
+Algorithm learner: done — 1 section updated (bottleneck_diagnosis v1→v2)
+Changelog: ~/.inference/claude_code_output/test1/algorithm_changelog.md
 ```

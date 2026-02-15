@@ -1,5 +1,5 @@
 # Matmul Reference
-<!-- Updated: 2026-02-14 | Source: 0212_v10_l1+0212_v10_l2+0212_v10_l3+0212_v10_l3_retry+0212_v8_l2+0212_v3_l3+0212_l2 -->
+<!-- Updated: 2026-02-15 | Source: 0212_v10_l1+0212_v10_l2+0212_v10_l3+0212_v10_l3_retry+0212_v8_l2+0212_v3_l3+0212_l2+level2_20260214_232629 -->
 
 ## Code Templates
 
@@ -22,7 +22,7 @@
 
 ### Matmul Epilogue Fusion Template
 
-The highest-value pattern for matmul + activation tasks. The accumulator is in registers after the tile loop — applying bias + activation there is essentially FREE.
+The highest-value pattern for matmul + activation tasks. The accumulator is in registers after the tile loop -- applying bias + activation there is essentially FREE.
 
 ```python
 import torch
@@ -102,7 +102,7 @@ class ModelNew(torch.nn.Module):
         self.bias = nn.Parameter(linear.bias.data.clone())
 
     def forward(self, x):
-        # weight is (N, K) — must transpose for matmul
+        # weight is (N, K) -- must transpose for matmul
         M, K = x.shape
         N = self.weight.shape[0]
         c = torch.empty((M, N), device=x.device, dtype=x.dtype)
@@ -129,9 +129,9 @@ class ModelNew(torch.nn.Module):
 **Key insight**: Diagonal matrix times dense is just row scaling -- diag(A) @ B = A[:, None] * B. Eliminates O(N^2*M) matmul for O(N*M) element-wise multiply. Always check for structured matrix properties before writing matmul kernels.
 **What worked**: Simple 2D-tiled Triton kernel for broadcast multiply. Also applies: 14_UpperTri (14.5x, skip below-diagonal tiles), 15_LowerTri (10.2x, skip above-diagonal tiles), 10_3DTensor (4.8x, reshape to 2D), 11_4DTensor (3.8x, reshape to 2D).
 
-### L2: 80_Gemm_Max_Subtract_GELU (73.5x, iter 0) -- Algebraic collapse to zeros
+### L2: 80_Gemm_Max_Subtract_GELU (54.2x, iter 0) -- Algebraic collapse to zeros
 **Key insight**: After max(dim=1, keepdim=True), tensor has shape (B,1). Then x - x.mean(dim=1,keepdim=True) on (B,1) is always zero. gelu(0)=0. Entire computation collapses to writing zeros.
-**What worked**: Mathematical proof that output is always zero. Also applies: 14_Gemm (61x, sum->matvec), 18_Matmul (61x, sum->matvec), 51_Gemm (70x, mean->matvec).
+**What worked**: Mathematical proof that output is always zero. Also applies: 14_Gemm (33.8x, sum->matvec), 18_Matmul (48.1x, sum->matvec), 51_Gemm (25.6x, mean->matvec).
 
 ### L3: 31_VisionAttention (8.1x, iter 7) -- Flash attention
 **Key insight**: For T=16384, materializing TxT attention matrix (1GB) is bottleneck. Flash attention with online softmax and tiled Q/K/V avoids this entirely. BLOCK_M=64, BLOCK_N=64.
@@ -142,12 +142,20 @@ class ModelNew(torch.nn.Module):
 **Key insight**: F.scaled_dot_product_attention is banned. Decompose into 3 Triton kernels (Q@K^T*scale, row softmax, attn@V) using batched matmul with super-blocking. fp16 inputs enable tensor cores.
 **What worked**: Each kernel independently autotuned. SEQ_LEN=512 fits softmax in single block. Materializes attention matrix (512MB fp16) but simpler and 2x faster than reference.
 
-### L2: 59_Matmul_Swish_Scaling (11.9x, iter 0) -- fp16 epilogue fusion template
-**Key insight**: Standard tiled fp16 matmul with all pointwise ops fused into epilogue. Canonical pattern: super-blocking GROUP_M=8, 7 autotune configs, implicit weight transpose via strides, cached fp16 weight.
-**What worked**: Also: 55_Matmul (11.1x), 56_Matmul (10.6x), 94_Gemm (8.6x), 66_Matmul (8.1x), 12_Gemm (7.1x), 99_Matmul (6.9x), 95_Matmul (6.2x).
+### L2: 76_Gemm_Add_ReLU (11.4x, iter 0) -- fp16 epilogue fusion template (canonical)
+**Key insight**: Standard tiled fp16 matmul with bias+relu fused into epilogue. Canonical first-try pattern for Gemm+pointwise. Cached fp16 weight transpose, super-blocking GROUP_M=8, 7 autotune configs.
+**What worked**: First-try success. Also: 63_Gemm_ReLU_Divide (11.3x), 70_Gemm_Sigmoid_Scaling_ResidualAdd (10.8x), 95_Matmul_Add_Swish_Tanh_GELU_Hardtanh (11.5x), 59_Matmul_Swish_Scaling (10.9x), 81_Gemm_Swish_Divide_Clamp_Tanh_Clamp (10.0x), 68_Matmul_Min_Subtract (7.2x), 9_Matmul_Subtract_Multiply_ReLU (6.4x), 53_Gemm_Scaling_Hardtanh_GELU (5.8x).
 
-### L2: 30_Gemm_GroupNorm_Hardtanh (11.7x, iter 1) -- Two-kernel Gemm+Norm
-**Key insight**: Two-kernel approach: (1) fp16 matmul with bias epilogue, (2) fused GroupNorm+activation. BN/GN needs all values before normalizing, cannot fuse into matmul epilogue. Also: 37_Matmul (5.5x), 62_Matmul (8.3x), 88_Gemm (5.2x).
+### L2: 97_Matmul_BatchNorm_BiasAdd_Divide_Swish (9.87x, iter 0) -- Three-kernel matmul+BN+postops
+**Key insight**: Three-kernel approach for matmul+BN+post-ops: (1) fp16 matmul with linear bias epilogue, (2) per-channel BN stats with Bessel correction, (3) fused normalize+bias+divide+swish. Training mode BN requires separate stats computation since it needs all batch values.
+**What worked**: BN stats computed per-channel across batch, running stats updated with momentum between kernels. Also: 84_Gemm_BatchNorm_Scaling_Softmax (6.1x, three-kernel + fixed softmax).
+
+### L2: 88_Gemm_GroupNorm_Swish_Multiply_Swish (8.1x, iter 0) -- Two-kernel Gemm+GN+chain
+**Key insight**: Two-kernel approach: matmul with bias epilogue + fused GN+swish+multiply+swish. GroupNorm cannot fuse into matmul epilogue (needs all group values). With 256 groups and 32 features/group, each group fits entirely in registers.
+**What worked**: First-try success. Also: 30_Gemm (11.0x), 94_Gemm (8.0x), 62_Matmul (6.9x), 37_Matmul (4.6x), 41_Gemm (3.5x).
+
+### L2: 99_Matmul_GELU_Softmax (10.4x, iter 0) -- Two-kernel matmul+GELU+softmax
+**Key insight**: Two-kernel: matmul+GELU epilogue + online softmax. Softmax needs all values in a row, cannot fuse into matmul tile-level epilogue. But matmul + GELU fusion is free. Also: 66_Matmul_Dropout_Softmax (6.3x, dropout=identity in eval).
 
 ### L1: 2_Standard_matrix_multiplication (7.6x, iter 0) -- Standard tiled matmul template
 **Key insight**: Standard tiled Triton matmul with super-blocking (GROUP_M=8) and 7 autotune configs consistently gives 2-8x over torch.matmul for large matrices. This is the canonical first-try template.
@@ -177,13 +185,15 @@ class ModelNew(torch.nn.Module):
 
 ## Decision Tree
 
-1. **Check algebraic simplification first** (Tier 1): Diagonal = row scaling (104x). Triangular = skip tiles (10-15x). Structured matrices always check first. Sum/mean after matmul distributes into weights (20-74x). Dead code (73.5x).
+1. **Check algebraic simplification first** (Tier 1): Diagonal = row scaling (104x). Triangular = skip tiles (10-15x). Structured matrices always check first. Sum/mean after matmul distributes into weights (20-74x). Dead code (54x).
 2. **For dense matmul (any shape)** (Tier 2): Standard tiled template with super-blocking GROUP_M=8, 7 autotune configs. Expect 2-8x. ~90% first-try success rate for L1.
 3. **For Gemm + pointwise chain (L2)** (Tier 2): Epilogue fusion template -- fp16 tensor cores, cached weight. Expect 4-12x. ~70% first-try.
-4. **For Gemm + Normalization + acts (L2)** (Tier 2): Two-kernel: matmul+bias epilogue, then fused GN/BN+activation. Expect 5-12x.
-5. **For attention/transformer** (Tier 1-2): Three-kernel decomposition for small SEQ_LEN (512). Flash attention for T>=1024 (8x). Split precision (IEEE for large-K, TF32 for small-K).
-6. **fp16 for large GEMMs (>1024x1024)** (Tier 3-4): Cache fp16 weight in __init__. Mandatory for very large K. Inline cast for medium GEMMs.
-7. **For transposed inputs** (Tier 3-4): Implicit transpose via strides. Never .T.contiguous().
-8. **For matvec (M<4K, K>100K)** (Anti-Pattern): Accept ~1.0x. Bandwidth-bound.
-9. **Autotune budget** (Tier 3-4): 4-7 configs optimal. More = more warmup overhead.
-10. **Never**: Write "nn.Linear" in source. Never use in-place writes. Always replicate exact weight init.
+4. **For Gemm + Normalization + acts (L2)** (Tier 2): Two-kernel: matmul+bias epilogue, then fused GN/BN+activation. Expect 3-12x. Three-kernel for BN (separate stats pass).
+5. **For Gemm + softmax/logsumexp (L2)** (Tier 2): Two-kernel: matmul+epilogue then online softmax/logsumexp. Expect 3-11x.
+6. **For Gemm + pooling + pointwise (L2)** (Tier 2): Two-kernel: matmul+bias then fused pool+acts. Expect 4-6x.
+7. **For attention/transformer** (Tier 1-2): Three-kernel decomposition for small SEQ_LEN (512). Flash attention for T>=1024 (8x). Split precision (IEEE for large-K, TF32 for small-K).
+8. **fp16 for large GEMMs (>1024x1024)** (Tier 3-4): Cache fp16 weight in __init__. Mandatory for very large K. Inline cast for medium GEMMs.
+9. **For transposed inputs** (Tier 3-4): Implicit transpose via strides. Never .T.contiguous().
+10. **For matvec (M<4K, K>100K)** (Anti-Pattern): Accept ~1.0x. Bandwidth-bound.
+11. **Autotune budget** (Tier 3-4): 4-7 configs optimal. More = more warmup overhead.
+12. **Never**: Write "nn.Linear" in source. Never use in-place writes. Always replicate exact weight init.

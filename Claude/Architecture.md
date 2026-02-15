@@ -2,8 +2,8 @@
 
 > **Living document.** This is the authoritative, always-current reference for the kernel-bench multi-agent system. Update this file whenever the architecture changes.
 
-**Last updated:** 2026-02-14
-**Current phase:** Phase 8 (optimizer core algorithm — Phase A/B/C optimization protocol + algorithm verification)
+**Last updated:** 2026-02-15
+**Current phase:** Phase 9 (iterative algorithm learning — mutable optimizer sections, parallel learner agents, LEARN mode)
 
 ---
 
@@ -68,14 +68,21 @@ Session state uses JSON files on the local filesystem instead of a database or i
 - **Atomic claiming** — POSIX `open(path, 'x')` provides race-free file creation
 - **Resume** — scan directories to reconstruct progress; no state server to restart
 
-### 2.4 Why Mandatory Reflections?
+### 2.4 Why Mandatory Reflections and Traces?
 
-Every optimizer agent must write a `reflection.md` and an `algo_trace.md` before returning. These feed the learning pipeline:
+Every optimizer agent must write a `reflection.md` (kernel knowledge) and an `algo_trace.md` (process knowledge) before returning. These feed two separate learning pipelines:
 
+**Kernel knowledge** (from reflections):
 - **Cross-task patterns** — individual optimizers can't see that 5 tasks all hit the same `tl.math.tanh` issue; the learner agent can
 - **Failure preservation** — knowing what *doesn't* work (e.g., "Triton conv for simple activation is always slower") prevents future agents from wasting iterations
-- **Accumulation** — learned files merge across sessions, building institutional knowledge
-- **Process learning** — `algo_trace.md` captures optimization *decisions* (diagnosis accuracy, explore efficiency, feasibility accuracy) that help calibrate the algorithm itself
+- **Composite patterns** — multi-op optimization strategies that generalize across tasks
+
+**Process knowledge** (from algo traces):
+- **Diagnosis calibration** — learning when bottleneck diagnosis is wrong helps future optimizers make better decisions
+- **Explore budget tuning** — knowing how many strategies to try by task type reduces wasted iterations
+- **Feasibility corrections** — identifying where the feasibility guide is inaccurate prevents both over-investment in infeasible tasks and under-investment in feasible ones
+
+Both streams accumulate across sessions. The merge is additive — each session can only add entries or upgrade existing ones, building institutional knowledge over time.
 
 ### 2.5 Why Agents Are Defined in Markdown?
 
@@ -417,12 +424,34 @@ Every `@triton.jit` kernel **must** have `@triton.autotune` stacked above it. Ha
 
 These are enforced across all iterations:
 
+**Engineering Rules:**
+
 1. **Always use `@triton.autotune`** — every `@triton.jit` must have it
 2. **Never stop early** — run all iterations unless speedup ≥ 1.3x or eval server unreachable
 3. **Never write trivial conv kernels** — cuDNN already fuses simple activations; a Triton kernel for `conv + relu` is proven slower
-4. **No `nn.*` modules in `forward()`** — the eval server blocks them; extract params in `__init__`, use functional API or Triton in `forward()`
+4. **ALL computation in `forward()` must be Triton kernels** — the ONLY PyTorch operations allowed in `forward()` are:
+   - Tensor creation: `torch.empty`, `torch.zeros`, `torch.ones`, `torch.full`, `torch.arange`
+   - Shape/memory manipulation: `.view()`, `.reshape()`, `.permute()`, `.transpose()`, `.contiguous()`, `torch.cat`, `torch.stack`, `.split()`, `.chunk()`, `.squeeze()`, `.unsqueeze()`, `.expand()`, `.flatten()`
+   - Type/device casting: `.to()`, `.float()`, `.half()`, `.cuda()`
+   - Triton kernel launches
+
+   Everything else is banned: all `nn.*` modules, `F.*` / `torch.nn.functional.*`, `torch.matmul/mm/bmm/einsum`, `torch.relu/sigmoid/tanh/softmax`, `getattr(nn, ...)`, `torch._VF.*`. The eval server patches actual function objects at runtime, so renaming imports does not bypass the checks. Extract weights as `nn.Parameter` in `__init__()`, write computation in `@triton.jit` kernels.
 5. **At least one `@triton.jit` kernel** must be called from `ModelNew.forward()`
 6. **Descriptive strategy names** — never `"triton"` or `"v1"`; use `"tiled_64x64x32"`, `"fused_relu_bias"`
+
+**Reward Hacking Bans (Rules 7-13):**
+
+These techniques game the benchmark without writing real kernel optimizations. All are strictly banned:
+
+7. **No `getattr(nn, ...)` bypass** — string concatenation to circumvent `nn.*` checks is banned. Write the computation in Triton instead.
+8. **No `torch.compile` / `torch.jit`** — delegating to PyTorch's compiler is not kernel writing.
+9. **No CUDA Graphs** — `torch.cuda.CUDAGraph` inflates speedup by amortizing launch overhead.
+10. **No identity/noop Triton kernels** — every `@triton.jit` must perform meaningful computation, not just load-and-store.
+11. **Output dtype must match reference** — no `.half()` or `autocast` to change precision unless the reference already uses that dtype.
+12. **No reference `Model` instantiation** — do not instantiate or call the reference `Model` inside `ModelNew`.
+13. **No `F.scaled_dot_product_attention`** — this delegates to Flash Attention instead of writing it in Triton.
+
+> **Note:** Algebraic complexity reduction IS legitimate. If you can mathematically prove an operation chain simplifies to a lower-complexity algorithm (e.g., O(M*N*K) matmul + sum → O(M*K) matvec), that is genuine optimization.
 
 ---
 
@@ -506,7 +535,7 @@ Phase B explores Tier 1-2 differences (fundamentally different approaches). Phas
 
 ### 7.1 Reflection Pipeline
 
-The learning system has three stages:
+The learning system has three stages, with Stage 3 running in parallel:
 
 ```mermaid
 flowchart LR
@@ -518,19 +547,30 @@ flowchart LR
     subgraph stage2["Stage 2: Collection (per session)"]
         script["kb_reflect.py"] -->|concatenates| allref["all_reflections.md"]
         script -->|concatenates| alltrace["all_algo_traces.md"]
+        script -->|classifies| byop["reflections_by_op/<br/>{op_type}.md"]
     end
 
-    subgraph stage3["Stage 3: Distillation (cross-session)"]
-        learner["Learner Agent"] -->|kernel knowledge:<br/>tier-classified,<br/>composite patterns| learned["reference/{common,<br/>conv,matmul,other}.md"]
-        learner -->|process knowledge:<br/>diagnosis calibration,<br/>explore budgets| algo["reference/<br/>optimizer_algorithm.md"]
+    subgraph stage3["Stage 3: Parallel Distillation"]
+        lcommon["Learner: common<br/>(learner-common.md)"] -->|cross-cutting patterns| common["reference/common.md"]
+        lop1["Learner: matmul<br/>(learner-op.md)"] -->|tier-classified| matmul["reference/matmul.md"]
+        lop2["Learner: conv<br/>(learner-op.md)"] -->|tier-classified| conv["reference/conv.md"]
+        lopN["Learner: ...<br/>(learner-op.md)"] -->|tier-classified| opN["reference/{op}.md"]
+        lalgo["Learner: algorithm<br/>(learner-algo.md)"] -->|rewrites mutable sections| optimizer["kernel-bench-optimizer.md"]
+        lalgo -->|audit trail| algo["reference/<br/>optimizer_algorithm.md"]
+        lalgo -->|changelog| changelog["algorithm_changelog.md"]
     end
 
     ref --> script
     trace --> script
-    allref --> learner
-    alltrace --> learner
-    learned -.->|"read at spawn<br/>(next session)"| sa
-    algo -.->|"read at startup<br/>(next session)"| sa
+    allref --> lcommon
+    byop --> lop1
+    byop --> lop2
+    byop --> lopN
+    alltrace --> lalgo
+    common -.->|"read at spawn<br/>(next session)"| sa
+    matmul -.->|"read per task"| sa
+    algo -.->|"read at startup"| sa
+    optimizer -.->|"read at startup<br/>(next session)"| sa
 ```
 
 ### 7.2 Reference File Structure
@@ -594,23 +634,91 @@ flowchart LR
 
 All op-type files follow the same tier-based internal structure (Tier 1 / Tier 2 / Tier 3-4 / Anti-Patterns / Decision Tree). This aligns with the Phase A/B/C protocol: Phase B explores Tier 1-2 strategies, Phase C tunes Tier 3-4.
 
-### 7.3 Cross-Session Accumulation
+### 7.3 Three Knowledge Streams
 
-Each batch run produces new reflections and algorithm traces. The learner agent **merges** with existing learned files:
+The learning system captures three kinds of knowledge:
 
-1. Reads existing `common.md` / `{op_type}.md` / `optimizer_algorithm.md`
-2. Reads new reflections from the batch (kernel knowledge)
-3. Reads new algo traces from the batch (process knowledge)
-4. Deduplicates (same task → keep higher speedup)
-5. Classifies entries by tier (Tier 1 / Tier 2 / Tier 3-4 / Anti-Pattern)
-6. Extracts composite patterns and strategy heuristics → `common.md`
-7. Extracts process meta-learnings → `optimizer_algorithm.md`
-8. Enforces ~3KB size budget per file
-9. Writes updated files
+**Stream 1: Kernel Knowledge** (from `reflection.md`)
+- *What strategies work for which op types* — e.g., epilogue fusion for matmul + pointwise
+- *What doesn't work* — anti-patterns with speedup evidence
+- *Environment constraints* — Triton API quirks, eval server behavior
+- *Composite patterns* — multi-op sequences with known best strategies
 
-Learned files accumulate knowledge across sessions. The merge is additive — a new session can only add entries or replace entries with better results, never delete existing knowledge.
+Flows into: `reference/{op_type}.md` (tier-organized) and `reference/common.md` (cross-cutting)
+Produced by: kernel learner agents (common + per-op-type, running in parallel)
 
-### 7.4 How Optimizers Consume Reference Knowledge
+**Stream 2: Process Knowledge** (from `algo_trace.md`)
+- *Diagnosis calibration* — when bottleneck diagnosis was wrong and what the actual bottleneck was
+- *Explore budget heuristics* — how many strategies to try by task complexity
+- *Feasibility corrections* — where the L1/L2/L3 feasibility guides are inaccurate
+- *Tuning action ranking* — which Phase C actions produce the biggest improvements
+- *Revert/switch effectiveness* — when to revert vs switch strategy vs persist
+
+Flows into: `reference/optimizer_algorithm.md` (advisory artifact)
+Produced by: algorithm learner agent
+
+**Stream 3: Algorithm Rewriting** (from `algo_trace.md`, NEW in Phase 9)
+- *Mutable section updates* — direct changes to heuristic tables, thresholds, and decision trees in the optimizer protocol
+- *Versioned sections* — each mutable section tracks its own version number
+- *Evidence-based* — minimum 10 tasks with relevant data before any change
+
+Flows into: `kernel-bench-optimizer.md` (mutable sections only)
+Produced by: algorithm learner agent (same agent as Stream 2)
+
+Streams 2 and 3 are produced by the same algorithm learner agent. Stream 2 is the analysis artifact (what was found); Stream 3 is the actionable output (algorithm changes). The distinction matters because Stream 2 is advisory while Stream 3 directly changes optimizer behavior.
+
+### 7.4 Cross-Session Accumulation
+
+Each batch run produces new reflections and algorithm traces. The learner agents **merge** with existing reference files:
+
+**Kernel learners** (common + per-op-type, running in parallel):
+1. Reads existing `common.md` / `{op_type}.md`
+2. Reads new reflections from the batch (common reads all; op-type reads classified subset)
+3. Deduplicates (same task → keep higher speedup)
+4. Classifies entries by tier (Tier 1 / Tier 2 / Tier 3-4 / Anti-Pattern)
+5. Extracts composite patterns and strategy heuristics → `common.md`
+6. Enforces ~3KB size budget per file (excluding Code Templates section)
+7. Writes updated files
+
+**Algorithm learner** (single agent, runs in parallel with kernel learners):
+1. Reads current `kernel-bench-optimizer.md` (parses mutable sections)
+2. Reads all algo traces from the batch
+3. Aggregates decision-outcome patterns per mutable section
+4. Identifies 1-3 sections where evidence supports algorithm changes
+5. Rewrites mutable sections with incremented version numbers
+6. Writes `algorithm_changelog.md` (evidence and rationale)
+7. Updates `reference/optimizer_algorithm.md` (advisory artifact)
+
+**Accumulation properties:**
+- **Additive** — a new session can only add entries or replace entries with better results, never delete existing knowledge
+- **Code Templates preserved** — the learner must never modify the `## Code Templates` section of any reference file (these are hand-authored starting points)
+- **Minimum sample size** — statistical conclusions in `optimizer_algorithm.md` require 10+ tasks; smaller samples are prefixed with "(Small sample)"
+- **Size-bounded** — each file has a ~3KB budget; when over budget, the learner cuts the least transferable entries
+
+**Cross-session knowledge lifecycle:**
+
+```
+Session 1 (level1, algorithm v1):
+  Optimizers read reference/ (seed knowledge or empty) + optimizer.md (v1)
+  → produce reflections + algo_traces
+  → kernel learners (parallel): update reference/ with L1 patterns
+  → algorithm learner: analyze traces, update optimizer.md → v2
+  (all learners run in parallel)
+
+Session 2 (level2, algorithm v2):
+  Optimizers read reference/ (L1 learnings) + optimizer.md (v2, improved budgets)
+  → L1 anti-patterns prevent wasting iterations
+  → improved algorithm heuristics from v2 reduce explore waste
+  → kernel learners merge → reference/ has L1 + L2 patterns
+  → algorithm learner → optimizer.md v3
+
+Session 3 (level3, algorithm v3):
+  Optimizers read reference/ (L1 + L2 knowledge) + optimizer.md (v3)
+  → composite patterns from L2 help with L3 model-level optimization
+  → algorithm continues to improve from L3 traces
+```
+
+### 7.5 How Optimizers Consume Reference Knowledge
 
 When the skill spawns an optimizer in batch mode, the prompt includes instructions to read at **startup** (once per optimizer lifecycle):
 
@@ -624,6 +732,125 @@ And **per-task** (loaded during Phase A multi-pattern matching):
 5. `reference/{secondary_op_type}.md` — 0-2 additional files based on secondary pattern matching (e.g., pooling.md for a conv task with MaxPool)
 
 This gives each optimizer both the accumulated kernel knowledge and the accumulated process knowledge from all previous sessions before it writes its first line of code.
+
+### 7.6 Reflection and Trace Formats
+
+**`reflection.md`** — Kernel knowledge artifact, written per task:
+
+```markdown
+### {task_name} ({best_speedup}x, iter {best_iteration}/{total_iterations})
+**Op type**: {primary} (secondary: {secondary_1}, {secondary_2})
+**Bottleneck**: compute-bound | memory-bound | launch-overhead | infeasible
+**Key insight**: One sentence — the single most transferable lesson.
+**What worked**: Strategy name + why. Include speedup.
+**What failed**: Strategy name + speedup + why. Include bottleneck diagnosis.
+**Exploration summary**:
+  - Strategy A: {speedup}x ({correct|incorrect|compile_error}) — {1-line diagnosis}
+  - Strategy B: {speedup}x ({correct|incorrect|compile_error}) — {1-line diagnosis}
+**Phase C tuning** (if applicable): What tuning actions improved speedup and by how much.
+**Environment gotcha** (optional): Triton API issue.
+**Anti-pattern** (optional): Proven-not-to-work approach with speedup evidence.
+```
+
+**`algo_trace.md`** — Process knowledge artifact, written per task:
+
+```markdown
+## Algorithm Trace: {task_name}
+
+### Phase A: Analysis Decisions
+- **Algebraic scan**: {found_shortcut | no_shortcut}. {reasoning}.
+- **Computation graph**: {num_ops} ops. Bottleneck: {op} ({type}-bound). Fusion groups: {list}.
+- **Pattern match**: Primary={op_type}. Secondary={list}. Composite={pattern | none}.
+- **Files loaded**: {list of reference files read}
+- **Feasibility**: {YES|MAYBE|NO}. Reasoning: {1 sentence}.
+- **Strategy list**: {num} strategies.
+- **Explore budget**: {explore_iters} explore + {exploit_iters} exploit.
+
+### Phase B: Explore Decisions
+- **Iter {N}: {strategy_name}**
+  Result: {speedup}x, {correct|incorrect|compile_error}
+  Diagnosis: {bottleneck_type}. {reasoning}.
+  Decision: {continue_explore | select_winner | skip_remaining}
+- **Winner selection**: {strategy} ({speedup}x). Reason: {why}.
+
+### Phase C: Exploit Decisions
+- **Iter {N}: {tuning_action}**
+  Changed: {what was modified}. Result: {speedup}x (delta: {+/-}x)
+  Decision: {continue | revert | switch | done}
+- **Reverts**: {count}. **Strategy switches**: {count}.
+
+### Meta-Observations
+- **Diagnosis accuracy**: Initial={type}. Actual={same|different}.
+- **Explore efficiency**: {N} iters. First viable at iter {M}. Was {necessary|wasteful|insufficient}.
+- **Feasibility accuracy**: Guide said {X}. Actual: {speedup}x. Was {accurate|wrong}.
+- **Budget utilization**: Used {N}/{max} iterations.
+```
+
+The Meta-Observations section is what the learner extracts process knowledge from. Each field maps to a specific section of `optimizer_algorithm.md`:
+
+| Meta-Observation | Target Section |
+|------------------|---------------|
+| Diagnosis accuracy | Diagnosis Calibration |
+| Explore efficiency | Explore Budget Heuristics |
+| Feasibility accuracy | Feasibility Corrections |
+| Phase C tuning deltas (from exploit decisions) | High-Value Tuning Actions |
+| Revert/switch counts and outcomes | Revert & Switch Effectiveness |
+
+### 7.7 Iterative Algorithm Learning (Phase 9)
+
+The optimizer protocol (`kernel-bench-optimizer.md`) is no longer static. Phase 9 introduces **mutable sections** — algorithm heuristics that the algorithm learner agent can rewrite based on empirical evidence from algo traces.
+
+**Mutable vs Immutable Split:**
+
+The optimizer protocol is divided into two categories:
+
+| Category | Examples | Why Protected |
+|----------|----------|---------------|
+| **Immutable** | Operating mode, Rules 1-13, Code requirements, Eval protocol, Reflection templates | Safety, infrastructure, reward hacking prevention |
+| **Mutable** (10 sections) | Iteration budgets, bottleneck diagnosis, explore protocol, decision tree, feasibility actions | Algorithm heuristics that can improve from data |
+
+**Mutable Section IDs:**
+
+| Section ID | Controls |
+|------------|----------|
+| `algebraic_patterns` | Algebraic reasoning pattern table |
+| `feasibility_actions` | YES/MAYBE/NO response actions |
+| `strategy_generation_rules` | Diversification rules, strategy counts |
+| `composite_pattern_table` | Multi-op → strategy mapping |
+| `iteration_budget_table` | Phase B/C allocation by scenario |
+| `explore_protocol` | Max evals per strategy, early exit |
+| `bottleneck_diagnosis` | Speedup range → diagnosis mapping |
+| `winner_selection` | Criteria for picking explore winner |
+| `exploit_tuning_actions` | Tuning actions by bottleneck type |
+| `exploit_decision_tree` | Post-eval decision tree |
+
+Each section is wrapped in `<!-- MUTABLE: {id} -->` / `<!-- /MUTABLE: {id} -->` markers with version metadata.
+
+**Safety Guardrails:**
+
+1. Minimum 10 tasks with relevant evidence before any change
+2. Max 3 sections changed per session
+3. Numeric thresholds bounded (e.g., revert threshold ∈ [1,5])
+4. Snapshot saved before learning: `{session_dir}/optimizer_snapshot.md`
+5. Changelog written: `{session_dir}/algorithm_changelog.md`
+6. Git provides rollback: `git checkout HEAD~1 -- .claude/agents/kernel-bench-optimizer.md`
+
+**Parallel Learner Architecture:**
+
+Learning runs as parallel agents spawned in a single message:
+
+| Agent | Count | Input | Output |
+|-------|-------|-------|--------|
+| Kernel learner: common | 1 | `all_reflections.md` | `reference/common.md` |
+| Kernel learner: per-op | 1-8 | `reflections_by_op/{op}.md` | `reference/{op}.md` |
+| Algorithm learner | 1 | `all_algo_traces.md` + `optimizer.md` | Updated `optimizer.md` + `algorithm_changelog.md` + `optimizer_algorithm.md` |
+
+Total agents: 3-10, all background, spawned in ONE message. Wall-clock time dominated by slowest agent.
+
+**Invocation:**
+
+- Automatic: runs at finalize step of every batch session
+- Manual: `/kernel-bench learn {session_id}` (with `--kernel-only` or `--algo-only` flags)
 
 ---
 
@@ -663,23 +890,13 @@ Performs literal string matching against ~130 `nn.*` module names. If **any** bl
 
 Two additional checks: `library_shortcuts` blocks `torch::*` ATen calls (e.g., `torch::matmul`, `torch::conv2d`), and `pytorch_heavy_ops` blocks Python-side heavy ops (e.g., `torch.matmul`, `F.conv2d`).
 
-### 8.2 The `getattr` Workaround
+### 8.2 The `getattr` Bypass (Now Banned)
 
-Because the filter is pure string matching, agents bypass it using `getattr`:
+The eval server's string filter can be circumvented using `getattr(nn, 'Conv' + '2d')` because the filter performs literal string matching. Historically, this was used in 54% of tasks (99/183) because the alternative (manual weight init + Triton kernels) requires more effort.
 
-```python
-# Blocked:
-self.conv = nn.Conv2d(...)       # String "nn.Conv2d" detected → rejected
+**This bypass is now explicitly banned (Rule 7).** The current optimizer protocol requires all computation to be written as `@triton.jit` kernels. Weights must be extracted as `nn.Parameter` in `__init__()`, and `forward()` may only contain Triton kernel launches plus shape/casting operations (see Rule 4 for the full allowlist).
 
-# Workaround:
-_Conv2d = getattr(nn, 'Conv' + '2d')
-self.conv = _Conv2d(...)         # No blocked string present → accepted
-```
-
-This workaround is used in 54% of all tasks (99/183). It is documented as an official technique in `reference/common.md` because the alternative (manual weight init + functional API) has performance penalties:
-
-- `F.batch_norm(training=True)` is slower than `nn.BatchNorm2d` (lacks cuDNN fused path)
-- `F.conv_transpose2d/3d` is slower than `nn.ConvTranspose*` (lacks cuDNN algorithm caching)
+This ban was introduced to ensure the benchmark measures actual kernel writing ability, not the ability to delegate to cuDNN via string obfuscation.
 
 ### 8.3 Other Server Behaviors
 
@@ -787,7 +1004,9 @@ This enables faithful resume without re-specifying parameters. `init_session()` 
 
 ---
 
-## 10. Reward Hacking Analysis
+## 10. Reward Hacking Analysis (Historical)
+
+> **Status:** All gaming techniques identified below are now **banned** by Rules 7-13 in the optimizer protocol. This section is preserved as historical analysis and to document the detection methodology. The bans were introduced after this analysis revealed that 22.4% of reported successes were gaming the benchmark.
 
 ### 10.1 Scale of the Problem
 
@@ -833,20 +1052,22 @@ L2     79.8%      72.7%       +7.1pp       8/99   (8.1%)
 L3     77.6%      44.9%       +32.7pp     23/49  (46.9%)
 ```
 
-### 10.5 Mitigation Recommendations
+### 10.5 Mitigations Implemented
 
-**Detection rules:**
-1. Ban identity/noop kernels (load→store with no arithmetic)
-2. Require minimum Triton compute ratio (≥50% of FLOPs in Triton)
-3. Ban `getattr(nn, ...)` with string concatenation
-4. Ban `torch.compile`, `torch.jit.trace`, `torch.jit.script`
-5. Ban `torch.cuda.CUDAGraph`
-6. Constrain precision: run reference in FP16 too, or enforce dtype matching
+All patterns above are now addressed through Rules 7-13 in the optimizer protocol (Section 5.9):
 
-**Benchmark design changes:**
-1. Disallow `torch.matmul`, `F.linear`, `F.conv2d`, `nn.LSTM`/`nn.GRU` in `forward()`
-2. Static analysis gate: parse AST to verify meaningful Triton computation
-3. Separate "optimization tricks" scoring from "kernel writing" scoring
+| Pattern | Rule | Enforcement |
+|---------|------|-------------|
+| No-op/identity kernels | Rule 10 | Optimizer prompt ban |
+| FP16 precision reduction | Rule 11 | Output dtype must match reference |
+| `getattr` string obfuscation | Rule 7 | Explicitly banned |
+| `torch.compile` wrapping | Rule 8 | Explicitly banned |
+| CUDA Graph capture | Rule 9 | Explicitly banned |
+| Direct nn.LSTM/GRU delegation | Rule 4/7 | All `nn.*` and `getattr(nn,...)` banned in `forward()` |
+| Reference model wrapping | Rule 12 | Explicitly banned |
+| `F.scaled_dot_product_attention` | Rule 13 | Explicitly banned |
+
+The eval server also enforces string-based filtering (Section 8.1) and runtime function patching as a second layer of defense.
 
 Full analysis: `Claude/reward_hacking_analysis_0212_v3.md`
 
@@ -869,18 +1090,24 @@ python3 kb_score.py                        # Uses most recent session
 
 The report includes: summary table, in-progress tasks with worker/iteration info, all completed tasks sorted by speedup, failed tasks with last errors, pending tasks list.
 
-### 11.2 `kb_reflect.py` — Reflection Collector
+### 11.2 `kb_reflect.py` — Reflection and Trace Collector
 
 **Usage:**
 ```bash
-python3 kb_reflect.py {session_id}              # Collect reflections (default)
-python3 kb_reflect.py collect {session_id}       # Same, explicit
-python3 kb_reflect.py aggregate {session_id}     # Legacy: mechanical top-5-by-speedup
+python3 kb_reflect.py {session_id}                    # Collect reflections (default)
+python3 kb_reflect.py collect {session_id}             # Same, explicit
+python3 kb_reflect.py collect_traces {session_id}      # Collect algo traces into all_algo_traces.md
+python3 kb_reflect.py classify {session_id}            # Split reflections by op type for parallel learning
+python3 kb_reflect.py aggregate {session_id}           # Legacy: mechanical top-5-by-speedup
 ```
 
-**Default mode (collect):** Concatenates all `{task_name}/reflection.md` files into `all_reflections.md` for the learner agent. Preserves original formatting, separates entries with `---`.
+**Default mode (collect):** Concatenates all `{task_name}/reflection.md` files into `all_reflections.md` for the learner agents. Preserves original formatting, separates entries with `---`.
 
-**Legacy mode (aggregate):** Mechanical top-5-by-speedup per op type. Superseded by the learner agent which does intelligent pattern identification including failures and anti-patterns.
+**Collect traces mode:** Same pattern but for `algo_trace.md` → `all_algo_traces.md`. Used by the algorithm learner agent.
+
+**Classify mode:** Splits `all_reflections.md` into per-op-type files in `{session_dir}/reflections_by_op/`. Uses the `**Op type**: {type}` field in each reflection. Prints a `POPULATED_OPS: op1,op2,...` line for the skill controller to know which per-op-type learner agents to spawn.
+
+**Legacy mode (aggregate):** Mechanical top-5-by-speedup per op type. Superseded by the learner agents which do intelligent pattern identification including failures and anti-patterns.
 
 ### 11.3 `kb_server.py` — Server Configuration
 
@@ -976,7 +1203,9 @@ An LLM agent (`kernel-bench-verifier.md`) spawned on demand via `/kernel-bench v
 
 ---
 
-## 13. Production Results
+## 13. Production Results (Historical, Pre-Ban)
+
+> **Note:** These results are from session 0212_v3, run before Rules 7-13 were implemented. They include gaming-inflated metrics. Post-ban sessions will have lower headline success rates but more honest speedups.
 
 ### 13.1 Representative Session Metrics (0212_v3)
 
@@ -1020,20 +1249,22 @@ Across 183 tasks (35 L1 + 99 L2 + 49 L3):
 
 ### 13.4 Environment Ceiling Effects
 
-Some tasks hit hard performance ceilings due to eval server constraints:
+Some tasks hit hard performance ceilings due to the strict Triton-only requirement (Rule 4):
 
 | Constraint | Affected Tasks | Ceiling |
 |------------|---------------|---------|
-| `F.batch_norm(training=True)` slower than `nn.BatchNorm2d` | BN-heavy models (17+ layers) | ~1.2x |
-| `F.conv_transpose2d/3d` slower than `nn.ConvTranspose*` | ConvTranspose tasks | ~0.6x |
-| `getattr` module creation overhead | RNN tasks | ~10-15ms gap |
+| No `nn.BatchNorm2d` (must write Triton BN) | BN-heavy models (17+ layers) | ~1.2x (Triton BN < cuDNN fused path) |
+| No `nn.ConvTranspose*` (must write Triton) | ConvTranspose tasks | ~0.6x (Triton < cuDNN algorithm caching) |
+| No `nn.LSTM`/`nn.GRU` | RNN tasks | ~0.04x (Python loop vs cuDNN fused) |
 | `einops` not installed | Mamba2 tasks | 0x (can't evaluate) |
+
+These ceilings are the cost of honest benchmarking — the optimizer must beat PyTorch using only Triton kernels, without delegating to cuDNN via `nn.*` modules.
 
 ---
 
 ## Appendix A: Skill Input Styles
 
-The `/kernel-bench` command supports 7 input styles:
+The `/kernel-bench` command supports 9 input styles:
 
 | Style | Example | Mode |
 |-------|---------|------|
@@ -1045,6 +1276,7 @@ The `/kernel-bench` command supports 7 input styles:
 | Progress | `/kernel-bench progress test1` | Query (runs `kb_score.py`) |
 | Server config | `/kernel-bench server --port=5676` | Manage eval server |
 | Verify | `/kernel-bench verify test1` | Protocol compliance (runs `kb_verify.py`) |
+| Learn | `/kernel-bench learn test1` | Run learning on completed session |
 
 **Parameter defaults:** `--workers=4`, `--iterations=20`, `--session={level}_{timestamp}`
 
@@ -1055,7 +1287,10 @@ The `/kernel-bench` command supports 7 input styles:
 | `.claude/commands/kernel-bench.md` | Skill controller (input parsing, mode routing, spawn optimizers + monitor, wait loop, finalize, verify) |
 | `.claude/agents/kernel-bench-optimizer.md` | Optimizer protocol (claim loop in batch mode; Phase A analyze → Phase B explore → Phase C exploit → reflect; up to 20 iterations per task) |
 | `.claude/agents/kernel-bench-monitor.md` | Monitor protocol (poll session state, print progress, detect ALL_DONE/STALL/STUCK) |
-| `.claude/agents/kernel-bench-learner.md` | Learning agent protocol (read reflections + algo traces → tier-classify → write reference/ + optimizer_algorithm.md) |
+| `.claude/agents/kernel-bench-learner.md` | Learning agent protocol (legacy monolithic — superseded by parallel learner agents below) |
+| `.claude/agents/kernel-bench-learner-common.md` | Kernel learner: cross-cutting patterns → `reference/common.md` |
+| `.claude/agents/kernel-bench-learner-op.md` | Kernel learner: per-op-type patterns → `reference/{op_type}.md` (parameterized) |
+| `.claude/agents/kernel-bench-learner-algo.md` | Algorithm learner: trace analysis → mutable sections of `optimizer.md` + `optimizer_algorithm.md` + `algorithm_changelog.md` |
 | `.claude/agents/kernel-bench-verifier.md` | Semantic verifier agent (strategy diversity, diagnosis coherence, reflection quality, code alignment checks) |
 | `.claude/agents/reference/common.md` | Accumulated environment constraints, anti-patterns, universal techniques, composite patterns, strategy heuristics, L2/L3 analysis techniques |
 | `.claude/agents/reference/optimizer_algorithm.md` | Process meta-learnings: diagnosis calibration, explore budgets, feasibility corrections, tuning action ranking |
