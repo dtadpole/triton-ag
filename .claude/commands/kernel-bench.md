@@ -11,7 +11,7 @@ Optimize CUDA/Triton kernels for kernel_bench tasks with crash recovery and **pa
 
 **CRITICAL: Parallel execution is the default and expected behavior.**
 
-- **Default workers**: 4 concurrent optimizers (configurable via `--workers=N`)
+- **Default workers**: 15 concurrent optimizers (configurable via `--workers=N`)
 - **Parallel spawning**: ALL optimizers + monitor MUST be spawned in a SINGLE message with multiple Task tool calls
 - **Concurrent tasks**: Each optimizer claims and processes tasks independently via claim loop
 
@@ -104,7 +104,7 @@ When invoked with `/kernel-bench [args]`, parse the input:
 8. **Detect natural language**: Contains numbers + keywords ("tasks", "agents", "random") → interpret and route
 
 **Parameter defaults:**
-- `--workers=4` (if not specified)
+- `--workers=15` (if not specified)
 - `--iterations=20` (if not specified, max iterations per task)
 - `--session={level}_{timestamp}` (if not specified)
 
@@ -130,7 +130,7 @@ When user provides a single .py file path:
 When user provides directory, level name, or session parameters:
 
 1. **Parse parameters** (with defaults):
-   - `--workers=N` → N concurrent optimizers (default: 4)
+   - `--workers=N` → N concurrent optimizers (default: 15)
    - `--iterations=N` → max iterations per task (default: 20)
    - `--session=ID` → session identifier (default: auto-generated)
    - `--provider=X` → kbEval provider (default: "local")
@@ -412,7 +412,7 @@ When user provides `--resume my_session`:
 
 2. **Extract config** from session state:
    ```
-   num_workers = state.config.get("num_workers", 4)
+   num_workers = state.config.get("num_workers", 15)
    provider = state.config.get("provider", "local")
    max_iterations = state.config.get("max_iterations", 20)
    ```
