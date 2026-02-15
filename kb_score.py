@@ -16,6 +16,20 @@ import json
 from pathlib import Path
 from datetime import datetime
 
+# Completion reasons that indicate a task should be retryable on resume
+RETRYABLE_REASONS = ("server_error", "all_iterations_failed")
+
+
+def _is_task_retryable(result: dict) -> bool:
+    """Check if a completed task should be treated as retryable on resume."""
+    reason = result.get("completion_reason", "")
+    if reason in RETRYABLE_REASONS:
+        return True
+    # Legacy fallback: no completion_reason but 0 speedup with "failed" strategy
+    if result.get("speedup", 0) == 0 and result.get("strategy") == "failed" and not reason:
+        return True
+    return False
+
 
 def get_output_base():
     """Get the base output directory for sessions."""
@@ -63,7 +77,8 @@ def load_session_data(session_id: str) -> dict:
             "best_iteration": None,
             "best_strategy": None,
             "completed": False,
-            "has_correct_result": False
+            "has_correct_result": False,
+            "completion_reason": None
         }
 
         if not task_dir.exists():
@@ -94,8 +109,18 @@ def load_session_data(session_id: str) -> dict:
 
         # Check if completed
         if (task_dir / "best_result.json").exists():
-            task_info["status"] = "completed"
-            task_info["completed"] = True
+            try:
+                best_result = json.loads((task_dir / "best_result.json").read_text())
+                if _is_task_retryable(best_result):
+                    task_info["status"] = "retryable"
+                    task_info["completion_reason"] = best_result.get("completion_reason", "unknown")
+                else:
+                    task_info["status"] = "completed"
+                    task_info["completed"] = True
+                    task_info["completion_reason"] = best_result.get("completion_reason")
+            except (json.JSONDecodeError, Exception):
+                task_info["status"] = "completed"
+                task_info["completed"] = True
         elif (task_dir / ".in_progress").exists():
             task_info["status"] = "in_progress"
         elif task_info["iterations"]:
@@ -133,6 +158,7 @@ def compute_summary(session_data: dict) -> dict:
     in_progress = sum(1 for t in tasks if t["status"] == "in_progress")
     incomplete = sum(1 for t in tasks if t["status"] == "incomplete")
     pending = sum(1 for t in tasks if t["status"] == "pending")
+    retryable = sum(1 for t in tasks if t["status"] == "retryable")
 
     # Count tasks with correct results (compiled & correct)
     correct_count = sum(1 for t in tasks if t["has_correct_result"])
@@ -156,6 +182,7 @@ def compute_summary(session_data: dict) -> dict:
         "completed": completed,
         "in_progress": in_progress,
         "pending": pending + incomplete,
+        "retryable": retryable,
         "failed": failed,
         "correctness_ratio": round(correct_count / total, 3) if total > 0 else 0.0,
         "fast_1_3_ratio": round(fast_1_3_count / total, 3) if total > 0 else 0.0,
@@ -191,6 +218,7 @@ def generate_markdown_report(session_data: dict, summary: dict) -> str:
     lines.append(f"| Completed | {summary['completed']} |")
     lines.append(f"| In Progress | {summary['in_progress']} |")
     lines.append(f"| Pending | {summary['pending']} |")
+    lines.append(f"| Retryable | {summary['retryable']} |")
     lines.append(f"| Failed | {summary['failed']} |")
     lines.append(f"| **Correctness Ratio** | {summary['correctness_ratio']:.1%} ({summary['correct_count']}/{summary['total']}) |")
     lines.append(f"| **Fast (≥1.3x)** | {summary['fast_1_3_ratio']:.1%} ({summary['fast_1_3_count']}/{summary['total']}) |")
@@ -240,6 +268,25 @@ def generate_markdown_report(session_data: dict, summary: dict) -> str:
             lines.append(f"| {t['name']} | {speedup_str} | {strategy} | {len(t['iterations'])} |")
         lines.append("")
 
+    # Retryable Tasks (server errors, all-failed with 0x)
+    retryable_tasks = [t for t in sorted_tasks if t["status"] == "retryable"]
+    if retryable_tasks:
+        lines.append("## Retryable Tasks")
+        lines.append("")
+        lines.append("These tasks failed due to server errors or all iterations failing. They will be retried on resume.")
+        lines.append("")
+        lines.append("| Task | Reason | Iterations | Last Error |")
+        lines.append("|------|--------|------------|------------|")
+        for t in retryable_tasks:
+            reason = t.get("completion_reason", "unknown")
+            last_error = "-"
+            if t["iterations"]:
+                last_it = t["iterations"][-1]
+                if last_it.get("error"):
+                    last_error = last_it["error"][:50] + "..." if len(last_it.get("error", "")) > 50 else last_it["error"]
+            lines.append(f"| {t['name']} | {reason} | {len(t['iterations'])} | {last_error} |")
+        lines.append("")
+
     # Failed Tasks
     failed_tasks = [t for t in sorted_tasks if t["status"] == "incomplete" and not t["has_correct_result"] and len(t["iterations"]) >= 10]
     if failed_tasks:
@@ -283,6 +330,7 @@ def print_console_summary(session_id: str, summary: dict):
     print(f"     Completed:     {summary['completed']}")
     print(f"     In Progress:   {summary['in_progress']}")
     print(f"     Pending:       {summary['pending']}")
+    print(f"     Retryable:     {summary['retryable']}")
     print(f"     Failed:        {summary['failed']}")
     print(f"     Avg Speedup:   {summary['avg_speedup']:.3f}x")
     print()

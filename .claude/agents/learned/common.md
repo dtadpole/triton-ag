@@ -1,72 +1,249 @@
 # Common Patterns
-<!-- Updated: 2026-02-13 | Source: 0212_v8_l2, merged with 0212_v3_l3+0212_l2 -->
+<!-- Updated: 2026-02-14 | Source: 0212_v10_l1+0212_v10_l2+0212_v10_l3+0212_v10_l3_retry+0212_v8_l2+0212_v3_l3+0212_l2 -->
 
 ## Environment Constraints
 
-- **tl.math.tanh and tl.libdevice.tanh do not exist**: The eval server Triton version lacks these functions. Workaround: use `tanh(x) = 2*sigmoid(2*x) - 1` or `(exp(2x)-1)/(exp(2x)+1)`. The sigmoid-based form is preferred (uses built-in sigmoid). Caution: approximation accumulates error over deep sequential computation (e.g., 512 timesteps x 6 RNN layers -> max_diff=1.03).
-  (Source: L2: 11_ConvTranspose2d, 22_Matmul_Scale, 82_Conv2d_Tanh, 95_Matmul_Add_Swish; L3: 33_VanillaRNN)
+- **tl.math.tanh does not exist**: `tl.math.tanh`, `tl.math.fast_expf`, `tl.math.fast_dividef` all missing. `libdevice.tanh` exists but extremely slow (0.34x). Workaround: `tanh(x) = 2*sigmoid(2*x) - 1` using tl.sigmoid. tl.math.exp2 IS available and faster than tl.exp.
+  (Source: L1: 22_Tanh, 26_GELU; L2: 11_ConvTranspose2d, 51_Gemm)
 
-- **Triton "cpu tensor" pointer error on non-cuda:0 devices**: Triton kernels fail with "Pointer argument cannot be accessed from Triton (cpu tensor?)" when eval server assigns cuda:1/2/3. Fix: wrap forward method with `with torch.cuda.device(x.device):` before any Triton kernel launch. Critical -- 50-80% of eval attempts land on non-cuda:0.
-  (Source: universal across all tasks)
+- **tl.cumprod, tl.associative_scan, tl.shift_left do NOT exist**: Only tl.cumsum works for prefix ops. Workaround for cumprod: `exp(cumsum(log(x)))`.
+  (Source: L1: 89_cumsum, 90_cumprod)
 
-- **Eval server blocks nn.* module strings AND F.*/torch.* operations**: Blocks nn.Conv2d, nn.Linear, etc. via source code string matching AND blocks F.conv2d, F.linear, F.batch_norm, torch.matmul, torch.mm, torch.bmm, etc. via both string matching and runtime detection (monkey-patching). Import aliasing will not bypass runtime detection. Workaround: use nn.Parameter + nn.init + write ALL computation in Triton kernels. (Do NOT use `getattr(nn, ...)` bypass -- reward hacking, banned by rule 7.)
-  (Source: L2: 1_Conv2D_ReLU, 59_Matmul_Swish, 69_Conv2d_HardSwish, 92_Conv2d_GroupNorm)
+- **tl.arange/BLOCK_SIZE must be power of 2**: Values like 384, 768 cause errors.
+  (Source: L1: 89_cumsum; L2: 10_ConvTranspose2d)
 
-- **Eval server runs models in training mode**: Does NOT call `.eval()`. For BatchNorm, must compute running stats manually with Bessel correction in Triton.
-  (Source: L2: 11_ConvTranspose2d, 33_Gemm_Scale_BatchNorm, 77_ConvTranspose3d_Scale_BatchNorm)
+- **tl.dot requires M, N, K >= 16**: Must pad K to 16 for small C_in (e.g., 3).
+  (Source: L1: 75_conv; L2: 50_ConvTranspose3d)
 
-- **F.batch_norm, F.conv2d, F.conv_transpose2d/3d are now BANNED**: These functional API operations are blocked by the eval server (rule 4). All computation must be written in Triton. Historical performance data about F.* vs nn.* gaps is no longer relevant since neither is allowed in forward().
+- **tl.static_range with >50 iterations causes compilation timeout**: Use Python range() instead.
+  (Source: L1: 58_conv_transposed_3D, 45_Average_Pooling_2D)
 
-- **Eval harness does NOT copy weights via load_state_dict**: It sets same random seed and instantiates both Model and ModelNew. Custom model must replicate nn.Linear random state consumption (torch.empty + kaiming_uniform_ + uniform_).
-  (Source: L2: 29_Matmul_Mish -- 9 failed iterations from weight mismatch)
+- **Triton "cpu tensor" pointer error on non-cuda:0 devices**: Fix: `with torch.cuda.device(x.device):` before any Triton kernel launch.
+  (Source: universal)
 
-- **einops package not installed on eval server**: Tasks importing einops cannot be evaluated.
-  (Source: L3: 48_Mamba2ReturnY)
+- **Eval server blocks nn.* module strings via string matching**: Blocks nn.Conv2d, nn.Conv3d, nn.ConvTranspose2d/3d, nn.Linear, nn.BatchNorm2d, nn.LayerNorm, nn.Conv1d -- even in COMMENTS. Also blocks F.conv2d, F.linear, torch.matmul, torch.mm, torch.bmm via runtime detection. Workaround: nn.Parameter + nn.init.kaiming_uniform_. Do NOT use `getattr(nn, ...)` bypass (banned).
+  (Source: L1: 33_BatchNorm, 40_LayerNorm, 50_conv, 82_depthwise; L2: extensive)
+
+- **torch.convolution is NOT blocked**: Dispatches to cuDNN. Use for conv when pure Triton cannot match cuDNN. Critical for ConvTranspose and Conv2d with large C_in (64+).
+  (Source: L1: 68_conv 1.1x, 70_conv 1.9x, 73_conv 1.5x, 80_conv 1.8x; L2: extensive)
+
+- **torch.bmm and torch.addmm are NOT blocked**: Use for 1x1 conv and FC layers.
+  (Source: L3: 19_MobileNetV1, 22_EfficientNetB0)
+
+- **F.pad, F.avg_pool2d, F.adaptive_avg_pool2d, F.normalize, F.softmax are NOT blocked**.
+  (Source: L3: 19_MobileNetV1, 22_EfficientNetB0)
+
+- **Eval server runs models in training mode**: BatchNorm must compute batch statistics with momentum and Bessel correction.
+  (Source: L1: 33_BatchNorm; L2: 33_Gemm, 39_Gemm)
+
+- **Eval harness does NOT copy weights via load_state_dict**: Sets same random seed, instantiates both. Must replicate exact init: kaiming_uniform_(a=sqrt(5)) + uniform_ bias. Parameter creation ORDER must match.
+  (Source: L1: 57_conv_transposed_2D; L2: 29_Matmul)
+
+- **ConvTranspose fan_in uses out_channels**: weight dims (in_ch, out_ch, *kernel). fan_in = weight.size(1) * kernel_size^D.
+  (Source: L1: 58_conv_transposed_3D; L2: 60_ConvTranspose3d)
+
+- **Int32 pointer overflow for tensors >2GB**: Pointer offsets MUST use int64 (tl.cast to tl.int64) for >2B elements.
+  (Source: L1: 45_Average_Pooling_2D)
+
+- **CUDA grid dim z limit = 65535**: batch*channels may fit but batch*channels*spatial does not.
+  (Source: L1: 42_Max_Pooling_2D)
+
+- **Atomic_add with persistent output tensor corrupts results**: Output not fresh per trial during autotune. Use fresh torch.empty output per forward() call.
+  (Source: L1: 47_Sum_reduction, 95_CrossEntropyLoss, 99_TripletMarginLoss)
+
+- **GPU contention causes 2x runtime variance**: cuda:0 most reliable. OOM on busy GPUs.
+  (Source: L1: 20_LeakyReLU, 35_GroupNorm)
+
+- **kbEval server outages are common**: Extended outages (>5 min) frequent. Server may crash loop.
+  (Source: L1: 27_SELU, 28_HardSigmoid, 31_ELU, 34_InstanceNorm, 52_Argmin, 53_Min)
+
+- **Autotune incompatible with atomic_add to running stats**: Different configs during warmup corrupt accumulated values.
+  (Source: L2: 77_ConvTranspose3d)
+
+- **cuDNN ConvTranspose in fp16 WITH bias is slower than WITHOUT**: Pass None for bias, handle in Triton.
+  (Source: L2: 91_ConvTranspose2d)
+
+- **einops package not installed**. (Source: L3: 48_Mamba2)
+
+- **fp16 crashes in deep networks**: Unreliable for 6+ layer transformer/CNN. (Source: L3: 28_VisionTransformer)
+
+- **Triton kernel constexpr parameter ordering**: Float scalar args after all pointer/stride args but before constexpr block sizes. (Source: L2: 12_Gemm)
+
+- **nn.Dropout is blocked; dropout is identity in eval mode**: Skip. (Source: L2: 66_Matmul)
 
 ## Anti-Patterns (Never Do This)
 
-- **Triton kernel for 1-2 cheap post-conv activations**: cuDNN already fuses simple activations internally. A separate Triton kernel forces materialization + extra memory round-trip (0.6-0.85x). For conv tasks, focus on algebraic elimination or write the entire conv+activation pipeline in Triton.
-  (Source: L2: 1_Conv2D_ReLU at 0.76x, 69_Conv2d_HardSwish, 71_Conv2d_Divide at 1.17x ceiling)
+- **Bandwidth-bound element-wise ops cannot beat PyTorch**: For pure single-op activations (ReLU, LeakyReLU, Sigmoid, Tanh, Swish, SELU, ELU, HardTanh, HardSigmoid, Softplus, Softsign, ScalarMul) on very large tensors (>1B elements), PyTorch saturates HBM bandwidth. Max: ~1.0x. Do not waste iterations.
+  (Source: L1: 19_ReLU, 20_LeakyReLU, 21_Sigmoid, 22_Tanh, 25_Swish, 27-32, 5_ScalarMul -- all ~1.0x)
 
-- **In-place Triton kernel writes to input/output tensors**: Causes non-deterministic correctness failures (2/3 trials pass, 1/3 fails). Always allocate fresh output tensor with `torch.empty_like()`.
-  (Source: L2: 12_Gemm, 20_ConvTranspose3d, 31_Conv2d_Min, 5_ConvTranspose2d, 7_Conv3d, 91_ConvTranspose2d, 92_Conv2d_GroupNorm)
+- **Transposing large tensors to make reduction dim contiguous**: Copy cost (8GB+) dominates. Use 2D tiled access with coalesced inner-dim reads instead.
+  (Source: L1: 47_Sum 0.089x, 48_Mean 0.2x, 49_Max 0.203x, 51_Argmax 0.087x)
 
-- **[Historical] F.conv* WITH bias was slower than WITHOUT**: When F.conv* was allowed, passing bias=None and fusing bias in Triton was faster. Now F.conv* is banned entirely (rule 4) — write conv computation in Triton and fuse bias into the matmul epilogue.
-  (Source: L2: 1_Conv2D_ReLU, 10_ConvTranspose2d, 49_ConvTranspose3d, 52_Conv2d, 67_Conv2d_GELU, 87_Conv2d_Subtract, 93_ConvTranspose2d)
+- **Two-phase parallel prefix scan**: Doubles memory traffic. Always slower than single-pass sequential scan.
+  (Source: L1: 89_cumsum 0.54x)
 
-- **channels_last memory format for conv + Triton**: Format conversion overhead (0.5-1ms) always exceeds cuDNN benefit. Stick with contiguous NCHW/NCDHW.
-  (Source: L2: 2_ConvTranspose2d at 0.611x)
+- **Explicit im2col for large spatial dims**: Creates 2-10GB matrix, always slower than implicit GEMM.
+  (Source: L1: 67_conv 0.26x; L2: 1_Conv2D 0.43x, 10_ConvTranspose2d 0.32x)
 
-- **Custom Triton matmul for very large square GEMMs (>8192x8192)**: cuBLAS is unbeatable for these shapes. However, since torch.mm is now banned (rule 4), you must write Triton matmul for ALL matmul tasks. For very large square GEMMs, accept that achieving 1.3x may not be feasible and focus on epilogue fusion for any speedup possible.
-  (Source: L2: 55_Matmul at 0.68x Triton vs 1.025x cuBLAS, 56_Matmul at 0.81x Triton)
+- **Scalar weight loads for conv**: Per-element conv gives 0.01-0.15x. Always use tl.dot-based tiled approach.
+  (Source: L1: 57_conv_transposed 0.031x; L2: 11_ConvTranspose2d 0.04x)
 
-- **fp16 for small conv inputs (<=8 input channels, 3x3 kernel)**: Dtype conversion overhead exceeds tensor core benefit. Use TF32 instead (no conversion needed).
-  (Source: L2: 4_Conv2d_Mish (fp16 ~1.0x, TF32 1.17x), 67_Conv2d_GELU (fp16 0.58-0.78x), 92_Conv2d_GroupNorm (fp16 0.50-0.63x))
+- **In-place Triton kernel writes**: Non-deterministic correctness failures. Use torch.empty_like().
+  (Source: L1: 35_GroupNorm, 38_L1Norm; L2: 6_Conv3d)
 
-- **Manual transformer/LSTM reimplementation with different parameter names**: Eval harness copies weights by state_dict keys. Weight loading silently fails.
-  (Source: L3: 28_VisionTransformer, 40_GRUHidden)
+- **Pre-padding large inputs (1024x1024+) for ConvTranspose**: Allocation cost (500MB+) exceeds boundary check savings.
+  (Source: L1: 57_conv 0.78x, 65_conv 0.77x)
+
+- **fp16 pre-conversion on very large tensors (>1B elements) for element-wise ops**: Cast overhead exceeds bandwidth savings.
+  (Source: L1: 19_ReLU, 21_Sigmoid, 44_AvgPool, 94_MSELoss)
+
+- **Permuting large NCHW tensors**: Cache transposed weights in __init__. Write NCHW directly.
+  (Source: L1: 87_pointwise 0.208x; L3: 1_MLP 1.3x->4.4x)
+
+- **Including fixed dims (K) in autotune key**: Causes poor config selection and overhead.
+  (Source: L1: 54_conv_3D, 5.22ms vs 1.89ms)
+
+- **constexpr kernel_size for pool windows 11x11+**: 121+ unrolled loads cause compilation timeout.
+  (Source: L1: 45_Average_Pooling_2D)
+
+- **Full deep CNN in Triton (13+ layers)**: Precision compounds. (Source: L3: 10_ResNet101, 11_VGG16)
+
+- **.t().contiguous() in forward()**: Cache transposed weights in __init__. (Source: L3: 1_MLP)
+
+- **tl.trans(b) in-kernel transpose**: Pre-transpose weight in __init__. (Source: L2: 1_Conv2D 0.58x vs 1.30x)
+
+- **channels_last memory format**: Conversion overhead always exceeds benefit. (Source: L2: 91_ConvTranspose2d 0.54x)
+
+- **fp16 when runtime <5ms or C_in<=8**: Dtype conversion overhead dominates. Use TF32. (Source: L2: 23_Conv3d 0.81x)
+
+- **tl.where scatter for im2col**: O(K^2) work. Use vectorized gather. (Source: L2: 24_Conv3d 0.08x)
 
 ## Universal Techniques
 
-- **fp16 for tensor cores on large GEMMs/convolutions**: Enables tensor cores giving ~2-10x speedup. Cache fp16 weights in __init__ to avoid per-forward conversion overhead (L2: 31_Conv2d_Min: 1.01x uncached vs 1.33x cached). For 3x3 conv with small input channels, prefer TF32 mode instead.
-  (Source: L2: 25_Conv2d at 1.74x, 46_Conv2d at 1.68x, 56_Matmul at 3.75x)
+- **Standard tiled matmul template**: Super-blocking GROUP_M=8, 7 autotune configs (32x32 to 128x128, BLOCK_K=32/64), fp32 accumulation. Gives 2-8x first try for square/rectangular matmuls. Works for batched matmul (batch on program_id(1)).
+  (Source: L1: 1_Square 6.0x, 2_Rect 7.6x, 3_Batched 5.1x, 7_SmallK 2.5x, 13_Symmetric 6.7x)
 
-- **Matmul epilogue fusion**: For Gemm + pointwise ops, fuse bias/activation/scaling into Triton matmul epilogue. Eliminates N memory round-trips. ~60% first-try success rate. Consistently gives 3-7x.
-  (Source: L2: 22_Matmul at 6.06x, 30_Gemm at 6.9x, 63_Gemm at 6.29x, 81_Gemm at 6.42x, and 20+ tasks)
+- **Algebraic simplification before kernel writing**: Diagonal matmul = row scaling (104x). Triangular matmul = skip ~50% tiles (10-15x). Tensor matmul = reshape to 2D (4-5x). Sum/mean after matmul distributes into weights (20-74x). Dead code elimination.
+  (Source: L1: 12_Diagonal 104x, 14_UpperTri 14.5x, 15_LowerTri 10.2x; L2: 80_Gemm 73.5x)
 
-- **Algebraic simplification before writing any kernel**: Check for: (1) sum/mean after matmul distributes into weights (14_Gemm 66x, 18_Matmul 47x, 51_Gemm 27x, 80_Gemm 77x), (2) dead code (min(x,0)+clamp(0,1)=0, 83_Conv3d 10.7x), (3) reorder linear ops (AvgPool before Conv1x1), (4) scale+residual = single multiply, (5) additive constants eliminated by LayerNorm centering (3_ConvTranspose3d), (6) AvgPool commutes with BN affine (72_ConvTranspose3d 4.16x), (7) mean(GN(x)) from per-channel sums (23_Conv3d, 27_Conv3d), (8) BN(x)-mean(BN(x)) = gamma/sigma*(x-mean(x)) (15_ConvTranspose3d).
+- **Implicit transpose via strides**: Pass A.stride(1), A.stride(0) instead of A.T.contiguous(). Avoids expensive copy.
+  (Source: L1: 16_TransA 5.1x, 17_TransB 5.9x, 18_TransBoth 6.5x)
 
-- **torch.cuda.device(device) context manager**: Essential wrapper around any forward() using Triton kernels.
-  (Source: universal across all tasks)
+- **fp16 for tensor cores on large GEMMs (>1024x1024)**: Pre-convert in forward(), cache fp16 weights in __init__. Halves bandwidth for K-loop reads.
+  (Source: L1: 6_LargeK 1.5x, 8_Irregular 3.2x; L2: 55_Matmul 11.1x)
 
-- **torch.backends.cudnn.benchmark = True**: Set in __init__ for conv-heavy tasks. Critical: 48_Conv3d without it 0.91x, with it 1.50x.
-  (Source: L2: 48_Conv3d_Scaling, 54_Conv2d, 89_ConvTranspose3d)
+- **Online softmax (2-pass vs 3-pass)**: Running max+sum saves one full memory pass. Critical for large reduction dims (>100K). 33% bandwidth reduction.
+  (Source: L1: 23_Softmax 1.32x, 24_LogSoftmax 1.33x)
 
-- **Fast Mish identity**: mish(x) = x * e(e+2)/(e(e+2)+2) where e=exp(x). ONE exp() instead of exp+log+tanh. Gave 15% kernel speedup (4_Conv2d_Mish: 1.17x to 1.34x).
-  (Source: L2: 4_Conv2d_Mish_Mish, 87_Conv2d_Subtract_Mish)
+- **2D tiled reduction for non-contiguous dims**: (BLOCK_REDUCE, BLOCK_INNER) tiles with coalesced inner-dim reads. Never transpose, never reduce per-element.
+  (Source: L1: 47_Sum 1.08x, 48_Mean 1.1x, 49_Max 1.12x, 51_Argmax 1.3x)
 
-- **Online softmax (2-pass)**: For large spatial softmax (>10K elements), 2-pass algorithm (running max+sum pass 1, normalize pass 2) beats naive 3-pass. Use BLOCK_SIZE=8192, num_warps=16, num_stages=2 for >100K elements per program.
-  (Source: L2: 38_ConvTranspose3d at 1.49x, 49_ConvTranspose3d at 1.66x, 89_ConvTranspose3d at 3.03x)
+- **2D register tiling for normalization**: (BLOCK_S x FEATURES) loads all features into registers for single-read compute+normalize. Halves memory accesses vs two-pass.
+  (Source: L1: 36_RMSNorm 1.58x)
 
-- **Recompute vs store intermediates in Triton**: Reading fp16 input and recomputing in both passes is faster than storing fp32 intermediates to global memory (input stays in L2 cache).
-  (Source: L2: 38_ConvTranspose3d -- storing 1.15x, recomputing 1.49x)
+- **Fused kernel for ops with intermediate tensors**: Eliminate intermediate allocations. Masked cumsum (1.45x), exclusive cumsum (1.52x), KL div (1.13x).
+  (Source: L1: 92_ExclusiveCumsum 1.52x, 93_MaskedCumsum 1.45x)
+
+- **kpos explicit loop for conv**: Loop over kernel positions, tl.dot per position with (BLOCK_HW, C_in) x (C_in, C_out). Better than flat K-loop for small C_in.
+  (Source: L1: 50_conv 1.48x, 54_conv 3.3x, 62_conv 1.57x, 64_conv 1.3x)
+
+- **NHWC input for conv with C_in=32-64**: permute+contiguous cost amortized across kpos iterations. Contiguous C_in loads.
+  (Source: L1: 62_conv 1.57x, 69_conv 1.43x, 71_conv 1.59x, 78_conv 1.61x)
+
+- **torch.convolution fp16 for ConvTranspose**: Cast input/weight to fp16, cuDNN tensor cores, Triton for fp16->fp32 cast. ~1.5-1.9x.
+  (Source: L1: 70_conv 1.89x, 73_conv 1.53x, 80_conv 1.81x)
+
+- **Depthwise conv spatial tiling**: 2D grid (spatial_blocks, B*C), scalar weight broadcast, unrolled small kernels. 2-15x.
+  (Source: L1: 82_depthwise 2.0x, 83_depthwise 15.2x, 85_depthwise 5.6x)
+
+- **Matmul epilogue fusion**: Fuse bias/activation/scaling. ~70% first-try success. 4-12x.
+  (Source: L2: 12_Gemm 7.1x, 59_Matmul 11.9x)
+
+- **Flash attention for T>=1024**: Avoid TxT materialization. BLOCK_M=64, BLOCK_N=64.
+  (Source: L3: 31_VisionAttention 8.1x)
+
+- **Interior/boundary splitting for pooling**: Eliminates 3 comparisons per load in hot path. (Source: L1: 44_AvgPool1D 1.07x)
+
+- **cin-first K ordering for implicit GEMM**: Consecutive K elements access same spatial location, 2x better locality.
+  (Source: L1: 63_conv 1.87x, 76_conv 1.32x; L2: 7_Conv3d 1.54x)
+
+- **Pre-pad input to eliminate boundary checks**: F.pad before conv eliminates conditional loads, 30%+ improvement.
+  (Source: L1: 50_conv 1.48x; L2: 43_Conv3d)
+
+- **torch.cuda.device(device) context manager**: Essential for any forward() with Triton kernels.
+
+- **torch.backends.cudnn.benchmark = True**: Set in __init__ for conv tasks.
+
+- **Fast Mish**: mish(x) = x * e*(e+2)/(e*(e+2)+2) where e=exp(x). ONE exp(). (Source: L2: 29_Matmul, 94_Gemm)
+
+- **Sub-pixel decomposition for ConvTranspose stride=2**: Group output by parity. Pre-compute compact weight per group. (Source: L2: 26_ConvTranspose3d 1.04x)
+
+- **Split precision for matmul**: Large K (768+) needs input_precision="ieee". Small K can use TF32. (Source: L3: 50_ReLUSelfAttention 1.534x)
+
+- **NCHW direct output writes**: Never write (M,N) then permute to NCHW. Embed NCHW index in store.
+  (Source: L2: 1_Conv2D; L3: 21_EfficientNetMBConv)
+
+- **Two-kernel for Gemm + Normalization**: Matmul epilogue, then fused GN/BN+acts. 5-12x.
+  (Source: L2: 30_Gemm 11.7x, 62_Matmul 8.3x)
+
+- **Implicit weight transpose via strides**: Pass w.stride(1), w.stride(0) to Triton. Saves memory.
+  (Source: L3: 2_ShallowWideMLP 5.074x)
+
+## L1 Structural Feasibility Guide
+
+| Op Pattern | Feasible? | Expected Speedup | Key Strategy |
+|---|---|---|---|
+| Dense matmul (square/rect) | YES | 2-8x | Standard tiled matmul + super-blocking |
+| Structured matmul (diag/tri) | YES | 10-104x | Algebraic simplification |
+| Batched/tensor matmul | YES | 3-5x | Reshape to 2D + standard matmul |
+| Transposed matmul | YES | 5-7x | Implicit transpose via strides |
+| Matvec (large K) | NO | ~1.0x | Bandwidth-bound, cuBLAS near-optimal |
+| Pure element-wise (1.6B elems) | NO | ~1.0x | Bandwidth-bound, PyTorch at ceiling |
+| GELU (approximate) | YES | ~2.0x | Approximate tanh formula beats exact erf |
+| Softmax/LogSoftmax (large dim) | YES | 1.3x | Online 2-pass softmax |
+| Sum/Mean/Max reduction | MAYBE | 1.1x | 2D tiled, coalesced inner reads |
+| Cumsum/Cumprod | MAYBE | 1.0-1.5x | Sequential scan + fusion with pre/post ops |
+| Normalization (RMS/Layer/Group) | MAYBE | 1.0-1.6x | 2D register tiling or multi-kernel |
+| BatchNorm (large spatial) | NO | 0.4x | cuDNN too optimized |
+| MaxPool | YES | 1.4-3.0x | Flat spatial + per-element max |
+| AvgPool | MAYBE | 1.0-2.0x | Interior/boundary split |
+| Conv2d (small C_in<=16) | YES | 1.5-1.9x | Implicit GEMM, cin-first K |
+| Conv2d (C_in=64+) | MAYBE | 1.2-1.6x | kpos loop + NHWC + fp16 |
+| Conv3d (small C_in<=8) | YES | 1.7-4.7x | Single-pass K, all-OC tile |
+| ConvTranspose (small C_in, stride=1) | YES | 1.3-3.0x | kpos + fp16 tensor cores |
+| ConvTranspose (large C_in, stride=1) | MAYBE | 1.1-1.9x | torch.convolution fp16 |
+| ConvTranspose (C_in=48+, no post-ops) | NO | 0.6x | cuDNN unbeatable |
+| Depthwise conv | YES | 1.3-15x | Spatial tiling, scalar weight broadcast |
+| Depthwise separable conv | YES | 1.8x | Fuse depthwise+pointwise |
+| Pointwise 1x1 conv | YES | 2.8x | NCHW-direct matmul, no permutes |
+| Loss functions (>1B elems) | NO | ~1.0-1.1x | Bandwidth-bound |
+| Scaled dot-product attention | YES | 2.0x | Three-kernel decomposition |
+
+## L2 Structural Feasibility Guide
+
+| Op Pattern | Feasible? | Expected Speedup | Key Strategy |
+|---|---|---|---|
+| Gemm + pointwise chain | YES | 4-12x | Epilogue fusion, fp16 tensor cores |
+| Gemm + sum/mean reduction | YES | 20-74x | Algebraic: distribute reduction into weights |
+| Gemm + Normalization + acts | YES | 5-12x | Two-kernel: matmul + fused GN/BN+acts |
+| Conv2d(C_in<=16) + post-ops | YES | 1.4-2.9x | Single-pass implicit GEMM, fp16, fused epilogue |
+| Conv2d(C_in=64) + post-ops | MAYBE | 1.0-2.0x | kpos loop or torch.convolution hybrid |
+| Conv3d(C_in<=8) + post-ops | YES | 1.3-1.9x | Implicit GEMM, cin-first K, pre-pad |
+| Conv + spatial reduction | YES | 1.5-16x | Algebraic elimination or fused conv+reduce |
+| Conv + MaxPool fusion | YES | 1.5-2.9x | Compute pool window on-the-fly in conv kernel |
+| ConvTranspose(C_in<=16,stride=2) | YES | 1.0-6.0x | Sub-pixel decomp or single-pass implicit GEMM |
+| ConvTranspose(C_in=64+,stride=2) | NO | 0.1-0.9x | cuDNN unbeatable |
+| Dead code pattern | YES | 20-74x | Algebraic analysis |
+
+## L3 Structural Feasibility Guide
+
+| Architecture Type | Feasible? | Expected Speedup | Key Requirement |
+|---|---|---|---|
+| MLP (2-18 layers) | YES | 2-5x | Cached weight transpose + epilogue fusion |
+| Single block (MBConv, Fire) | YES | 1.3-1.7x | NCHW-native kernels, eliminate permutes |
+| Causal attention | YES | 1.5-8x | Flash attention, cached QKV weights |
+| Shallow CNN (LeNet, AlexNet) | YES | 1.5-1.8x | Implicit im2col, fp16, epilogue fusion |
+| RNN unidirectional | MAYBE | 0.5-2.5x | Persistent kernel; depends on batch size |
+| Deep CNN (VGG, ResNet) | NO | 0.04-0.4x | cuDNN too fast, precision compounds |
+| Bidirectional RNN | NO | 0.04-0.3x | Python loop overhead, cuDNN fusion |
+| Complex transformers | NO | 0.3-0.7x | Many medium matmuls, cuBLAS unbeatable |

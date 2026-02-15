@@ -96,6 +96,33 @@ _best_result_tracker: dict[tuple[str, str], dict] = {}
 DEFAULT_TARGET_SPEEDUP = 1.3
 DEFAULT_MAX_ITERATIONS = 10
 
+# Completion reasons that indicate a task should be retryable on resume
+RETRYABLE_REASONS = ("server_error", "all_iterations_failed")
+
+
+def _infer_completion_reason(speedup: float, strategy: str, iterations_done: int, max_iterations: int) -> str:
+    """Infer the completion reason based on task results."""
+    if speedup >= DEFAULT_TARGET_SPEEDUP:
+        return "target_reached"
+    if strategy == "failed" and speedup == 0:
+        return "all_iterations_failed"
+    if isinstance(strategy, str) and ("server" in strategy.lower() or "unavailable" in strategy.lower()):
+        return "server_error"
+    if iterations_done >= max_iterations:
+        return "max_iterations"
+    return "unknown"
+
+
+def _is_task_retryable(result: dict) -> bool:
+    """Check if a completed task should be treated as retryable on resume."""
+    reason = result.get("completion_reason", "")
+    if reason in RETRYABLE_REASONS:
+        return True
+    # Legacy fallback: no completion_reason but 0 speedup with "failed" strategy
+    if result.get("speedup", 0) == 0 and result.get("strategy") == "failed" and not reason:
+        return True
+    return False
+
 
 def get_kbeval_client(config_file: str = "kbEval.yaml"):
     """Get the kbEval client singleton."""
@@ -468,12 +495,20 @@ async def _auto_update_progress(
     # Auto-complete if conditions met
     if should_complete and current_best:
         try:
+            # Determine completion reason for auto-completion
+            auto_reason = None
+            if current_best["speedup"] >= DEFAULT_TARGET_SPEEDUP:
+                auto_reason = "target_reached"
+            elif iteration >= max_iterations - 1:
+                auto_reason = "max_iterations"
+
             await complete_task_progress(
                 session_id=session_id,
                 task_name=task_name,
                 final_speedup=current_best["speedup"],
                 final_iteration=current_best["iteration"],
-                final_strategy=current_best["strategy"]
+                final_strategy=current_best["strategy"],
+                completion_reason=auto_reason
             )
             logger.info(f"[kernel-bench] Auto-completed {task_name}: {current_best['speedup']:.2f}x "
                        f"({completion_reason})")
@@ -492,7 +527,8 @@ async def _auto_update_progress(
                 task_name=task_name,
                 final_speedup=0,
                 final_iteration=iteration,
-                final_strategy="failed"
+                final_strategy="failed",
+                completion_reason="all_iterations_failed"
             )
             logger.info(f"[kernel-bench] Auto-completed {task_name} as failed "
                        f"({completion_reason}, no successful iteration)")
@@ -1017,13 +1053,44 @@ async def claim_task(
     # Create task directory if needed
     task_dir.mkdir(parents=True, exist_ok=True)
 
+    # One-task-per-worker enforcement: reject if this worker already holds a task
+    session_dir = output_base / session_id
+    for existing_task in session_dir.iterdir():
+        if not existing_task.is_dir() or existing_task.name == task_name:
+            continue
+        existing_marker = existing_task / ".in_progress"
+        if existing_marker.exists():
+            try:
+                existing_data = json.loads(existing_marker.read_text())
+                if existing_data.get("worker") == worker_id and not _is_marker_stale(existing_data):
+                    return {
+                        "success": False,
+                        "reason": "worker_already_has_task",
+                        "existing_task": existing_task.name,
+                        "task_name": task_name
+                    }
+            except (json.JSONDecodeError, Exception):
+                pass
+
     # Check if already completed
     if (task_dir / "best_result.json").exists():
-        return {
-            "success": False,
-            "reason": "already_completed",
-            "task_name": task_name
-        }
+        try:
+            result = json.loads((task_dir / "best_result.json").read_text())
+            if _is_task_retryable(result):
+                # Retryable task — allow re-claim, archive old result below
+                pass
+            else:
+                return {
+                    "success": False,
+                    "reason": "already_completed",
+                    "task_name": task_name
+                }
+        except (json.JSONDecodeError, Exception):
+            return {
+                "success": False,
+                "reason": "already_completed",
+                "task_name": task_name
+            }
 
     # Check for existing marker
     if marker_file.exists():
@@ -1056,6 +1123,11 @@ async def claim_task(
         # 'x' mode = exclusive create, fails if file exists
         with open(marker_file, 'x') as f:
             json.dump(marker_data, f)
+
+        # Archive previous result if re-claiming a retryable task
+        prev_result = task_dir / "best_result.json"
+        if prev_result.exists():
+            prev_result.rename(task_dir / "best_result.prev.json")
 
         logger.info(f"[kernel-bench] Worker {worker_id} claimed task: {task_name}")
 
@@ -1181,6 +1253,13 @@ async def get_session_state(session_id: str) -> dict:
 
         # Check for completion marker
         if (task_dir / "best_result.json").exists():
+            try:
+                result = json.loads((task_dir / "best_result.json").read_text())
+                if _is_task_retryable(result):
+                    incomplete.append(task_name)  # Retryable, not truly completed
+                    continue
+            except (json.JSONDecodeError, Exception):
+                pass
             completed.append(task_name)
             continue
 
@@ -1296,9 +1375,16 @@ async def get_pending_tasks(
     for task_name in all_tasks:
         task_dir = session_dir / task_name
 
-        # Skip completed tasks
+        # Skip completed tasks (but allow retryable ones)
         if task_dir.exists() and (task_dir / "best_result.json").exists():
-            continue
+            try:
+                result = json.loads((task_dir / "best_result.json").read_text())
+                if _is_task_retryable(result):
+                    pass  # Don't skip — treat as claimable
+                else:
+                    continue  # Legitimately completed, skip
+            except (json.JSONDecodeError, Exception):
+                continue  # Can't read, assume completed
 
         # Skip in-progress tasks (with valid markers)
         marker_file = task_dir / ".in_progress"
@@ -1466,7 +1552,8 @@ async def complete_task_progress(
     task_name: str,
     final_speedup: float,
     final_iteration: int,
-    final_strategy: str
+    final_strategy: str,
+    completion_reason: str = None
 ) -> dict:
     """
     Mark a task as completed and save the best result.
@@ -1480,6 +1567,9 @@ async def complete_task_progress(
         final_speedup: Best achieved speedup
         final_iteration: Iteration that achieved best result
         final_strategy: Strategy that achieved best result
+        completion_reason: Why the task completed (e.g., "target_reached",
+                          "max_iterations", "all_iterations_failed", "server_error").
+                          Auto-inferred if not provided.
 
     Returns:
         Dict with completion status
@@ -1545,12 +1635,17 @@ async def complete_task_progress(
     progress_file.write_text(json.dumps(progress, indent=2))
 
     # Create best_result.json (used by get_session_state for completion detection)
+    # Infer completion reason if not explicitly provided
+    effective_reason = completion_reason or _infer_completion_reason(
+        final_speedup, final_strategy, iterations_done, max_iterations
+    )
     best_result = {
         "task_name": task_name,
         "speedup": round(final_speedup, 3),
         "iteration": final_iteration,
         "strategy": final_strategy,
-        "completed_at": datetime.now().isoformat()
+        "completed_at": datetime.now().isoformat(),
+        "completion_reason": effective_reason
     }
     best_result_file.write_text(json.dumps(best_result, indent=2))
 

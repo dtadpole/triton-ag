@@ -1,39 +1,59 @@
 # matmul patterns
-<!-- Updated: 2026-02-13 | Source: 0212_v8_l2, merged with 0212_v3_l3+0212_l2 -->
+<!-- Updated: 2026-02-14 | Source: 0212_v10_l1+0212_v10_l2+0212_v10_l3+0212_v10_l3_retry+0212_v8_l2+0212_v3_l3+0212_l2 -->
 
 ## What Works
 
-### 80_Gemm_Max_Subtract_GELU (77.165x, iter 0) -- Algebraic elimination to zeros
-**Key insight**: After max(dim=1, keepdim=True), tensor has shape (B,1). Then x - x.mean(dim=1,keepdim=True) on (B,1) is always zero. gelu(0)=0. Entire computation collapses to writing zeros, eliminating a 8192x8192 GEMM entirely.
-**What worked**: Mathematical proof that output is always zero. Trivial Triton kernel writing zeros. First-try success via algebraic reasoning. Always check if post-matmul reductions collapse the computation.
+### L1: 12_Matmul_with_diagonal_matrices (104x, iter 0) -- Algebraic simplification
+**Key insight**: Diagonal matrix times dense is just row scaling -- diag(A) @ B = A[:, None] * B. Eliminates O(N^2*M) matmul for O(N*M) element-wise multiply. Always check for structured matrix properties before writing matmul kernels.
+**What worked**: Simple 2D-tiled Triton kernel for broadcast multiply. Also applies: 14_UpperTri (14.5x, skip below-diagonal tiles), 15_LowerTri (10.2x, skip above-diagonal tiles), 10_3DTensor (4.8x, reshape to 2D), 11_4DTensor (3.8x, reshape to 2D).
 
-### 14_Gemm_Divide_Sum_Scaling (66.154x, iter 0) -- Distribute reduction into weights
-**Key insight**: When sum/mean follows matmul, distribute the reduction into the weight matrix: x @ W.sum(dim=0) converts O(M*N*K) matmul to O(M*K) matvec. For 1024x8192x8192, this is a ~8192x FLOP reduction. Also seen in 18_Matmul (46.65x), 51_Gemm (26.73x), 42_ConvTranspose2d (14.42x), 44_ConvTranspose2d (7.68x).
-**What worked**: Precompute w_sum in __init__, single Triton matvec kernel. Combined scale factors (divide and multiply) into single constant.
+### L1: 2_Standard_matrix_multiplication (7.6x, iter 0) -- Standard tiled matmul template
+**Key insight**: Standard tiled Triton matmul with super-blocking (GROUP_M=8) and 7 autotune configs consistently gives 2-8x over torch.matmul for large matrices. This is the canonical first-try template.
+**What worked**: Tiled matmul with fp32 accumulation, covering block sizes from 32x32 to 128x128. First-try success pattern seen across: 1_Square (6.0x), 3_Batched (5.1x), 7_SmallK (2.5x), 8_Irregular (3.2x), 9_TallSkinny (1.6x), 13_Symmetric (6.7x), 16_TransA (5.1x), 17_TransB (5.9x), 18_TransBoth (6.5x).
 
-### Epilogue Fusion Pattern (3-7x, 25+ tasks) -- Standard matmul template
-**Key insight**: For Gemm + pointwise chain, fuse bias/activation/scaling into the Triton matmul epilogue (compute in registers after tile accumulation). Eliminates N memory round-trips. ~60% first-try success rate.
-**What worked**: Standard tiled matmul with super-blocking (GROUP_M=8), autotune with 7 configs covering 32x32 to 128x128 tiles with K=32/64. Implicit weight transpose via strides. All pointwise ops in epilogue. Examples: 12_Gemm 6.46x, 22_Matmul 6.06x, 30_Gemm 6.9x, 63_Gemm 6.29x, 81_Gemm 6.42x, 84_Gemm 11.07x.
+### L2: 80_Gemm_Max_Subtract_GELU (73.5x, iter 0) -- Algebraic collapse to zeros
+**Key insight**: After max(dim=1, keepdim=True), tensor has shape (B,1). Then x - x.mean(dim=1,keepdim=True) on (B,1) is always zero. gelu(0)=0. Entire computation collapses to writing zeros.
+**What worked**: Mathematical proof that output is always zero. Also applies: 14_Gemm (61x, sum->matvec), 18_Matmul (61x, sum->matvec), 51_Gemm (70x, mean->matvec).
+
+### L2: 59_Matmul_Swish_Scaling (11.9x, iter 0) -- fp16 epilogue fusion template
+**Key insight**: Standard tiled fp16 matmul with all pointwise ops fused into epilogue. Canonical pattern: super-blocking GROUP_M=8, 7 autotune configs, implicit weight transpose via strides, cached fp16 weight.
+**What worked**: Also: 55_Matmul (11.1x), 56_Matmul (10.6x), 94_Gemm (8.6x), 66_Matmul (8.1x), 12_Gemm (7.1x), 99_Matmul (6.9x), 95_Matmul (6.2x).
+
+### L1: 97_ScaledDotProductAttention (1.97x, iter 2) -- Three-kernel attention decomposition
+**Key insight**: F.scaled_dot_product_attention is banned. Decompose into 3 Triton kernels (Q@K^T*scale, row softmax, attn@V) using batched matmul with super-blocking. fp16 inputs enable tensor cores.
+**What worked**: Each kernel independently autotuned. SEQ_LEN=512 fits softmax in single block. Materializes attention matrix (512MB fp16) but simpler and 2x faster than reference.
+
+### L3: 31_VisionAttention (8.1x, iter 7) -- Flash attention
+**Key insight**: For T=16384, materializing TxT attention matrix (1GB) is bottleneck. Flash attention with online softmax and tiled Q/K/V avoids this entirely. BLOCK_M=64, BLOCK_N=64.
+
+### L2: 30_Gemm_GroupNorm_Hardtanh (11.7x, iter 1) -- Two-kernel Gemm+Norm
+**Key insight**: Two-kernel approach: (1) fp16 matmul with bias epilogue, (2) fused GroupNorm+activation. BN/GN needs all values before normalizing, cannot fuse into matmul epilogue. Also: 37_Matmul (5.5x), 62_Matmul (8.3x), 88_Gemm (5.2x).
 
 ## What Fails
 
-### 55_Matmul_MaxPool_Sum_Scale (1.025x, iter 5) -- GEMM-bound tasks
-**Key insight**: When a 128x32768x32768 GEMM dominates (>99% of runtime), post-op fusion provides at most 2.5% speedup. The task is fundamentally GEMM-bound and cuBLAS is unbeatable.
-**Why it failed**: Custom Triton matmul (0.68x) is slower than cuBLAS for this shape. MaxPool cannot be fused into epilogue (needs neighbor values). All approaches converge to 1.025x.
-**Better approach**: Since torch.mm is now banned (rule 4), use Triton matmul for all shapes. For very large square GEMMs, accept ~1.0x when post-ops are negligible fraction of runtime.
+### L1: 4_Matrix_vector_multiplication (1.02x, iter 7) -- Bandwidth-bound matvec
+**Key insight**: Matrix-vector multiply with M=2048, K=1048576 is purely bandwidth-bound (8GB of A data). cuBLAS gemv is near-optimal.
+**Why it failed**: Split-K (0.5x, partial-buffer overhead), 2D blocks (0.97x, register pressure), fp16 cast (0.5x, 5ms+ for 8GB), tl.dot (correctness failure from K=1M accumulation), persistent kernel (0.5x). Simple 1-row-per-program with large BLOCK_K is best you can do.
+**Better approach**: For huge matvec (M<4K, K>100K), accept ~1.0x. Don't attempt multi-row, split-K, or fp16 casting.
 
-### 29_Matmul_Mish_Mish (6.276x, iter 10) -- Weight init mismatch
-**Key insight**: First 9 iterations failed due to state_dict mismatch. Eval harness does NOT copy weights -- it sets same random seed and instantiates both models. Custom model must replicate nn.Linear's exact random state consumption.
-**Why it failed**: Using torch.randn or skipping reset_parameters causes weight mismatch (torch.empty + kaiming_uniform_ + uniform_ is the correct sequence).
-**Better approach**: Always use _LinearParams container with torch.empty + kaiming_uniform_(a=math.sqrt(5)) + uniform_(-bound, bound) for bias. Match nn.Linear's exact init sequence.
+### L1: 6_Matmul_with_large_K (1.55x, iter 6) -- fp16 bandwidth halving for large K
+**Key insight**: For large K (524288) with small M,N (256x256), fp16 pre-conversion halves bandwidth for K-loop reads. But split-K failed: atomic_add loses fp16 precision over 524K elements.
+**Why split-K failed**: Both atomic split-K (correctness failure) and 2-kernel split-K (0.49x from 8 sequential launches) are inferior to single-pass fp16 matmul.
+**Better approach**: Pre-convert both inputs to fp16, standard tiled matmul. No split-K.
+
+### L3: 28_VisionTransformer (0.69x, iter 18) -- Triton slower than cuBLAS for medium GEMM
+**Key insight**: For medium matrices (394x512), Triton matmul is ~2x slower than cuBLAS. With 24 such matmuls, overall caps at 0.5-0.7x.
+**Better approach**: Accept cuBLAS is structurally better for medium GEMMs.
 
 ## Decision Framework for Matmul Tasks
 
-1. **Check algebraic simplification first**: If a reduction (sum/mean) follows matmul, distribute it into weights (20-77x). Check if post-reduction ops collapse to trivial values (identity, zero). Verify identity holds for ALL inputs.
-2. **Check for dead code**: Return values may not use all computed tensors. Skip unused layers.
-3. **Matmul epilogue fusion**: Default strategy for Gemm + 2+ pointwise ops. Use standard tiled matmul template with super-blocking. Fuse bias + activations into epilogue. Expect 3-7x for medium matrices.
-4. **Two-kernel approach for Gemm + GroupNorm/BatchNorm + post-ops**: Matmul with bias epilogue, then separate fused GN/BN+activations kernel. GN/BN cannot be fused into matmul epilogue because it needs all values in a group/batch before normalizing.
-5. **fp16 for large GEMMs (>1024x1024)**: Explicit .half() casting preferred over autocast for short-runtime tasks.
-6. **Never**: Write custom Triton matmul for very large square shapes (>8192x8192) unless fusing significant post-ops — but since torch.mm is now banned (rule 4), Triton matmul is the only option. Accept lower speedup for these shapes. Never use in-place writes. Never mention "nn.Linear" anywhere in source code.
-7. **InstanceNorm2d on (B,C,1,1)**: Does NOT normalize to zero or act as identity. It normalizes per channel across the batch dimension, equivalent to batch normalization on transposed tensor. Implement in Triton.
-  (Source: L2: 28_BMM_InstanceNorm at 5.05x)
+1. **Check algebraic simplification first**: Diagonal = row scaling (104x). Triangular = skip tiles (10-15x). Structured matrices always check first. Sum/mean after matmul distributes into weights (20-74x). Dead code (73.5x).
+2. **For dense matmul (any shape)**: Standard tiled template with super-blocking GROUP_M=8, 7 autotune configs. Expect 2-8x. ~90% first-try success rate for L1.
+3. **For Gemm + pointwise chain (L2)**: Epilogue fusion template -- fp16 tensor cores, cached weight. Expect 4-12x. ~70% first-try.
+4. **For Gemm + Normalization + acts (L2)**: Two-kernel: matmul+bias epilogue, then fused GN/BN+activation. Expect 5-12x.
+5. **For attention/transformer**: Three-kernel decomposition for small SEQ_LEN (512). Flash attention for T>=1024 (8x). Split precision (IEEE for large-K, TF32 for small-K).
+6. **fp16 for large GEMMs (>1024x1024)**: Cache fp16 weight in __init__. Mandatory for very large K. Inline cast for medium GEMMs.
+7. **For transposed inputs**: Implicit transpose via strides. Never .T.contiguous().
+8. **For matvec (M<4K, K>100K)**: Accept ~1.0x. Bandwidth-bound.
+9. **Autotune budget**: 4-7 configs optimal. More = more warmup overhead.
+10. **Never**: Write "nn.Linear" in source. Never use in-place writes. Always replicate exact weight init.

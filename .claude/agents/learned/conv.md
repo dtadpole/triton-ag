@@ -1,38 +1,63 @@
 # conv patterns
-<!-- Updated: 2026-02-13 | Source: 0212_v8_l2, merged with 0212_v3_l3+0212_l2 -->
+<!-- Updated: 2026-02-14 | Source: 0212_v10_l1+0212_v10_l2+0212_v10_l3+0212_v10_l3_retry+0212_v8_l2+0212_v3_l3+0212_l2 -->
 
 ## What Works
 
-### 42_ConvTranspose2d_GlobalAvgPool... (14.424x, iter 0) -- Algebraic elimination
-**Key insight**: When spatial mean/sum follows conv_transpose, the entire convolution can be eliminated algebraically: mean_spatial(conv_transpose(x)) = (1/(OH*OW)) * x_sum @ w_sum + bias. Converts massive 2D transposed conv to tiny matmul.
-**What worked**: Spatial sum of input, summed weights, small matmul. Post-ops fused into Triton kernel on tiny output. Also works with stride>1 (44_ConvTranspose2d at 7.68x). Always check if spatial reduction distributes into conv weights.
+### L1: 83_conv_depthwise_2D_asymmetric_kernel (15.2x, iter 0) -- Depthwise spatial tiling
+**Key insight**: Depthwise conv with asymmetric kernel (3,1) and only 8 channels is trivially parallelizable. 2D grid (spatial_blocks, B*C), scalar weight broadcast per kernel position. cuDNN is not optimized for depthwise with asymmetric/small-channel inputs.
+**What worked**: First-try 15.2x. Same pattern: 85_depthwise (5.6x, 3x7 kernel), 82_depthwise (2.0x, 3x3/unrolled+wide rows), 84_depthwise (1.3x, 3x3/128ch), 86_depthwise_separable (1.78x, fuse depthwise+pointwise).
 
-### 72_ConvTranspose3d_BatchNorm_AvgPool_AvgPool (4.162x, iter 5) -- BN+Pool commutativity
-**Key insight**: AvgPool commutes with BN affine transform since both are linear. Pool BEFORE applying BN affine avoids materializing full BN output (256M elements). Three-kernel pipeline: (K1) per-channel sums for BN stats, (K2) batch stats + running mean/var update, (K3) vectorized pool4 + BN affine from conv output directly. fp16 conv + fused AvgPool(2)+AvgPool(2) into single Pool(4).
-**What worked**: Algebraic BN elimination + pool commutativity saved ~0.5GB memory bandwidth = ~10ms. Reading conv output twice (stats + pool+affine) is much cheaper than materializing full BN output then pooling.
+### L1: 54_conv_3D_square (3.31x, iter 7) -- Single-pass implicit GEMM with small C_in
+**Key insight**: Conv3d with small C_in (3), K=81 fits in single BLOCK_K=128 tile, enabling single-pass implicit GEMM with fp16 tensor cores. Key: narrow autotune key to ['M','N'] (exclude K, it's fixed).
+**What worked**: All-OC single tile approach with BLOCK_K=32 (K=27 padded). Also: 59_conv3d (4.7x, K=27 single-pass), 66_conv3d (1.7x, kh/kw loop with K_inner=9), 60_conv3d (1.8x, kh/kw loop).
 
-### 13_ConvTranspose3d_Mean_Add_Softmax_Tanh_Scaling (9.051x, iter 6) -- Algebraic decomposition
-**Key insight**: Mean over depth after ConvTranspose3d decomposes into three 2D convolutions: mean_d(conv3d(x,w)) = (1/D)*[conv2d(sum_d(x), sum_kd(w)) - boundary corrections]. Three 2D convs on (B,16,128,128) are much cheaper than one 3D conv on (B,16,32,128,128).
-**What worked**: Derived algebraic identity eliminating 3D conv entirely. Post-conv ops (bias+softmax+tanh+scale) fused into single Triton kernel.
+### L1: 87_conv_pointwise_2D (2.82x, iter 1) -- NCHW-direct 1x1 conv as matmul
+**Key insight**: Pointwise 1x1 conv is pure matmul per spatial position. Working directly on NCHW (no permute/contiguous) with fp16 tensor cores gives 2.8x. Index: stride_xc for C_in gather, direct NCHW writes.
+**What worked**: Each program handles (batch, spatial_tile, channel_tile). K=64 (C_in) fits single tile. Permuting to (B*H*W, C_in) was 0.208x -- the 1GB permutation dominated.
+
+### L1: 62_conv_2D_asymmetric_kernel (1.57x, iter 4) -- NHWC input for C_in=32-64
+**Key insight**: Pre-converting input to NHWC makes C_in loads contiguous, giving much better coalescing for kpos loop. permute+contiguous cost amortized across kpos iterations. NCHW was only 1.13x; NHWC gave 1.57x.
+**What worked**: Also: 69_convT (1.43x, NHWC), 71_convT (1.59x, NHWC), 78_convT (1.61x, NHWC). NHWC is key for C_in=32-64.
+
+### L1: 70_conv_transposed_3D (1.89x, iter 0) -- torch.convolution fp16 for ConvTranspose
+**Key insight**: ConvTranspose3d stride=1 with fp16 tensor cores via torch.convolution gives clean ~1.9x. Triton kernel does fp16->fp32 cast. The critical factor for ConvTranspose infeasibility is stride>1, NOT C_in.
+**What worked**: x.half() + weight_fp16 + torch.convolution(transposed=True). Also: 73_conv (1.53x, fp16 cuDNN + Triton bias), 80_conv (1.81x, fp16 cuDNN + Triton cast), 77_conv (1.20x, cuDNN+cast).
+
+### L2: 42_ConvTranspose2d_GlobalAvgPool (15.8x, iter 1) -- Algebraic elimination
+**Key insight**: When spatial mean/sum follows conv_transpose, entire convolution eliminated: mean_spatial(conv_transpose(x)) = conv_bias + (1/HW) * x_sum @ w_sum. Also: 44_ConvTranspose2d (4.1x), 83_Conv3d (27x, dead code).
+
+### L2: 82_Conv2d_Tanh_Scaling_BiasAdd_Max (2.93x, iter 3) -- Fuse MaxPool into conv
+**Key insight**: Fusing MaxPool(4) into conv kernel avoids materializing massive conv output. Each program computes 16 conv values (4x4 pool window) on-the-fly and takes max. Also: 50_ConvTranspose3d (1.45x), 96_ConvTranspose3d (1.96x).
+
+### L3: 21_EfficientNetMBConv (1.73x, iter 18) -- NCHW-native eliminates permutes
+**Key insight**: Custom Triton matmul reading NCHW and writing NCHW directly for 1x1 conv eliminates ALL permute+contiguous ops. Also: 5_AlexNet (1.75x), 18_SqueezeNet (1.52x).
 
 ## What Fails
 
-### 34_ConvTranspose3d_LayerNorm_GELU_Scaling (0.665x, iter 11) -- Conv dominated, no algebraic shortcut
-**Key insight**: ConvTranspose3d with large outputs (268M elements) and fast reference (<6ms) are structurally infeasible when all conv operations must be written in Triton.
-**Why it failed**: Triton convolution cannot match cuDNN for this shape. Conv dominates ~80% of runtime. Even fused Triton LN+GELU+Scale cannot compensate.
-**Better approach**: Accept failure for conv_transpose-dominated tasks with large outputs. Focus optimization effort on tasks where algebraic elimination is possible.
+### L1: 61_conv_transposed_3D (0.61x, iter 8) -- Large C_in ConvTranspose structurally infeasible
+**Key insight**: ConvTranspose3d with C_in=48, no post-ops is structurally infeasible. cuDNN tensor core implicit GEMM cannot be matched.
+**Why it failed**: All-OC (0.61x best), flat K-loop (0.32x), kh/kw loop with padding (0.12x), pre-padding (worse), fp32 (worse than fp16).
+**Better approach**: Pure ConvTranspose with large C_in and no algebraic shortcuts or post-op fusion caps at ~0.6x. Accept failure. Use torch.convolution for cuDNN if post-ops exist.
 
-### 21_Conv2d_Add_Scale_Sigmoid_GroupNorm (0.878x, iter 18) -- Conv + GroupNorm both need Triton
-**Key insight**: Conv2d + GroupNorm tasks require writing both operations in Triton, which is fundamentally harder than when cuDNN conv was available.
-**Why it failed**: Writing both conv and GroupNorm in Triton introduces overhead on both operations vs cuDNN.
-**Better approach**: For Conv + GroupNorm, write custom two-kernel Triton GroupNorm (stats kernel + apply kernel) and im2col+matmul Triton conv.
+### L2: ConvTranspose3d(C_in=64+, stride=2) -- Structurally infeasible
+**Key insight**: stride-2 in 3D wastes 87.5% of K-loop on alignment checks. cuDNN uses hardware-optimized implicit GEMM.
+**Why it fails**: 100_ConvT (0.37x), 49_ConvT (0.22x), 3_ConvT (0.22x), 38_ConvT (0.39x), 72_ConvT (0.35x), 78_ConvT (0.12x).
+**Better approach**: torch.convolution for cuDNN + fused Triton post-ops. Only ConvTranspose with small C_in (<=16) and K<=128 can beat cuDNN.
 
 ## Decision Framework for Conv Tasks
 
-1. **Check if conv can be eliminated algebraically** (e.g., spatial sum/mean after conv distributes into weights). If yes, massive speedup possible (7-14x).
-2. **Check if algebraic reordering applies**: AvgPool before Conv1x1, AvgPool commutes with BN affine, dead code elimination (min(x,0)+clamp(0,1)=0), additive constants eliminated by LayerNorm.
-3. **If conv cannot be eliminated**: Write im2col + Triton matmul (with epilogue fusion for bias + post-ops). Use `torch.as_strided` for im2col unfolding (shape manipulation, not compute). For small kernels (1x1, 3x3), consider direct sliding-window Triton kernel.
-4. **If post-ops are just 1-2 cheap activations**: Conv tasks with only trivial post-ops will be harder since cuDNN fuses these internally. Focus on algebraic elimination or accept lower speedup.
-5. **Always**: Wrap forward() in `torch.cuda.device(x.device)`. Use ParamHolder module to match state_dict keys. Cache fp16 weights in `__init__` when using tensor cores.
-6. **Online softmax for conv + softmax tasks**: 2-pass algorithm with BLOCK_SIZE=8192, num_warps=16. Fuse bias+clamp+softmax+post-ops into single kernel. Recompute from fp16 input rather than storing intermediates.
-7. **Conv_transpose tasks**: Write transposed convolution in Triton (im2col approach with transposed weight layout). Accept that these are structurally harder without cuDNN.
+1. **Check algebraic elimination**: Spatial sum/mean after conv distributes into weights (7-27x). Dead code (27x). Pool fuses into conv (2.9x). Always check first.
+2. **Depthwise conv**: Spatial tiling with scalar weight broadcast. 2D grid (spatial_blocks, B*C). Expect 1.3-15x. Usually first-try success.
+3. **Depthwise separable**: Fuse depthwise+pointwise into single kernel, eliminate intermediate tensor. ~1.8x.
+4. **Pointwise 1x1 conv**: NCHW-direct matmul, no permutes. ~2.8x.
+5. **Conv2d/3d with small C_in (<=16) and 3x3 kernel**: Single-pass implicit GEMM. K=C_in*9 fits one BLOCK_K. cin-first K ordering. Expect 1.5-4.7x. (63_conv 1.87x, 54_conv 3.31x, 59_conv 4.74x).
+6. **Conv2d with C_in=32-64 and C_out<=128**: kpos explicit loop with all-OC single tile + NHWC input + fp16 tensor cores. Expect 1.2-1.6x. (62_conv 1.57x, 56_conv 1.34x).
+7. **Conv2d with C_in=64+ and large spatial**: Prefer torch.convolution() for cuDNN + fused Triton post-ops. Pure Triton caps at ~1.0-1.2x. (80_conv 1.81x via cuDNN fp16).
+8. **Conv3d with small C_in (<=8)**: cin-first K ordering, pre-pad input, BLOCK_K=32. Single-pass when K<128. (54_conv 3.31x, 59_conv 4.74x).
+9. **ConvTranspose stride=1 with moderate C_in**: torch.convolution fp16 + Triton fp16->fp32 cast. ~1.5-1.9x. (70_conv 1.89x, 73_conv 1.53x).
+10. **ConvTranspose stride=1 with small C_in (<=32)**: Pure Triton kpos loop + fp16 tensor cores. ~1.3-3.0x. (64_conv 1.3x, 74_conv 1.84x, 79_conv 2.97x).
+11. **ConvTranspose(C_in=48+, no post-ops)**: Accept ~0.6x or use torch.convolution + cudnn.benchmark. (61_conv 0.6x, 68_conv 1.1x via cudnn.benchmark).
+12. **Conv1d with very long sequences (65K+)**: Never do layout conversion (NCL->NLC). Use NCL directly with kpos loop. (64_conv 1.3x, NLC was 0.5x).
+13. **fp16 cast strategy**: Pre-cast input tensor to fp16 (x.half()) before kernel for C_in>=32 where amortized across many kpos iterations. In-kernel cast (.to(tl.float16)) for C_in<16. Pre-cast in forward() is faster than per-tile cast inside kernel.
+14. **Weight layout**: Pre-transpose to (KH*KW, C_in, C_out) or (K, C_out) in __init__, cached as fp16 via register_buffer. Contiguous weight reads are critical for tl.dot.
+15. **Always**: Wrap forward() in torch.cuda.device(x.device). Cache fp16 weights. Use nn.Parameter + nn.init, never nn.Conv*.
