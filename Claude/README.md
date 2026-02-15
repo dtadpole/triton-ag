@@ -23,6 +23,7 @@ Each phase documents the design at the time it was implemented. These are histor
 | [03 - Phase 3 - Batch Architecture](03%20-%20Phase%203%20-%20Batch%20Architecture.md) | 2026-02-12 | Batch resilience: atomic claiming, session state, reflection pipeline |
 | [04 - Phase 4 - Supervisor Architecture](04%20-%20Phase%204%20-%20Supervisor%20Architecture.md) | 2026-02-14 | Supervisor agent, agent rename (worker/optimizer), retry logic, completion tracking |
 | [05 - Phase 5 - Controller Pattern](05%20-%20Phase%205%20-%20Controller%20Pattern.md) | 2026-02-14 | Skill agent as lightweight verification controller with post-execution checklist |
+| [06 - Phase 6 - Server Reliability](06%20-%20Phase%206%20-%20Server%20Reliability.md) | 2026-02-14 | Watchdog process, health endpoint, automatic server recovery |
 
 ## Analysis & Reference
 

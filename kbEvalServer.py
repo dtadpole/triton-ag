@@ -16,6 +16,7 @@ import wandb
 import yaml
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
 from gzipMiddleware import GunzipRequestMiddleware
 from kbEvalUtil import KernelExecResult, on_process_timeout
 from logger import logger
@@ -235,6 +236,27 @@ async def info():
         "compile_pytorch": COMPILE_PYTORCH,
         "max_timeout_seconds": MAX_TIMEOUT_SECONDS,
     }
+
+
+@app.get("/health")
+async def health():
+    """Health check endpoint for watchdog and monitoring."""
+    elapsed_time = time.time() - START_TIME
+    response = {
+        "status": "healthy",
+        "uptime_seconds": int(elapsed_time),
+        "error_count": TOTAL_ERROR_COUNTER,
+        "pending_requests": parallel_request_counter,
+    }
+    if TOTAL_ERROR_COUNTER > MAX_ERROR_COUNT:
+        response["status"] = "unhealthy"
+        response["reason"] = "error_count_high"
+        return JSONResponse(content=response, status_code=503)
+    if elapsed_time > MAX_RUN_TIME:
+        response["status"] = "unhealthy"
+        response["reason"] = "max_runtime_exceeded"
+        return JSONResponse(content=response, status_code=503)
+    return JSONResponse(content=response, status_code=200)
 
 
 @app.post("/kb_eval_ref")

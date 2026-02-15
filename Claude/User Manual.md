@@ -195,12 +195,12 @@ The server automatically load-balances evaluation requests across all specified 
 
 **Single GPU:**
 ```bash
-tmux new-session -d -s kbEval "cd /data/users/$USER/triton-ag && source .venv/bin/activate && while true; do CUDA_VISIBLE_DEVICES=0 python3 kbEvalServer.py --local_host --port 5676 --device 0; sleep 5; done"
+tmux new-session -d -s kbEval "cd /data/users/$USER/triton-ag && source .venv/bin/activate && CUDA_VISIBLE_DEVICES=0 python3 kbEvalWatchdog.py --local_host --port 5676 --device 0"
 ```
 
 **Multiple GPUs (4 GPUs):**
 ```bash
-tmux new-session -d -s kbEval "cd /data/users/$USER/triton-ag && source .venv/bin/activate && while true; do CUDA_VISIBLE_DEVICES=0,1,2,3 python3 kbEvalServer.py --local_host --port 5676 --device 0,1,2,3; sleep 5; done"
+tmux new-session -d -s kbEval "cd /data/users/$USER/triton-ag && source .venv/bin/activate && CUDA_VISIBLE_DEVICES=0,1,2,3 python3 kbEvalWatchdog.py --local_host --port 5676 --device 0,1,2,3"
 ```
 
 **Check it's running:**
