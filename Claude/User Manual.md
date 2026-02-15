@@ -175,7 +175,7 @@ Choose a GPU with 8GB+ free memory. Note the index (0, 1, 2, etc.).
 ```bash
 cd /data/users/$USER/triton-ag
 source .venv/bin/activate
-CUDA_VISIBLE_DEVICES=0 python3 kbEvalServer.py --local_host --port 5676 --device 0
+CUDA_VISIBLE_DEVICES=0 python3 kbEvalWatchdog.py --local_host --port 5676 --device 0
 ```
 
 Replace `CUDA_VISIBLE_DEVICES=0` and `--device 0` with your chosen GPU index.
@@ -184,7 +184,7 @@ Replace `CUDA_VISIBLE_DEVICES=0` and `--device 0` with your chosen GPU index.
 ```bash
 cd /data/users/$USER/triton-ag
 source .venv/bin/activate
-CUDA_VISIBLE_DEVICES=0,1,2,3 python3 kbEvalServer.py --local_host --port 5676 --device 0,1,2,3
+CUDA_VISIBLE_DEVICES=0,1,2,3 python3 kbEvalWatchdog.py --local_host --port 5676 --device 0,1,2,3
 ```
 
 The server automatically load-balances evaluation requests across all specified devices. This enables parallel kernel compilation and benchmarking.
