@@ -314,7 +314,19 @@ When user provides directory, level name, or session parameters:
    Bash: cp .claude/agents/kernel-bench-optimizer.md \
          {session_dir}/optimizer_snapshot.md
 
-   # 5c. Spawn ALL learner agents in ONE message (background)
+   # 5c. Gain write access BEFORE spawning learner agents
+   # Background agents cannot prompt the user for file write permissions.
+   # The skill controller (foreground) MUST gain write access upfront by
+   # writing to each target directory. Do this by touching/writing a small
+   # marker file to establish permission:
+   #   - Write to .claude/agents/reference/ (for kernel learners)
+   #   - Write to .claude/agents/kernel-bench-optimizer.md (for algorithm learner)
+   # The optimizer snapshot copy above already writes to {session_dir}/.
+   # For the reference directory, write a placeholder:
+   Bash: echo "# write access marker" >> .claude/agents/reference/.learn_marker && \
+         rm -f .claude/agents/reference/.learn_marker
+
+   # 5d. Spawn ALL learner agents in ONE message (background)
    # Check if reference files were modified after session start
    if reference/common.md was NOT modified after session start:
 
@@ -373,10 +385,10 @@ When user provides directory, level name, or session parameters:
          run_in_background=true
        )
 
-   # 5d. Wait for ALL learner agents to complete
+   # 5e. Wait for ALL learner agents to complete
    # Read each agent's output_file until complete
 
-   # 5e. Generate score report
+   # 5f. Generate score report
    if no progress_*.md report exists in session_dir:
        Run: python3 kb_score.py {session_id}
    ```
@@ -653,7 +665,27 @@ When user says "learn {session_id}" or provides learning flags:
              {session_dir}/optimizer_snapshot.md
    ```
 
-5. **Spawn learner agents** (ALL in ONE message, background):
+5. **Gain write access BEFORE spawning learner agents:**
+
+   Background agents cannot prompt the user for file write permissions.
+   The skill controller (foreground) MUST gain write access upfront by
+   writing to each target directory that learner agents will modify.
+   Do this now — before spawning any agents:
+
+   ```
+   # Write to .claude/agents/reference/ (for kernel + algorithm learners)
+   Bash: echo "# write access marker" >> .claude/agents/reference/.learn_marker && \
+         rm -f .claude/agents/reference/.learn_marker
+
+   # Write to .claude/agents/kernel-bench-optimizer.md (for algorithm learner)
+   # The snapshot copy in step 4 already establishes access to {session_dir}/
+   # but we also need access to the optimizer file itself:
+   if --kernel-only is NOT set:
+       Read then touch .claude/agents/kernel-bench-optimizer.md
+       # (the algorithm learner will Edit this file)
+   ```
+
+6. **Spawn learner agents** (ALL in ONE message, background):
    ```
    agents = []
 
@@ -715,10 +747,10 @@ When user says "learn {session_id}" or provides learning flags:
    Spawn all agents in ONE message (background)
    ```
 
-6. **Wait for all agents to complete:**
+7. **Wait for all agents to complete:**
    Read each agent's output_file until all are done.
 
-7. **Display summary:**
+8. **Display summary:**
    ```
    Print: "Learning complete for session '{session_id}'."
    Print: "Kernel learners: {N} (common + {M} op-types)"  # if not --algo-only

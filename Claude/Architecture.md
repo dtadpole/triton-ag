@@ -295,7 +295,13 @@ Reference model runtimes are cached in `_ref_runtime_cache` (per-process dict ke
 
 ---
 
-## 5. Multi-Turn Optimization Loop
+## 5. Optimization Algorithm
+
+The three-phase protocol is the core algorithm that each optimizer agent executes per task. It structures kernel optimization as a search problem with two distinct stages: **exploration** (Phase B — breadth-first across fundamentally different strategies) and **exploitation** (Phase C — depth-first tuning of the most promising approach). Phase A precedes both with static analysis that narrows the search space before any GPU evaluation.
+
+This separation is critical because exploring the wrong strategy deeply wastes iterations, while never going deep enough misses the tuning gains that push 1.1x results over the 1.3x target. The explore-then-exploit pattern maps directly to the 4-tier strategy taxonomy: Phase B tries Tier 1-2 differences (different algorithms and architectures), Phase C tunes Tier 3-4 (parameters and micro-optimizations within the winner).
+
+The algorithm's heuristics — iteration budgets, bottleneck diagnoses, revert thresholds, feasibility actions — are **not static**. Ten mutable sections of `kernel-bench-optimizer.md` are rewritten by the algorithm learner based on empirical evidence from algo traces (see Section 6). This means the algorithm itself improves across sessions: if traces show that L1 tasks find a viable strategy at iteration 0 in 78% of cases, the iteration budget table gets updated to allocate fewer explore iterations for L1 tasks.
 
 ### 5.1 Three-Phase Protocol (Phase A/B/C)
 
@@ -455,85 +461,15 @@ These techniques game the benchmark without writing real kernel optimizations. A
 
 ---
 
-## 6. Optimizer Claim Loop and Dispatch
+## 6. Memory and Learning System
 
-### 6.1 Optimizer Claim Loop
+The memory system is what makes kernel-bench more than a one-shot optimizer — it turns each batch session into a training signal that improves the next session. Without it, every session starts from scratch and repeats the same mistakes. With it, an optimizer spawned in session 5 inherits the distilled knowledge of all successful strategies, known anti-patterns, and process calibrations from sessions 1-4.
 
-Each optimizer runs a **claim → optimize → complete → claim next** loop. The optimizer handles both task dispatch (previously the worker's job) and kernel optimization.
+The system captures three distinct knowledge streams. **Kernel knowledge** records what strategies work for which operations — the concrete patterns, code templates, and anti-patterns that inform *what code to write*. **Process knowledge** records how the optimization algorithm performed — diagnosis accuracy, explore efficiency, and tuning action effectiveness that inform *how to run the search*. **Algorithm rewriting** goes further than process knowledge by directly modifying the optimizer's heuristic tables, turning observations like "L1 tasks find a viable strategy at iteration 0 in 78% of cases" into reduced explore budgets in the next session.
 
-```python
-# Optimizer main loop (simplified)
-while True:
-    pending = get_pending_tasks(session_id, limit=5)
-    if not pending:
-        print("[optimizer-N] No more tasks. Exiting.")
-        exit()
+Learning is additive and bounded. Each session can add new entries or replace entries with better results, but never deletes existing knowledge. Reference files are capped at ~3KB to prevent context bloat. The algorithm learner can change at most 3 of 10 mutable sections per session, requires minimum 10 tasks of evidence per change, and saves a snapshot before any modification. This conservative approach ensures that a bad learning run cannot catastrophically degrade the optimizer — the worst case is reverting one git commit.
 
-    task = claim_task(session_id, task_name, worker_id="optimizer-N")
-    if not task.success:
-        continue  # Another optimizer claimed it first
-
-    pytorch_code = get_task_details(task_path)
-    op_type = detect_op_type(pytorch_code)  # keyword matching
-
-    # Phase A: Analyze — algebraic reasoning, computation graph,
-    #   multi-pattern matching (load 2-3 reference files), feasibility, strategy list
-    strategies = phase_a_analyze(pytorch_code, op_type)
-
-    # Phase B: Explore — try 2-3 Tier 1-2 strategies, max 2 evals each
-    winner, explore_results = phase_b_explore(strategies, task_path, session_id)
-
-    # Phase C: Exploit — deep-tune winner with Tier 3-4 actions
-    best_speedup = phase_c_exploit(winner, task_path, session_id, max_iterations)
-
-    complete_task_progress(session_id, task_name, best_speedup, ...)
-    write_reflection()    # Enhanced format with exploration summary + bottleneck
-    write_algo_trace()    # Algorithm execution trace (Phase A/B/C decisions)
-    # Loop back: claim next task
-```
-
-The optimizer prompt includes instructions to:
-1. Read `kernel-bench-optimizer.md` (protocol, templates, hard rules, Phase A/B/C algorithm)
-2. Read `reference/common.md` (universal constraints, composite patterns, strategy heuristics)
-3. Read `reference/optimizer_algorithm.md` (process meta-learnings: diagnosis calibration, explore budgets)
-4. Read `reference/{op_type}.md` (op-specific patterns, loaded per-task based on detection; tier-organized)
-5. Read up to 2 additional `reference/{secondary_op}.md` files based on multi-pattern matching
-6. The PyTorch source code is obtained per-task via `get_task_details()`
-
-### 6.2 Op-Type Detection
-
-Before optimizing each task, the optimizer scans PyTorch code for keywords to select the right learned file and strategy:
-
-| Priority | Keywords | Op Type | Learned File |
-|----------|----------|---------|-------------|
-| 1 | `nn.Linear`, `matmul`, `mm`, `bmm` | `matmul` | `reference/matmul.md` |
-| 2 | `nn.Conv`, `F.conv` | `conv` | `reference/conv.md` |
-| 3 | `LayerNorm`, `BatchNorm`, `GroupNorm`, `RMSNorm` | `normalization` | `reference/normalization.md` |
-| 4 | `cross_entropy`, `mse_loss`, `kl_div` | `loss` | `reference/loss.md` |
-| 5 | `max_pool`, `avg_pool`, `adaptive_pool` | `pooling` | `reference/pooling.md` |
-| 6 | `sum`, `mean`, `max`, `softmax` (no matmul) | `reduction` | `reference/reduction.md` |
-| 7 | `relu`, `sigmoid`, `gelu`, `silu` (no matmul/conv) | `element_wise` | `reference/pointwise.md` |
-| 8 | None of the above | `other` | `reference/other.md` |
-
-First match wins (matmul > conv > normalization > ...).
-
-### 6.3 Strategy Selection
-
-The optimizer uses the Phase A analysis to generate a ranked strategy list with 2-4 candidates at Tier 1-2 level. Strategy selection is guided by:
-
-1. **Algebraic reasoning** — if a mathematical shortcut exists, it becomes strategy #1 (highest priority)
-2. **Computation graph decomposition** — identifies fusion groups and dominant bottleneck
-3. **Multi-pattern matching** — loads primary + up to 2 secondary reference files; consults Tier 1-2 sections
-4. **Composite pattern table** — matches multi-op sequences against known best strategies
-5. **Feasibility assessment** — consults L1/L2/L3 feasibility guides in common.md
-
-Phase B explores Tier 1-2 differences (fundamentally different approaches). Phase C tunes Tier 3-4 within the winner (parameters, layouts, micro-optimizations).
-
----
-
-## 7. Memory and Learning System
-
-### 7.1 Reflection Pipeline
+### 6.1 Reflection Pipeline
 
 The learning system has three stages, with Stage 3 running in parallel:
 
@@ -573,7 +509,7 @@ flowchart LR
     optimizer -.->|"read at startup<br/>(next session)"| sa
 ```
 
-### 7.2 Reference File Structure
+### 6.2 Reference File Structure
 
 ```
 .claude/agents/reference/
@@ -634,7 +570,7 @@ flowchart LR
 
 All op-type files follow the same tier-based internal structure (Tier 1 / Tier 2 / Tier 3-4 / Anti-Patterns / Decision Tree). This aligns with the Phase A/B/C protocol: Phase B explores Tier 1-2 strategies, Phase C tunes Tier 3-4.
 
-### 7.3 Three Knowledge Streams
+### 6.3 Three Knowledge Streams
 
 The learning system captures three kinds of knowledge:
 
@@ -667,7 +603,7 @@ Produced by: algorithm learner agent (same agent as Stream 2)
 
 Streams 2 and 3 are produced by the same algorithm learner agent. Stream 2 is the analysis artifact (what was found); Stream 3 is the actionable output (algorithm changes). The distinction matters because Stream 2 is advisory while Stream 3 directly changes optimizer behavior.
 
-### 7.4 Cross-Session Accumulation
+### 6.4 Cross-Session Accumulation
 
 Each batch run produces new reflections and algorithm traces. The learner agents **merge** with existing reference files:
 
@@ -718,7 +654,7 @@ Session 3 (level3, algorithm v3):
   → algorithm continues to improve from L3 traces
 ```
 
-### 7.5 How Optimizers Consume Reference Knowledge
+### 6.5 How Optimizers Consume Reference Knowledge
 
 When the skill spawns an optimizer in batch mode, the prompt includes instructions to read at **startup** (once per optimizer lifecycle):
 
@@ -733,7 +669,7 @@ And **per-task** (loaded during Phase A multi-pattern matching):
 
 This gives each optimizer both the accumulated kernel knowledge and the accumulated process knowledge from all previous sessions before it writes its first line of code.
 
-### 7.6 Reflection and Trace Formats
+### 6.6 Reflection and Trace Formats
 
 **`reflection.md`** — Kernel knowledge artifact, written per task:
 
@@ -796,7 +732,7 @@ The Meta-Observations section is what the learner extracts process knowledge fro
 | Phase C tuning deltas (from exploit decisions) | High-Value Tuning Actions |
 | Revert/switch counts and outcomes | Revert & Switch Effectiveness |
 
-### 7.7 Iterative Algorithm Learning (Phase 9)
+### 6.7 Iterative Algorithm Learning (Phase 9)
 
 The optimizer protocol (`kernel-bench-optimizer.md`) is no longer static. Phase 9 introduces **mutable sections** — algorithm heuristics that the algorithm learner agent can rewrite based on empirical evidence from algo traces.
 
@@ -851,6 +787,82 @@ Total agents: 3-10, all background, spawned in ONE message. Wall-clock time domi
 
 - Automatic: runs at finalize step of every batch session
 - Manual: `/kernel-bench learn {session_id}` (with `--kernel-only` or `--algo-only` flags)
+
+---
+
+## 7. Optimizer Claim Loop and Dispatch
+
+### 7.1 Optimizer Claim Loop
+
+Each optimizer runs a **claim → optimize → complete → claim next** loop. The optimizer handles both task dispatch (previously the worker's job) and kernel optimization.
+
+```python
+# Optimizer main loop (simplified)
+while True:
+    pending = get_pending_tasks(session_id, limit=5)
+    if not pending:
+        print("[optimizer-N] No more tasks. Exiting.")
+        exit()
+
+    task = claim_task(session_id, task_name, worker_id="optimizer-N")
+    if not task.success:
+        continue  # Another optimizer claimed it first
+
+    pytorch_code = get_task_details(task_path)
+    op_type = detect_op_type(pytorch_code)  # keyword matching
+
+    # Phase A: Analyze — algebraic reasoning, computation graph,
+    #   multi-pattern matching (load 2-3 reference files), feasibility, strategy list
+    strategies = phase_a_analyze(pytorch_code, op_type)
+
+    # Phase B: Explore — try 2-3 Tier 1-2 strategies, max 2 evals each
+    winner, explore_results = phase_b_explore(strategies, task_path, session_id)
+
+    # Phase C: Exploit — deep-tune winner with Tier 3-4 actions
+    best_speedup = phase_c_exploit(winner, task_path, session_id, max_iterations)
+
+    complete_task_progress(session_id, task_name, best_speedup, ...)
+    write_reflection()    # Enhanced format with exploration summary + bottleneck
+    write_algo_trace()    # Algorithm execution trace (Phase A/B/C decisions)
+    # Loop back: claim next task
+```
+
+The optimizer prompt includes instructions to:
+1. Read `kernel-bench-optimizer.md` (protocol, templates, hard rules, Phase A/B/C algorithm)
+2. Read `reference/common.md` (universal constraints, composite patterns, strategy heuristics)
+3. Read `reference/optimizer_algorithm.md` (process meta-learnings: diagnosis calibration, explore budgets)
+4. Read `reference/{op_type}.md` (op-specific patterns, loaded per-task based on detection; tier-organized)
+5. Read up to 2 additional `reference/{secondary_op}.md` files based on multi-pattern matching
+6. The PyTorch source code is obtained per-task via `get_task_details()`
+
+### 7.2 Op-Type Detection
+
+Before optimizing each task, the optimizer scans PyTorch code for keywords to select the right learned file and strategy:
+
+| Priority | Keywords | Op Type | Learned File |
+|----------|----------|---------|-------------|
+| 1 | `nn.Linear`, `matmul`, `mm`, `bmm` | `matmul` | `reference/matmul.md` |
+| 2 | `nn.Conv`, `F.conv` | `conv` | `reference/conv.md` |
+| 3 | `LayerNorm`, `BatchNorm`, `GroupNorm`, `RMSNorm` | `normalization` | `reference/normalization.md` |
+| 4 | `cross_entropy`, `mse_loss`, `kl_div` | `loss` | `reference/loss.md` |
+| 5 | `max_pool`, `avg_pool`, `adaptive_pool` | `pooling` | `reference/pooling.md` |
+| 6 | `sum`, `mean`, `max`, `softmax` (no matmul) | `reduction` | `reference/reduction.md` |
+| 7 | `relu`, `sigmoid`, `gelu`, `silu` (no matmul/conv) | `element_wise` | `reference/pointwise.md` |
+| 8 | None of the above | `other` | `reference/other.md` |
+
+First match wins (matmul > conv > normalization > ...).
+
+### 7.3 Strategy Selection
+
+The optimizer uses the Phase A analysis to generate a ranked strategy list with 2-4 candidates at Tier 1-2 level. Strategy selection is guided by:
+
+1. **Algebraic reasoning** — if a mathematical shortcut exists, it becomes strategy #1 (highest priority)
+2. **Computation graph decomposition** — identifies fusion groups and dominant bottleneck
+3. **Multi-pattern matching** — loads primary + up to 2 secondary reference files; consults Tier 1-2 sections
+4. **Composite pattern table** — matches multi-op sequences against known best strategies
+5. **Feasibility assessment** — consults L1/L2/L3 feasibility guides in common.md
+
+Phase B explores Tier 1-2 differences (fundamentally different approaches). Phase C tunes Tier 3-4 within the winner (parameters, layouts, micro-optimizations).
 
 ---
 
