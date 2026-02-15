@@ -1,5 +1,5 @@
 # Conv Reference
-<!-- Updated: 2026-02-15 | Source: 0212_v10_l1+0212_v10_l2+0212_v10_l3+0212_v10_l3_retry+0212_v8_l2+0212_v3_l3+0212_l2+level2_20260214_232629 -->
+<!-- Updated: 2026-02-15 | Source: 0212_v10_l1+0212_v10_l2+0212_v10_l3+0212_v10_l3_retry+0212_v8_l2+0212_v3_l3+0212_l2+level2_20260214_232629+level2_20260214_232629_conv_convtranspose2d -->
 
 ## Code Templates
 
@@ -121,9 +121,11 @@ class ModelNew(torch.nn.Module):
 **Key insight**: For Conv2d(C_in=8) + trivial post-ops (relu+hardswish), cuDNN already fuses simple activations. kpos explicit loop with num_warps=2 on small block configs and focused autotune around winner block sizes is needed to approach cuDNN.
 **What worked**: 7 configs with num_warps=2 or 4, num_stages=2 or 3, BLOCK_HW=64-256 after discovering num_warps=2 was optimal.
 
+- **Post-op chain algebraic collapse**: Before implementing separate post-ops, check if the chain simplifies algebraically. E.g., bias+clamp+scale+clamp+divide can collapse to clamp(conv+combined_bias, lo, hi) with pre-computed combined_bias in __init__. Reduces Triton kernel complexity and register pressure. (Source: L2: 2_ConvTranspose2d_BiasAdd_Clamp_Scaling_Clamp_Divide, +0.18x from naive chain)
+- **cudnn.benchmark**: Set `torch.backends.cudnn.benchmark = True` in __init__ for ConvTranspose tasks. Enables cuDNN autotuner to select fastest algorithm for the specific tensor shapes. Gives +0.08x on ConvTranspose2d stride=2. (Source: L2: 2_ConvTranspose2d)
 - **fp16 cast strategy**: Pre-cast input tensor to fp16 (x.half()) before kernel for C_in>=32 where amortized across many kpos iterations. In-kernel cast (.to(tl.float16)) for C_in<16. Pre-cast in forward() is faster than per-tile cast inside kernel.
 - **Weight layout**: Pre-transpose to (KH*KW, C_in, C_out) or (K, C_out) in __init__, cached as fp16 via register_buffer. Contiguous weight reads are critical for tl.dot.
-- **Always**: Wrap forward() in torch.cuda.device(x.device). Cache fp16 weights. Use nn.Parameter + nn.init, never nn.Conv*.
+- **Always**: Wrap forward() in torch.cuda.device(x.device). Cache fp16 weights. Use nn.Parameter + nn.init, never nn.Conv*. Pass bias=None to torch.convolution and handle bias in Triton. Enable cudnn.benchmark for ConvTranspose tasks.
 
 ## Anti-Patterns
 
@@ -134,8 +136,13 @@ class ModelNew(torch.nn.Module):
 
 ### L2: ConvTranspose(C_in=64+, stride=2) -- Structurally infeasible without substantial post-ops
 **Key insight**: Conv dominates ~90% of runtime. Even with fp16, cuDNN ConvTranspose is near-optimal. Total speedup caps at ~1.25x even with optimal post-op fusion.
-**What failed**: L2: 91_ConvTranspose2d(C_in=64,stride=2) capped at 1.245x; L2: 5_ConvTranspose2d(C_in=64,stride=2) capped at 1.28x.
-**Better approach**: torch.convolution fp16 no-bias + fuse all post-ops. Accept 1.1-1.25x ceiling.
+**What failed**: L2: 91_ConvTranspose2d(C_in=64,stride=2) capped at 1.245x; L2: 5_ConvTranspose2d(C_in=64,stride=2) capped at 1.28x; L2: 2_ConvTranspose2d(C_in=64,stride=2) capped at 1.236x despite algebraic simplification of 4-op post-chain.
+**Better approach**: torch.convolution fp16 no-bias + cudnn.benchmark + fuse all post-ops. Accept 1.1-1.25x ceiling.
+
+### L2: channels_last memory format for ConvTranspose2d -- Layout conversion overhead
+**Key insight**: channels_last (NHWC) memory format adds conversion overhead that kills performance for ConvTranspose2d, unlike Conv2d where NHWC can help with C_in=32-64.
+**Why it failed**: L2: 2_ConvTranspose2d with channels_last was 0.647x (vs 1.236x with default NCHW). The format conversion cost is not amortized because ConvTranspose output is already near-optimal in NCHW for cuDNN.
+**Better approach**: Use default NCHW for ConvTranspose2d. NHWC only benefits direct Triton Conv2d with kpos loop and C_in=32-64.
 
 ### L2: Conv2d(C_in=8) + trivial post-ops (1-2 simple activations) -- Near-infeasible
 **Key insight**: cuDNN already fuses simple activations (relu, hardswish) internally. Separate Triton kernel for post-ops adds launch overhead. Implicit GEMM also struggles -- cuDNN is near-optimal.
@@ -149,7 +156,7 @@ class ModelNew(torch.nn.Module):
 
 ## Decision Tree
 
-1. **Check algebraic elimination** (Tier 1): Spatial sum/mean after conv distributes into weights (7-27x). Dead code (27x). Pool fuses into conv (2.9x). BN absorbs bias. InstanceNorm absorbs bias. Always check first.
+1. **Check algebraic elimination** (Tier 1): Spatial sum/mean after conv distributes into weights (7-27x). Dead code (27x). Pool fuses into conv (2.9x). BN absorbs bias. InstanceNorm absorbs bias. Also simplify post-op chains algebraically (bias+clamp+scale+clamp -> single clamp with combined bias). Always check first.
 2. **Depthwise conv** (Tier 1): Spatial tiling with scalar weight broadcast. 2D grid (spatial_blocks, B*C). Expect 1.3-15x. Usually first-try success.
 3. **Depthwise separable** (Tier 1): Fuse depthwise+pointwise into single kernel, eliminate intermediate tensor. ~1.8x.
 4. **Pointwise 1x1 conv** (Tier 2): NCHW-direct matmul, no permutes. ~2.8x.
@@ -161,8 +168,8 @@ class ModelNew(torch.nn.Module):
 10. **ConvTranspose stride=1 with moderate C_in** (Tier 1): torch.convolution fp16 no-bias + Triton fp16->fp32 cast. ~1.5-1.9x. (70_conv 1.89x, 73_conv 1.53x).
 11. **ConvTranspose stride=2 with small C_in (<=16)** (Tier 1-2): torch.convolution fp16 no-bias + fused Triton post-ops. Expect 1.5-5.2x. (L2: 96_ConvTranspose3d 5.2x, 89_ConvTranspose3d 4.4x).
 12. **ConvTranspose stride=2 with C_in=32** (Tier 2): torch.convolution fp16 no-bias. Expect 1.1-2.3x. (L2: 78_ConvTranspose3d 2.3x with fused bias+pool).
-13. **ConvTranspose(C_in=64+, stride=2, no post-ops)** (Anti-Pattern): Accept ~0.7-1.25x or use torch.convolution + cudnn.benchmark. Conv dominates at ~90% runtime.
+13. **ConvTranspose(C_in=64+, stride=2, no post-ops)** (Anti-Pattern): Accept ~0.7-1.25x or use torch.convolution + cudnn.benchmark. Conv dominates at ~90% runtime. Do NOT use channels_last (0.647x).
 14. **Conv1d with very long sequences (65K+)** (Tier 3-4): Never do layout conversion (NCL->NLC). Use NCL directly with kpos loop. (64_conv 1.3x, NLC was 0.5x).
 15. **fp16 cast strategy** (Tier 3-4): Pre-cast input tensor to fp16 (x.half()) before kernel for C_in>=32 where amortized across many kpos iterations. In-kernel cast (.to(tl.float16)) for C_in<16. Pre-cast in forward() is faster than per-tile cast inside kernel.
 16. **Weight layout** (Tier 3-4): Pre-transpose to (KH*KW, C_in, C_out) or (K, C_out) in __init__, cached as fp16 via register_buffer. Contiguous weight reads are critical for tl.dot.
-17. **Always** (Tier 3-4): Wrap forward() in torch.cuda.device(x.device). Cache fp16 weights. Use nn.Parameter + nn.init, never nn.Conv*. Pass bias=None to torch.convolution and handle bias in Triton.
+17. **Always** (Tier 3-4): Wrap forward() in torch.cuda.device(x.device). Cache fp16 weights. Use nn.Parameter + nn.init, never nn.Conv*. Pass bias=None to torch.convolution and handle bias in Triton. Enable cudnn.benchmark for ConvTranspose tasks.

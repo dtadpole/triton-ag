@@ -157,13 +157,15 @@ Check `common.md § Composite Patterns` for multi-op strategy hints.
 Consult `common.md` feasibility guides (L1/L2/L3 Structural Feasibility Guide):
 
 <!-- MUTABLE: feasibility_actions -->
-<!-- Version: 1 | Updated: 2026-02-15 | Source: initial -->
+<!-- Version: 2 | Updated: 2026-02-15 | Source: level2_20260214_232629 -->
+<!-- Rationale: NO-with-postops tasks (ConvTranspose C_in=64+stride=2) reached 1.731x when fp16 no-bias was tried (100_ConvTranspose3d). Split NO category to prevent early exit before fp16 no-bias attempt. Evidence: 88 tasks, 3 NO tasks exceeded expectations with fp16. -->
 
 | Class | Action |
 |-------|--------|
 | **YES** | Full explore + exploit budget |
 | **MAYBE** | Allocate explore budget to test viability |
-| **NO** | Try 1 best-effort strategy. Complete early if <1.0x after 2 iterations |
+| **NO (with 3+ post-ops)** | Try fp16 cuDNN no-bias + Triton postops as first strategy. 6 iterations total. Complete early if <1.0x after trying fp16 no-bias |
+| **NO (pure/trivial post-ops)** | Try 1 best-effort strategy. Complete early if <1.0x after 2 iterations. Max 4 iterations |
 
 <!-- /MUTABLE: feasibility_actions -->
 
@@ -196,14 +198,19 @@ How many strategies:
 **Composite patterns (multi-op → strategy hint):**
 
 <!-- MUTABLE: composite_pattern_table -->
-<!-- Version: 1 | Updated: 2026-02-15 | Source: initial -->
+<!-- Version: 2 | Updated: 2026-02-15 | Source: level2_20260214_232629 -->
+<!-- Rationale: Added 4 new patterns from 88 L2 tasks: conv+channel_reduction (7 tasks), ConvTranspose small C_in (8 tasks), matmul+softmax (3 tasks), conv+BN+pool (3 tasks). Speedup ranges calibrated from actual results. -->
 
 ```
 matmul → pointwise(1-3)           → epilogue_fusion          (4-12x)
 matmul → norm → activation        → two_kernel_matmul_normact (5-12x)
 matmul → reduction(sum/mean)      → algebraic_distribute      (20-74x)
+matmul → softmax                  → two_kernel_matmul_softmax (5-7x)
 conv(C_in<=16) → pool             → fused_conv_pool           (1.5-2.9x)
 conv → norm → activation          → torch_conv_triton_postops (1.3-2x)
+conv → channel_min/max → postops  → fp16_conv_fused_reduction (1.3-1.9x)
+conv → BN → pool                  → algebraic_pool_bn_fused   (1.5-3.1x)
+convT(C_in<=32,s=2) → postops(3+) → fp16_nobias_fused_postops (1.5-5.2x)
 reshape → matmul → softmax → matmul → flash_attention        (2-8x)
 norm → pointwise → norm           → fused_prenorm             (1.3-2x)
 pointwise(3+) → reduction         → single_fused_kernel       (1.3-1.5x)
@@ -215,14 +222,17 @@ diagonal_matmul → anything        → row_scaling_fused         (10-100x)
 **Set iteration budget:**
 
 <!-- MUTABLE: iteration_budget_table -->
-<!-- Version: 1 | Updated: 2026-02-15 | Source: initial -->
+<!-- Version: 2 | Updated: 2026-02-15 | Source: level2_20260214_232629 -->
+<!-- Rationale: 88 tasks show gemm+pointwise/norm first-try success rate of 85%+. Avg 1.3 iters for gemm+pointwise (30 tasks), 1.5 for gemm+norm (10 tasks). Reduced explore budget for well-known patterns. Split NO by post-op count. -->
 
 | Scenario | Phase B (explore) | Phase C (exploit) |
 |----------|-------------------|-------------------|
 | Algebraic shortcut found | 0 (skip) | all |
-| Standard task (2 strategies) | 4 (2 × 2 iters) | remaining |
-| Complex L2/L3 (3 strategies) | 6 (3 × 2 iters) | remaining |
-| NO feasibility | 2 (1 × 2 iters) | 2 (minimal) |
+| First-try pattern (gemm+pw, gemm+norm, convT C_in<=16) | 0 (skip explore) | all (start with canonical strategy) |
+| Standard task (2 strategies) | 2 (1 iter each) | remaining |
+| Complex L2/L3 (3 strategies) | 4 (2 + 1 + 1 iters) | remaining |
+| NO feasibility (with 3+ post-ops) | 2 (fp16 no-bias first) | 4 (exploit fp16 path) |
+| NO feasibility (pure/trivial) | 2 (1 × 2 iters) | 2 (minimal) |
 
 <!-- /MUTABLE: iteration_budget_table -->
 
