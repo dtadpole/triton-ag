@@ -1,5 +1,5 @@
 # SSM/Mamba2 Reference
-<!-- Updated: 2026-02-15 | Source: level3_20260214_235132 -->
+<!-- Updated: 2026-02-15 | Source: level3_20260214_235132, level3_20260215_020905, level3_20260215_122506 -->
 
 ## Code Templates
 <!-- No templates yet. Add proven kernel patterns here as they are discovered. -->
