@@ -646,6 +646,139 @@ def check_chain_c12_worker_scaling(batches, config):
             "detail": "; ".join(issues) if issues else "appropriate"}
 
 
+def check_chain_c13_breakthrough_hints(batches):
+    """C13: breakthrough_hints.json exists and is valid for plateau/breakthrough batches."""
+    base = get_output_base()
+    issues = []
+
+    for b in batches:
+        tier = b.get("escalation_tier", "normal")
+        if tier not in ("plateau", "breakthrough"):
+            continue
+
+        sid = b.get("session_id", "")
+        session_dir = base / sid
+        hints_file = session_dir / "breakthrough_hints.json"
+
+        if not hints_file.exists():
+            issues.append(f"batch {b.get('batch_index', '?')}: missing breakthrough_hints.json (tier={tier})")
+            continue
+
+        try:
+            hints = json.loads(hints_file.read_text())
+        except json.JSONDecodeError:
+            issues.append(f"batch {b.get('batch_index', '?')}: invalid JSON in breakthrough_hints.json")
+            continue
+
+        # Validate structure
+        required_keys = ["escalation_tier", "cluster_summary", "tasks"]
+        missing = [k for k in required_keys if k not in hints]
+        if missing:
+            issues.append(f"batch {b.get('batch_index', '?')}: missing keys {missing} in breakthrough_hints.json")
+            continue
+
+        # Validate tasks have required fields
+        tasks = hints.get("tasks", {})
+        for task_name, task_data in list(tasks.items())[:3]:  # spot-check 3
+            if "failure_cluster" not in task_data:
+                issues.append(f"batch {b.get('batch_index', '?')}: task {task_name} missing failure_cluster")
+                break
+            if "hint" not in task_data:
+                issues.append(f"batch {b.get('batch_index', '?')}: task {task_name} missing hint")
+                break
+
+    return {"id": "C13", "name": "breakthrough_hints.json valid for escalation batches",
+            "passed": len(issues) == 0, "severity": "WARN",
+            "detail": "; ".join(issues[:3]) if issues else "valid where needed"}
+
+
+def check_chain_c14_infeasible_filtering(batches, manifest):
+    """C14: Infeasible tasks are filtered from retry sets in later batches."""
+    base = get_output_base()
+    issues = []
+
+    # Find infeasible tasks from breakthrough_hints.json files
+    infeasible_by_batch = {}
+    for b in batches:
+        sid = b.get("session_id", "")
+        session_dir = base / sid
+        hints_file = session_dir / "breakthrough_hints.json"
+
+        if not hints_file.exists():
+            continue
+
+        try:
+            hints = json.loads(hints_file.read_text())
+            infeasible = hints.get("infeasible_tasks", [])
+            if infeasible:
+                infeasible_by_batch[b.get("batch_index", 0)] = set(infeasible)
+        except (json.JSONDecodeError, Exception):
+            continue
+
+    if not infeasible_by_batch:
+        return {"id": "C14", "name": "infeasible tasks filtered from retries",
+                "passed": True, "severity": "WARN", "detail": "no infeasible tasks identified"}
+
+    # Check that later batches don't include infeasible tasks
+    all_infeasible = set()
+    for batch_idx in sorted(infeasible_by_batch.keys()):
+        all_infeasible.update(infeasible_by_batch[batch_idx])
+
+        # Check all subsequent batches
+        for b in batches:
+            if b.get("batch_index", 0) <= batch_idx:
+                continue
+
+            sid = b.get("session_id", "")
+            session_dir = base / sid
+            manifest_file = session_dir / "session_manifest.json"
+            if not manifest_file.exists():
+                continue
+
+            try:
+                sm = json.loads(manifest_file.read_text())
+                batch_tasks = set(sm.get("tasks", []))
+                leaked = batch_tasks & all_infeasible
+                if leaked:
+                    issues.append(f"batch {b.get('batch_index', '?')}: includes {len(leaked)} infeasible tasks ({', '.join(list(leaked)[:3])})")
+            except (json.JSONDecodeError, Exception):
+                pass
+
+    return {"id": "C14", "name": "infeasible tasks filtered from retries",
+            "passed": len(issues) == 0, "severity": "WARN",
+            "detail": "; ".join(issues[:3]) if issues else f"{len(all_infeasible)} infeasible tasks correctly excluded"}
+
+
+def check_chain_c15_escalation_progression(batches):
+    """C15: Escalation tier progresses correctly (normal → plateau → breakthrough → hard_converge)."""
+    VALID_TIERS = ["normal", "plateau", "breakthrough", "hard_converge"]
+    issues = []
+    prev_tier = None
+
+    for b in batches:
+        tier = b.get("escalation_tier", "normal")
+        batch_idx = b.get("batch_index", 0)
+
+        # Validate tier value
+        if tier not in VALID_TIERS:
+            issues.append(f"batch {batch_idx}: invalid tier '{tier}'")
+            prev_tier = tier
+            continue
+
+        # Check progression (can stay same or advance, never go backward)
+        if prev_tier is not None and prev_tier in VALID_TIERS and tier in VALID_TIERS:
+            prev_rank = VALID_TIERS.index(prev_tier)
+            curr_rank = VALID_TIERS.index(tier)
+            if curr_rank < prev_rank:
+                issues.append(f"batch {batch_idx}: tier regressed from '{prev_tier}' to '{tier}'")
+
+        prev_tier = tier
+
+    return {"id": "C15", "name": "escalation tier progression valid",
+            "passed": len(issues) == 0, "severity": "WARN",
+            "detail": "; ".join(issues) if issues else "monotonic progression"}
+
+
 def verify_chain(chain_id):
     """Run chain-level verification. Returns (per_batch_results, chain_checks)."""
     base = get_output_base()
@@ -703,7 +836,7 @@ def verify_chain(chain_id):
 
         per_batch_results[sid] = {"results": results, "skipped": skipped, "batch_index": b.get("batch_index", 0)}
 
-    # Run chain-level checks C1-C12
+    # Run chain-level checks C1-C15
     chain_checks = [
         c1,
         check_chain_c2_statuses(batches),
@@ -717,6 +850,9 @@ def verify_chain(chain_id):
         check_chain_c10_convergence(manifest),
         check_chain_c11_no_empty(batches),
         check_chain_c12_worker_scaling(batches, config),
+        check_chain_c13_breakthrough_hints(batches),
+        check_chain_c14_infeasible_filtering(batches, manifest),
+        check_chain_c15_escalation_progression(batches),
     ]
 
     return per_batch_results, chain_checks

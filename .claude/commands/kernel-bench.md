@@ -959,6 +959,7 @@ that read the latest reference files from disk. No restart needed between batche
 3. **Initialize tracking:**
    ```
    all_best_results = {}  # task_name → best speedup across all batches
+   escalation_tier = "normal"  # normal → plateau → breakthrough → hard_converge
    ```
 
 #### Batch Loop
@@ -1013,19 +1014,57 @@ conversation memory. All state is computed from files.**
        task_count = len(retry_set)
    ```
 
-2. **Convergence check** (only for same-level retries, batch_index >= 2):
+2. **Escalation check** (only for same-level retries, batch_index >= 2):
    ```
    if prior_sessions_for_level and batch_index >= 2:
+       # Compute per-task progress from last batch
+       last_batch_sid = chain_manifest["batches"][-1]["session_id"]
+       last_batch_progress = get_batch_progress(last_batch_sid)
+
+       tasks_improved = 0    # tasks where speedup increased by >= 0.1x
+       tasks_newly_passing = 0  # tasks that crossed 1.3x
+       for task in last_batch_progress["tasks"]:
+           name = task["task_name"]
+           current = task.get("best", {}).get("speedup", 0) if task.get("best") else 0
+           prior = all_best_results.get(name, 0)
+           if current - prior >= 0.1:
+               tasks_improved += 1
+           if current >= 1.3 and prior < 1.3:
+               tasks_newly_passing += 1
+
        prev_batch = chain_manifest["batches"][-1]
        prev_cumulative_rate = prev_batch.get("cumulative_success_rate", 0)
        current_cumulative_rate = chain_manifest["cumulative"]["cumulative_success_rate"]
-
        delta_pp = current_cumulative_rate - prev_cumulative_rate
-       # Also check avg speedup delta (compute from all_best_results)
 
-       if delta_pp < 0.03:
-           Print: f"Converged after batch {batch_index-1} (Δ={delta_pp:.1%}pp). Stopping chain."
-           break
+       if escalation_tier == "normal":
+           if delta_pp < 0.05:   # 5pp threshold
+               escalation_tier = "plateau"
+               Print: f"Plateau detected after batch {batch_index-1} (Δ={delta_pp:.1%}pp). Escalating — running breakthrough analysis."
+               # DON'T STOP — continue to breakthrough analysis + next batch
+
+       elif escalation_tier in ("plateau", "breakthrough"):
+           if tasks_improved == 0 and tasks_newly_passing == 0:
+               escalation_tier = "hard_converge"
+               Print: f"Hard converge after batch {batch_index-1}: no individual task improved despite breakthrough hints. Stopping chain."
+               break
+           else:
+               escalation_tier = "breakthrough"
+               Print: f"Breakthrough progress: {tasks_improved} tasks improved, {tasks_newly_passing} newly passing. Continuing."
+
+       # Filter infeasible tasks from retry set
+       if escalation_tier in ("plateau", "breakthrough"):
+           breakthrough_file = session_dir_for_last_batch / "breakthrough_hints.json"
+           if breakthrough_file exists (Read):
+               hints = parse JSON from breakthrough_file
+               infeasible = hints.get("infeasible_tasks", [])
+               if infeasible:
+                   retry_set = [t for t in retry_set if t not in infeasible]
+                   task_count = len(retry_set)
+                   Print: f"Filtered {len(infeasible)} infeasible tasks. {task_count} remain."
+                   if task_count == 0:
+                       Print: "All remaining tasks infeasible. Stopping chain."
+                       break
    ```
 
 3. **Scale workers:**
@@ -1050,10 +1089,17 @@ conversation memory. All state is computed from files.**
    )
    ```
 
-5. **Write task histories** (for batch_index >= 1, only if level was seen before):
+5. **Write task histories and breakthrough hints** (for batch_index >= 1):
    ```
    if prior_sessions_for_level and task_names:
        Bash: python3 kb_history.py {chain_dir} {batch_index} {session_id}
+
+       # Run breakthrough analysis when escalated (plateau or breakthrough tier)
+       if escalation_tier in ("plateau", "breakthrough"):
+           Bash: python3 kb_breakthrough.py {chain_dir} {batch_index} {session_id}
+           # This writes breakthrough_hints.json with per-task failure clusters,
+           # cross-task transfer hints, and strategy gap analysis.
+           # Optimizers will read this after claiming tasks.
    ```
 
 6. **Write-ahead: mark batch as running:**
@@ -1063,7 +1109,8 @@ conversation memory. All state is computed from files.**
      "session_id": session_id,
      "level": level,
      "task_count": task_count,
-     "status": "running"
+     "status": "running",
+     "escalation_tier": escalation_tier
    }
    # Append to chain_manifest.batches, save to disk
    Read chain_manifest.json → append batch_entry → Write chain_manifest.json
@@ -1096,6 +1143,18 @@ conversation memory. All state is computed from files.**
    # Get results from this batch
    batch_progress = get_batch_progress(session_id)
 
+   # Compute per-task progress (for escalation check in next iteration)
+   tasks_improved_count = 0
+   tasks_newly_passing_count = 0
+   for task in batch_progress["tasks"]:
+       name = task["task_name"]
+       current_speedup = task.get("best", {}).get("speedup", 0) if task.get("best") else 0
+       prior_best = all_best_results.get(name, 0)
+       if current_speedup - prior_best >= 0.1:
+           tasks_improved_count += 1
+       if current_speedup >= 1.3 and prior_best < 1.3:
+           tasks_newly_passing_count += 1
+
    # Update all_best_results with this batch's results
    for task in batch_progress["tasks"]:
        name = task["task_name"]
@@ -1123,11 +1182,22 @@ conversation memory. All state is computed from files.**
    batch_success_rate = batch_passing / task_count if task_count > 0 else 0
    batch_avg_speedup = sum(batch_speedups) / len(batch_speedups) if batch_speedups else 0
 
-   # Update manifest
+   # Count infeasible tasks filtered (from breakthrough_hints.json if it exists)
+   infeasible_count = 0
+   hints_file = session_dir / "breakthrough_hints.json"
+   if hints_file exists (Read):
+       hints = parse JSON
+       infeasible_count = len(hints.get("infeasible_tasks", []))
+
+   # Update manifest batch entry
    batch_entry["success_rate"] = round(batch_success_rate, 3)
    batch_entry["avg_speedup"] = round(batch_avg_speedup, 3)
    batch_entry["cumulative_success_rate"] = round(cumulative_success_rate, 3)
    batch_entry["completed_at"] = current_timestamp_iso
+   batch_entry["escalation_tier"] = escalation_tier
+   batch_entry["tasks_improved_count"] = tasks_improved_count
+   batch_entry["tasks_newly_passing_count"] = tasks_newly_passing_count
+   batch_entry["infeasible_filtered"] = infeasible_count
 
    chain_manifest["cumulative"] = {
      "tasks_total": tasks_total,

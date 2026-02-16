@@ -1164,7 +1164,7 @@ The verifier reconstructs the full phase timeline from these names without readi
 
 ### 12.2 Layer 2: Mechanical Verification (`kb_verify.py`)
 
-A Python script (same pattern as `kb_score.py`) that runs 17 structural checks per task, plus 12 chain-level checks for multi-batch chains:
+A Python script (same pattern as `kb_score.py`) that runs 17 structural checks per task, plus 15 chain-level checks for multi-batch chains:
 
 **Per-task checks:**
 
@@ -1216,7 +1216,7 @@ An LLM agent (`kernel-bench-verifier.md`) spawned on demand via `/kernel-bench v
         └── File: semantic_verification.md
 ```
 
-**Chain-level checks** (C1-C12, run with `kb_verify.py --chain {chain_id}`):
+**Chain-level checks** (C1-C15, run with `kb_verify.py --chain {chain_id}`):
 
 | Check | Description | Severity |
 |-------|-------------|----------|
@@ -1232,6 +1232,9 @@ An LLM agent (`kernel-bench-verifier.md`) spawned on demand via `/kernel-bench v
 | C10 | Convergence decision justified | WARN |
 | C11 | No empty batches | FAIL |
 | C12 | Worker scaling appropriate | WARN |
+| C13 | breakthrough_hints.json valid for escalation batches | WARN |
+| C14 | Infeasible tasks filtered from retry sets | WARN |
+| C15 | Escalation tier progression valid | WARN |
 
 ---
 
@@ -1304,12 +1307,43 @@ For retry batches (batch N≥1 of the same level), `kb_history.py` generates `ta
 
 Optimizers check this file after claiming a task and use it to inform Phase A analysis.
 
-### 13.5 Convergence Detection
+### 13.5 Convergence Detection and Escalation Protocol
 
-The chain stops when:
-1. All tasks pass (≥1.3x) — retry set is empty
-2. Max batches reached
-3. Cumulative success rate delta < 3pp between consecutive batches (diminishing returns)
+Simple convergence thresholds (e.g., 3pp global delta) give up too easily on hard tasks. The chain uses an escalation tier system that adapts its strategy based on the nature of the plateau.
+
+**Escalation Tiers:**
+
+```
+NORMAL → PLATEAU → BREAKTHROUGH → HARD_CONVERGE
+```
+
+| Tier | Condition | Behavior |
+|------|-----------|----------|
+| **NORMAL** | Default (first batch or making progress) | Standard retry with task histories |
+| **PLATEAU** | <5 tasks improved AND <3 newly passing in a batch | Run `kb_breakthrough.py` — failure clustering, cross-task transfer hints |
+| **BREAKTHROUGH** | Plateau persisted for 2+ consecutive batches | Same as PLATEAU but with more aggressive hints; optimizers try fundamentally different approaches |
+| **HARD_CONVERGE** | No tasks improved for 2+ batches at PLATEAU/BREAKTHROUGH | Chain stops — genuine convergence |
+
+**Per-task convergence (replaces global-only check):**
+- `tasks_improved`: tasks where speedup increased by ≥0.1x this batch
+- `tasks_newly_passing`: tasks that crossed the 1.3x target this batch
+- Both metrics count individual progress, preventing the system from stopping when some tasks are still making gains
+
+**Breakthrough Analysis** (`kb_breakthrough.py`):
+
+When escalation reaches PLATEAU or BREAKTHROUGH, the system runs failure clustering on stuck tasks:
+
+| Cluster | Criteria | Optimizer Guidance |
+|---------|----------|-------------------|
+| `close_to_target` | Best speedup ≥1.1x | Read similar passing task's kernel; skip Phase B, go to Phase C tuning |
+| `perf_ceiling` | Standard approaches exhausted, <1.1x | Try untried strategy families; different parallelism axis |
+| `correctness_stuck` | >50% iterations fail correctness | Write simplest correct kernel first, then tune |
+| `compile_stuck` | >50% iterations fail compilation | Write minimal compilable kernel; fix Triton API issues |
+| `infeasible` | <0.2x across 2+ batches, 10+ iterations | Filter from retry set; skip in future batches |
+
+The analysis also finds cross-task transfer opportunities — when a stuck task has a similar structure to a passing task, the passing task's kernel code path is provided as a template.
+
+**Output:** `breakthrough_hints.json` in session directory, consumed by optimizers after claiming.
 
 ### 13.6 Session Directory Layout
 
@@ -1323,6 +1357,7 @@ The chain stops when:
 ├── chain_20260215_143022_b1/        ← batch 1 session
 │   ├── session_manifest.json
 │   ├── task_histories.json          ← from prior batches
+│   ├── breakthrough_hints.json      ← if escalation tier >= PLATEAU
 │   └── {task_name}/...
 ```
 
@@ -1437,7 +1472,8 @@ The `/kernel-bench` command supports 11 input styles:
 | `kbEvalServer.py` | Remote GPU eval server (stateless FastAPI) |
 | `kbEval.yaml` | Provider configuration (URLs, timeouts, API key paths) |
 | `kb_score.py` | Progress reporting script (single session + chain cross-batch) |
-| `kb_verify.py` | Algorithm verification script (17 per-task checks + 12 chain-level checks) |
+| `kb_verify.py` | Algorithm verification script (17 per-task checks + 15 chain-level checks) |
 | `kb_reflect.py` | Reflection collection script |
 | `kb_server.py` | Eval server configuration script |
 | `kb_history.py` | Task history generator for chain mode (prior batch → task_histories.json) |
+| `kb_breakthrough.py` | Failure clustering and breakthrough hints for chain escalation (plateau/breakthrough tiers) |

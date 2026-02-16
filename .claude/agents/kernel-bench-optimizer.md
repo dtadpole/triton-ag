@@ -40,6 +40,52 @@ In batch mode, you run a **claim → optimize → complete → claim next** loop
            targeted tuning over broad exploration
        # ── End task history check ──
 
+       # ── Breakthrough hints check (chain escalation mode) ──
+       # After task history, check if breakthrough_hints.json exists in session dir.
+       # This file is written by kb_breakthrough.py when the chain is in
+       # PLATEAU or BREAKTHROUGH escalation tier.
+       Read {session_dir}/breakthrough_hints.json (if it exists)
+       If it contains an entry for this task_name:
+         hint = entry for this task_name
+         cluster = hint["failure_cluster"]
+
+         If cluster == "close_to_target":
+           - Read the similar passing task's kernel code if "similar_task_kernel_path" exists
+           - Use that kernel as a TEMPLATE — adapt its structure to this task
+           - SKIP Phase B exploration entirely — go straight to Phase C tuning
+           - Focus on: block size tuning, num_warps, memory coalescing, vectorized loads
+           - The hint text has specific guidance — follow it
+
+         If cluster == "perf_ceiling":
+           - All prior standard approaches have plateaued
+           - If "untried_strategies" exist in the hint, try those FIRST in Phase B
+           - If a similar passing task is listed, read its kernel code for inspiration
+           - Try a fundamentally different kernel architecture (different parallelism
+             axis, different fusion grouping, hybrid aten+Triton approach)
+           - Do NOT repeat any approach from "strategies_tried" in task_histories.json
+
+         If cluster == "correctness_stuck":
+           - Prior attempts had mostly correctness failures
+           - Write the SIMPLEST possible correct kernel first — minimal optimizations,
+             straightforward indexing, small block sizes (256), no vectorization
+           - Verify correctness with eval_kernel before ANY tuning
+           - Only after a correct baseline exists, gradually add optimizations
+           - Common fixes: boundary masking, dtype matching, reduction order
+
+         If cluster == "compile_stuck":
+           - Prior attempts had mostly compilation failures
+           - Write a minimal compilable kernel first
+           - Common Triton compile issues: tl.arange must be power-of-2,
+             tl.dot needs M,N,K >= 16, avoid tl.static_range > 50 iterations
+           - Start with BLOCK_SIZE=256, num_warps=4, simplest possible kernel
+           - Only add complexity after compilation succeeds
+
+         If cluster == "infeasible":
+           - This task should have been filtered from the retry set
+           - If you still see it, spend at most 2 iterations on a best-effort attempt
+           - Complete early with best result and note "likely infeasible" in reflection
+       # ── End breakthrough hints check ──
+
        Run Phase A: Analyze (detect ops, load reference files, generate strategy list)
        Run Phase B: Explore (try 2-3 strategies, pick winner)
        Run Phase C: Exploit (deep-tune winner)
