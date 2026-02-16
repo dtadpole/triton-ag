@@ -1,5 +1,5 @@
 # Conv Reference
-<!-- Updated: 2026-02-15 | Source: 0212_v10_l1+0212_v10_l2+0212_v10_l3+0212_v10_l3_retry+0212_v8_l2+0212_v3_l3+0212_l2+level2_20260214_232629+level2_20260215+level3_20260215_020905+level2_20260215_122501+level3_20260215_122506 -->
+<!-- Updated: 2026-02-15 | Source: 0212_v10_l1+0212_v10_l2+0212_v10_l3+0212_v10_l3_retry+0212_v8_l2+0212_v3_l3+0212_l2+level2_20260214_232629+level2_20260215+level3_20260215_020905+level2_20260215_122501+level3_20260215_122506+level3_20260215_152600 -->
 
 ## Code Templates
 
@@ -62,12 +62,12 @@ class ModelNew(torch.nn.Module):
 **Case 4: Conv + Matmul combos** -- focus on optimizing the matmul side with epilogue fusion.
 
 **Case 5: Deep CNN passthrough (L3 multi-layer networks)**
-- For deep networks (DenseNet, EfficientNet, MobileNet, RegNet, VGG), replace nn.Module dispatch with direct torch.convolution + torch.batch_norm + torch.clamp calls
-- Cache all parameter references in Python lists during __init__ (avoid getattr overhead in loops)
+- For deep networks (DenseNet, EfficientNet, MobileNet, RegNet, VGG, ShuffleNet), replace nn.Module dispatch with direct torch.convolution + torch.batch_norm + torch.clamp calls
+- Cache all parameter references in Python lists during __init__ or lazily on first forward() (avoid getattr overhead in loops)
 - Enable cudnn.benchmark=True for conv algorithm auto-tuning
 - Speedup comes from eliminating nn.Module.__call__ overhead across 20-200+ layer calls
 - Expect 1.3-2.5x for launch-overhead-bound networks; FAILS for compute-bound large-batch CNNs
-- Cached param refs vs getattr: +0.135x (ResNet101, 33 blocks), +0.47x (EfficientNetB1), +0.529x (MobileNetV1)
+- Cached param refs vs getattr: +0.135x (ResNet101, 33 blocks), +0.47x (EfficientNetB1), +0.499x (MobileNetV2 lazy cache), +0.529x (MobileNetV1)
 
 **Reality check:** Pure Triton convolution is significantly harder to optimize than cuDNN. For conv-dominated tasks with minimal post-ops, achieving 1.3x speedup may not be feasible. Focus effort on tasks where algebraic elimination or substantial post-op fusion is possible.
 
@@ -96,8 +96,16 @@ class ModelNew(torch.nn.Module):
 ## Tier 2: Architecture Variants
 
 ### L3: 16_DenseNet201 (2.506x, iter 0) -- cuDNN passthrough for deep CNNs
-**Key insight**: cuDNN passthrough (torch.convolution + torch.batch_norm + torch.clamp) with cached parameter lists scales superlinearly with network depth. DenseNet201 (200+ module calls) gets 2.5x; DenseNet121 gets 1.5x; EfficientNetB1 gets 1.7x; EfficientNetB0 gets 1.6x; MobileNetV1 gets 1.4x; MobileNetV2 gets 1.7x; ResNet101 gets 1.3x. Speedup is proportional to nn.Module dispatch overhead eliminated.
+**Key insight**: cuDNN passthrough (torch.convolution + torch.batch_norm + torch.clamp) with cached parameter lists scales superlinearly with network depth. DenseNet201 (200+ module calls) gets 2.5x; DenseNet121 gets 1.5x; EfficientNetB1 gets 1.7x; EfficientNetB0 gets 1.6x; MobileNetV1 gets 1.4x; MobileNetV2 gets 1.85x; ResNet101 gets 1.3x. Speedup is proportional to nn.Module dispatch overhead eliminated.
 **What worked**: Cache all parameters as Python lists, call torch.convolution/torch.batch_norm/torch.clamp directly, enable cudnn.benchmark=True. Often first-try success.
+
+### L3: 20_MobileNetV2 (1.854x, iter 7) -- Lazy cached param refs + dead code elimination
+**Key insight**: The original MobileNetV2 discards residual connection flags (returns (Sequential, use_res_connect) but caller takes [0] only). Eliminating dead residual code + lazy caching param refs avoids getattr overhead. Lazy cache (built on first forward() call) prevents CPU/GPU device mismatch from __init__.
+**What worked**: torch.convolution + torch.batch_norm + torch.clamp with lazy cached param refs. Removing dead residual connections gave 1.355x; lazy cache added +0.499x to reach 1.854x. Caching in __init__ fails because parameters are on CPU before .cuda().
+
+### L3: 26_ShuffleNet (1.578x, iter 18) -- Full fp16 pipeline for deep group conv networks
+**Key insight**: ShuffleNet's 40+ conv+BN operations across 13 units benefit massively from full fp16 pipeline (convert once at start, stay fp16 throughout). fp32 passthrough gives only 0.985x; fp16 pipeline gives 1.327x; pre-cached fp16 weights push to 1.578x. In-place clamp_ saves memory allocation per ReLU.
+**What worked**: x.half() once at start + cuDNN passthrough + cached param refs + pre-cached .half() weights. fp16 must be all-or-nothing (per-layer conversion gave 0.848x). channels_last hurts due to channel shuffle requiring NCHW (view/transpose/contiguous). Triton channel shuffle slower than torch built-in.
 
 ### L3: 17_SqueezeNetFireModule (1.845x, iter 1) -- Full fp16 pipeline + cat elimination
 **Key insight**: Keeping the entire multi-conv pipeline in fp16 (input -> squeeze -> expand) eliminates two fp32<->fp16 roundtrips, and writing expand outputs directly into a pre-allocated cat buffer with channel offsets eliminates torch.cat memory copy.
@@ -163,14 +171,17 @@ class ModelNew(torch.nn.Module):
 **Key insight**: cuDNN Conv3d WITHOUT bias is significantly faster than WITH bias. Handle conv bias as scalar add inside Triton kernel. The no-bias cuDNN path avoids an extra global memory write.
 **What worked**: torch.convolution with None bias + fused Triton kernel. +0.246x over with-bias.
 
-- **cuDNN passthrough for deep CNNs**: Replace nn.Module dispatch with torch.convolution + torch.batch_norm + torch.clamp. Cache all params in Python lists (avoid getattr). Enable cudnn.benchmark=True. Expect 1.3-2.5x for 20+ layer networks. Cached param refs critical: getattr->list cache gave +0.135x (ResNet101, 33 blocks x 15+ attrs), +0.47x (EfficientNetB1), +0.529x (MobileNetV1). (Source: L3 DenseNet121/201, EfficientNetB0/B1, MobileNetV1/V2, ResNet101, VGG16)
-- **Full fp16 pipeline**: Keep fp16 throughout multi-conv architectures. Never cast back to fp32 between conv layers when the next conv consumes fp16 directly. cuDNN BN accepts fp16 input (computes internally in fp32). Casting fp16 conv output to fp32 before BN wastes ~0.9ms on 80M element cast. Eliminating all intermediate casts: +0.1-0.6x. For DenseNet dense blocks, x.half() once at start and cat fp16 features -- only convert final output .float(). (Source: L3 DenseNet121DenseBlock 1.39x, VGG16 1.45x, SqueezeNetFireModule 1.85x, AlexNet 1.3x; L2 11_ConvTranspose2d_BatchNorm)
+- **cuDNN passthrough for deep CNNs**: Replace nn.Module dispatch with torch.convolution + torch.batch_norm + torch.clamp. Cache all params in Python lists (avoid getattr). Use lazy cache (first forward() call) if params initialized in __init__ before .cuda(). Enable cudnn.benchmark=True. Expect 1.3-2.5x for 20+ layer networks. Cached param refs critical: getattr->list cache gave +0.135x (ResNet101, 33 blocks x 15+ attrs), +0.47x (EfficientNetB1), +0.499x (MobileNetV2 lazy cache), +0.529x (MobileNetV1). (Source: L3 DenseNet121/201, EfficientNetB0/B1, MobileNetV1/V2, ResNet101, VGG16, ShuffleNet)
+- **Full fp16 pipeline**: Keep fp16 throughout multi-conv architectures. Never cast back to fp32 between conv layers when the next conv consumes fp16 directly. cuDNN BN accepts fp16 input (computes internally in fp32). Must be all-or-nothing: per-layer conversion is WORSE than fp32 (ShuffleNet per-layer: 0.848x vs full pipeline: 1.578x). x.half() once at start, convert only final output .float(). Pre-cache .half() weights to avoid repeated conversion. Eliminating all intermediate casts: +0.1-0.6x. (Source: L3 DenseNet121DenseBlock 1.39x, VGG16 1.45x, SqueezeNetFireModule 1.85x, AlexNet 1.3x, ShuffleNet 1.58x; L2 11_ConvTranspose2d_BatchNorm)
+- **Lazy cached param refs**: Cache parameter references lazily on first forward() call, not in __init__. Parameters cached in __init__ point to CPU tensors before .cuda() is called, causing device mismatch or compile errors. Build cache dict/list on first forward() invocation. +0.499x for MobileNetV2. (Source: L3 MobileNetV2 1.854x)
 - **Parallel BN/GN stats with B*C programs**: When C is small (32) and spatial is large (256x256), using only C programs severely underutilizes GPU. Use B*C programs where each handles one spatial plane. 0.6x to 2.7x improvement. Per-channel spatial splits outperform per-group splits for GN when channels_per_group is small. For DenseNet transition: 16 splits -> 2.074x, 32 splits -> 2.623x, 64 splits -> 2.708x. (Source: L3 DenseNet121TransitionLayer, L2 19_ConvTranspose2d +0.165x, 15_ConvTranspose3d +1.479x)
-- **channels_last (NHWC) for deep CNN passthrough**: NCHW to NHWC gives +50% for cuDNN convolutions on modern GPUs when amortized over many layers. Exception: ConvTranspose2d (0.647x). (Source: L3 27_RegNet 0.8x->1.22x)
+- **channels_last (NHWC) for deep CNN passthrough**: NCHW to NHWC gives +50% for cuDNN convolutions on modern GPUs when amortized over many layers. Exception: ConvTranspose2d (0.647x). Exception: ShuffleNet -- channel shuffle requires NCHW (view/transpose/contiguous), forcing expensive format conversions at every unit (channels_last 1.136x < NCHW fp16 1.578x). (Source: L3 27_RegNet 0.8x->1.22x)
 - **Skip conv bias before BN in training mode**: BN subtracts batch mean which absorbs conv bias. Eliminating bias add saves ~0.45ms. Only valid in training mode (not eval with running_mean). (Source: L3 27_RegNet 1.22x->1.49x)
-- **fp32 conv for tiny C_in (<=6)**: fp16 conv adds MORE overhead than it saves when C_in<=6 and spatial is small. The .half() casts cost more than tensor core gains. (Source: L3 4_LeNet5: fp16 1.145x vs fp32 1.216x; fp16 FC dims 120/84/20 too small for tensor cores 0.794x)
+- **fp32 conv for tiny C_in (<=6)**: fp16 conv adds MORE overhead than it saves when C_in<=6 and spatial is small. The .half() casts cost more than tensor core gains. (Source: L3 4_LeNet5: fp16 1.145x vs fp32 1.216x; L3 17_SqueezeNetFireModule C_in=3/6: fp16 0.837x vs fp32 1.583x; fp16 FC dims 120/84/20 too small for tensor cores 0.794x)
+- **Kernel launch minimization for sub-1ms models**: When total model runtime is ~1ms, each kernel launch costs ~50us (5% of runtime). Conv WITH bias (1 launch) + fused relu+pool (1 launch) = 2 launches per stage beats conv(no-bias) + bias_relu + pool = 3 launches. The no-bias pattern helps large models but hurts tiny ones. (Source: L3 4_LeNet5 1.115x)
 - **Pre-allocated cat buffer**: For multi-branch architectures, write branch outputs directly to pre-allocated output tensor with channel offsets. Eliminates torch.cat copy. (Source: L3 17_SqueezeNetFireModule)
-- **fp16 conv no-bias (MANDATORY)**: Always pass bias=None to cuDNN, handle bias in Triton. fp16 WITH bias is 20-40% slower than WITHOUT. Pre-cache fp16 weight via register_buffer. (Source: all L2 conv tasks)
+- **fp16 conv no-bias (MANDATORY)**: Always pass bias=None to cuDNN, handle bias in Triton. fp16 WITH bias is 20-40% slower than WITHOUT. Pre-cache fp16 weight via register_buffer. Exception: sub-1ms models where launch count matters more (use conv WITH bias). (Source: all L2 conv tasks)
+- **In-place operations for deep pipelines**: Use `x.clamp_(min=0.0)` instead of `torch.clamp(x, min=0.0)` across 30+ layers to save memory allocation per ReLU. Meaningful in networks with 40+ conv+BN operations. (Source: L3 26_ShuffleNet)
 - **Reduce data passes**: 2-pass Welford (sum+sq in pass 1, normalize in pass 2) beats 3-pass. Saves one full global memory read. +0.13x for InstanceNorm (17_Conv2d), +0.27x for softmax (24_Conv3d).
 - **Recompute vs materialize**: Recomputing activations (sigmoid, GELU, swish) in both stats and normalize passes cheaper than writing+reading temp buffer. +0.24x (21_Conv2d), +0.327x for fp16 intermediate (52_Conv2d). Exception: erf-based GELU is too expensive to recompute when trading for marginal bandwidth savings (19_ConvTranspose2d: recompute was -0.04x).
 - **Keep fp16 conv output**: Do NOT cast .float() after fp16 conv. Read fp16 directly in Triton, cast to fp32 in registers. Fuse cast+bias into single Triton kernel for +0.4x (78_ConvTranspose3d). +0.367x (32_Conv2d).
@@ -214,15 +225,15 @@ class ModelNew(torch.nn.Module):
 **Why it failed**: fp16 conv with fp32 BN adds conversion overhead (0.478x). native_batch_norm slower than batch_norm (0.443x). channels_last improved from 0.588x to 0.71x but still far below 1.0x.
 **Better approach**: Accept failure for isolated conv+BN blocks. Passthrough only helps when eliminating dispatch overhead across many layers.
 
-### L3: 21_EfficientNetMBConv (0.754x, iter 1) -- Decomposing nn.Sequential loses cuDNN fusion
-**Key insight**: MBConv with large C_in (112, 672) is dominated by cuDNN-optimized 1x1 convolutions. Decomposing nn.Sequential into separate torch.convolution + torch.batch_norm + clamp adds ~2.5ms from lost cuDNN fusion. 17 exploit iterations all stayed in 0.718-0.754x range.
+### L3: 21_EfficientNetMBConv (0.755x, iter 13) -- Decomposing nn.Sequential loses cuDNN fusion
+**Key insight**: MBConv with large C_in (112, 672) is dominated by cuDNN-optimized 1x1 convolutions. Decomposing nn.Sequential into separate torch.convolution + torch.batch_norm + clamp adds ~2.5ms from lost cuDNN fusion. 17 exploit iterations all stayed in 0.718-0.754x range. Only full-network passthrough helps (EfficientNetB0 1.64x, B1 1.70x).
 **Why it failed**: NCHW Triton matmul (0.77x, non-coalesced). fp16 on 250M+ elements (0.655x). NHWC permute on 1.4GB (0.472x). Manual BN stats (0.69x).
 **Better approach**: Only full-network passthrough helps (EfficientNetB0 1.64x, B1 1.70x). Individual MBConv blocks are infeasible.
 
-### L3: 25_ShuffleNetUnit + 26_ShuffleNet (1.016x / 0.993x) -- Channel shuffle structural ceiling
-**Key insight**: ShuffleNet's channel shuffle (view+transpose+contiguous) is an unavoidable memory copy. cuDNN passthrough saves dispatch overhead but the shuffle copy cost equals or exceeds those savings, creating a structural ceiling at ~1.0x.
-**Why it failed**: Triton channel shuffle kernel slower than view+transpose+contiguous (0.928x). fp16 cast overhead exceeds tensor core gains at batch=10 (0.777x). channels_last requires NCHW<->NHWC conversions for shuffle (0.5x). torch.channel_shuffle slightly slower than manual (0.964x).
-**Better approach**: Accept infeasibility. Minimal Triton (just fused relu+add) with cuDNN passthrough is best at ~1.0x. Cap at 3 iterations.
+### L3: 25_ShuffleNetUnit (1.016x) -- Single ShuffleNet unit structural ceiling
+**Key insight**: Individual ShuffleNet units have unavoidable channel shuffle memory copy (view+transpose+contiguous). cuDNN passthrough saves dispatch overhead but shuffle cost equals or exceeds savings. However, full ShuffleNet (13 units) reaches 1.578x via fp16 pipeline amortizing the single x.half() cost.
+**Why it failed**: Triton channel shuffle kernel slower than view+transpose+contiguous (0.928x). fp16 cast overhead exceeds tensor core gains at batch=10 for single unit (0.777x).
+**Better approach**: Accept infeasibility for single units. Full-network fp16 pipeline with pre-cached weights succeeds (1.578x).
 
 ### L3: 20_MobileNetV2 (correctness trap) -- Model behavior differs from apparent architecture
 **Key insight**: The original model computes use_res_connect flag but the forward() runs self.features(x) as a flat Sequential -- no residual connections are actually used. Adding residual connections causes max_diff=0.198.
@@ -282,8 +293,8 @@ class ModelNew(torch.nn.Module):
 ## Decision Tree
 
 1. **Check algebraic elimination** (Tier 1): Spatial sum/mean after conv distributes into weights (8-14x). BN(x)-mean(BN(x)) cancels beta (1.9x). InstanceNorm(no affine) cancels bias. Dead code (16x). GAP(BN(x))=f(spatial_mean) (1.76x). mean(GN(x))=f(channel_sums) (1.66x). Conv3d+mean decomposes to 2D convs (8.44x). AvgPool commutes with 1x1 Conv (4x FLOP reduction). Post-op chain collapse. Always check first.
-2. **Deep CNN passthrough** (Tier 2): For networks with 20+ conv layers (DenseNet, EfficientNet, MobileNet, RegNet, VGG, ResNet101), replace nn.Module dispatch with torch.convolution + torch.batch_norm + torch.clamp + cached param lists + cudnn.benchmark. Expect 1.3-2.5x. SKIP if compute-bound (batch>=64 with large spatial, or <20 layers).
-3. **Full fp16 pipeline** (Tier 2): For multi-conv architectures, keep fp16 throughout without casting back to fp32. cuDNN BN accepts fp16 input. +0.1-0.6x over per-layer casting. Essential for VGG16 (+0.52x), DenseNet dense blocks (+0.14x), SqueezeNet fire modules.
+2. **Deep CNN passthrough** (Tier 2): For networks with 20+ conv layers (DenseNet, EfficientNet, MobileNet, RegNet, VGG, ShuffleNet, ResNet101), replace nn.Module dispatch with torch.convolution + torch.batch_norm + torch.clamp + cached param lists + cudnn.benchmark. Add full fp16 pipeline for +0.1-0.6x. Use lazy cache if params are set up in __init__ before .cuda(). Expect 1.3-2.5x. SKIP if compute-bound (batch>=64 with large spatial, or <20 layers).
+3. **Full fp16 pipeline** (Tier 2): For multi-conv architectures, keep fp16 throughout without casting back to fp32. cuDNN BN accepts fp16 input. Must be all-or-nothing (per-layer conversion is WORSE than fp32). +0.1-0.6x over per-layer casting. Essential for VGG16 (+0.52x), DenseNet dense blocks (+0.14x), SqueezeNet fire modules, ShuffleNet (+0.6x). Pre-cache .half() weights.
 4. **Depthwise conv** (Tier 1): Spatial tiling with scalar weight broadcast. 2D grid (spatial_blocks, B*C). Expect 1.3-15x. Usually first-try.
 5. **Depthwise separable** (Tier 1): Fuse depthwise+pointwise, eliminate intermediate. ~1.8x.
 6. **Pointwise 1x1 conv** (Tier 2): NCHW-direct matmul, no permutes. ~2.8x.
@@ -300,7 +311,7 @@ class ModelNew(torch.nn.Module):
 17. **Large GN/BN spatial reductions (>500K)**: Use per-channel spatial splits (not per-group) for coalesced access. B*C programs for parallel BN when C is small. +0.35x.
 18. **Multi-pass reductions**: Use 2-pass Welford over 3-pass. Recompute activations rather than materializing intermediates (exception: erf-GELU too expensive).
 19. **Fused post-ops with reductions**: Split if total loop iterations >10K per program. Two kernels beat one fused kernel.
-20. **Compute-bound single blocks** (Anti-Pattern): Individual conv+BN blocks (ResNet basic, MBConv, Inception, ShuffleNet unit) with large C_in are infeasible. cuDNN internal fusion is unbeatable. Only full-network passthrough helps. ShuffleNet channel shuffle adds structural ceiling at ~1.0x.
+20. **Compute-bound single blocks** (Anti-Pattern): Individual conv+BN blocks (ResNet basic, MBConv, Inception, ShuffleNet unit) with large C_in are infeasible. cuDNN internal fusion is unbeatable. Only full-network passthrough helps. ShuffleNet channel shuffle adds structural ceiling at ~1.0x for single units but full network reaches 1.578x via fp16 pipeline.
 21. **RNG init order**: Match EXACT parameter initialization order of original Model. Mismatch causes systematic correctness failures across ALL iterations.
 22. **MaxPool precision**: Never do bias arithmetic in fp16 before MaxPool. Fuse fp16->fp32 cast+bias in Triton before pool.
 23. **Autotune for reduction kernels**: Use single config only. Multiple configs corrupt accumulated stats during warmup.

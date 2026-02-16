@@ -631,21 +631,17 @@ Best: iteration {N}, {speedup}x ({strategy})
 When session_id is a chain (starts with `chain_` and has `chain_manifest.json`):
 
 ```bash
-python3 kb_score.py --chain {chain_id}
+python3 kb_score.py {chain_id}
 ```
 
-This displays the cross-batch improvement table. If the script doesn't support `--chain` yet,
-read `chain_manifest.json` directly and print the table:
+The script auto-detects chain mode and produces:
+- Cross-batch progression table (batch rate, cumulative rate, delta)
+- Per-task cross-batch progression (speedup at each batch for every retried task)
+- Tasks that crossed the 1.3x threshold across batches
+- Remaining failures with structural ceiling reasons
+- Final results summary
 
-```
-Chain: {chain_id}
-
-Batch  Level   Tasks  Passed  Rate    Cumulative  Δ
-─────  ──────  ─────  ──────  ──────  ──────────  ──────
-  0    level1   100     45    45.0%     45.0%      —
-  1    level1    55     21    38.2%     66.0%    +21.0pp
-  2    level1    34     10    29.4%     76.0%    +10.0pp
-```
+A detailed markdown report is saved to `{chain_dir}/chain_progress_{timestamp}.md`.
 
 ### SERVER MODE
 
@@ -1151,24 +1147,22 @@ conversation memory. All state is computed from files.**
 
 #### Chain Summary
 
-After loop ends (max batches, convergence, or all pass), print cross-batch improvement table:
+After loop ends (max batches, convergence, or all pass), run the chain progress report:
 
-```
-Chain: {chain_id}
-
-Batch  Level   Tasks  Passed  Rate    Cumulative  Δ
-─────  ──────  ─────  ──────  ──────  ──────────  ──────
-  0    level1   100     45    45.0%     45.0%      —
-  1    level1    55     21    38.2%     66.0%    +21.0pp
-  2    level1    34     10    29.4%     76.0%    +10.0pp
-
-Chain complete: {cumulative_success_rate:.1%} overall ({tasks_passing}/{tasks_total})
+```bash
+python3 kb_score.py {chain_id}
 ```
 
-Also run the score report for the final batch:
-```
-Bash: python3 kb_score.py {final_session_id}
-```
+This auto-detects chain mode and prints:
+- Cross-batch progression table with cumulative rates and deltas
+- Per-task cross-batch progression (speedup at each batch for retried tasks)
+- Tasks that crossed the 1.3x threshold
+- Remaining failures with ceiling reasons
+- Final results summary
+
+A detailed markdown report is saved to `{chain_dir}/chain_progress_{timestamp}.md`.
+
+Display the script output directly to the user.
 
 ## Output Format
 

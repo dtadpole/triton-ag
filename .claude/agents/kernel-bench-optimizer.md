@@ -172,8 +172,8 @@ Check `common.md § Composite Patterns` for multi-op strategy hints.
 Consult `common.md` feasibility guides (L1/L2/L3 Structural Feasibility Guide):
 
 <!-- MUTABLE: feasibility_actions -->
-<!-- Version: 5 | Updated: 2026-02-15 | Source: level3_20260215_122506 -->
-<!-- Rationale: 33 L3 tasks. ShuffleNet channel shuffle creates structural ceiling at 0.993x despite being deep CNN (26_ShuffleNet). Bidirectional RNN/GRU via aten.gru gives 0.96-0.99x parity, NOT 0.04-0.3x (41_GRUBidirectional 0.991x, 42_GRUBidirectionalHidden 0.976x). LeNet5 too small for >1.3x (actual 1.216x at ~1ms ref). DenseNet transition layer BN+ReLU+Conv1x1+Pool fusible at 2.708x. VanillaRNN persistent kernel precision issues -- aten.mm fallback 1.354x. MobileNetV2 dead residual connection removal enables 1.748x. -->
+<!-- Version: 6 | Updated: 2026-02-15 | Source: level3_20260215_152600 -->
+<!-- Rationale: 22 L3 traces. RegNet (6 layers) misclassified as deep CNN -> 0.821x after 20 iters (27_RegNet). ShuffleNet reclassified from NO to YES: full fp16 pipeline (convert once) achieves 1.578x (26_ShuffleNet). GRU training=False unlocks cuDNN inference kernel: 1.168x vs 1.0x training=True (40_GRUHidden). Full ResNet101 is YES at 1.439x, batch=10 dispatch-bound (10_ResNet101). ResNet18 also YES at 1.491x (9_ResNet18). DenseNet DenseBlock full fp16 pipeline 1.378x breakthrough at iter 9 (14_DenseNet121DenseBlock). LeNet confirmed at 1.115x, below 1.2x floor (4_LeNet5). Fire module confirmed at 1.583x with fp32 nobias (17_SqueezeNetFireModule). UNet ceiling confirmed at 1.233x (45_UNetSoftmax). -->
 
 | Class | Action |
 |-------|--------|
@@ -183,17 +183,23 @@ Consult `common.md` feasibility guides (L1/L2/L3 Structural Feasibility Guide):
 | **ConvTranspose C_in=64 + norm post-ops (GN/BN/IN)** | MAYBE (1.2-1.7x). fp16 no-bias + per-channel parallel stats is the unlock. Max 12 iterations. The norm stats kernel (not conv) is the actual bottleneck |
 | **NO (with 3+ post-ops, no norm)** | Try fp16 cuDNN no-bias + Triton postops as first strategy. 6 iterations total. Complete early if <1.0x after trying fp16 no-bias |
 | **NO (pure/trivial post-ops)** | Try 1 best-effort strategy. Complete early if <1.0x after 2 iterations. Max 3 iterations |
-| **L3: Deep CNN cuDNN passthrough** | YES (1.4-2.5x). Use torch.convolution + torch.batch_norm + torch.clamp for all layers. Triton only for FC. Add cudnn.benchmark=True. Cache param refs in lists. Skip explore. EXCEPTION: batch>=64 with 512+ spatial OR ResNet residual blocks -> MAYBE (0.6-0.9x). EXCEPTION: channel shuffle networks (ShuffleNet) -> NO (0.8-1.0x ceiling, shuffle creates structural bottleneck) |
+| **L3: Deep CNN cuDNN passthrough (20+ layers)** | YES (1.3-2.5x). Use torch.convolution + torch.batch_norm + torch.clamp for all layers. Triton only for FC (aten.addmm). Add cudnn.benchmark=True. Cache param refs in dicts/lists. Skip explore. EXCEPTION: batch>=64 with 512+ spatial -> MAYBE (0.6-0.9x, 18_SqueezeNet 0.949x). Key: dispatch overhead scales with layer count -- 20-layer 1.3x, 120-layer 1.5x, 200-layer 2.5x |
+| **L3: Full ResNet (20+ layers, batch<=16)** | YES (1.3-1.5x). Dict-cached params + torch.convolution + torch.batch_norm + Triton GAP/FC. batch<=16 makes dispatch overhead dominate over compute. ResNet101 1.439x, ResNet18 1.491x. NOT the same as single ResNet block (which is NO at 0.623x). Init debugging may take 4-7 iters |
+| **L3: ShuffleNet / group conv CNN with channel shuffle** | YES (1.3-1.6x) with full fp16 pipeline. Convert input to fp16 ONCE at start, run all layers in fp16, convert output back. Per-layer fp16 conversion is WORSE (0.848x). channels_last is WORSE (shuffle forces NCHW conversion). cuDNN benchmark caching gives 10% variance. Max 12 iterations (fp16 breakthrough may come at iter 8-10) |
+| **L3: DenseNet DenseBlock (BN+ReLU+Conv+cat growing)** | YES (1.1-1.4x). Full fp16 pipeline is the unlock (NOT per-layer fp16). fp32 pipeline gives ~1.1x, full fp16 gives ~1.4x. Test full fp16 EARLY (iter 2-3), not late. Cat bandwidth is the bottleneck -- fp16 halves it. Max 10 iterations |
 | **L3: DenseNet transition layer (BN+ReLU+Conv1x1+Pool)** | YES (2-3x). Small C_in (32-64) means 1x1 conv weight fits in Triton registers. Fully fuse BN_normalize+clamp+conv+pool in single kernel. Use parallel stats (16-64 splits) for BN. Skip explore. First-try with fused approach |
+| **L3: Shallow/medium CNN (6-12 layers, RegNet-like)** | MAYBE (0.8-1.2x). Too few layers for dispatch overhead to dominate, but too many for full Triton. cuDNN passthrough may give parity (1.0x) at best. fp16 pipeline worth trying but may not overcome overhead. Max 8 iterations. Complete early if <1.0x after 4 iterations. 27_RegNet: 0.821x after trying all approaches |
+| **L3: Fire module (SqueezeNet single block)** | YES (1.3-1.8x). fp32 nobias + Triton fused bias+relu+cat is canonical. fp16 HURTS for C_in=3/6 with large spatial. 17_SqueezeNetFireModule 1.583x at iter 2. Skip explore. Max 5 iterations |
 | **L3: Single block C_in>=256** | NO. cuDNN conv near-optimal at large C_in. Max 8 iterations. Complete early if <1.0x after 4 iterations |
-| **L3: Shallow CNN (LeNet, AlexNet)** | YES (1.2-1.8x). Fuse relu+pool, reduce launches. Sub-1ms models (LeNet) cap at ~1.2x -- launch overhead dominates but model too fast for meaningful gains. fp16 hurts on very small CNNs. Max 8 iterations |
-| **L3: RNN/LSTM/GRU cuDNN delegation** | MAYBE (0.9-1.06x ceiling). Use aten.lstm/aten.gru. Max 6 iterations. Complete early if <1.0x after 3 iterations. Do NOT retry hoping for GPU variance |
-| **L3: Bidirectional RNN/GRU cuDNN delegation** | MAYBE (0.9-1.0x ceiling). Use aten.gru with bidirectional=True. Same cuDNN parity as unidirectional. Max 6 iterations. Note: guide's 0.04-0.3x range assumes Triton-native RNN, NOT cuDNN delegation |
-| **L3: Vanilla RNN (single timestep)** | YES (4-9x). Essentially 2 large GEMMs. Epilogue fusion with tanh. First-try pattern |
+| **L3: Shallow CNN (LeNet, AlexNet)** | MAYBE (1.0-1.35x). Fuse relu+pool, reduce launches. Sub-1ms models (LeNet) cap at ~1.1x -- launch overhead dominates but model too fast. AlexNet can reach 1.35x. fp16 hurts on very small CNNs. Max 8 iterations |
+| **L3: RNN/LSTM/GRU cuDNN delegation** | MAYBE (0.9-1.06x ceiling with training=True). Use aten.lstm/aten.gru. Max 6 iterations. Complete early if <1.0x after 3 iterations. Do NOT retry hoping for GPU variance |
+| **L3: GRU/RNN cuDNN with training=False** | MAYBE (1.0-1.2x ceiling). Use aten.gru with training=False to unlock cuDNN inference kernel path. 40_GRUHidden 1.168x at iter 9. training=False is the key unlock (+0.17x over training=True). Max 6 iterations |
+| **L3: Bidirectional RNN/GRU cuDNN delegation** | MAYBE (0.85-0.95x ceiling). Use aten.gru with bidirectional=True. 5% overhead gap from mandatory Triton kernel is unavoidable. Max 6 iterations. 41_GRUBidirectional 0.950x |
+| **L3: Vanilla RNN (single timestep)** | YES (4-9x). Essentially 2 large GEMMs. Split-cat + tanh epilogue + fp16 tensor cores. First-try pattern. 33_VanillaRNN 7.508x |
 | **L3: Vanilla RNN (multi-timestep)** | MAYBE (1.0-6.5x). Persistent kernel CAN work but has precision issues. Fallback: aten.mm + aten.tanh per step with batch projections. Max 10 iterations |
-| **L3: Causal attention** | YES (1.5-8x). Flash attention + Triton projections. Skip explore. First-try pattern. Use @ operator (not tl.dot) for projection matmuls -- tl.dot ieee still differs from cuBLAS |
-| **L3: Complex transformer (6+ layers)** | NO (0.3-0.7x). Try aten.linear hybrid. Max 6 iterations |
-| **L3: UNet-style CNN (encoder-decoder with skip)** | MAYBE (1.0-1.3x). cuDNN passthrough + param caching. Softmax dim=-1 sensitivity prevents bias=None. Max 10 iterations |
+| **L3: Causal attention** | YES (1.5-8x). Flash attention + Triton projections. Skip explore. First-try pattern. Use @ operator (not tl.dot) for projection matmuls -- tl.dot ieee still differs from cuBLAS. 50_ReLUSelfAttention 1.996x |
+| **L3: Complex transformer (6+ layers)** | NO (0.3-0.7x). Try aten.linear hybrid + torch.native_layer_norm. Max 6 iterations. 30_SwinTransformerV2 0.447x |
+| **L3: UNet-style CNN (encoder-decoder with skip)** | MAYBE (1.0-1.25x). cuDNN passthrough + bias=None on conv (NOT ConvTranspose). aten._softmax for precision. Softmax dim=-1 sensitivity prevents Triton softmax, fp16, channels_last. Structural ceiling at 1.2x. Max 10 iterations. 45_UNetSoftmax 1.233x |
 
 <!-- /MUTABLE: feasibility_actions -->
 
@@ -226,29 +232,40 @@ How many strategies:
 **Composite patterns (multi-op → strategy hint):**
 
 <!-- MUTABLE: composite_pattern_table -->
-<!-- Version: 4 | Updated: 2026-02-15 | Source: level3_20260215_122506 -->
-<!-- Rationale: 33 L3 tasks. Added BN+ReLU+Conv1x1+Pool fusion (13_DenseNet121TransitionLayer 2.708x -- 1x1 conv weight fits in registers, parallel stats 16-64 splits). Added channel shuffle negative pattern (26_ShuffleNet 0.993x -- NOT a standard deep CNN). Updated flash_attention: use @ operator not tl.dot for projections (44_MiniGPTBlock 4.052x). Added UNet+softmax precision ceiling (45_UNetSoftmax 1.231x). Added fp16 pipeline for DenseNet dense blocks (14_DenseNet121DenseBlock 1.392x -- fp16 cat bandwidth reduction). -->
+<!-- Version: 6 | Updated: 2026-02-15 | Source: level3_20260215_152600 -->
+<!-- Rationale: 22 L3 traces. ShuffleNet reclassified: full fp16 pipeline achieves 1.578x (26_ShuffleNet). ResNet dict-cached passthrough 1.439x (10_ResNet101), 1.491x (9_ResNet18). DenseNet DenseBlock full fp16 1.378x (14_DenseNet121DenseBlock). Fire module fp32 nobias 1.583x (17_SqueezeNetFireModule). UNet nobias ceiling 1.233x (45_UNetSoftmax). NetVLAD Triton matmul+L2norm 1.326x (46_NetVladWithGhostClusters). VanillaRNN split-cat 7.508x (33_VanillaRNN). -->
 
 ```
-matmul → pointwise(1-3)           → epilogue_fusion            (4-12x)
-matmul → norm → activation        → two_kernel_matmul_normact  (3.5-12x)
-matmul → reduction(sum/mean)      → algebraic_distribute       (20-74x)
-matmul → softmax                  → two_kernel_matmul_softmax  (5-11x)
-conv(C_in<=16) → pool             → fused_conv_pool            (1.5-2.9x)
-conv → norm → activation          → torch_conv_triton_postops  (1.3-2x)
-conv → channel_min/max → postops  → fp16_conv_fused_reduction  (1.3-1.9x, use 2D grid)
-conv → BN → pool                  → algebraic_pool_bn_fused    (1.5-3.1x)
-conv(C_in=8) → BN                 → implicit_gemm_bn           (1.5-1.7x, K=72 fits tl.dot)
-conv → GN/BN → mean              → algebraic_mean_norm         (1.3-1.7x, bypass normalize)
-convT(C_in<=32,s=2) → postops(3+) → fp16_nobias_fused_postops (1.5-5.2x)
-convT(C_in=64) → spatial_mean     → fp16_nobias_fused_mean     (1.7-2.0x)
-BN → ReLU → Conv1x1 → Pool       → fully_fused_transition     (2-3x, C_in<=64, parallel stats)
-reshape → matmul → softmax → matmul → flash_attention         (2-8x, use @ not tl.dot for proj)
-norm → pointwise → norm           → fused_prenorm              (1.3-2x)
-pointwise(3+) → reduction         → single_fused_kernel        (1.3-1.5x)
-diagonal_matmul → anything        → row_scaling_fused          (10-100x)
-conv → BN → act → cat(growing)    → fp16_pipeline_cat          (1.3-1.5x, fp16 cat saves bw)
-deep_CNN + channel_shuffle          → AVOID_cudnn_passthrough    (0.8-1.0x, shuffle is bottleneck)
+matmul -> pointwise(1-3)           -> epilogue_fusion            (4-12x)
+matmul -> norm -> activation        -> two_kernel_matmul_normact  (3.5-12x)
+matmul -> reduction(sum/mean)      -> algebraic_distribute       (20-74x)
+matmul -> softmax                  -> two_kernel_matmul_softmax  (5-11x)
+conv(C_in<=16) -> pool             -> fused_conv_pool            (1.5-2.9x)
+conv(C_in=64) -> postops(3+)      -> fp16_nobias_fused_postops  (1.3-2.0x, reliable YES)
+conv -> norm -> activation          -> torch_conv_triton_postops  (1.3-2x)
+conv -> channel_min/max -> postops  -> fp16_conv_fused_reduction  (1.3-1.9x, use 2D grid)
+conv -> BN -> pool                  -> algebraic_pool_bn_fused    (1.5-3.1x)
+conv(C_in=8) -> BN                 -> implicit_gemm_bn           (1.5-1.7x, K=72 fits tl.dot)
+conv(C_in=8) -> postops            -> implicit_gemm_kn_layout    (2.0-2.8x, (K,N) weight layout)
+conv -> GN/BN -> mean              -> algebraic_mean_norm         (1.3-1.7x, bypass normalize)
+conv3d(C_in<=8) -> softmax -> pool  -> fused_softmax_pool          (1.5-1.8x, online softmax)
+convT -> BN -> pool                 -> welford_fused_normalize_pool (1.5-2.0x, Welford stats + fused normalize+pool)
+convT(C_in<=32,s=2) -> postops(3+) -> fp16_nobias_fused_postops (1.5-5.2x)
+convT(C_in=64) -> spatial_mean     -> fp16_nobias_fused_mean     (1.7-2.0x)
+conv -> LN(small_dim)              -> 2d_block_ln_fused           (1.3-1.6x, 2D (BLOCK_H, W) decomposition)
+BN -> ReLU -> Conv1x1 -> Pool       -> fully_fused_transition     (2-3x, C_in<=64, parallel stats)
+reshape -> matmul -> softmax -> matmul -> flash_attention         (2-8x, use @ not tl.dot for proj)
+norm -> pointwise -> norm           -> fused_prenorm              (1.3-2x)
+pointwise(3+) -> reduction         -> single_fused_kernel        (1.3-1.5x)
+diagonal_matmul -> anything        -> row_scaling_fused          (10-100x)
+conv -> BN -> act -> cat(growing)    -> full_fp16_pipeline_cat     (1.1-1.4x, full fp16 halves cat bw)
+deep_CNN + channel_shuffle          -> full_fp16_pipeline          (1.3-1.6x, convert once at start, NOT per-layer)
+deep_CNN + residual(ResNet 20+)    -> dict_cached_cudnn_passthrough (1.3-1.5x, dict params + Triton GAP/FC)
+fire_module(squeeze+expand+cat)    -> fp32_nobias_fused_cat       (1.3-1.8x, fp16 HURTS at C_in=3/6)
+deep_CNN(120+ layers)              -> cudnn_passthrough_fp16      (1.5-2.5x, DenseNet121 2.28x, DenseNet201 2.48x)
+unet(encoder-decoder+softmax)      -> cudnn_nobias_aten_softmax   (1.1-1.25x, bias=None conv, aten._softmax)
+split_cat -> matmul -> tanh        -> split_cat_epilogue_fp16     (5-9x, VanillaRNN single-step)
+matmul -> BN -> softmax -> matmul  -> triton_matmul_l2norm        (1.3-1.5x, NetVLAD tall-skinny Triton > cuBLAS)
 ```
 
 <!-- /MUTABLE: composite_pattern_table -->
@@ -256,8 +273,8 @@ deep_CNN + channel_shuffle          → AVOID_cudnn_passthrough    (0.8-1.0x, sh
 **Set iteration budget:**
 
 <!-- MUTABLE: iteration_budget_table -->
-<!-- Version: 5 | Updated: 2026-02-15 | Source: level3_20260215_122506 -->
-<!-- Rationale: 33 L3 tasks (2nd session). Deep CNN cuDNN passthrough avg 3.7 iters with range 2-13 (MobileNetV2 outlier at 13 due to arch debugging, VGG16 2, MobileNetV1 3, EfficientNetB0 3, EfficientNetB1 3, DenseNet121DB 10, ResNet101 5). MLP confirmed 2.0 avg (1_MLP 2, 2_ShallowWideMLP 2, 3_DeepNarrowMLP 2). Attention avg 4.5 iters (43_MinGPT 2, 44_MiniGPTBlock 7). RNN/LSTM/GRU ALL used 20/20 again (35_LSTM, 37_LSTMCn, 39_GRU, 41_GRUBidir, 42_GRUBidirHidden). ShuffleNet used 13/20. DenseNet transition layer 20/20 (breakthrough at iter 17). Added new rows: DenseNet transition, bidir RNN/GRU, UNet CNN, VanillaRNN split. -->
+<!-- Version: 6 | Updated: 2026-02-15 | Source: level3_20260215_152600 -->
+<!-- Rationale: 22 L3 traces (3rd session). Deep CNN cuDNN passthrough avg 6.4 iters (range 1-14): ResNet101 8, ResNet18 1, DenseNet121 4, DenseNet201 12, MobileNetV1 14, MobileNetV2 8. ShuffleNet needed 20 iters but fp16 breakthrough at iter 9 -- budget 12 recommended. RegNet (6 layers) wasted 20/20 at 0.821x -- new shallow CNN row. GRU/LSTM used 20/20 but training=False unlock at iter 9 for 1.168x (40_GRUHidden). Fire module solved in 3 iters (17_SqueezeNetFireModule 1.583x). UNet used 20/20 at 1.233x ceiling. VanillaRNN 2 iters (33_VanillaRNN 7.508x). ReLUSelfAttention 2 iters (50_ReLUSelfAttention 1.996x). -->
 
 | Scenario | Phase B (explore) | Phase C (exploit) |
 |----------|-------------------|-------------------|
@@ -269,18 +286,23 @@ deep_CNN + channel_shuffle          → AVOID_cudnn_passthrough    (0.8-1.0x, sh
 | ConvTranspose C_in=64+ with spatial mean/sum | 2 (fp16 no-bias first) | 2 (limited ceiling) |
 | NO feasibility (with 3+ post-ops) | 2 (fp16 no-bias first) | 4 (exploit fp16 path) |
 | NO feasibility (pure/trivial) | 2 (1 x 2 iters) | max 4 total (cap at 6 overall) |
-| L3: Deep CNN cuDNN passthrough | 0 (skip) | 5 (cudnn.benchmark + param caching; arch debugging may need 3-5 iters) |
+| L3: Deep CNN cuDNN passthrough (20+ layers) | 0 (skip) | 8 (init debugging may need 4-7 iters for complex architectures like ResNet101, MobileNetV1) |
+| L3: Full ResNet (20+ layers, batch<=16) | 0 (skip) | 8 (dict-cached params; init order debugging 4-7 iters; ResNet101 solved at iter 7, ResNet18 at iter 0) |
+| L3: ShuffleNet / group conv + channel shuffle | 2 (fp32 cuDNN vs fp16 pipeline) | 10 (full fp16 breakthrough may come at iter 8-10; convert once NOT per-layer) |
+| L3: DenseNet DenseBlock (BN+Conv+cat growing) | 0 (skip) | 10 (fp32 gives ~1.1x by iter 2; test FULL fp16 at iter 3-4 for ~1.4x breakthrough) |
 | L3: DenseNet transition layer (BN+Conv1x1+Pool) | 2 (cuDNN vs fused Triton) | 8 (parallel stats tuning; breakthrough may come late) |
+| L3: Shallow/medium CNN (6-12 layers, RegNet-like) | 2 (cuDNN vs fp16) | max 6 (cap at 8 total; likely infeasible at 0.8-1.2x) |
+| L3: Fire module (SqueezeNet block) | 0 (skip) | 5 (fp32 nobias + fused cat; solved in 3 iters typically) |
 | L3: MLP chain (epilogue fusion) | 0 (skip) | 3 (fp16 + cached weights + autotune) |
 | L3: Causal attention (flash attn) | 0 (skip) | 8 (init debugging + tl.dot precision fix may need 5-7 iters) |
 | L3: Shallow CNN (LeNet, AlexNet) | 2 (cuDNN vs fp16) | 6 (fuse relu+pool, reduce launches) |
-| L3: Vanilla RNN (single timestep) | 0 (skip) | 3 (epilogue fusion + tanh) |
+| L3: Vanilla RNN (single timestep) | 0 (skip) | 3 (split-cat + tanh epilogue + fp16; typically 2 iters) |
 | L3: Vanilla RNN (multi-timestep) | 1 (persistent vs aten.mm loop) | max 9 (cap at 10 total; precision debugging) |
-| L3: RNN/LSTM/GRU cuDNN delegation | 1 (aten.lstm/gru) | max 5 (cap at 6 total) |
-| L3: Bidirectional RNN/GRU cuDNN delegation | 1 (aten.gru bidirectional) | max 5 (cap at 6 total; arg order debugging) |
+| L3: RNN/LSTM/GRU cuDNN delegation | 1 (aten.lstm/gru) | max 5 (cap at 6 total; try training=False for GRU +0.17x) |
+| L3: Bidirectional RNN/GRU cuDNN delegation | 1 (aten.gru bidirectional) | max 5 (cap at 6 total; 0.85-0.95x ceiling) |
 | L3: Single block C_in>=256 (infeasible) | 2 (1 iter each) | max 6 (cap at 8 total) |
-| L3: Complex transformer | 2 (full Triton vs aten.linear) | max 4 (cap at 6 total) |
-| L3: UNet-style CNN (encoder-decoder) | 2 (cuDNN passthrough) | 8 (softmax precision sensitivity; plateau at ~1.2x) |
+| L3: Complex transformer | 2 (full Triton vs aten.linear) | max 4 (cap at 6 total; try torch.native_layer_norm) |
+| L3: UNet-style CNN (encoder-decoder) | 2 (cuDNN passthrough) | 8 (softmax precision sensitivity; ceiling at ~1.2x; bias=None on conv NOT ConvTranspose) |
 
 <!-- /MUTABLE: iteration_budget_table -->
 
@@ -346,14 +368,21 @@ Deep-tune the winning strategy. Read the Tier 3-4 section of the primary referen
 **Tuning actions by bottleneck:**
 
 <!-- MUTABLE: exploit_tuning_actions -->
-<!-- Version: 1 | Updated: 2026-02-15 | Source: initial -->
+<!-- Version: 2 | Updated: 2026-02-15 | Source: chain_20260215_152436_b0 -->
+<!-- Rationale: 100 L2 tasks. Added specific proven actions with delta evidence: channels_last_3d (79_Conv3d +0.066x unlock), approximate GELU (67_Conv2d +0.15x), Welford BN fused (72_ConvTranspose3d 0.97x->1.833x), deferred bias through pool (78_ConvTranspose3d 1.27x->1.76x), online logsumexp (92_Conv2d +0.199x). Added anti-patterns per category. -->
 
 ```
-COMPUTE-BOUND: fp16 tensor cores → expand autotune configs → increase BLOCK_K → try GROUP_M values
-MEMORY-BOUND:  fuse more ops → vectorized loads → reduce global mem trips → coalesce access
-LAUNCH-OVERHEAD: kernel fusion → persistent kernel → reduce grid dimensions
-CORRECTNESS:   fix masking → fix pointer arithmetic → fp32 accumulator → match dtype → check reduction axis
-COMPILATION:   check Triton API constraints → power-of-2 BLOCK → replace missing functions → fix constexpr
+COMPUTE-BOUND (matmul): fp16 tensor cores (+2-5x) → cached fp16 weight in register_buffer (+1x) → implicit weight transpose via strides → GROUP_M=8
+COMPUTE-BOUND (conv):   bias=None ALWAYS from iter 0 (+0.3x) → fp16 for ConvTranspose (+2x) → fuse bias into Triton → implicit GEMM for C_in=8 (K,N) layout (+1.3x) → cudnn.benchmark=True (+0.2x, try EARLY) → channels_last_3d for Conv3d C_in<=8 (+0.07x wildcard)
+  ANTI-PATTERN: fp16 for Conv3d C_in<=8 C_out<=32 (0.85-0.98x). fp32 conv WITH bias always worse.
+MEMORY-BOUND (post-conv): keep fp16 conv output, do NOT .float() (halves bandwidth, +0.3x) → fuse pool into normalize pass (+0.5x) → online single-pass softmax/logsumexp (reduces reads 3x->2x, +0.2x, 92_Conv2d 1.179->1.378x) → pre-combine affine transforms (+0.02x per transform)
+MEMORY-BOUND (BN stats): parallel split stats 16-32 splits (+0.24-0.35x, 52_Conv2d 1.02->1.37x, 85_Conv2d 1.27->1.52x) → Welford BN + fused normalize+pool (72_ConvTranspose3d 0.97->1.83x) → fp16 intermediate halves BN bandwidth (+0.3x)
+MEMORY-BOUND (channel reduction): fuse bias+min/max into single kernel (+0.6x) → 2D grid batch x spatial_tiles (+0.66x) → .contiguous() on pool output → large BLOCK_W for coalesced reads
+MEMORY-BOUND (norm+mean algebraic): compute mean from per-channel sums (bypass normalize pass, +0.37x, 23_Conv3d 1.18->1.74x) → defer bias through max pools (78_ConvTranspose3d 1.27->1.76x)
+LAUNCH-OVERHEAD: kernel fusion → persistent kernel → reduce grid dimensions → 2D block decomposition for LN (34_ConvTranspose3d 1.04->1.58x)
+CORRECTNESS:   fix masking → fix pointer arithmetic → fp32 accumulator → match dtype → check reduction axis → exact GELU via tl.math.erf (NOT sigmoid approx for correctness-sensitive tasks)
+  NOTE: approximate GELU x*sigmoid(1.702x) saves ~40% compute over exact GELU, use for fused post-conv only (67_Conv2d +0.15x)
+COMPILATION:   check Triton API constraints → power-of-2 BLOCK → replace missing functions → fix constexpr → with torch.cuda.device(device) for non-cuda:0
 ```
 
 <!-- /MUTABLE: exploit_tuning_actions -->
@@ -361,19 +390,23 @@ COMPILATION:   check Triton API constraints → power-of-2 BLOCK → replace mis
 **Iteration decision tree:**
 
 <!-- MUTABLE: exploit_decision_tree -->
-<!-- Version: 4 | Updated: 2026-02-15 | Source: level2_20260215_122501 -->
-<!-- Rationale: 3 L2 tasks burned 14-17 iterations after plateau in 1.0-1.3x range (16_ConvTranspose2d 1.263x used 20/20, 2_ConvTranspose2d 1.23x used 20/20, 21_Conv2d 1.268x used 20/20). The v3 threshold of 5+ was too generous for conv tasks at structural ceiling. Added conv-specific early exit at 4+ when best is 1.0-1.3x (cuDNN structural ceiling zone). Reduced absolute exit from 5+ to 4+ based on 74 L2 tasks showing zero recoveries after 4 consecutive non-improvements. -->
+<!-- Version: 5 | Updated: 2026-02-15 | Source: chain_20260215_152436_b0 -->
+<!-- Rationale: 8 tasks used 20/20 iters with final <1.3x: 5_ConvTranspose2d 1.291x, 2_ConvTranspose2d 1.234x, 16_ConvTranspose2d 1.253x, 67_Conv2d 1.256x, 73_Conv2d 1.29x, 93_ConvTranspose2d 1.207x, 91_ConvTranspose2d 1.13x, 7_Conv3d 1.103x. All plateaued by iter 5-8, wasted 12-15 iterations. Added total_stagnant_iterations counter to catch marginal improvements that reset consecutive counter. Added universal <1.0x early exit after 6 iters. -->
 
 ```
+State: also track total_stagnant_iterations = 0 (incremented on every non-improvement, never reset)
+
 After eval result for iteration i:
 
 if speedup >= 1.3x -> DONE. Complete, write reflection + trace.
 
 if compiled AND correct AND speedup > best_speedup:
     -> Progress! Apply next tuning action. consecutive_non_improvements = 0.
+    (total_stagnant_iterations is NOT reset -- it tracks cumulative non-progress)
 
 if compiled AND correct AND speedup <= best_speedup:
     -> consecutive_non_improvements += 1
+    -> total_stagnant_iterations += 1
     -> If 2+: revert to best_code, try DIFFERENT modification
     -> If 3+ AND best_speedup < 1.0x:
         Structurally infeasible (cuDNN parity). Accept current best. DONE.
@@ -387,6 +420,14 @@ if compiled AND correct AND speedup <= best_speedup:
         Wildcards cannot overcome cuDNN parity in this speedup range.
     -> If 4+ consecutive non-improvements (regardless of speedup):
         Accept current best. DONE. No further tuning will help.
+
+if total_stagnant_iterations >= 6 AND best_speedup < 1.3x AND conv_task:
+    -> Structural ceiling confirmed by cumulative evidence. Accept current best. DONE.
+    (Catches cases where marginal +0.01x improvements reset consecutive counter)
+
+if iteration >= 6 AND best_speedup < 1.0x (any task type):
+    -> Structurally infeasible. Accept current best. DONE.
+    (6 iterations is sufficient to confirm structural infeasibility)
 
 if compiled AND NOT correct:
     -> Revert to best_code, apply minimal change.

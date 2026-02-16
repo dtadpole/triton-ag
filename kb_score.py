@@ -449,15 +449,19 @@ def print_chain_summary(chain_id, manifest, batch_summaries):
     # Final cumulative stats
     cumulative = manifest.get("cumulative", {})
     if cumulative:
+        rate_pct = cumulative.get('cumulative_success_rate', 0)
         print(f"   Overall: {cumulative.get('tasks_passing', 0)}/{cumulative.get('tasks_total', 0)} "
-              f"({cumulative.get('cumulative_success_rate', 0):.1%}), "
+              f"({rate_pct:.1f}%), "
               f"avg speedup {cumulative.get('avg_speedup', 0):.3f}x")
+        if manifest.get("chain_status"):
+            print(f"   Status: {manifest['chain_status']}")
+            if manifest.get("convergence_reason"):
+                print(f"   Reason: {manifest['convergence_reason']}")
         print()
 
 
 def find_improved_tasks(manifest, all_best):
-    """Find tasks that improved across batches."""
-    base = get_output_base()
+    """Find tasks that improved across batches (crossed 1.3x threshold)."""
     batches = manifest.get("batches", [])
     improvements = []
 
@@ -492,27 +496,72 @@ def find_improved_tasks(manifest, all_best):
     return improvements
 
 
+def build_task_progression(manifest):
+    """Build per-task speedup history across all batches for retried tasks."""
+    batches = manifest.get("batches", [])
+    task_history = {}  # task_name -> {batch_index: speedup}
+    task_best = {}  # task_name -> best_speedup across all batches
+
+    for b in batches:
+        sid = b.get("session_id", "")
+        session_data = load_session_data(sid)
+        if "error" in session_data:
+            continue
+        for t in session_data.get("tasks", []):
+            name = t["name"]
+            speedup = t.get("best_speedup") or 0
+            if name not in task_history:
+                task_history[name] = {}
+            task_history[name][b.get("batch_index", 0)] = speedup
+            if name not in task_best or speedup > task_best[name]:
+                task_best[name] = speedup
+
+    # Only include tasks that were retried (appear in 2+ batches)
+    retried = {name: hist for name, hist in task_history.items() if len(hist) >= 2}
+    return retried, task_best
+
+
 def generate_chain_report(chain_id, manifest, batch_summaries, all_best):
     """Generate chain progress markdown report."""
     lines = []
+    config = manifest.get("config", {})
+    batches = manifest.get("batches", [])
+    cumulative = manifest.get("cumulative", {})
+
     lines.append("# Chain Progress Report")
     lines.append("")
     lines.append(f"**Chain:** `{chain_id}`")
+    lines.append(f"**Command:** `{config.get('original_command', 'N/A')}`")
     lines.append(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append(f"**Batches:** {len(batch_summaries)}")
+    lines.append(f"**Batches:** {len(batch_summaries)} (max {config.get('max_batches', '?')})")
+    if manifest.get("chain_status"):
+        lines.append(f"**Status:** {manifest['chain_status']}")
+    if manifest.get("convergence_reason"):
+        lines.append(f"**Convergence:** {manifest['convergence_reason']}")
+    lines.append("")
+
+    # Configuration
+    lines.append("## Configuration")
+    lines.append("")
+    lines.append(f"- Target speedup: {config.get('target_speedup', '?')}x")
+    lines.append(f"- Retry mode: {config.get('retry_mode', '?')}")
+    lines.append(f"- Max batches: {config.get('max_batches', '?')}")
+    lines.append(f"- Workers: {config.get('workers', '?')}")
+    lines.append(f"- Iterations per task: {config.get('iterations', '?')}")
     lines.append("")
 
     # Cross-batch improvement table
-    lines.append("## Cross-Batch Improvement")
+    lines.append("## Cross-Batch Progression")
     lines.append("")
-    lines.append("| Batch | Level | Tasks | Passed | Rate | Cumulative | Delta |")
-    lines.append("|-------|-------|-------|--------|------|------------|-------|")
+    lines.append("| Batch | Level | Tasks | Passed (batch) | Batch Rate | Batch Avg | Cumulative | Delta |")
+    lines.append("|-------|-------|-------|----------------|------------|-----------|------------|-------|")
 
     prev_cumulative = 0
     for bs in batch_summaries:
         cum_rate = bs.get("cumulative_rate", 0)
         cum_passing = bs.get("cumulative_passing", 0)
         cum_total = bs.get("cumulative_total", 0)
+        avg_speedup = bs.get("avg_speedup", 0)
 
         if bs["batch_index"] == 0:
             delta_str = "--"
@@ -520,31 +569,96 @@ def generate_chain_report(chain_id, manifest, batch_summaries, all_best):
             delta_pp = (cum_rate - prev_cumulative) * 100
             delta_str = f"+{delta_pp:.1f}pp" if delta_pp >= 0 else f"{delta_pp:.1f}pp"
 
-        lines.append(f"| {bs['batch_index']} | {bs['level']} | {bs['task_count']} | "
+        status_marker = "" if bs["status"] == "completed" else f" [{bs['status']}]"
+
+        lines.append(f"| b{bs['batch_index']} | {bs['level']} | {bs['task_count']} | "
                      f"{bs['passed']} | {bs['rate']:.1%} | "
-                     f"{cum_passing}/{cum_total} ({cum_rate:.1%}) | {delta_str} |")
+                     f"{avg_speedup:.3f}x | "
+                     f"{cum_passing}/{cum_total} ({cum_rate:.1%}) | {delta_str}{status_marker} |")
         prev_cumulative = cum_rate
 
     lines.append("")
 
-    # Task improvements
+    # Per-task cross-batch progression
+    retried, task_best = build_task_progression(manifest)
+    if retried:
+        batch_indices = sorted({bi for hist in retried.values() for bi in hist})
+
+        lines.append("## Per-Task Cross-Batch Progression")
+        lines.append("")
+
+        # Build header
+        header = "| Task |"
+        separator = "|------|"
+        for bi in batch_indices:
+            header += f" b{bi} |"
+            separator += "------|"
+        header += " Best | Status |"
+        separator += "------|--------|"
+        lines.append(header)
+        lines.append(separator)
+
+        # Sort: tasks that crossed threshold first (by improvement), then remaining by best speedup desc
+        def sort_key(item):
+            name, hist = item
+            best = task_best.get(name, 0)
+            crossed = best >= 1.3
+            return (0 if crossed else 1, -best)
+
+        for name, hist in sorted(retried.items(), key=sort_key):
+            best = task_best.get(name, 0)
+            row = f"| {name} |"
+            for bi in batch_indices:
+                if bi in hist:
+                    speedup = hist[bi]
+                    # Highlight if this batch crossed threshold
+                    prev_best = max((hist.get(j, 0) for j in batch_indices if j < bi), default=0)
+                    if speedup >= 1.3 and prev_best < 1.3:
+                        row += f" **{speedup:.3f}x** |"
+                    else:
+                        row += f" {speedup:.3f}x |"
+                else:
+                    row += " -- |"
+            status = "PASS" if best >= 1.3 else "FAIL"
+            row += f" {best:.3f}x | {status} |"
+            lines.append(row)
+
+        lines.append("")
+
+    # Tasks that improved (crossed threshold)
     improvements = find_improved_tasks(manifest, all_best)
     if improvements:
-        lines.append("## Tasks That Improved Across Batches")
+        lines.append("## Tasks That Crossed Threshold")
         lines.append("")
-        lines.append("| Task | First Speedup | Final Speedup | Batches |")
-        lines.append("|------|---------------|---------------|---------|")
-        for imp in improvements[:20]:
-            lines.append(f"| {imp['name']} | {imp['first']:.2f}x | {imp['final']:.2f}x | {imp['batches']} |")
+        lines.append("These tasks were below 1.3x in batch 0 and crossed the target in a later batch.")
+        lines.append("")
+        lines.append("| Task | Initial | Final | Improvement |")
+        lines.append("|------|---------|-------|-------------|")
+        for imp in improvements:
+            delta = imp['final'] - imp['first']
+            lines.append(f"| {imp['name']} | {imp['first']:.3f}x | {imp['final']:.3f}x | +{delta:.3f}x |")
+        lines.append("")
+
+    # Remaining failures
+    remaining = manifest.get("remaining_failures", [])
+    if remaining:
+        lines.append("## Remaining Failures (Structural Ceilings)")
+        lines.append("")
+        lines.append("These tasks did not reach the target speedup across all batches.")
+        lines.append("")
+        lines.append("| Task | Best Speedup | Ceiling Reason |")
+        lines.append("|------|-------------|----------------|")
+        for f in remaining:
+            lines.append(f"| {f['task']} | {f['best_speedup']:.3f}x | {f.get('ceiling', 'unknown')} |")
         lines.append("")
 
     # Overall stats
-    cumulative = manifest.get("cumulative", {})
-    lines.append("## Overall Stats")
+    lines.append("## Final Results")
     lines.append("")
+    rate_pct = cumulative.get('cumulative_success_rate', 0)
     lines.append(f"- **Total tasks:** {cumulative.get('tasks_total', 0)}")
     lines.append(f"- **Passing (>=1.3x):** {cumulative.get('tasks_passing', 0)}")
-    lines.append(f"- **Success rate:** {cumulative.get('cumulative_success_rate', 0):.1%}")
+    lines.append(f"- **Success rate:** {rate_pct:.1f}%")
     lines.append(f"- **Avg speedup:** {cumulative.get('avg_speedup', 0):.3f}x")
     lines.append("")
 
@@ -587,14 +701,54 @@ def main():
         batch_summaries, all_best = compute_chain_summary(manifest)
         print_chain_summary(session_id, manifest, batch_summaries)
 
+        # Show per-task cross-batch progression
+        retried, task_best = build_task_progression(manifest)
+        if retried:
+            batch_indices = sorted({bi for hist in retried.values() for bi in hist})
+            print(f"   --- Per-Task Progression ({len(retried)} retried tasks) ---\n")
+
+            # Build column header
+            header = "     " + "Task".ljust(49)
+            for bi in batch_indices:
+                header += f"  b{bi:<5d}"
+            header += "  Best    Status"
+            print(header)
+            print("     " + "-" * (49 + 8 * len(batch_indices) + 16))
+
+            def sort_key(item):
+                name, hist = item
+                best = task_best.get(name, 0)
+                crossed = best >= 1.3
+                return (0 if crossed else 1, -best)
+
+            for name, hist in sorted(retried.items(), key=sort_key):
+                best = task_best.get(name, 0)
+                short_name = name[:45] if len(name) <= 45 else name[:42] + "..."
+                row = f"     {short_name:<49s}"
+                for bi in batch_indices:
+                    if bi in hist:
+                        row += f"  {hist[bi]:.3f}x"
+                    else:
+                        row += "      --"
+                status = "PASS" if best >= 1.3 else "FAIL"
+                row += f"  {best:.3f}x  {status}"
+                print(row)
+            print()
+
         # Show task improvements
         improvements = find_improved_tasks(manifest, all_best)
         if improvements:
-            print(f"   --- Tasks Improved Across Batches ({len(improvements)}) ---")
-            for imp in improvements[:10]:
-                print(f"     {imp['name']}: {imp['first']:.2f}x -> {imp['final']:.2f}x")
-            if len(improvements) > 10:
-                print(f"     ... and {len(improvements) - 10} more")
+            print(f"   --- Tasks That Crossed Threshold ({len(improvements)}) ---")
+            for imp in improvements:
+                print(f"     {imp['name']}: {imp['first']:.3f}x -> {imp['final']:.3f}x (+{imp['final']-imp['first']:.3f}x)")
+            print()
+
+        # Show remaining failures
+        remaining = manifest.get("remaining_failures", [])
+        if remaining:
+            print(f"   --- Remaining Failures ({len(remaining)}) ---")
+            for f in remaining:
+                print(f"     {f['task']}: {f['best_speedup']:.3f}x ({f.get('ceiling', 'unknown')})")
             print()
 
         # Generate and save report

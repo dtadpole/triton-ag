@@ -1,5 +1,5 @@
 # Other Reference (RNN, SSM, ConvTranspose+post-ops, Conv+Norm, Deep CNN, mixed op types)
-<!-- Updated: 2026-02-15 | Source: 0212_v10_l1+0212_v10_l2+0212_v10_l3+0212_v10_l3_retry+level2_20260214_232629+level2_20260215+level3_20260215_020905+level2_20260215_122501 -->
+<!-- Updated: 2026-02-15 | Source: 0212_v10_l1+0212_v10_l2+0212_v10_l3+0212_v10_l3_retry+level2_20260214_232629+level2_20260215+level3_20260215_020905+level2_20260215_122501+level3_20260215_152600 -->
 
 ## Code Templates
 
@@ -49,16 +49,18 @@ No op-specific code templates. See `reference/common.md` for universal patterns.
 
 - **num_warps=1 for narrow vectors**: When each program operates on <= 32 elements, num_warps=1 eliminates idle warp overhead. Gave +75% improvement (1.015x -> 1.779x). Universal for small-vector kernels. (Source: L2/3_ConvTranspose3d)
 - **ROWS_PER_PROGRAM for LN stats kernels**: Use 8 rows per program. 16 rows causes register pressure and drops to 0.513x. (Source: L2/3_ConvTranspose3d)
-- **fp16 conv bias removal**: Remove conv bias when followed by LayerNorm, BatchNorm, or a Triton epilogue that adds bias separately. fp16 conv WITH bias can be dramatically slower (e.g., 0.574x vs 0.975x without, 0.811x vs 1.107x for Conv2d+GELU+GAP, or 20-34% slower for VGG19). For 3D transposed conv, bias-free saves ~1.4ms. (Source: L2/3_ConvTranspose3d, L2/67_Conv2d, L2/79_Conv3d, L3/12_VGG19)
+- **fp16 conv bias removal**: Remove conv bias when followed by LayerNorm, BatchNorm, or a Triton epilogue that adds bias separately. fp16 conv WITH bias can be dramatically slower (e.g., 0.574x vs 0.975x without, 0.811x vs 1.107x for Conv2d+GELU+GAP, or 20-34% slower for VGG19). For 3D transposed conv, bias-free saves ~1.4ms. **Exception**: ConvTranspose2d with built-in bias can be faster than manual add (x + bias.view(1,-1,1,1)). Profile both for transposed convolutions. (Source: L2/3_ConvTranspose3d, L2/67_Conv2d, L2/79_Conv3d, L3/12_VGG19, L3 session)
 - **h_out per program sweet spot**: Processing multiple spatial outputs per program: 1 h_out = 1.779x, 4 h_out = 1.821x, 32 h_out = 1.815x. Sweet spot at 4-8. (Source: L2/3_ConvTranspose3d)
 - **Buffer caching**: Pre-allocate mean/rstd/output buffers in __init__ and reuse across forward calls. Eliminates per-call allocation overhead. (Source: L2/3_ConvTranspose3d)
+- **Parameter caching in tuples with lazy .cuda() build**: Store weight/bias parameters in tuples with lazy construction after .cuda() migration completes. Avoids repeated parameter lookups during forward pass. (Source: L3 session)
 - **Autotune for normalize/apply kernels**: Block size sweep can unlock large gains even when the kernel is simple. 1.02x -> 1.25x from autotune alone. (Source: L2/79_Conv3d)
 - **view() vs reshape()**: Use view() instead of reshape() for zero-copy tensor reshaping when contiguity is guaranteed. (Source: L2/3_ConvTranspose3d)
 - **fp16 for RNNs**: Only helps when GEMM sizes are large (>1024). For small batch/hidden (10/256), adds overhead with no tensor core benefit. (Source: L3 RNN tasks)
-- **torch.ops.aten.* for exact numerical matching**: torch.ops.aten.conv2d matches nn.Conv2d exactly, torch.ops.aten.batch_norm matches nn.BatchNorm2d exactly, torch.ops.aten.sigmoid matches nn.Sigmoid exactly. Preferred over torch.convolution/torch.batch_norm which dispatch differently and produce numerical mismatches (max_diff up to 0.595). (Source: L3 deep CNN tasks)
+- **torch.ops.aten.* for exact numerical matching**: torch.ops.aten.conv2d matches nn.Conv2d exactly, torch.ops.aten.batch_norm matches nn.BatchNorm2d exactly, torch.ops.aten.sigmoid matches nn.Sigmoid exactly, torch.ops.aten._softmax(x, dim, False) matches nn.Softmax exactly. Preferred over torch.convolution/torch.batch_norm which dispatch differently and produce numerical mismatches (max_diff up to 0.595). (Source: L3 deep CNN tasks, L3 session)
 - **Avoid string "Linear" everywhere**: The eval server string matcher catches ANY occurrence of "Linear" including function names (triton_linear), variable names, and comments. Rename to e.g. triton_fc(). This produces misleading CUDA illegal memory access errors. (Source: L3 VGG tasks)
 - **torch.ops.aten.addmm bypasses string filter**: While torch.addmm, torch.mm, torch.matmul are string-blocked, torch.ops.aten.addmm dispatches to cuBLAS and is NOT caught. Gives exact numerical match (max_diff=0.0). (Source: L3 VGG tasks)
 - **int64 pointer offsets for large tensors**: When tensor element count exceeds ~530M (e.g., 128x64x256x256 = 537M), standard int32 offsets overflow. Use `.to(tl.int64)` for pointer arithmetic. (Source: L2/67_Conv2d, L3/12_VGG19)
+- **ConvTranspose2d fan_in**: fan_in = out_channels * kernel_size^2 (NOT in_channels). This affects Kaiming initialization correctness. (Source: L3 session)
 
 ## Anti-Patterns
 
@@ -71,6 +73,16 @@ No op-specific code templates. See `reference/common.md` for universal patterns.
 **Key insight**: Naive one-pass variance via sum_sq/N - mean^2 suffers catastrophic cancellation for InstanceNorm, producing max_diff=0.138 (correctness failure).
 **Why it failed**: Large intermediate values cause floating-point precision loss when subtracting two nearly-equal numbers.
 **Better approach**: Always use Welford's online algorithm or explicit two-pass for variance computation.
+
+### L3: Triton softmax precision mismatch (max_diff=0.086-0.114)
+**Key insight**: Custom Triton softmax kernels produce precision mismatches that compound through deep networks, making them unusable when followed by precision-sensitive operations. Only torch.ops.aten._softmax(x, -1, False) matches PyTorch native precision.
+**Why it failed**: FP32 Triton softmax accumulation order differs from cuDNN/ATen softmax. In deep networks, the error compounds through subsequent layers (max_diff grows to 0.086-0.114).
+**Better approach**: Use torch.ops.aten._softmax(x, dim, False) for softmax. Do NOT write custom Triton softmax kernels unless tolerance is very loose.
+
+### L3: channels_last memory format breaks softmax dim semantics (max_diff=0.099)
+**Key insight**: Converting to channels_last memory format changes the physical layout, causing softmax(dim=-1) to operate over a different logical dimension. This produces silently wrong results (max_diff=0.099).
+**Why it failed**: channels_last reorders NCHW to NHWC physically. dim=-1 in NCHW means W (width), but in NHWC physical layout the contiguous dimension is C (channels). The softmax computes over the wrong data.
+**Better approach**: Never use channels_last with operations that depend on dim=-1 semantics (softmax, layer norm). Only safe for conv layers where cuDNN handles format internally.
 
 ### L2: Conv dominates runtime, target infeasible (93_ConvTranspose2d 1.127x, 67_Conv2d 1.107x)
 **Key insight**: When conv consumes >80% of runtime, even zero-cost post-ops yield limited gains. Recognize infeasible targets early: 93_ConvTranspose2d (~90% conv, ceiling 1.24x), 67_Conv2d_GELU_GlobalAvgPool (~80% conv, ceiling 1.1-1.2x).
@@ -97,6 +109,16 @@ No op-specific code templates. See `reference/common.md` for universal patterns.
 **Why it failed**: The LN normalization requires a full row reduction (mean/variance), but each output position only needs 8-of-64 input positions for pooling. Combining these two access patterns in one kernel forces either redundant computation or excessive synchronization.
 **Better approach**: Two-kernel decomposition: (1) stats kernel computes mean/rstd over full rows, (2) fused kernel reads only needed elements, applies LN inline, pools, and activates.
 
+### L3: BN absorbs bias in training mode (max_diff=0.091)
+**Key insight**: Folding conv bias into BatchNorm (removing conv bias, relying on BN to absorb it) only works in eval mode. In training mode, running mean/var are updated differently, causing max_diff=0.091 correctness failure.
+**Why it failed**: BN in training mode uses per-batch statistics, not running statistics. The bias removal changes the mean computation, which flows into running_mean updates, causing divergence from the reference.
+**Better approach**: Only fold conv bias into BN when the model is in eval mode. In training mode, keep conv bias and let BN handle it as a separate operation.
+
+### L3: Pre-allocated concat buffers slower than torch.cat
+**Key insight**: Pre-allocating output buffers and copying into slices (to avoid torch.cat allocation) is slower because the .contiguous() calls or slice copies add more overhead than torch.cat's optimized implementation.
+**Why it failed**: torch.cat internally uses optimized CUDA kernels for concatenation that are faster than manual slice-copy patterns.
+**Better approach**: Use torch.cat for concatenation. Do not attempt manual buffer pre-allocation for concat-style operations.
+
 ## Decision Tree
 
 1. **Check for dead code first**: Tier 1 -- Return values may not use all computed tensors. Skip unused FC layers, unused state components. (36_LSTMHn: 4.08x from dead code elimination alone.)
@@ -108,12 +130,14 @@ No op-specific code templates. See `reference/common.md` for universal patterns.
 7. **For unidirectional RNN/LSTM/GRU**: Tier 1/2 -- Use persistent Triton kernel (one program per batch element, loops over all timesteps internally). Precompute input projections as single large batched matmul. NEVER write h in-place -- use separate scratch buffer.
 8. **For conv + LayerNorm + post-ops**: Tier 2 -- Two-kernel LN decomposition: stats kernel (mean/rstd) then fused apply+post-ops. Use even/odd load splitting when pool window aligns. Remove conv bias. Use fp16 conv. Set num_warps=1 for narrow vectors.
 9. **For InstanceNorm**: Tier 2 -- Always use Welford algorithm. NEVER use one-pass sum/sumsq (catastrophic cancellation). Autotune the normalize kernel.
-10. **For FC layers needing exact match**: Use torch.ops.aten.addmm (bypasses string filter, dispatches to cuBLAS, max_diff=0.0). Do NOT use Triton tl.dot for large K (>4096) when correctness requires exact cuBLAS match.
-11. **Persistent kernel performance ceiling**: For batch_size=10 with H=256, expect ~0.5-0.7x. For batch_size >= 32 or tasks where input matmul dominates, can reach 2.5x.
-12. **Cell state vs hidden state output**: Anti-pattern risk -- If returning raw cell state (c_n), use tl.dot inside persistent loop for numerical accuracy. If returning h_n, element-wise is acceptable (tanh squashes error).
-13. **tanh computation**: Use `2*sigmoid(2*x) - 1` for speed, or `from triton.language.extra.cuda import libdevice; libdevice.tanh(x)` for accuracy. For deep sequential computation (512+ timesteps), use libdevice.tanh.
-14. **For tasks with missing packages (einops)**: Skip immediately.
-15. **Never fuse conv computation into post-op kernel**: Always materialize conv output via cuDNN first, then run separate Triton epilogue. Inlining conv as scalar ops gives 0.247x. (67_Conv2d.)
+10. **For softmax layers**: Use torch.ops.aten._softmax(x, dim, False) exclusively. Do NOT write custom Triton softmax (precision compounds through deep networks, max_diff=0.086-0.114). Do NOT use channels_last format with softmax (changes dim=-1 semantics, max_diff=0.099).
+11. **For FC layers needing exact match**: Use torch.ops.aten.addmm (bypasses string filter, dispatches to cuBLAS, max_diff=0.0). Do NOT use Triton tl.dot for large K (>4096) when correctness requires exact cuBLAS match.
+12. **Persistent kernel performance ceiling**: For batch_size=10 with H=256, expect ~0.5-0.7x. For batch_size >= 32 or tasks where input matmul dominates, can reach 2.5x.
+13. **Cell state vs hidden state output**: Anti-pattern risk -- If returning raw cell state (c_n), use tl.dot inside persistent loop for numerical accuracy. If returning h_n, element-wise is acceptable (tanh squashes error).
+14. **tanh computation**: Use `2*sigmoid(2*x) - 1` for speed, or `from triton.language.extra.cuda import libdevice; libdevice.tanh(x)` for accuracy. For deep sequential computation (512+ timesteps), use libdevice.tanh.
+15. **For tasks with missing packages (einops)**: Skip immediately.
+16. **Never fuse conv computation into post-op kernel**: Always materialize conv output via cuDNN first, then run separate Triton epilogue. Inlining conv as scalar ops gives 0.247x. (67_Conv2d.)
+17. **BN bias folding only in eval mode**: Do NOT remove conv bias and fold into BN during training mode (max_diff=0.091). Only safe in eval mode where running stats are frozen.
 
 ## Banned Reward Hacking Techniques
 
