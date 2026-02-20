@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-CUDA Kernel Prompt Optimization with GEPA.
+Triton Kernel Prompt Optimization with GEPA.
 
-This script optimizes the system prompt for CUDA kernel generation
+This script optimizes the system prompt for Triton kernel generation
 using GEPA's evolutionary prompt optimization.
 
 Usage:
-    python optimize_cuda_kernel.py --config configs/cuda_kernel.yaml
-    python optimize_cuda_kernel.py --provider h100_8_5_a --model qwen3-32b
+    python optimize_triton_kernel.py --config configs/triton_kernel.yaml
+    python optimize_triton_kernel.py --provider h100_8_5_a --model qwen3-32b
 """
 
 import argparse
@@ -28,7 +28,7 @@ if "/workspace/gepa" not in sys.path:
 
 import gepa
 import yaml
-from adapters.cuda_kernel_adapter import CudaKernelAdapter, CudaKernelDataInst
+from adapters.triton_kernel_adapter import TritonKernelAdapter, TritonKernelDataInst
 
 
 # Directory for caching reference runtimes
@@ -97,10 +97,10 @@ def load_prompts_from_config(config: dict) -> Dict[str, Any]:
                 ... {reference_code} ...
 
     Example:
-        >>> config = load_config("configs/cuda_kernel.yaml")
+        >>> config = load_config("configs/triton_kernel.yaml")
         >>> result = load_prompts_from_config(config)
         >>> print(result["system_prompt"][:100])
-        'You are an experienced CUDA developer...'
+        'You are an experienced Triton developer...'
         >>> print(result["seed_candidate"].keys())
         dict_keys(['role_description', 'task_description', 'task_instruction'])
     """
@@ -226,7 +226,7 @@ async def generate_reference_runtime_async(
     eval_client,
     provider: str,
     hostname: str,
-    data: CudaKernelDataInst,
+    data: TritonKernelDataInst,
     run_tag: str = "reference_runtime",
     model_tag: str = "reference",
     force_refresh: bool = False,
@@ -238,7 +238,7 @@ async def generate_reference_runtime_async(
         eval_client: KbEvalClient instance
         provider: Provider name for evaluation
         hostname: Hostname of the kbEval server (for caching)
-        data: CudaKernelDataInst containing reference code
+        data: TritonKernelDataInst containing reference code
         run_tag: Tag for the evaluation run
         model_tag: Tag for the model
         force_refresh: If True, regenerate even if cached
@@ -260,7 +260,8 @@ async def generate_reference_runtime_async(
         reference_code=data.reference_code,
         run_tag=run_tag,
         model_tag=model_tag,
-        task_tag=data.task_id
+        task_tag=data.task_id,
+        code_type="triton",  # KEY DIFFERENCE: Use "triton" instead of "cuda"
     )
 
     if result is not None:
@@ -273,7 +274,7 @@ async def generate_reference_runtime_async(
 
 
 def generate_reference_runtimes(
-    dataset: List[CudaKernelDataInst],
+    dataset: List[TritonKernelDataInst],
     eval_config_file: str,
     eval_provider: str,
     run_tag: str = "reference_runtime",
@@ -284,7 +285,7 @@ def generate_reference_runtimes(
     Generate reference runtimes for all tasks in a dataset (in parallel).
 
     Args:
-        dataset: List of CudaKernelDataInst
+        dataset: List of TritonKernelDataInst
         eval_config_file: Path to kbEval.yaml config
         eval_provider: Provider name for evaluation
         run_tag: Tag for the evaluation run
@@ -311,7 +312,7 @@ def generate_reference_runtimes(
 
     results = {}
 
-    async def _generate_single(data: CudaKernelDataInst) -> tuple:
+    async def _generate_single(data: TritonKernelDataInst) -> tuple:
         """Generate reference runtime for a single task and return (task_id, result)."""
         result = await generate_reference_runtime_async(
             eval_client=eval_client,
@@ -327,7 +328,7 @@ def generate_reference_runtimes(
         """Generate all reference runtimes in parallel with concurrency limit."""
         semaphore = asyncio.Semaphore(max_concurrent)
 
-        async def _limited_generate(data: CudaKernelDataInst) -> tuple:
+        async def _limited_generate(data: TritonKernelDataInst) -> tuple:
             async with semaphore:
                 return await _generate_single(data)
 
@@ -364,14 +365,14 @@ def generate_reference_runtimes(
 
 
 def load_all_reference_runtimes(
-    dataset: List[CudaKernelDataInst],
+    dataset: List[TritonKernelDataInst],
     hostname: str,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Load all cached reference runtimes for a dataset.
 
     Args:
-        dataset: List of CudaKernelDataInst
+        dataset: List of TritonKernelDataInst
         hostname: Hostname of the kbEval server
 
     Returns:
@@ -387,7 +388,7 @@ def load_all_reference_runtimes(
 
 def rename_output_folders_to_task_names(
     run_dir: str,
-    valset: List[CudaKernelDataInst],
+    valset: List[TritonKernelDataInst],
     folder_name: str = "generated_best_outputs_valset",
 ) -> None:
     """
@@ -458,7 +459,7 @@ def load_kernel_bench_dataset(
         exclude_tasks: Optional list of task IDs to exclude
 
     Returns:
-        Tuple of (trainset, valset) where each is a list of CudaKernelDataInst
+        Tuple of (trainset, valset) where each is a list of TritonKernelDataInst
 
     Note:
         - If train_size >= total_tasks (or all available tasks), val set = train set
@@ -523,7 +524,7 @@ def load_kernel_bench_dataset(
                 continue
 
             all_tasks.append(
-                CudaKernelDataInst(
+                TritonKernelDataInst(
                     task_id=task_id,
                     reference_code=reference_code,
                     additional_context={"level": level, "source_file": str(py_file)},
@@ -575,12 +576,12 @@ def load_kernel_bench_dataset(
 
 def create_sample_dataset() -> list:
     """
-    Create a sample dataset for CUDA kernel optimization.
+    Create a sample dataset for Triton kernel optimization.
 
     This is a simple hardcoded dataset for testing.
     For production, use load_kernel_bench_dataset() instead.
     """
-    # Sample reference codes for different CUDA operations
+    # Sample reference codes for different Triton operations
     samples = [
         {
             "task_id": "elementwise_add",
@@ -703,7 +704,7 @@ def get_init_inputs():
     ]
 
     return [
-        CudaKernelDataInst(
+        TritonKernelDataInst(
             task_id=s["task_id"],
             reference_code=s["reference_code"],
         )
@@ -826,12 +827,12 @@ def _extract_new_prompt_from_response(response: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Optimize CUDA kernel generation prompts with GEPA"
+        description="Optimize Triton kernel generation prompts with GEPA"
     )
     parser.add_argument(
         "--config",
         type=str,
-        default="gepa/configs/cuda_kernel.yaml",
+        default="gepa/configs/triton_kernel.yaml",
         help="Path to config file",
     )
     parser.add_argument(
@@ -1015,7 +1016,7 @@ def main():
     user_prompt_template = prompts_data.get("user_prompt_template")
 
     print("=" * 60)
-    print("GEPA CUDA Kernel Prompt Optimization")
+    print("GEPA Triton Kernel Prompt Optimization")
     print("=" * 60)
     print(f"Task Model: {model_name}")
     print(f"Task Provider: {provider_name}")
@@ -1195,7 +1196,7 @@ def main():
     if reflection_config:
         print(f"Reflection config: custom template loaded")
 
-    adapter = CudaKernelAdapter(
+    adapter = TritonKernelAdapter(
         model_name=model_name,
         provider_name=provider_name,
         config_file=args.inference_config,
