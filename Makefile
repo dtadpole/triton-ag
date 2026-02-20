@@ -124,6 +124,7 @@ env_start_amd:
 		--ulimit nofile=65536:65536 \
 		--ulimit nproc=-1:-1\
 		--ulimit memlock=-1:-1 \
+		--ulimit core=0:0 \
 		-v ~/.ssh/:/root/.ssh \
 		-v ~/.bashrc:/root/.bashrc \
 		-v ~/.netrc:/root/.netrc \

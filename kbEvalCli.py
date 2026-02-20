@@ -145,15 +145,20 @@ def eval_kernel_custom(
 
     context = {}
 
+    try:
+        hw_name = torch.cuda.get_device_name(device=device)
+    except Exception:
+        hw_name = "unknown"
+
     if measure_reference:
         metadata = {
             "is_reference": True,
-            "hardware": torch.cuda.get_device_name(device=device),
+            "hardware": hw_name,
             "device": str(device),  # for debugging
         }
     else:
         metadata = {
-            "hardware": torch.cuda.get_device_name(device=device),
+            "hardware": hw_name,
             "device": str(device),  # for debugging
         }
 
@@ -216,7 +221,10 @@ def eval_kernel_custom(
 
     # we are here because models compiled successfully
     # now we need to acquire lock and run the evaluation
-    lock_file = os.path.join(KB_EVAL_DIR, f".lock_{str(device)}")
+    # Use device index only (e.g. "7") to avoid colons in filename from "cuda:7"
+    device_id = device.index if device.index is not None else 0
+    os.makedirs(KB_EVAL_DIR, exist_ok=True)
+    lock_file = os.path.join(KB_EVAL_DIR, f".lock_{device_id}")
     while True:
         correctness = False
         try:
@@ -409,22 +417,31 @@ def main():
     # for key, value in cli_config.get("env_vars", {}).items():
     #     os.environ[key] = str(value)
 
+    is_rocm = hasattr(torch.version, 'hip') and torch.version.hip is not None
+
     if args.use_param_opt:
         try:
             if torch.cuda.is_available():
-                major = torch.cuda.get_device_capability(0)[0]
-                minor = torch.cuda.get_device_capability(0)[1]
-                os.environ["TORCH_CUDA_ARCH_LIST"] = f"{major}.{minor}"
-                os.environ["CUDAARCHS"] = f"{major}{minor}"
-                os.environ.update({
-                    'MAX_JOBS': str(4),
-                    'NVCC_APPEND_FLAGS': "--threads=4",
-                    'CUDA_NVCC_FLAGS': "-O1 --use_fast_math --ptxas-options=-O1"
-                })
+                if is_rocm:
+                    # ROCm/AMD: skip NVIDIA-specific compiler flags
+                    os.environ.update({
+                        'MAX_JOBS': str(4),
+                    })
+                    logger.info(f"ROCm detected (HIP {torch.version.hip}), skipping NVCC flags")
+                else:
+                    major = torch.cuda.get_device_capability(0)[0]
+                    minor = torch.cuda.get_device_capability(0)[1]
+                    os.environ["TORCH_CUDA_ARCH_LIST"] = f"{major}.{minor}"
+                    os.environ["CUDAARCHS"] = f"{major}{minor}"
+                    os.environ.update({
+                        'MAX_JOBS': str(4),
+                        'NVCC_APPEND_FLAGS': "--threads=4",
+                        'CUDA_NVCC_FLAGS': "-O1 --use_fast_math --ptxas-options=-O1"
+                    })
             else:
-                print("Warning: torch.cuda.is_available() is False. No CUDA device detected.")
+                print("Warning: torch.cuda.is_available() is False. No GPU device detected.")
         except Exception as e:
-            print(f"Warning: Failed to detect CUDA architecture: {e}")
+            print(f"Warning: Failed to detect GPU architecture: {e}")
 
 
     # temp_dir is {HOME}/.kbeval/{run_tag}/{model_tag}/{task_tag}/{eval_tag}

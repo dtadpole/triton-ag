@@ -291,7 +291,10 @@ def get_timing_stats(elapsed_times: list[float], device: torch.device = None) ->
     }
 
     if device:
-        stats["hardware"] = torch.cuda.get_device_name(device=device)
+        try:
+            stats["hardware"] = torch.cuda.get_device_name(device=device)
+        except Exception:
+            stats["hardware"] = "unknown"
         stats["device"] = str(device)  # for debugging
 
     return stats
