@@ -3,10 +3,10 @@
 
 # Default model and provider settings
 defaults:
-  task_model: "qwen3-32b"
-  reflection_model: "deepseek-reasoner"
-  task_provider: "h8_4b"
-  reflection_provider: "deepseek"
+  task_model: "claude-opus-4-5@20251101"
+  reflection_model: "claude-opus-4-5@20251101"
+  task_provider: "h100_8_5_a_local"
+  reflection_provider: "h100_8_5_a_local"
 
 # Dataset configuration
 dataset:
@@ -230,7 +230,7 @@ prompts:
     label: "TASK DESCRIPTION"
     description: "This component describes the overall task and objective. It should explain what input the AI receives and what output is expected."
     content: |
-      You are provided with PyTorch reference code and shall examine the code to understand how it works, then generate high-performance CUDA code that matches the reference code for correctness.
+      You are provided with PyTorch reference code and shall examine the code to understand how it works, then generate high-performance Triton code that matches the reference code for correctness.
 
   # Component 3: Task Instructions
   # Specific guidelines and constraints for completing the task
@@ -239,11 +239,15 @@ prompts:
     label: "TASK INSTRUCTIONS"
     description: "This component provides specific guidelines, constraints, and step-by-step instructions for completing the task correctly."
     content: |
-      When generating code, always follow these instructions:
-      - Replace pytorch operators in the reference code with raw CUDA kernels, optimizing for performance on NVIDIA architecture.
-      - Use torch.utils.cpp_extension.load_inline and name your optimized output module ModelNew.
+      You will iteratively improve the Triton kernel. Within each iteration, ensure that you have generate the complete code and follow these instructions:
+      - Write your solution concisely.  Be brief with your thinking and reasoning, and focus only on the key points.
+      - Implement the same functionality as the reference code, but with Triton kernels.
+      - Name your optimized module ModelNew.
+      - Include a beginning comment in the code to explain the most important optimization technique you used.
+      - Include an ending comment in the code to explain the ideas for potential further optimization.
       - You're NOT allowed to use torch.nn (except for Parameter, containers, and init).
-      - The input and output must be on CUDA device. Your answer must be the complete new module (no testing code, no other code): it will be evaluated and you will be given feedback on its correctness and speedup so you can iterate to maximize the speedup.
+      - The input and output must be on CUDA device. Your answer must be the complete new module, with no testing code, no init code. It will be evaluated and you will be given feedback on its correctness and speedup so you can iterate to maximize the performance.
+      - If you receive feedback from user on your code, you shall improve your code based on the feedback.
 
   # Component 4: Examples
   # Example reference code and generated code to show expected format
@@ -286,62 +290,90 @@ prompts:
       def get_init_inputs():
           return []  # No special initialization inputs needed
 
+
     generated_code: |
+      # This is a simple triton kernel for element-wise addition. Following are most important optimization techniques:
+      # 1. Coalesced memory access: contiguous offsets + contiguous tensors → coalesced tl.load/store.
+      # 2. Tiling/blocking: BLOCK_SIZE tiles (pid * BLOCK_SIZE + tl.arange(...)) → good occupancy/vectorization.
+      # 3. Branchless tail: mask on loads/stores (offsets < n_elements) → avoids divergent bounds checks.
+      # 4. Compile-time specialization: BLOCK_SIZE: tl.constexpr → JIT unrolling/strength-reduction.
+
+      import torch
       import torch.nn as nn
-      from torch.utils.cpp_extension import load_inline
+      import triton
+      import triton.language as tl
 
-      # Define the custom CUDA kernel for element-wise addition
-      elementwise_add_source = '''
-      #include <torch/extension.h>
-      #include <cuda_runtime.h>
+      @triton.jit
+      def elementwise_add_kernel(
+          x_ptr,  # *Pointer* to first input tensor
+          y_ptr,  # *Pointer* to second input tensor
+          output_ptr,  # *Pointer* to output tensor
+          n_elements,  # Size of the tensor
+          BLOCK_SIZE: tl.constexpr,  # Number of elements each program should process
+      ):
+          # Get the program ID to identify which block this program handles
+          pid = tl.program_id(axis=0)
 
-      __global__ void elementwise_add_kernel(const float* a, const float* b, float* out, int size) {
-          int idx = blockIdx.x * blockDim.x + threadIdx.x;
-          if (idx < size) {
-              out[idx] = a[idx] + b[idx];
-          }
-      }
+          # Calculate the starting position for this block
+          block_start = pid * BLOCK_SIZE
 
-      torch::Tensor elementwise_add_cuda(torch::Tensor a, torch::Tensor b) {
-          auto size = a.numel();
-          auto out = torch::zeros_like(a);
+          # Create a range of offsets for this block
+          offsets = block_start + tl.arange(0, BLOCK_SIZE)
 
-          const int block_size = 256;
-          const int num_blocks = (size + block_size - 1) / block_size;
+          # Create a mask to handle cases where n_elements is not divisible by BLOCK_SIZE
+          mask = offsets < n_elements
 
-          elementwise_add_kernel<<<num_blocks, block_size>>>(a.data_ptr<float>(), b.data_ptr<float>(), out.data_ptr<float>(), size);
+          # Load data from input tensors
+          x = tl.load(x_ptr + offsets, mask=mask)
+          y = tl.load(y_ptr + offsets, mask=mask)
 
-          return out;
-      }
-      '''
+          # Perform element-wise addition
+          output = x + y
 
-      elementwise_add_cpp_source = (
-          "torch::Tensor elementwise_add_cuda(torch::Tensor a, torch::Tensor b);"
-      )
+          # Store the result
+          tl.store(output_ptr + offsets, output, mask=mask)
 
-      # Compile the inline CUDA code for element-wise addition
-      elementwise_add = load_inline(
-          name="elementwise_add",
-          cpp_sources=elementwise_add_cpp_source,
-          cuda_sources=elementwise_add_source,
-          functions=["elementwise_add_cuda"],
-          verbose=True,
-          extra_cflags=[""],
-          extra_ldflags=[""],
-      )
+      def elementwise_add_triton(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+          # Ensure tensors are contiguous
+          x = x.contiguous()
+          y = y.contiguous()
+
+          # Create output tensor
+          output = torch.empty_like(x)
+
+          # Calculate total number of elements
+          n_elements = x.numel()
+
+          # Choose block size (power of 2 for efficiency)
+          BLOCK_SIZE = 1024
+
+          # Calculate grid size (number of blocks needed)
+          grid = (triton.cdiv(n_elements, BLOCK_SIZE),)
+
+          # Launch the kernel
+          elementwise_add_kernel[grid](
+              x, y, output, n_elements, BLOCK_SIZE=BLOCK_SIZE
+          )
+
+          return output
 
       class ModelNew(nn.Module):
           def __init__(self) -> None:
               super().__init__()
-              self.elementwise_add = elementwise_add
 
           def forward(self, a, b):
-              return self.elementwise_add.elementwise_add_cuda(a, b)
+              return elementwise_add_triton(a, b)
+
+      # Here are some ideas for potential further optimization:
+      # 1. Autotune launch params: @triton.autotune over BLOCK_SIZE/num_warps/num_stages keyed on input size/dtype.
+      # 2. Vectorize per lane: process V>1 elements per thread (e.g., V=4) to better utilize LD/ST bandwidth.
+      # 3. Alignment hints: add tl.multiple_of(offsets, 16) / tl.max_contiguous(offsets, 16) when true to aid vectorization.
+      # 4. Fuse ops: combine add with adjacent elementwise steps (bias/activation) to cut global memory traffic.
 
   # User prompt template with {reference_code} placeholder for the actual task
   # This is NOT part of the system_prompt and is NOT optimizable by GEPA
   user_prompt_template: |
-    Following is the reference PyTorch code, implement the complete new module with CUDA (no testing code, no other code).
+    Following is the reference PyTorch code, implement the complete new module with Triton (no testing code, no init code).
 
     Reference code:
     ```python

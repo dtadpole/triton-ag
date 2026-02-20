@@ -50,7 +50,7 @@ env_gepa_start:
 		--security-opt apparmor:unconfined \
 		--privileged \
 		localhost/gepa \
-		/bin/bash -c "make mount_shared_drive && make wandb_login && tail -f /dev/null"
+		/bin/bash -c "make mount_shared_drive && tail -f /dev/null"
 
 env_gepa:
 	docker exec -it gepa /bin/bash

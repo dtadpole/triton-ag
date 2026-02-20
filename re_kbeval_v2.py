@@ -13,8 +13,8 @@ from kbEvalClient import KbEvalClient
 CONFIG_FILE = "kbEval.yaml"
 PROVIDER = ["a4_2"]
 OUTPUT_DIR = "shared/re_kbeval"
-MAX_CONCURRENT = 50
-
+MAX_CONCURRENT = 30
+CODE_TYPE = "triton"
 
 OVERWRITE = True
 
@@ -142,6 +142,7 @@ async def process_codes(reference_code_path, generated_code_path, generated_only
                 generated_code=generated_code,
                 run_tag="re_kbeval",
                 eval_tag=eval_tag,
+                code_type=CODE_TYPE,
             )
             break  # Success, exit loop
         except Exception as e:
@@ -244,50 +245,37 @@ if __name__ == "__main__":
     # To run with default paths:
     file_pairs = []
 
-    for i in range(0, 13):
-        test_folders = (
-            "shared/.inference/codeGenEval/triton_eval.qwen32b.v0_000_%02d"
-            % (i)
-        )
-        folder_level1 = [
-            os.path.join(test_folders, f_) for f_ in os.listdir(test_folders) if "qwen3-32b" in f_
-        ]
-        for folder_ in folder_level1:
-            folder_level2 = [os.path.join(folder_, f_) for f_ in os.listdir(folder_)]
-            for folder_2 in folder_level2:
-                reference_file, generated_files = get_reference_and_generated(folder_2)
-                current_pairs = [
-                        [reference_file, generated_file, True]
-                        for generated_file in generated_files
-                    ]
-                current_pairs[0][2] = False
-                file_pairs.extend(
-                    current_pairs
-                )
+    claude_run_folder = "shared/claude_run/0205_l1"
+    level = 1
+    all_tasks = [os.path.join(claude_run_folder, f_) for f_ in os.listdir(claude_run_folder) if "md" not in f_ and "json" not in f_]
 
-    for i in range(0, 13):
-        test_folders = (
-            "shared/.inference/codeGenEval/triton_eval.qwen32b.v0_000_%02d"
-            % (i)
-        )
-        folder_level1 = [
-            os.path.join(test_folders, f_) for f_ in os.listdir(test_folders) if "deepseek-reasoner" in f_
-        ]
-        for folder_ in folder_level1:
-            folder_level2 = [os.path.join(folder_, f_) for f_ in os.listdir(folder_)]
-            for folder_2 in folder_level2:
-                reference_file, generated_files = get_reference_and_generated(folder_2)
-                current_pairs = [
-                        [reference_file, generated_file, True]
-                        for generated_file in generated_files
-                    ]
-                current_pairs[0][2] = False
-                file_pairs.extend(
-                    current_pairs
-                )
+    reference_folder = f"kernel_bench/level{level}"
+    for task in all_tasks:
+        reference_file = os.path.join(reference_folder, os.path.basename(task) + ".py")
+        for i, generated_code in enumerate([_ for _ in os.listdir(task) if "cuda_kernel" in _]):
+            generated_file = os.path.join(task, generated_code)
+            if i == 0:
+                file_pairs.append([reference_file, generated_file, True])
+            else:
+                file_pairs.append([reference_file, generated_file, False])
+
+
+    claude_run_folder = "shared/claude_run/0205_l2"
+    level = 2
+    all_tasks = [os.path.join(claude_run_folder, f_) for f_ in os.listdir(claude_run_folder) if "md" not in f_ and "json" not in f_]
+
+    reference_folder = f"kernel_bench/level{level}"
+    for task in all_tasks:
+        reference_file = os.path.join(reference_folder, os.path.basename(task) + ".py")
+        for i, generated_code in enumerate([_ for _ in os.listdir(task) if "cuda_kernel" in _]):
+            generated_file = os.path.join(task, generated_code)
+            if i == 0:
+                file_pairs.append([reference_file, generated_file, True])
+            else:
+                file_pairs.append([reference_file, generated_file, False])
 
 
     print(f"Total pairs: {len(file_pairs)}")
-    print(file_pairs[0:10])
-    # asyncio.run(process_all_pairs(file_pairs, max_concurrent=MAX_CONCURRENT))
+    # print(file_pairs[0:10])
+    asyncio.run(process_all_pairs(file_pairs, max_concurrent=MAX_CONCURRENT))
     print("All evaluations completed!")
