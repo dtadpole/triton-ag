@@ -117,14 +117,21 @@ env_start_amd:
 		--device /dev/kfd \
 		--device /dev/dri \
 		--group-add video \
+		--ipc=host \
 		--cap-add SYS_ADMIN \
+		--cap-add SYS_PTRACE \
 		--net=host \
-		--shm-size=128g \
 		--pids-limit -1 \
 		--ulimit nofile=65536:65536 \
 		--ulimit nproc=-1:-1\
 		--ulimit memlock=-1:-1 \
 		--ulimit core=0:0 \
+		--security-opt seccomp=unconfined \
+		--security-opt apparmor:unconfined \
+		-e HSA_NO_SCRATCH_RECLAIM=1 \
+		-e TORCH_ROCM_FA_PREFER_CK=1 \
+		-e HIP_FORCE_DEV_KERNARG=1 \
+		-e GPU_MAX_HW_QUEUES=2 \
 		-v ~/.ssh/:/root/.ssh \
 		-v ~/.bashrc:/root/.bashrc \
 		-v ~/.netrc:/root/.netrc \
@@ -132,9 +139,7 @@ env_start_amd:
 		-v ~/.keys/:/root/.keys/ \
 		-v /data/users/${USER}/:/root/.cache/ \
 		-v ${PWD}:/workspace/ \
-		--cap-add SYS_ADMIN \
 		--device /dev/fuse \
-		--security-opt apparmor:unconfined \
 		--privileged \
 		localhost/triton_ag_amd \
 		/bin/bash -c "make mount_shared_drive && tail -f /dev/null"
