@@ -9,10 +9,16 @@ VLLM_SETTING := VLLM_ALLOW_RUNTIME_LORA_UPDATING=True HF_HUB_DISABLE_XET=1 HF_HU
 
 help:
 	@echo "Available targets:"
-	@echo "  build_docker    - build docker image"
-	@echo "  env       	     - enter into dock container"
+	@echo "  build_docker    - build docker image (NVIDIA)"
+	@echo "  build_docker_amd - build docker image (AMD ROCm)"
+	@echo "  env             - enter into docker container (NVIDIA)"
+	@echo "  env_amd         - enter into docker container (AMD)"
+	@echo "  env_start       - start docker container (NVIDIA)"
+	@echo "  env_start_amd   - start docker container (AMD)"
 	@echo "  finetune        - Run data parallel fine-tuning on 4 GPUs"
+	@echo "  finetune-amd    - Run data parallel fine-tuning on 4 AMD GPUs"
 	@echo "  finetune-single - Run single GPU fine-tuning"
+	@echo "  finetune-single-amd - Run single AMD GPU fine-tuning"
 	@echo "  finetune-2gpu   - Run data parallel fine-tuning on 2 GPUs"
 	@echo "  finetune-debug  - Run data parallel fine-tuning with debug logging"
 	@echo "  finetune-safe   - Run safe multi-GPU fine-tuning with model parallelism"
@@ -94,6 +100,75 @@ env_start:
 
 env:
 	docker exec -it codegen /bin/bash
+
+# ==================== AMD GPU Targets ====================
+
+build_docker_amd: Dockerfile_amd
+ifeq (${IS_DEVSERVER}, 1)
+	$(META_PROXY) docker build -f Dockerfile_amd --network=host --progress=plain -t triton_ag_amd .
+else
+	docker build -f Dockerfile_amd --network=host --progress=plain -t triton_ag_amd .
+endif
+
+env_start_amd:
+	$(META_PROXY) docker run -d \
+		--name codegen_amd \
+		--replace \
+		--device /dev/kfd \
+		--device /dev/dri \
+		--group-add video \
+		--cap-add SYS_ADMIN \
+		--net=host \
+		--shm-size=128g \
+		--pids-limit -1 \
+		--ulimit nofile=65536:65536 \
+		--ulimit nproc=-1:-1\
+		--ulimit memlock=-1:-1 \
+		-v ~/.ssh/:/root/.ssh \
+		-v ~/.bashrc:/root/.bashrc \
+		-v ~/.netrc:/root/.netrc \
+		-v ~/.gitconfig:/root/.gitconfig \
+		-v ~/.keys/:/root/.keys/ \
+		-v /data/users/${USER}/:/root/.cache/ \
+		-v ${PWD}:/workspace/ \
+		--cap-add SYS_ADMIN \
+		--device /dev/fuse \
+		--security-opt apparmor:unconfined \
+		--privileged \
+		localhost/triton_ag_amd \
+		/bin/bash -c "make mount_shared_drive && tail -f /dev/null"
+
+env_amd:
+	docker exec -it codegen_amd /bin/bash
+
+# AMD vLLM targets using HIP_VISIBLE_DEVICES
+vllm-qwen3-32b-amd:
+	${VLLM_SETTING} HIP_VISIBLE_DEVICES=0,1,2,3 python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen3-32B \
+    --port 8091 --host :: \
+    --api-key dummy \
+    --data-parallel-size 1 \
+    --tensor-parallel-size 4 \
+    --pipeline-parallel-size 1 \
+    --gpu-memory-utilization 0.95 --max_model_len 24576 \
+    --load_format safetensors \
+    --trust_remote_code \
+    --enable_auto_tool_choice --tool_call_parser hermes \
+    --scheduling_policy priority \
+    --max_log_len 0 --max_num_seqs 144 \
+    --return-tokens-as-token-ids \
+    --enforce-eager
+
+# AMD Fine-tuning targets
+finetune-amd:
+	@echo "Starting data parallel fine-tuning on 4 AMD GPUs..."
+	bash -c "HIP_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29500 finetune_manual.py"
+
+finetune-single-amd:
+	@echo "Starting single AMD GPU fine-tuning..."
+	bash -c "HIP_VISIBLE_DEVICES=0 python finetune_manual.py"
+
+# ==================== End AMD GPU Targets ====================
 
 env_vllm:
 	docker exec -it vllm /bin/bash
