@@ -192,8 +192,6 @@ async def kb_eval_ref(
     authenticated: bool = Depends(verify_token)
 ) -> KernelExecResult:
     global TOTAL_REQUEST_COUNTER, TOTAL_ERROR_COUNTER, parallel_request_counter, parallel_request_counter_lock, DEVICES
-    wandb_run = None
-    start_time = time.time()
 
     # logger.info(f"kb_eval_ref: {run_tag}, {model_tag}, {task_tag}, {reference_code}")
 
@@ -315,7 +313,6 @@ async def kb_eval_ref(
     except Exception as e:
         # global TOTAL_ERROR_COUNTER
         TOTAL_ERROR_COUNTER += 1
-        elapsed_time = time.time() - start_time
         logger.error(f"❌ [KB Eval] [reference] error: {type(e).__name__}: {str(e)}")
         result = KernelExecResult(
             compiled=False,
@@ -364,8 +361,6 @@ async def kb_eval(
     authenticated: bool = Depends(verify_token)
 ) -> KernelExecResult:
     global TOTAL_REQUEST_COUNTER, TOTAL_ERROR_COUNTER, parallel_request_counter, parallel_request_counter_lock, DEVICES
-    wandb_run = None
-    start_time = time.time()
 
     try:
         async with parallel_request_counter_lock:
@@ -461,7 +456,6 @@ async def kb_eval(
     except FileNotFoundError as e:
         # global TOTAL_ERROR_COUNTER
         TOTAL_ERROR_COUNTER += 1
-        elapsed_time = time.time() - start_time
         logger.error(f"❌ [KB Eval] [{eval_tag}] error: {type(e).__name__}: {str(e)}")
         result = KernelExecResult(
             compiled=False,
@@ -496,7 +490,6 @@ async def kb_eval(
     except Exception as e:
         # global TOTAL_ERROR_COUNTER
         TOTAL_ERROR_COUNTER += 1
-        elapsed_time = time.time() - start_time
         logger.error(f"❌ [KB Eval] [{eval_tag}] error: {type(e).__name__}: {str(e)}")
         result = KernelExecResult(
             compiled=False,
