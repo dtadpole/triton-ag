@@ -83,6 +83,33 @@ class KernelExecResult(BaseModel):
     metadata: dict = {}
     runtime_stats: dict = {}  # only recorded if we decide to measure performance
 
+class KbEvalResult(BaseModel):
+    """
+    Combined evaluation result for both reference and generated kernels.
+    """
+    # Reference kernel results
+    ref_compiled: bool = False
+    ref_correctness: bool = False
+    ref_runtime: float = -1.0  # in us
+    ref_elapsed_time: float = -1.0  # wall-clock seconds for the ref eval
+
+    # Generated kernel results
+    gen_compiled: bool = False
+    gen_correctness: bool = False
+    gen_runtime: float = -1.0  # in us
+    gen_elapsed_time: float = -1.0  # wall-clock seconds for the gen eval
+
+    # Combined metrics
+    speedup: float = -1.0  # ref_runtime / gen_runtime (>1 means gen is faster)
+    total_elapsed_time: float = -1.0  # wall-clock seconds for entire request
+
+    # Detailed sub-results
+    ref_metadata: dict = {}
+    gen_metadata: dict = {}
+    ref_runtime_stats: dict = {}
+    gen_runtime_stats: dict = {}
+
+
 class CorrectnessResult(BaseModel):
     trials: str = "unknown"
     total_trials: int = 0

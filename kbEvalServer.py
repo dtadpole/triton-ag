@@ -17,7 +17,7 @@ import yaml
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from gzipMiddleware import GunzipRequestMiddleware
-from kbEvalUtil import KernelExecResult, on_process_timeout
+from kbEvalUtil import KernelExecResult, KbEvalResult, on_process_timeout
 from logger import logger
 from pydantic import BaseModel, Field
 from util import KB_EVAL_DIR
@@ -219,401 +219,203 @@ async def stats():
     }
 
 
-@app.post("/kb_eval_ref")
-async def kb_eval_ref(
-    request: Request,  # injected by fastapi
-    run_tag: str = Body(...),
-    model_tag: str = Body(...),
-    task_tag: str = Body(...),
-    reference_code: str = Body(...),
-    authenticated: bool = Depends(verify_token),
+async def _run_eval(
+    request: Request,
+    temp_dir: str,
+    eval_tag: str,
+    command: str,
 ) -> KernelExecResult:
-    global TOTAL_REQUEST_COUNTER, TOTAL_ERROR_COUNTER, parallel_request_counter, parallel_request_counter_lock, DEVICES
+    """Run a single kbEvalCli subprocess and return its KernelExecResult."""
+    process = await asyncio.create_subprocess_shell(
+        command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=os.environ.copy(),
+    )
 
-    # logger.info(f"kb_eval_ref: {run_tag}, {model_tag}, {task_tag}, {reference_code}")
+    logger.info(f"[KB Eval] [{eval_tag}] START ====================")
+    logger.info(f"[KB Eval] [{eval_tag}] command: {command}")
 
-    try:
-        async with parallel_request_counter_lock:
-            parallel_request_counter += 1
-            TOTAL_REQUEST_COUNTER += 1
+    stdout_task = asyncio.create_task(
+        read_stream(process.stdout, temp_dir, eval_tag, is_error=False)
+    )
+    stderr_task = asyncio.create_task(
+        read_stream(process.stderr, temp_dir, eval_tag, is_error=True)
+    )
+    check_return_code_task = asyncio.create_task(check_return_code(process))
+    check_disconnect_task = asyncio.create_task(
+        check_disconnect_and_kill_child_process(request, process)
+    )
 
-        start_time = time.time()
+    await asyncio.gather(
+        stdout_task,
+        stderr_task,
+        check_return_code_task,
+        check_disconnect_task,
+        return_exceptions=True,
+    )
+    if process.returncode != 0:
+        logger.error(f"[KB Eval] [{eval_tag}] return code: {process.returncode}")
+    else:
+        logger.info(f"[KB Eval] [{eval_tag}] return code: {process.returncode}")
 
-        # get prefix_tag from run_tag by removing regex pattern [_ddd_dd] (ddd is 3 digits, dd is 2 digits) at the end if exists
-        prefix_tag = re.sub(r"_\d*_\d*$", "", run_tag)
-        wandb_run = _setup_wandb_logging(prefix_tag, model_tag)
-
-        # temp_dir is {HOME}/.kbeval/{model_tag}/{task_tag}/{eval_tag}/{time_tag}
-        temp_dir = os.path.join(KB_EVAL_DIR, run_tag, model_tag, task_tag)
-        os.makedirs(temp_dir, exist_ok=True)
-
-        reference_file_path = os.path.join(temp_dir, f"reference_code.py")
-        with open(reference_file_path, "w") as f:
-            f.write(reference_code)
-
-        # logger.info(f"[KB Eval] [reference] reference_file_path: [{reference_file_path}]")
-
-        eval_tag = "reference"
-        # pre-compile the reference code
-        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code reference_code.py --measure_reference --device-list {','.join([str(device) for device in DEVICES])} --code_type pytorch --quiet"
-        process = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=os.environ.copy(),
+    result_json_path = os.path.join(temp_dir, f"{eval_tag}_kbeval.json")
+    if not os.path.exists(result_json_path):
+        raise FileNotFoundError(
+            f"[KB Eval] [{eval_tag}] result file missing: {result_json_path}"
         )
 
-        logger.info(f"[KB Eval] [reference] START ====================")
-        logger.info(f"[KB Eval] [reference] command: {command}")
-
-        # Create tasks to read stdout and stderr concurrently
-        stdout_task = asyncio.create_task(
-            read_stream(process.stdout, temp_dir, eval_tag, is_error=False)
-        )
-        stderr_task = asyncio.create_task(
-            read_stream(
-                process.stderr, temp_dir, eval_tag, is_error=True
-            )  # seems taking warning message as error message
+    with open(result_json_path, "r") as f:
+        result_json = json.load(f)
+        logger.info(
+            f"[KB Eval] [{eval_tag}] result: {json.dumps(result_json, indent=4)}"
         )
 
-        check_return_code_task = asyncio.create_task(check_return_code(process))
-        check_disconnect_task = asyncio.create_task(
-            check_disconnect_and_kill_child_process(request, process)
-        )
-
-        # Wait for all output to be processed
-        await asyncio.gather(
-            stdout_task,
-            stderr_task,
-            check_return_code_task,
-            check_disconnect_task,
-            return_exceptions=True,
-        )
-        if process.returncode != 0:
-            logger.error(f"[KB Eval] [{eval_tag}] return code: {process.returncode}")
-        else:
-            logger.info(f"[KB Eval] [{eval_tag}] return code: {process.returncode}")
-
-        # read the result from {temp_dir}/{eval_tag}_kbeval.json
-        result_json_path = os.path.join(temp_dir, f"{eval_tag}_kbeval.json")
-        if not os.path.exists(result_json_path):
-            elapsed_time = time.time() - start_time
-            error_msg = f"[KB Eval] [reference] kbEvalCli.py could not generate the result file in time [{elapsed_time:.2f}s]. Missing file [{result_json_path}]"
-            logger.error(error_msg)
-            raise FileNotFoundError(error_msg)
-
-        with open(result_json_path, "r") as f:
-            result_json = json.load(f)
-            logger.info(
-                f"[KB Eval] [reference] retrieved result json from [{result_json_path}]\n{json.dumps(result_json, indent=4)}"
-            )
-
-        logger.info(f"[KB Eval] [reference] END ====================")
-
-        result = KernelExecResult.model_validate(result_json)
-
-        metrics = {
-            "health/completion": 1,
-            "health/parallel_requests": parallel_request_counter,
-            "health/error_counter": TOTAL_ERROR_COUNTER,
-            "health/request_counter": TOTAL_REQUEST_COUNTER,
-            f"{task_tag}/healthiness": 1,
-            f"{task_tag}/compiled": 1 if result.compiled else 0,
-            f"{task_tag}/correctness": 1 if result.correctness else 0,
-            f"{task_tag}/runtime": (
-                result.runtime if result.runtime > 0 else 0
-            ),  # milliseconds
-            f"{task_tag}/elapsed_time": time.time() - start_time,  # seconds
-        }
-        if wandb_run:
-            wandb_run.log(metrics)
-
-        return result
-
-    except FileNotFoundError as e:
-        # global TOTAL_ERROR_COUNTER
-        TOTAL_ERROR_COUNTER += 1
-        elapsed_time = time.time() - start_time
-        logger.error(f"❌ [KB Eval] [reference] error: {type(e).__name__}: {str(e)}")
-        result = KernelExecResult(
-            compiled=False,
-            correctness=False,
-            metadata={
-                "processing_error": f"[kb_eval_ref] Cannot generate the evaluation result in time. [elapsed_time: {elapsed_time:.2f}s]",
-                "retriable": "maybe",  # if the error is retriable, the client will retry the request
-            },
-            runtime=-1.0,
-        )
-        metrics = {
-            "health/completion": 0,
-            "health/parallel_requests": parallel_request_counter,
-            "health/error_counter": TOTAL_ERROR_COUNTER,
-            "health/request_counter": TOTAL_REQUEST_COUNTER,
-            f"{task_tag}/healthiness": 0,
-            f"{task_tag}/compiled": 1 if result.compiled else 0,
-            f"{task_tag}/correctness": 1 if result.correctness else 0,
-            f"{task_tag}/runtime": (
-                result.runtime if result.runtime > 0 else 0
-            ),  # milliseconds
-            f"{task_tag}/elapsed_time": time.time() - start_time,  # seconds
-        }
-        if wandb_run:
-            wandb_run.log(metrics)
-        return result
-
-    except Exception as e:
-        # global TOTAL_ERROR_COUNTER
-        elapsed_time = time.time() - start_time
-        TOTAL_ERROR_COUNTER += 1
-        logger.error(f"❌ [KB Eval] [reference] error: {type(e).__name__}: {str(e)}")
-        result = KernelExecResult(
-            compiled=False,
-            correctness=False,
-            metadata={
-                "processing_error": f"[kb_eval_ref] Cannot generate the evaluation result in time. [elapsed_time: {elapsed_time:.2f}s]. Unexpected error: {type(e).__name__}: {str(e)}",
-                "retriable": "maybe",  # if the error is retriable, the client will retry the request
-            },
-            runtime=-1.0,
-        )
-        metrics = {
-            "health/completion": 0,
-            "health/parallel_requests": parallel_request_counter,
-            "health/error_counter": TOTAL_ERROR_COUNTER,
-            "health/request_counter": TOTAL_REQUEST_COUNTER,
-            f"{task_tag}/healthiness": 0,
-            f"{task_tag}/compiled": 1 if result.compiled else 0,
-            f"{task_tag}/correctness": 1 if result.correctness else 0,
-            f"{task_tag}/runtime": (
-                result.runtime if result.runtime > 0 else 0
-            ),  # milliseconds
-            f"{task_tag}/elapsed_time": time.time() - start_time,  # seconds
-        }
-        if wandb_run:
-            wandb_run.log(metrics)
-        return result
-
-    finally:
-        async with parallel_request_counter_lock:
-            parallel_request_counter -= 1
-            if parallel_request_counter < 0:
-                logger.error(
-                    f"Request counter is negative: {parallel_request_counter}, resetting to 0"
-                )
-                parallel_request_counter = 0
+    logger.info(f"[KB Eval] [{eval_tag}] END ====================")
+    return KernelExecResult.model_validate(result_json)
 
 
 @app.post("/kb_eval")
 async def kb_eval(
-    request: Request,  # injected by fastapi
+    request: Request,
     run_tag: str = Body(...),
     model_tag: str = Body(...),
     task_tag: str = Body(...),
-    eval_tag: str = Body(...),
     reference_code: str = Body(...),
     generated_code: str = Body(...),
+    eval_tag: str = Body(default="eval"),
     code_type: str = Body(default="cuda"),
     authenticated: bool = Depends(verify_token),
-) -> KernelExecResult:
+) -> KbEvalResult:
     global TOTAL_REQUEST_COUNTER, TOTAL_ERROR_COUNTER, parallel_request_counter, parallel_request_counter_lock, DEVICES
+
+    wandb_run = None
+    start_time = time.time()
 
     try:
         async with parallel_request_counter_lock:
             parallel_request_counter += 1
             TOTAL_REQUEST_COUNTER += 1
 
-        start_time = time.time()
-
-        # get prefix_tag from run_tag by removing regex pattern [_ddd_dd] (ddd is 3 digits, dd is 2 digits) at the end if exists
         prefix_tag = re.sub(r"_\d*_\d*$", "", run_tag)
         wandb_run = _setup_wandb_logging(prefix_tag, model_tag)
 
-        # temp_dir is {HOME}/.kbeval/{run_tag}/{model_tag}/{task_tag}/{eval_tag}
         temp_dir = os.path.join(KB_EVAL_DIR, run_tag, model_tag, task_tag, eval_tag)
         os.makedirs(temp_dir, exist_ok=True)
 
-        reference_file_path = os.path.join(temp_dir, f"reference_code.py")
+        reference_file_path = os.path.join(temp_dir, "reference_code.py")
         with open(reference_file_path, "w") as f:
             f.write(reference_code)
 
-        generated_file_path = os.path.join(temp_dir, f"generated_code.py")
+        generated_file_path = os.path.join(temp_dir, "generated_code.py")
         with open(generated_file_path, "w") as f:
             f.write(generated_code)
 
-        # logger.info(f"[KB Eval] [{eval_tag}] reference_file_path: [{reference_file_path}]")
-        # logger.info(f"[KB Eval] [{eval_tag}] generated_file_path: [{generated_file_path}]")
+        device_list = ",".join(str(d) for d in DEVICES)
 
-        if COMPILE_CACHE is True:
+        if COMPILE_CACHE:
             cache_tag = "--use_cuda_cache"
         else:
             cache_tag = ""
-        if CHECK_GET_INPUTS is False:
+        if not CHECK_GET_INPUTS:
             check_get_inputs_tag = "--not_check_get_inputs"
         else:
             check_get_inputs_tag = ""
 
-        logger.info(
-            f"[KB Eval] [{eval_tag}] COMPILE_CACHE: [{COMPILE_CACHE}], cache_tag: [{cache_tag}]"
-        )
-        # pre-compile the generated code
-        command = f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} --task_tag {task_tag} --eval_tag {eval_tag} --reference_code reference_code.py --generated_code generated_code.py --device-list {','.join([str(device) for device in DEVICES])} --code_type {code_type} --quiet {cache_tag} {check_get_inputs_tag}"
-        process = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=os.environ.copy(),
+        # --- Phase 1: Reference benchmark ---
+        ref_eval_tag = f"{eval_tag}_ref"
+        ref_command = (
+            f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s "
+            f"python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} "
+            f"--task_tag {task_tag} --eval_tag {ref_eval_tag} --reference_code reference_code.py "
+            f"--measure_reference --device-list {device_list} --code_type pytorch --quiet"
         )
 
-        logger.info(f"[KB Eval] [{eval_tag}] START ====================")
-        logger.info(f"[KB Eval] [{eval_tag}] command: {command}")
+        ref_start = time.time()
+        ref_result = await _run_eval(request, temp_dir, ref_eval_tag, ref_command)
+        ref_elapsed = time.time() - ref_start
 
-        # Create tasks to read stdout and stderr concurrently
-        stdout_task = asyncio.create_task(
-            read_stream(process.stdout, temp_dir, eval_tag, is_error=False)
+        # --- Phase 2: Generated code evaluation ---
+        gen_eval_tag = f"{eval_tag}_gen"
+        gen_command = (
+            f"timeout --foreground --signal=SIGTERM --kill-after=5s {MAX_TIMEOUT_SECONDS}s "
+            f"python kbEvalCli.py --wd {temp_dir} --run_tag {run_tag} --model_tag {model_tag} "
+            f"--task_tag {task_tag} --eval_tag {gen_eval_tag} --reference_code reference_code.py "
+            f"--generated_code generated_code.py --device-list {device_list} "
+            f"--code_type {code_type} --quiet {cache_tag} {check_get_inputs_tag}"
         )
-        stderr_task = asyncio.create_task(
-            read_stream(process.stderr, temp_dir, eval_tag, is_error=True)
+
+        gen_start = time.time()
+        gen_result = await _run_eval(request, temp_dir, gen_eval_tag, gen_command)
+        gen_elapsed = time.time() - gen_start
+
+        # --- Compute speedup ---
+        total_elapsed = time.time() - start_time
+        speedup = -1.0
+        if (
+            ref_result.runtime > 0
+            and gen_result.runtime > 0
+            and ref_result.correctness
+            and gen_result.correctness
+        ):
+            speedup = ref_result.runtime / gen_result.runtime
+
+        result = KbEvalResult(
+            ref_compiled=ref_result.compiled,
+            ref_correctness=ref_result.correctness,
+            ref_runtime=ref_result.runtime,
+            ref_elapsed_time=ref_elapsed,
+            gen_compiled=gen_result.compiled,
+            gen_correctness=gen_result.correctness,
+            gen_runtime=gen_result.runtime,
+            gen_elapsed_time=gen_elapsed,
+            speedup=speedup,
+            total_elapsed_time=total_elapsed,
+            ref_metadata=ref_result.metadata,
+            gen_metadata=gen_result.metadata,
+            ref_runtime_stats=ref_result.runtime_stats,
+            gen_runtime_stats=gen_result.runtime_stats,
         )
-        check_return_code_task = asyncio.create_task(check_return_code(process))
-        check_disconnect_task = asyncio.create_task(
-            check_disconnect_and_kill_child_process(request, process)
-        )
 
-        # Wait for all output to be processed
-        await asyncio.gather(
-            stdout_task,
-            stderr_task,
-            check_return_code_task,
-            check_disconnect_task,
-            return_exceptions=True,
-        )
-        if process.returncode != 0:
-            logger.error(f"[KB Eval] [{eval_tag}] return code: {process.returncode}")
-        else:
-            logger.info(f"[KB Eval] [{eval_tag}] return code: {process.returncode}")
-
-        result_json_path = os.path.join(temp_dir, f"{eval_tag}_kbeval.json")
-        if not os.path.exists(result_json_path):
-            elapsed_time = time.time() - start_time
-            error_msg = f"[KB Eval] [{eval_tag}] kbEvalCli.py could not generate the result file in time [{elapsed_time:.2f}s]. Missing file [{result_json_path}]"
-            logger.error(error_msg)
-            raise FileNotFoundError(error_msg)
-
-        # read the result from {temp_dir}/kbeval_{eval_tag}.json
-        with open(result_json_path, "r") as f:
-            result_json = json.load(f)
-            logger.info(
-                f"[KB Eval] [{eval_tag}] retrieved result json from [{result_json_path}]\n{json.dumps(result_json, indent=4)}"
-            )
-
-        logger.info(f"[KB Eval] [{eval_tag}] END ====================")
-
-        result = KernelExecResult.model_validate(result_json)
-
-        # Cache hit/miss tracking based on elapsed time
-        elapsed_time = time.time() - start_time
+        # Cache hit/miss tracking
         global TOTAL_CACHE_HITS, TOTAL_CACHE_MISSES, TOTAL_CACHE_UNCLEAR
-
         cache_status = "unclear"
-        if elapsed_time <= CACHE_HIT_THRESHOLD:
+        if gen_elapsed <= CACHE_HIT_THRESHOLD:
             TOTAL_CACHE_HITS += 1
             cache_status = "hit"
-            logger.info(
-                f"🎯 [Cache HIT] [{eval_tag}] completed in {elapsed_time:.2f}s (≤{CACHE_HIT_THRESHOLD}s)"
-            )
-        elif elapsed_time >= CACHE_MISS_THRESHOLD:
+        elif gen_elapsed >= CACHE_MISS_THRESHOLD:
             TOTAL_CACHE_MISSES += 1
             cache_status = "miss"
-            logger.info(
-                f"❌ [Cache MISS] [{eval_tag}] completed in {elapsed_time:.2f}s (≥{CACHE_MISS_THRESHOLD}s)"
-            )
         else:
             TOTAL_CACHE_UNCLEAR += 1
-            logger.info(
-                f"❓ [Cache UNCLEAR] [{eval_tag}] completed in {elapsed_time:.2f}s ({CACHE_HIT_THRESHOLD}s < t < {CACHE_MISS_THRESHOLD}s)"
-            )
 
-        # Calculate cache hit rate
-        total_cache_requests = (
-            TOTAL_CACHE_HITS + TOTAL_CACHE_MISSES + TOTAL_CACHE_UNCLEAR
-        )
-        cache_hit_rate = (
-            (TOTAL_CACHE_HITS / total_cache_requests) if total_cache_requests > 0 else 0
-        )
-        cache_miss_rate = (
-            (TOTAL_CACHE_MISSES / total_cache_requests)
-            if total_cache_requests > 0
-            else 0
-        )
+        total_cache_requests = TOTAL_CACHE_HITS + TOTAL_CACHE_MISSES + TOTAL_CACHE_UNCLEAR
+        cache_hit_rate = (TOTAL_CACHE_HITS / total_cache_requests) if total_cache_requests > 0 else 0
 
         metrics = {
             "health/completion": 1,
             "health/parallel_requests": parallel_request_counter,
             "health/error_counter": TOTAL_ERROR_COUNTER,
             "health/request_counter": TOTAL_REQUEST_COUNTER,
-            "metrics/compiled": 1 if result.compiled else 0,
-            "metrics/correctness": 1 if result.correctness else 0,
-            "metrics/runtime": (
-                result.runtime if result.runtime > 0 else 0
-            ),  # milliseconds
-            "metrics/elapsed_time": elapsed_time,  # seconds
-            # Cache metrics
+            "metrics/ref_compiled": 1 if ref_result.compiled else 0,
+            "metrics/ref_correctness": 1 if ref_result.correctness else 0,
+            "metrics/ref_runtime": max(ref_result.runtime, 0),
+            "metrics/gen_compiled": 1 if gen_result.compiled else 0,
+            "metrics/gen_correctness": 1 if gen_result.correctness else 0,
+            "metrics/gen_runtime": max(gen_result.runtime, 0),
+            "metrics/speedup": speedup if speedup > 0 else 0,
+            "metrics/total_elapsed_time": total_elapsed,
             "cache/hit_rate": cache_hit_rate,
-            "cache/miss_rate": cache_miss_rate,
             "cache/total_hits": TOTAL_CACHE_HITS,
             "cache/total_misses": TOTAL_CACHE_MISSES,
             "cache/total_unclear": TOTAL_CACHE_UNCLEAR,
-            "cache/total_requests": total_cache_requests,
-            "cache/current_status": (
-                1 if cache_status == "hit" else (0 if cache_status == "miss" else 0.5)
-            ),
-            "cache/current_elapsed_time": elapsed_time,
             f"{task_tag}/healthiness": 1,
-            f"{task_tag}/compiled": 1 if result.compiled else 0,
-            f"{task_tag}/correctness": 1 if result.correctness else 0,
-            f"{task_tag}/runtime": (
-                result.runtime if result.runtime > 0 else 0
-            ),  # milliseconds
-            f"{task_tag}/elapsed_time": elapsed_time,  # seconds
-            f"{task_tag}/cache_hit_rate": cache_hit_rate,
-            f"{task_tag}/cache_status": cache_status,
-        }
-        if wandb_run:
-            wandb_run.log(metrics)
-
-        return result
-
-    except FileNotFoundError as e:
-        # global TOTAL_ERROR_COUNTER
-        TOTAL_ERROR_COUNTER += 1
-        logger.error(f"❌ [KB Eval] [{eval_tag}] error: {type(e).__name__}: {str(e)}")
-        result = KernelExecResult(
-            compiled=False,
-            correctness=False,
-            metadata={
-                "processing_error": f"[kb_eval] Cannot generate the evaluation result in time [{elapsed_time:.2f}s].",
-                "retriable": True,  # if the error is retriable, the client will retry the request
-            },
-            runtime=-1.0,
-        )
-
-        metrics = {
-            "health/completion": 0,
-            "health/parallel_requests": parallel_request_counter,
-            "health/error_counter": TOTAL_ERROR_COUNTER,
-            "health/request_counter": TOTAL_REQUEST_COUNTER,
-            "metrics/compiled": 1 if result.compiled else 0,
-            "metrics/correctness": 1 if result.correctness else 0,
-            "metrics/runtime": (
-                result.runtime if result.runtime > 0 else 0
-            ),  # milliseconds
-            "metrics/elapsed_time": time.time() - start_time,  # seconds
-            f"{task_tag}/healthiness": 0,
-            f"{task_tag}/compiled": 1 if result.compiled else 0,
-            f"{task_tag}/correctness": 1 if result.correctness else 0,
-            f"{task_tag}/runtime": (
-                result.runtime if result.runtime > 0 else 0
-            ),  # milliseconds
-            f"{task_tag}/elapsed_time": time.time() - start_time,  # seconds
+            f"{task_tag}/ref_compiled": 1 if ref_result.compiled else 0,
+            f"{task_tag}/gen_compiled": 1 if gen_result.compiled else 0,
+            f"{task_tag}/ref_correctness": 1 if ref_result.correctness else 0,
+            f"{task_tag}/gen_correctness": 1 if gen_result.correctness else 0,
+            f"{task_tag}/speedup": speedup if speedup > 0 else 0,
+            f"{task_tag}/elapsed_time": total_elapsed,
         }
         if wandb_run:
             wandb_run.log(metrics)
@@ -621,18 +423,14 @@ async def kb_eval(
         return result
 
     except Exception as e:
-        # global TOTAL_ERROR_COUNTER
         TOTAL_ERROR_COUNTER += 1
+        elapsed_time = time.time() - start_time
         traceback.print_exc()
-        logger.error(f"❌ [KB Eval] [{eval_tag}] error: {type(e).__name__}: {str(e)}")
-        result = KernelExecResult(
-            compiled=False,
-            correctness=False,
-            metadata={
-                "processing_error": f"[kb_eval] Cannot generate the evaluation result in time. [elapsed_time: {elapsed_time:.2f}s]. Unexpected error: {type(e).__name__}: {str(e)}",
-                "retriable": True,  # if the error is retriable, the client will retry the request
-            },
-            runtime=-1.0,
+        logger.error(f"❌ [KB Eval] error: {type(e).__name__}: {str(e)}")
+        result = KbEvalResult(
+            total_elapsed_time=elapsed_time,
+            ref_metadata={"processing_error": str(e), "retriable": True},
+            gen_metadata={"processing_error": str(e), "retriable": True},
         )
 
         metrics = {
@@ -640,23 +438,11 @@ async def kb_eval(
             "health/parallel_requests": parallel_request_counter,
             "health/error_counter": TOTAL_ERROR_COUNTER,
             "health/request_counter": TOTAL_REQUEST_COUNTER,
-            "metrics/compiled": 1 if result.compiled else 0,
-            "metrics/correctness": 1 if result.correctness else 0,
-            "metrics/runtime": (
-                result.runtime if result.runtime > 0 else 0
-            ),  # milliseconds
-            "metrics/elapsed_time": time.time() - start_time,  # seconds
             f"{task_tag}/healthiness": 0,
-            f"{task_tag}/compiled": 1 if result.compiled else 0,
-            f"{task_tag}/correctness": 1 if result.correctness else 0,
-            f"{task_tag}/runtime": (
-                result.runtime if result.runtime > 0 else 0
-            ),  # milliseconds
-            f"{task_tag}/elapsed_time": time.time() - start_time,  # seconds
+            f"{task_tag}/elapsed_time": elapsed_time,
         }
         if wandb_run:
             wandb_run.log(metrics)
-
         return result
 
     finally:
